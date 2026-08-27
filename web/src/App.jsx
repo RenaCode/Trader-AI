@@ -1,10 +1,11 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
+import Login from './components/Login';
 import Overview from './components/Overview';
 import Learning from './components/Learning';
 import Moves from './components/Moves';
 import Sources from './components/Sources';
 import Risk from './components/Risk';
-import { useApi } from './utils/api';
+import { get, post, useApi } from './utils/api';
 
 const SECTIONS = [
   { key: 'overview', label: 'Stan',           Component: Overview },
@@ -18,8 +19,35 @@ const ENGINE_LABEL = { crypto: 'Krypto', equity: 'Giełda' };
 const ENGINE_ICON = { crypto: '₿', equity: '📈' };
 
 export default function App() {
-  const engines = useApi('/api/engines', []);
-  const health = useApi('/api/health', [], { refreshMs: 60000 });
+  // 'checking' zapobiega mignieciu ekranu logowania u zalogowanego uzytkownika
+  // przy odswiezeniu strony - dopiero odpowiedz /api/auth/me rozstrzyga.
+  const [authState, setAuthState] = useState('checking');
+  const [user, setUser] = useState(null);
+
+  const checkSession = useCallback(async () => {
+    try {
+      setUser(await get('/api/auth/me'));
+      setAuthState('in');
+    } catch {
+      setUser(null);
+      setAuthState('out');
+    }
+  }, []);
+
+  useEffect(() => { checkSession(); }, [checkSession]);
+
+  const signOut = useCallback(async () => {
+    try { await post('/api/auth/logout'); } catch { /* sesja i tak przepada */ }
+    setUser(null);
+    setAuthState('out');
+  }, []);
+
+  // Sesja moze wygasnac w trakcie pracy - wtedy kazdy hook odczytu zglasza 401
+  // i aplikacja wraca na ekran logowania zamiast pokazywac scianę bledow.
+  const onUnauthorized = useCallback(() => { setUser(null); setAuthState('out'); }, []);
+
+  const engines = useApi(authState === 'in' ? '/api/engines' : null, [authState], { onUnauthorized });
+  const health = useApi(authState === 'in' ? '/api/health' : null, [authState], { refreshMs: 60000 });
   const [engine, setEngine] = useState(null);
   const [section, setSection] = useState('overview');
 
@@ -31,6 +59,14 @@ export default function App() {
 
   const Active = SECTIONS.find((s) => s.key === section)?.Component || Overview;
   const current = engines.data?.find((e) => e.engine === engine);
+
+  if (authState === 'checking') {
+    return <div className="login-shell"><div className="loading-pulse dim">Sprawdzanie sesji…</div></div>;
+  }
+
+  if (authState === 'out') {
+    return <Login onSuccess={checkSession} />;
+  }
 
   if (engines.error) {
     return (
@@ -57,6 +93,7 @@ export default function App() {
           </div>
         </div>
 
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
         {engines.data?.length > 0 && (
           <div className="engine-tabs" role="tablist">
             {engines.data.map((e) => (
@@ -73,6 +110,17 @@ export default function App() {
             ))}
           </div>
         )}
+        <div className="user-menu">
+          <span className="user-chip">
+            <span className="avatar">{(user?.login || '?').slice(0, 1).toUpperCase()}</span>
+            {user?.login}
+            {user?.totp_enabled
+              ? <span className="badge ok">2FA</span>
+              : <span className="badge warn">bez 2FA</span>}
+          </span>
+          <button className="btn-ghost" onClick={signOut}>Wyloguj</button>
+        </div>
+        </div>
       </header>
 
       {current && (
@@ -99,7 +147,7 @@ export default function App() {
       </nav>
 
       {engine ? (
-        <Active key={`${engine}-${section}`} engine={engine} />
+        <Active key={`${engine}-${section}`} engine={engine} onUnauthorized={onUnauthorized} />
       ) : (
         <div className="empty loading-pulse">Wczytywanie silników…</div>
       )}

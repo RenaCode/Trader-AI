@@ -12,12 +12,19 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from fastapi import Depends
+
+from .auth import current_user
 from .db import close_pool, fetch_one, open_pool
-from .routers import learning, moves, overview, risk, sources
+from .security import SecretBox
+from .routers import auth, learning, moves, overview, risk, sources
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Fail fast: brak klucza szyfrujacego ma zatrzymac start, a nie wybuchnac
+    # dopiero przy pierwszej konfiguracji 2FA albo zapisie klucza API gieldy.
+    SecretBox()
     await open_pool()
     yield
     await close_pool()
@@ -33,11 +40,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(overview.router)
-app.include_router(learning.router)
-app.include_router(moves.router)
-app.include_router(sources.router)
-app.include_router(risk.router)
+# Auth jest jedynym routerem bez ochrony - reszta wymaga waznej sesji.
+# Ochrona jest deklarowana TUTAJ, a nie w kazdym routerze osobno: dodanie nowego
+# routera z danymi bez tej linijki nie przejdzie code review, bo lista jest w
+# jednym miejscu i widac, czego brakuje.
+app.include_router(auth.router)
+
+_protected = [overview.router, learning.router, moves.router, sources.router, risk.router]
+for r in _protected:
+    app.include_router(r, dependencies=[Depends(current_user)])
 
 
 @app.get("/api/health")
@@ -46,7 +57,7 @@ async def health():
     return {"status": "ok", "migrations": row["n"] if row else 0}
 
 
-@app.get("/api/engines")
+@app.get("/api/engines", dependencies=[Depends(current_user)])
 async def engines():
     """Lista silnikow = zakladki w UI. Zrodlem prawdy jest baza, nie stala w kodzie."""
     rows = await fetch_one(

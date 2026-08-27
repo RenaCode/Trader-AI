@@ -224,3 +224,113 @@ a.src-link:hover { text-decoration: underline; }
 .app-footer { text-align: center; margin-top: 40px; font-size: 0.78rem; color: var(--text-dim); }
 .app-footer a { color: var(--text-muted); text-decoration: none; }
 .app-footer a:hover { text-decoration: underline; }
+
+/* ------------------------------------------------------------------ logowanie */
+.login-shell {
+  min-height: 100vh;
+  display: flex; flex-direction: column;
+  align-items: center; justify-content: center;
+  gap: 18px; padding: 24px;
+}
+
+.login-card {
+  width: 100%; max-width: 400px;
+  padding: 32px 30px 26px;
+  /* Mocniejsza obwodka niz zwykla karta - to jedyny element na ekranie,
+     wiec ma byc oczywistym punktem skupienia. */
+  border-color: var(--border-glass-strong);
+  box-shadow: var(--shadow-glow), 0 0 60px -20px rgba(124, 58, 237, 0.4);
+}
+
+.login-brand { display: flex; align-items: center; gap: 13px; margin-bottom: 26px; }
+.login-sub { font-size: 0.76rem; color: var(--text-dim); margin-top: 2px; }
+
+.field { display: block; margin-bottom: 16px; }
+.field-label {
+  display: block; font-size: 0.75rem; font-weight: 600; letter-spacing: 0.04em;
+  text-transform: uppercase; color: var(--text-muted); margin-bottom: 7px;
+}
+
+.input-field {
+  width: 100%;
+  background: var(--bg-inset);
+  border: 1px solid var(--border-glass);
+  border-radius: var(--radius-md);
+  color: var(--text-main);
+  font-family: var(--font-main); font-size: 0.95rem;
+  padding: 12px 14px;
+  transition: var(--transition-smooth);
+}
+.input-field:hover { border-color: var(--border-glass-strong); }
+.input-field:focus {
+  outline: none;
+  border-color: var(--color-primary);
+  box-shadow: var(--focus-ring);
+}
+
+/* Kod jednorazowy czyta sie znak po znaku - monospace i rozstrzelenie
+   zmniejszaja szanse pomylki przy przepisywaniu z telefonu. */
+.code-input {
+  font-family: var(--font-mono);
+  font-size: 1.35rem; letter-spacing: 0.34em; text-align: center;
+  padding: 13px 14px;
+}
+
+.btn-primary {
+  width: 100%;
+  border: none; border-radius: var(--radius-md);
+  background: var(--gradient-ai); color: #fff;
+  font-family: var(--font-main); font-size: 0.92rem; font-weight: 600;
+  padding: 13px 18px; margin-top: 6px;
+  cursor: pointer; transition: var(--transition-smooth);
+  box-shadow: 0 4px 18px -4px rgba(124, 58, 237, 0.5);
+}
+.btn-primary:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 7px 22px -4px rgba(124,58,237,0.6); }
+.btn-primary:active:not(:disabled) { transform: translateY(0); }
+.btn-primary:disabled { opacity: 0.45; cursor: not-allowed; box-shadow: none; }
+
+.btn-link {
+  width: 100%; margin-top: 10px;
+  background: none; border: none; color: var(--text-muted);
+  font-family: var(--font-main); font-size: 0.82rem; cursor: pointer;
+  padding: 8px; border-radius: var(--radius-sm);
+}
+.btn-link:hover { color: var(--text-main); background: rgba(255,255,255,0.04); }
+
+.form-error {
+  border-radius: var(--radius-md); padding: 11px 13px; margin-bottom: 14px;
+  font-size: 0.82rem; line-height: 1.5;
+  border: 1px solid rgba(239, 68, 68, 0.35);
+  background: rgba(239, 68, 68, 0.09);
+  color: var(--danger-light);
+}
+
+.login-foot {
+  margin-top: 22px; padding-top: 16px;
+  border-top: 1px solid var(--border-glass);
+  font-size: 0.75rem; color: var(--text-dim); text-align: center;
+}
+.login-legal { font-size: 0.76rem; color: var(--text-dim); }
+.login-legal a { color: var(--text-muted); text-decoration: none; }
+.login-legal a:hover { text-decoration: underline; }
+
+/* ------------------------------------------------------------------ pasek konta */
+.user-menu { display: flex; align-items: center; gap: 10px; }
+.user-chip {
+  display: inline-flex; align-items: center; gap: 8px;
+  font-size: 0.8rem; color: var(--text-muted);
+  background: var(--bg-inset); border: 1px solid var(--border-glass);
+  border-radius: 999px; padding: 7px 14px;
+}
+.user-chip .avatar {
+  width: 22px; height: 22px; border-radius: 50%;
+  background: var(--gradient-ai); color: #fff;
+  display: grid; place-items: center; font-size: 0.7rem; font-weight: 700;
+}
+.btn-ghost {
+  background: transparent; border: 1px solid var(--border-glass);
+  color: var(--text-muted); border-radius: var(--radius-sm);
+  font-family: var(--font-main); font-size: 0.8rem; padding: 8px 14px;
+  cursor: pointer; transition: var(--transition-smooth);
+}
+.btn-ghost:hover { color: var(--text-main); border-color: var(--border-glass-strong); background: rgba(255,255,255,0.04); }

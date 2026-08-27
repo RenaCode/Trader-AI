@@ -1,0 +1,104 @@
+"""Zaleznosci uwierzytelniania: odczyt sesji z ciasteczka, ochrona endpointow, CSRF.
+
+Model sesyjny (nie JWT) jest tu celowy: sesje da sie natychmiast uniewaznic po
+stronie serwera, co dla systemu obracajacego pieniedzmi jest wazniejsze niz
+bezstanowosc. JWT bez listy odwolan nie da sie wylogowac przed wygasnieciem.
+"""
+from __future__ import annotations
+
+from datetime import datetime, timezone
+
+from fastapi import Cookie, Depends, Header, HTTPException, Request, Response
+
+from .db import fetch_one, execute
+from .security import SESSION_COOKIE, session_token_hash
+
+CSRF_COOKIE = "trader_csrf"
+CSRF_HEADER = "x-csrf-token"
+
+
+async def current_user(
+    request: Request,
+    trader_session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
+) -> dict:
+    """Zwraca uzytkownika albo 401. Uzywane jako Depends na chronionych routerach."""
+    if not trader_session:
+        raise HTTPException(status_code=401, detail="Wymagane zalogowanie")
+
+    row = await fetch_one(
+        """
+        SELECT s.id AS session_id, s.expires_at, s.mfa_satisfied,
+               u.id, u.login, u.role, u.is_active
+        FROM app.session s
+        JOIN app.user u ON u.id = s.user_id
+        WHERE s.token_hash = %s AND s.revoked_at IS NULL
+        """,
+        (session_token_hash(trader_session),),
+    )
+    if not row:
+        raise HTTPException(status_code=401, detail="Sesja nieznana lub uniewazniona")
+    if row["expires_at"] <= datetime.now(timezone.utc):
+        raise HTTPException(status_code=401, detail="Sesja wygasla")
+    if not row["is_active"]:
+        raise HTTPException(status_code=403, detail="Konto nieaktywne")
+    if not row["mfa_satisfied"]:
+        raise HTTPException(status_code=401, detail="Drugi skladnik niepotwierdzony")
+
+    request.state.user_id = row["id"]
+    request.state.session_id = row["session_id"]
+    return row
+
+
+async def require_csrf(
+    request: Request,
+    x_csrf_token: str | None = Header(default=None, alias=CSRF_HEADER),
+    trader_csrf: str | None = Cookie(default=None, alias=CSRF_COOKIE),
+) -> None:
+    """Double-submit cookie dla metod zmieniajacych stan.
+
+    Ciasteczko sesji ma SameSite=Strict, co samo w sobie blokuje wiekszosc CSRF,
+    ale to jest druga, niezalezna warstwa - przegladarki roznie traktuja Strict
+    przy nawigacjach, a koszt tej kontroli jest zerowy.
+    """
+    if request.method in ("GET", "HEAD", "OPTIONS"):
+        return
+    if not trader_csrf or not x_csrf_token or trader_csrf != x_csrf_token:
+        raise HTTPException(status_code=403, detail="Nieprawidlowy token CSRF")
+
+
+def set_session_cookies(response: Response, token: str, csrf: str, max_age: int) -> None:
+    response.set_cookie(
+        SESSION_COOKIE, token,
+        max_age=max_age, httponly=True, secure=True, samesite="strict", path="/",
+    )
+    # CSRF celowo BEZ httponly - front musi go odczytac, zeby odeslac w naglowku.
+    # Sam w sobie nie daje dostepu; jest wazny tylko w parze z ciasteczkiem sesji.
+    response.set_cookie(
+        CSRF_COOKIE, csrf,
+        max_age=max_age, httponly=False, secure=True, samesite="strict", path="/",
+    )
+
+
+def clear_session_cookies(response: Response) -> None:
+    response.delete_cookie(SESSION_COOKIE, path="/", samesite="strict", secure=True)
+    response.delete_cookie(CSRF_COOKIE, path="/", samesite="strict", secure=True)
+
+
+async def audit(action: str, *, user_id: int | None = None, entity: str | None = None,
+                entity_id: str | None = None, before=None, after=None,
+                request: Request | None = None) -> None:
+    ip = None
+    ua = None
+    if request is not None:
+        # Za Traefikiem prawdziwy adres jest w X-Forwarded-For.
+        fwd = request.headers.get("x-forwarded-for")
+        ip = (fwd.split(",")[0].strip() if fwd else (request.client.host if request.client else None))
+        ua = request.headers.get("user-agent")
+    await execute(
+        "INSERT INTO app.audit_log (actor_user_id, action, entity, entity_id, before, after, ip, user_agent)"
+        " VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
+        (user_id, action, entity, entity_id, before, after, ip, ua),
+    )
+
+
+Protected = Depends(current_user)

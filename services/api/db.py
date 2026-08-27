@@ -20,8 +20,11 @@ def dsn() -> str:
 async def open_pool() -> AsyncConnectionPool:
     global _pool
     if _pool is None:
+        # autocommit=True jest konieczne: bez niego psycopg trzyma otwarta transakcje,
+        # a pula wykonuje ROLLBACK przy zwrocie polaczenia - zapisy (sesje, audyt)
+        # cicho znikalyby po zakonczeniu zadania.
         _pool = AsyncConnectionPool(dsn(), min_size=1, max_size=8, open=False,
-                                    kwargs={"row_factory": dict_row})
+                                    kwargs={"row_factory": dict_row, "autocommit": True})
         await _pool.open(wait=True, timeout=15)
     return _pool
 
@@ -50,3 +53,9 @@ async def fetch_one(sql: str, params: tuple | dict | None = None) -> dict | None
     async with conn() as c:
         cur = await c.execute(sql, params)
         return await cur.fetchone()
+
+
+async def execute(sql: str, params: tuple | dict | None = None) -> None:
+    """Zapis bez zwracania wierszy. Autocommit jest wlaczony na puli."""
+    async with conn() as c:
+        await c.execute(sql, params)

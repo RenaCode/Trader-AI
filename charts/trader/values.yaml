@@ -65,9 +65,11 @@ ingress:
     traefik.ingress.kubernetes.io/router.entrypoints: websecure
   host: trader.renacode.com
   tlsSecret: trader-tls-cert
-  # Bramka tymczasowa do czasu wdrozenia logowania z 2FA - patrz
-  # templates/basicauth.yaml. Sekret tworzony recznie:
-  #   htpasswd -nbB <user> <haslo> | kubectl create secret generic trader-basicauth --from-file=users=/dev/stdin
+  # WYLACZONE: aplikacja ma wlasne logowanie (haslo Argon2id + opcjonalny TOTP,
+  # sesje serwerowe, CSRF). BasicAuth na krawedzi bylo tylko zaslona na czas
+  # budowy i teraz dublowaloby logowanie, pokazujac uzytkownikowi dwa okna.
+  # Zostawione jako awaryjny wylacznik: ustaw enabled=true, zeby odciac ruch
+  # do aplikacji bez jej zatrzymywania.
   basicAuth:
-    enabled: true
+    enabled: false
     secretName: trader-basicauth
