@@ -44,6 +44,11 @@ TRAIN_DAYS = 14
 TEST_DAYS = 2
 STEP_DAYS = 2
 
+# Ponizej tylu transakcji okno nie daje podstaw do zadnej statystyki.
+MIN_TRADES = 5
+# Podloga odchylenia standardowego zwrotow (0,01% = jedna dziesiata prowizji).
+MIN_SD = 1e-4
+
 ENTER = 0.25
 EXIT = 0.12
 MIN_CONF = 0.35
@@ -129,21 +134,32 @@ def simulate(panel: list[dict], weights: dict[str, dict[str, float]],
                 position = None
         curve.append(equity)
 
-    if not trades:
+    # Ponizej MIN_TRADES kazda statystyka jest szumem. Zwracamy jawne zero
+    # i licznik transakcji, zeby okno dalo sie odroznic od takiego, ktore
+    # naprawde wyszlo na zero.
+    if len(trades) < MIN_TRADES:
         return {"sharpe": 0.0, "sortino": 0.0, "max_dd": 0.0, "hit_rate": 0.0,
-                "avg_r": 0.0, "profit_factor": 0.0, "n_trades": 0, "total_return": 0.0,
-                "trades": []}
+                "avg_r": 0.0, "profit_factor": 0.0, "n_trades": len(trades),
+                "total_return": round((equity - 1) * 100, 4), "trades": trades,
+                "insufficient": True}
 
     mean = statistics.fmean(trades)
-    sd = statistics.pstdev(trades) or 1e-9
+    sd = statistics.pstdev(trades)
     downside = [t for t in trades if t < 0]
     dsd = statistics.pstdev(downside) if len(downside) > 1 else sd
 
-    # Annualizacja: swiece 5-minutowe, rynek 24/7 -> 105 120 obserwacji rocznie.
-    # Skalujemy liczba transakcji, nie obserwacji, bo Sharpe liczymy na transakcjach.
-    per_year = 105120 / max(1, len(panel)) * len(trades)
-    sharpe = mean / sd * math.sqrt(max(1.0, per_year))
-    sortino = mean / (dsd or 1e-9) * math.sqrt(max(1.0, per_year))
+    # Podloga na odchyleniu. Bez niej kilka niemal identycznych transakcji daje
+    # sd bliskie zeru i Sharpe rzedu milionow - liczbe, ktora nic nie znaczy,
+    # a wyglada jak wynik.
+    sd = max(sd, MIN_SD)
+    dsd = max(dsd, MIN_SD)
+
+    # Sharpe NA TRANSAKCJE, bez anualizacji. Anualizowanie wyniku z okna
+    # dwudniowego mnozy szum przez ~50 i produkuje liczby nieporownywalne
+    # miedzy oknami. Efekt na transakcje jest ograniczony, stabilny i uczciwy;
+    # prog "dodatnie okno" i tak patrzy tylko na znak.
+    sharpe = mean / sd
+    sortino = mean / dsd
 
     peak = curve[0]
     max_dd = 0.0
@@ -294,10 +310,15 @@ def train(conn, engine: str, days: int, trials_per_window: int) -> None:
             "profit_factor": statistics.fmean(m["profit_factor"] for m in oos),
         }
         n_trades = sum(m["n_trades"] for m in oos)
-        all_sharpes.append(agg["sharpe"])
-        worst_dd = min(worst_dd, agg["max_dd"])
-        if agg["sharpe"] > 0:
-            positive += 1
+        # Okno bez minimum transakcji nie jest ani dodatnie, ani ujemne -
+        # jest bez informacji. Wliczanie go jako "niedodatnie" zanizaloby
+        # ocene, a jako "dodatnie" zawyzalo.
+        informative = any(not m.get("insufficient") for m in oos)
+        if informative:
+            all_sharpes.append(agg["sharpe"])
+            worst_dd = min(worst_dd, agg["max_dd"])
+            if agg["sharpe"] > 0:
+                positive += 1
 
         for m in oos:
             for t in m["trades"]:
@@ -318,8 +339,10 @@ def train(conn, engine: str, days: int, trials_per_window: int) -> None:
             [(w_id, k, round(v, 4)) for k, v in agg.items()])
         conn.commit()
 
+        mark = "" if informative else "  (za mało transakcji — pominięte w ocenie)"
         print(f"  okno {idx:>2d}  {test_from:%m-%d}–{test_to:%m-%d}  "
-              f"Sharpe(OOS)={agg['sharpe']:+.3f}  transakcje={n_trades}  reżim={dominant}")
+              f"Sharpe/transakcję={agg['sharpe']:+.4f}  transakcje={n_trades}  "
+              f"reżim={dominant}{mark}")
         idx += 1
         start += timedelta(days=STEP_DAYS)
 
@@ -376,7 +399,10 @@ def train(conn, engine: str, days: int, trials_per_window: int) -> None:
     cur.execute("SELECT count(*) AS n FROM learn.hypothesis_trial WHERE model_id=%s", (model_id,))
     trials = cur.fetchone()["n"]
 
-    status = ("validated" if pct >= 70 and median and median > 0.3
+    # Prog dobrany do miary NA TRANSAKCJE, nie anualizowanej. 0,05 oznacza,
+    # ze sredni zwrot z transakcji to 5% jej wlasnego odchylenia - skromnie,
+    # ale mierzalnie powyzej zera po kosztach.
+    status = ("validated" if pct >= 70 and median and median > 0.05
               else "degraded" if total >= 5 and pct < 40 else "learning")
     reason = {
         "validated": f"Dodatnie {positive}/{total} okien out-of-sample ({pct:.0f}%). Kryteria spełnione.",
@@ -385,8 +411,8 @@ def train(conn, engine: str, days: int, trials_per_window: int) -> None:
     }[status]
 
     cur.execute(
-        "UPDATE learn.model_version SET status = CASE WHEN %s = 'degraded' THEN 'candidate'"
-        " ELSE 'active' END, promoted_at = now() WHERE id = %s", (status, mv_id))
+        "UPDATE learn.model_version SET status = (CASE WHEN %s = 'degraded' THEN 'candidate'"
+        " ELSE 'active' END)::learn.mv_status, promoted_at = now() WHERE id = %s", (status, mv_id))
     cur.execute("UPDATE learn.model_version SET status='retired', retired_at=now()"
                 " WHERE model_id=%s AND id<>%s AND status='active'", (model_id, mv_id))
     cur.execute("UPDATE learn.training_run SET status='done', finished_at=now(), n_windows=%s"

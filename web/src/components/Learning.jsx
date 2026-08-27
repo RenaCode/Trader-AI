@@ -49,8 +49,8 @@ export default function Learning({ engine }) {
                 hint={s?.model || 'brak aktywnego modelu'} />
         <Metric label="Okna dodatnie (OOS)" value={s ? `${s.windows_positive}/${s.windows_total}` : '—'}
                 tone={passes ? 'profit' : 'loss'} hint={`${fmtNum(pct, 1)}% · próg ${THRESHOLD_PCT}%`} />
-        <Metric label="Mediana Sharpe (OOS)" value={fmtNum(s?.median_oos_sharpe, 2)}
-                tone={(s?.median_oos_sharpe ?? 0) > 0 ? 'profit' : 'loss'} hint="mediana po wszystkich oknach" />
+        <Metric label="Mediana Sharpe / transakcję" value={fmtNum(s?.median_oos_sharpe, 3)}
+                tone={(s?.median_oos_sharpe ?? 0) > 0 ? 'profit' : 'loss'} hint="out-of-sample, bez anualizacji" />
         <Metric label="Najgorszy drawdown" value={s?.max_drawdown != null ? `${fmtNum(s.max_drawdown, 2)}%` : '—'}
                 tone="loss" hint="w oknie testowym" />
       </div>
@@ -83,10 +83,10 @@ export default function Learning({ engine }) {
 
       <div className="glass-card">
         <div className="card-title">
-          Sharpe per okno walk-forward
+          Sharpe na transakcję, per okno walk-forward
           <span className="hint">out-of-sample · najstarsze po lewej</span>
         </div>
-        <BarChart data={bars} height={210} valueFmt={(v) => v.toFixed(2)} />
+        <BarChart data={bars} height={210} valueFmt={(v) => v.toFixed(3)} />
       </div>
 
       <div className="grid grid-2">
