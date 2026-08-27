@@ -3,7 +3,18 @@
    miejscu przenosi sie na wykresy. */
 import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 
-const PAD = { t: 12, r: 12, b: 24, l: 46 };
+const PAD = { t: 12, r: 14, b: 24, l: 46 };
+
+/* Lewy margines liczony z NAJDLUZSZEJ etykiety osi, a nie ze stalej.
+   Przy skalowaniu viewBox do szerokosci kontenera (1:1 w pikselach) staly
+   margines 46 px ucinal "102 500,00" do "500,00" - wczesniej tego nie bylo
+   widac, bo SVG bylo powiekszane ~2.4x. 6.2 px na znak to ostrozne
+   przyblizenie szerokosci cyfry w font-size 10 monospace. */
+function axisPad(ticks, fmt) {
+  const longest = ticks.reduce(
+    (m, t) => Math.max(m, String(fmt ? fmt(t) : t.toFixed(1)).length), 0);
+  return Math.max(PAD.l, Math.ceil(longest * 6.2) + 14);
+}
 
 /* Mierzy realna szerokosc kontenera i uzywa jej jako szerokosci viewBox.
    Bez tego SVG z viewBox="0 0 800 H" i sztywna wysokoscia renderuje sie w skali
@@ -54,19 +65,21 @@ export function AreaChart({ data, height = 220, valueKey = 'v', labelFmt, valueF
   const [ref, w] = useWidth();
   const h = height;
 
-  const { pts, min, max, ticks } = useMemo(() => {
-    if (!data?.length) return { pts: [], min: 0, max: 0, ticks: [] };
+  const { pts, min, max, ticks, padL } = useMemo(() => {
+    if (!data?.length) return { pts: [], min: 0, max: 0, ticks: [], padL: PAD.l };
     const vals = data.map((d) => d[valueKey]);
     let lo = Math.min(...vals), hi = Math.max(...vals);
     const pad = (hi - lo) * 0.12 || Math.abs(hi) * 0.02 || 1;
     lo -= pad; hi += pad;
-    const iw = w - PAD.l - PAD.r, ih = h - PAD.t - PAD.b;
+    const tk = niceTicks(lo, hi, 4);
+    const padL = axisPad(tk, valueFmt);
+    const iw = w - padL - PAD.r, ih = h - PAD.t - PAD.b;
     const pts = data.map((d, i) => [
-      PAD.l + (data.length === 1 ? iw / 2 : (i / (data.length - 1)) * iw),
+      padL + (data.length === 1 ? iw / 2 : (i / (data.length - 1)) * iw),
       PAD.t + ih - ((d[valueKey] - lo) / (hi - lo)) * ih,
     ]);
-    return { pts, min: lo, max: hi, ticks: niceTicks(lo, hi, 4) };
-  }, [data, valueKey, h, w]);
+    return { pts, min: lo, max: hi, ticks: tk, padL };
+  }, [data, valueKey, h, w, valueFmt]);
 
   const ih = h - PAD.t - PAD.b;
   const stroke = color || 'var(--profit)';
@@ -83,8 +96,8 @@ export function AreaChart({ data, height = 220, valueKey = 'v', labelFmt, valueF
   const onMove = (e) => {
     const rect = e.currentTarget.getBoundingClientRect();
     const x = ((e.clientX - rect.left) / rect.width) * w;
-    const iw = w - PAD.l - PAD.r;
-    const idx = Math.round(((x - PAD.l) / iw) * (data.length - 1));
+    const iw = w - padL - PAD.r;
+    const idx = Math.round(((x - padL) / iw) * (data.length - 1));
     if (idx >= 0 && idx < data.length) setHover(idx);
   };
 
@@ -105,9 +118,9 @@ export function AreaChart({ data, height = 220, valueKey = 'v', labelFmt, valueF
           const y = PAD.t + ih - ((tv - min) / (max - min)) * ih;
           return (
             <g key={tv}>
-              <line x1={PAD.l} y1={y} x2={w - PAD.r} y2={y}
+              <line x1={padL} y1={y} x2={w - PAD.r} y2={y}
                     stroke="rgba(255,255,255,0.055)" strokeWidth="1" />
-              <text x={PAD.l - 8} y={y + 3.5} textAnchor="end"
+              <text x={padL - 8} y={y + 3.5} textAnchor="end"
                     fill="var(--text-dim)" fontSize="10" fontFamily="var(--font-mono)">
                 {valueFmt ? valueFmt(tv) : tv.toFixed(0)}
               </text>
@@ -157,7 +170,9 @@ export function BarChart({ data, height = 200, valueKey = 'v', labelKey = 'label
   const hi = Math.max(...vals, threshold, 0);
   const lo = Math.min(...vals, threshold, 0);
   const span = (hi - lo) || 1;
-  const iw = w - PAD.l - PAD.r, ih = h - PAD.t - PAD.b;
+  const ticks = niceTicks(lo, hi, 4);
+  const padL = axisPad(ticks, valueFmt);
+  const iw = w - padL - PAD.r, ih = h - PAD.t - PAD.b;
   const bw = Math.max(3, (iw / data.length) * 0.66);
   const y0 = PAD.t + ih - ((0 - lo) / span) * ih;
 
@@ -165,23 +180,23 @@ export function BarChart({ data, height = 200, valueKey = 'v', labelKey = 'label
     <div className="chart-wrap" ref={ref}>
       <svg viewBox={`0 0 ${w} ${h}`} width="100%" height={h} role="img"
            preserveAspectRatio="none">
-        {niceTicks(lo, hi, 4).map((tv) => {
+        {ticks.map((tv) => {
           const y = PAD.t + ih - ((tv - lo) / span) * ih;
           return (
             <g key={tv}>
-              <line x1={PAD.l} y1={y} x2={w - PAD.r} y2={y} stroke="rgba(255,255,255,0.055)" />
-              <text x={PAD.l - 8} y={y + 3.5} textAnchor="end" fill="var(--text-dim)"
+              <line x1={padL} y1={y} x2={w - PAD.r} y2={y} stroke="rgba(255,255,255,0.055)" />
+              <text x={padL - 8} y={y + 3.5} textAnchor="end" fill="var(--text-dim)"
                     fontSize="10" fontFamily="var(--font-mono)">
                 {valueFmt ? valueFmt(tv) : tv.toFixed(1)}
               </text>
             </g>
           );
         })}
-        <line x1={PAD.l} y1={y0} x2={w - PAD.r} y2={y0} stroke="rgba(255,255,255,0.22)" />
+        <line x1={padL} y1={y0} x2={w - PAD.r} y2={y0} stroke="rgba(255,255,255,0.22)" />
 
         {data.map((d, i) => {
           const v = d[valueKey] ?? 0;
-          const x = PAD.l + (i + 0.5) * (iw / data.length) - bw / 2;
+          const x = padL + (i + 0.5) * (iw / data.length) - bw / 2;
           const y = PAD.t + ih - ((Math.max(v, 0) - lo) / span) * ih;
           const bh = Math.abs((v / span) * ih);
           return (
