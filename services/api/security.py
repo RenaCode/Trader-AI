@@ -10,6 +10,7 @@ import hashlib
 import hmac
 import os
 import secrets
+import time
 from datetime import datetime, timedelta, timezone
 
 import pyotp
@@ -109,6 +110,10 @@ class SecretBox:
         return self._aes.decrypt(blob[:12], blob[12:], None).decode()
 
 
+def constant_time_eq(a: str, b: str) -> bool:
+    return hmac.compare_digest(a, b)
+
+
 # ----------------------------------------------------------------- TOTP
 def new_totp_secret() -> str:
     return pyotp.random_base32()
@@ -118,10 +123,38 @@ def totp_uri(secret: str, login: str, issuer: str = "Trader AI") -> str:
     return pyotp.TOTP(secret).provisioning_uri(name=login, issuer_name=issuer)
 
 
-def verify_totp(secret: str, code: str) -> bool:
-    # valid_window=1 toleruje rozjazd zegara o jeden krok (30 s) w kazda strone.
-    return pyotp.TOTP(secret).verify(code.strip().replace(" ", ""), valid_window=1)
+TOTP_STEP = 30
+TOTP_WINDOW = 1        # tolerancja rozjazdu zegara: jeden krok w kazda strone
 
 
-def constant_time_eq(a: str, b: str) -> bool:
-    return hmac.compare_digest(a, b)
+def verify_totp(secret: str, code: str, last_step: int | None = None) -> int | None:
+    """Zwraca numer zaakceptowanego kroku czasowego albo None.
+
+    OCHRONA PRZED POWTORZENIEM. Wczesniejsza wersja zwracala bool i nie
+    interesowala sie tym, ktory krok pasowal. Kod byl przez to wazny przez cale
+    okno tolerancji (~90 s) i dzialal w nim WIELOKROTNIE - przechwycony raz,
+    dawal sie uzyc ponownie. RFC 6238 §5.2 wymaga wprost, zeby weryfikator
+    odrzucil drugie uzycie tego samego kroku.
+
+    Zwracany numer kroku wolajacy zapisuje w app.totp_secret.last_step
+    i podaje przy nastepnym sprawdzeniu jako `last_step`. Kod z krokiem nie
+    wiekszym niz zapisany jest odrzucany, choc sam w sobie jest poprawny.
+
+    Porownanie idzie przez compare_digest, a nie przez `==`. Roznica czasu przy
+    zwyklym porownaniu lancuchow jest tu mala, ale kod TOTP ma szesc cyfr
+    i darmowa ochrona jest tanszym wyborem niz rozwazanie, czy akurat wystarczy.
+    """
+    code = code.strip().replace(" ", "").replace("-", "")
+    if not code.isdigit():
+        return None
+    totp = pyotp.TOTP(secret)
+    biezacy = int(time.time()) // TOTP_STEP
+    for offset in range(-TOTP_WINDOW, TOTP_WINDOW + 1):
+        step = biezacy + offset
+        if constant_time_eq(totp.at(step * TOTP_STEP), code):
+            if last_step is not None and step <= last_step:
+                return None          # kod juz zuzyty
+            return step
+    return None
+
+

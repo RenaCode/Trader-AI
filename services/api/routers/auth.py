@@ -156,7 +156,7 @@ async def mfa(body: MfaBody, request: Request, response: Response):
     from ..security import session_token_hash, SecretBox
 
     pending = await fetch_one(
-        "SELECT s.id, s.user_id, s.expires_at, t.secret_enc"
+        "SELECT s.id, s.user_id, s.expires_at, t.secret_enc, t.last_step"
         " FROM app.session s JOIN app.totp_secret t ON t.user_id = s.user_id"
         " WHERE s.token_hash = %s AND s.revoked_at IS NULL AND s.mfa_satisfied = false",
         (session_token_hash(body.challenge),),
@@ -167,7 +167,10 @@ async def mfa(body: MfaBody, request: Request, response: Response):
     secret = SecretBox().decrypt(bytes(pending["secret_enc"]))
     code = body.code.strip().replace(" ", "").replace("-", "")
 
-    accepted = verify_totp(secret, code)
+    # Krok czasowy, na ktorym kod przeszedl. Zapisujemy go, zeby ten sam kod
+    # nie dal sie uzyc drugi raz w oknie tolerancji zegara (RFC 6238 §5.2).
+    step = verify_totp(secret, code, last_step=pending["last_step"])
+    accepted = step is not None
     used_backup = False
     if not accepted:
         # Kod zapasowy - jednorazowy, oznaczany jako zuzyty w tej samej transakcji.
@@ -183,6 +186,13 @@ async def mfa(body: MfaBody, request: Request, response: Response):
     if not accepted:
         await audit("auth.mfa_failed", user_id=pending["user_id"], request=request)
         raise HTTPException(status_code=401, detail="Nieprawidlowy kod")
+
+    if step is not None:
+        # Zapis PRZED utworzeniem sesji: gdyby kolejny krok zawiodl, kod i tak
+        # ma pozostac zuzyty. Odwrotna kolejnosc zostawialaby okno na powtorzenie.
+        await execute(
+            "UPDATE app.totp_secret SET last_step = %s WHERE user_id = %s",
+            (step, pending["user_id"]))
 
     # Bilet zuzyty. Sesja powstaje NOWA - to jest zabezpieczenie przed session fixation.
     await execute("UPDATE app.session SET revoked_at = now() WHERE id = %s", (pending["id"],))
@@ -254,13 +264,17 @@ async def totp_confirm(body: TotpConfirmBody, request: Request,
                        user: dict = Depends(current_user)):
     from ..security import SecretBox
 
-    row = await fetch_one("SELECT secret_enc FROM app.totp_secret WHERE user_id = %s", (user["id"],))
+    row = await fetch_one(
+        "SELECT secret_enc, last_step FROM app.totp_secret WHERE user_id = %s", (user["id"],))
     if not row:
         raise HTTPException(status_code=404, detail="Najpierw uruchom konfiguracje")
-    if not verify_totp(SecretBox().decrypt(bytes(row["secret_enc"])), body.code):
+    step = verify_totp(SecretBox().decrypt(bytes(row["secret_enc"])), body.code,
+                       last_step=row["last_step"])
+    if step is None:
         raise HTTPException(status_code=401, detail="Kod nie pasuje - sprawdz zegar urzadzenia")
 
-    await execute("UPDATE app.totp_secret SET confirmed_at = now() WHERE user_id = %s", (user["id"],))
+    await execute("UPDATE app.totp_secret SET confirmed_at = now(), last_step = %s"
+                  " WHERE user_id = %s", (step, user["id"]))
     await execute("DELETE FROM app.backup_code WHERE user_id = %s", (user["id"],))
 
     codes = new_backup_codes()
