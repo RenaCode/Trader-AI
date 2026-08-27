@@ -138,3 +138,46 @@ def test_constant_time_eq():
     assert constant_time_eq("abc", "abc")
     assert not constant_time_eq("abc", "abd")
     assert not constant_time_eq("abc", "abcd")
+
+
+# ------------------------------------------------------------------ rotacja klucza
+KLUCZ_STARY = base64.b64encode(os.urandom(32)).decode()
+KLUCZ_NOWY = base64.b64encode(os.urandom(32)).decode()
+
+
+def test_nowy_klucz_odczytuje_wartosci_zapisane_starym():
+    """Sedno rotacji: po zmianie klucza stare wartosci nadal sie odczytuja."""
+    stary_box = SecretBox(KLUCZ_STARY)
+    blob = stary_box.encrypt("klucz-api-gieldy")
+    nowy_box = SecretBox(KLUCZ_NOWY, old_key_b64=KLUCZ_STARY)
+    assert nowy_box.decrypt(blob) == "klucz-api-gieldy"
+
+
+def test_zapis_idzie_zawsze_biezacym_kluczem():
+    nowy_box = SecretBox(KLUCZ_NOWY, old_key_b64=KLUCZ_STARY)
+    blob = nowy_box.encrypt("sekret")
+    assert nowy_box.zaszyfrowany_biezacym(blob)
+    # Sam stary klucz nie moze tego odczytac.
+    with pytest.raises(Exception):
+        SecretBox(KLUCZ_STARY).decrypt(blob)
+
+
+def test_rozpoznaje_ktore_wartosci_wymagaja_przepisania():
+    """Bez tego raport z rotacji klamalby o tym, co zostalo zrobione."""
+    nowy_box = SecretBox(KLUCZ_NOWY, old_key_b64=KLUCZ_STARY)
+    stare = SecretBox(KLUCZ_STARY).encrypt("x")
+    nowe = nowy_box.encrypt("x")
+    assert not nowy_box.zaszyfrowany_biezacym(stare)
+    assert nowy_box.zaszyfrowany_biezacym(nowe)
+
+
+def test_bez_starego_klucza_stare_wartosci_sa_nieodczytywalne():
+    """Kanarek do procedury rotacji.
+
+    Pokazuje, dlaczego kroku z przepisaniem nie wolno pominac: po usunieciu
+    SECRETS_KEY_OLD wartosc zostaje bezpowrotnie nieczytelna.
+    """
+    blob = SecretBox(KLUCZ_STARY).encrypt("klucz-gieldy")
+    bez_starego = SecretBox(KLUCZ_NOWY)
+    with pytest.raises(Exception):
+        bez_starego.decrypt(blob)

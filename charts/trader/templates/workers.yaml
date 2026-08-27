@@ -45,6 +45,9 @@ spec:
             - name: SECRETS_KEY
               valueFrom:
                 secretKeyRef: { name: {{ $.Values.secretName }}, key: SECRETS_KEY }
+            - name: SECRETS_KEY_OLD
+              valueFrom:
+                secretKeyRef: { name: {{ $.Values.secretName }}, key: SECRETS_KEY_OLD, optional: true }
             # Klucz Anthropic jest czytany PRZEDE WSZYSTKIM z bazy (wpisany w UI).
             # Ten wpis jest tylko sciezka zapasowa i celowo optional.
             - name: ANTHROPIC_API_KEY

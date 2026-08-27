@@ -48,6 +48,11 @@ spec:
             - name: SECRETS_KEY
               valueFrom:
                 secretKeyRef: { name: {{ .Values.secretName }}, key: SECRETS_KEY }
+            # Poprzedni klucz - ustawiany WYLACZNIE na czas rotacji. Odszyfrowanie
+            # probuje najpierw biezacego, potem tego; zapis idzie zawsze biezacym.
+            - name: SECRETS_KEY_OLD
+              valueFrom:
+                secretKeyRef: { name: {{ .Values.secretName }}, key: SECRETS_KEY_OLD, optional: true }
             - name: ANTHROPIC_API_KEY
               valueFrom:
                 secretKeyRef: { name: {{ .Values.secretName }}, key: ANTHROPIC_API_KEY, optional: true }

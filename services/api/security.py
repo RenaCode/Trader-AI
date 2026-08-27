@@ -86,31 +86,82 @@ def backup_code_hash(code: str) -> str:
 class SecretBox:
     """AES-GCM na kluczu z env (SECRETS_KEY, 32 bajty base64).
 
-    Uzywane do kluczy API gield i sekretow TOTP. Nonce jest losowy per zapis
-    i doklejany przed szyfrogramem, wiec ten sam plaintext daje rozne bytes.
+    Uzywane do kluczy API gield, sekretow TOTP i klucza Anthropica. Nonce jest
+    losowy per zapis i doklejany przed szyfrogramem, wiec ten sam plaintext daje
+    rozne bajty.
+
+    ROTACJA KLUCZA
+
+    Klucz bez mozliwosci wymiany jest zobowiazaniem na zawsze: gdy wycieknie albo
+    trzeba go zmienic z innego powodu, kazda zaszyfrowana wartosc staje sie
+    nieodczytywalna - i to bez ostrzezenia, dopiero przy pierwszym odczycie.
+
+    Dlatego `SECRETS_KEY_OLD` (opcjonalny) trzyma poprzedni klucz. Odszyfrowanie
+    probuje najpierw biezacego, potem starego; zapis idzie ZAWSZE biezacym.
+    Procedura wymiany jest wiec taka:
+
+        1. SECRETS_KEY_OLD = dotychczasowy klucz, SECRETS_KEY = nowy
+        2. wdrozenie - od tej chwili nowe zapisy ida nowym kluczem,
+           a stare wartosci nadal sie odczytuja
+        3. python services/rotate_secrets.py - przepisuje wszystko nowym kluczem
+        4. usuniecie SECRETS_KEY_OLD
+
+    Format szyfrogramu sie NIE zmienia, wiec nie ma migracji danych - jedyna
+    roznica jest w tym, ze przy odszyfrowaniu probujemy dwoch kluczy.
     """
 
-    def __init__(self, key_b64: str | None = None):
+    def __init__(self, key_b64: str | None = None, old_key_b64: str | None = None):
         raw = key_b64 or os.environ.get("SECRETS_KEY", "")
         if not raw:
             raise RuntimeError(
                 "SECRETS_KEY nie jest ustawiony - bez niego nie da sie bezpiecznie "
                 "przechowac kluczy API gield ani sekretow TOTP."
             )
+        self._aes = AESGCM(self._klucz(raw))
+
+        stary = old_key_b64 if old_key_b64 is not None else os.environ.get("SECRETS_KEY_OLD", "")
+        self._aes_stary = AESGCM(self._klucz(stary)) if stary else None
+
+    @staticmethod
+    def _klucz(raw: str) -> bytes:
         key = base64.b64decode(raw)
         if len(key) != 32:
             raise RuntimeError("SECRETS_KEY musi byc 32 bajtami zakodowanymi w base64")
-        self._aes = AESGCM(key)
+        return key
 
     def encrypt(self, plaintext: str) -> bytes:
         nonce = os.urandom(12)
         return nonce + self._aes.encrypt(nonce, plaintext.encode(), None)
 
     def decrypt(self, blob: bytes) -> str:
-        return self._aes.decrypt(blob[:12], blob[12:], None).decode()
+        try:
+            return self._aes.decrypt(blob[:12], blob[12:], None).decode()
+        except Exception:
+            if self._aes_stary is None:
+                raise
+            # Wartosc zapisana jeszcze poprzednim kluczem. Odczyt sie udaje,
+            # ale nastepny zapis pojdzie juz kluczem biezacym.
+            return self._aes_stary.decrypt(blob[:12], blob[12:], None).decode()
+
+    def zaszyfrowany_biezacym(self, blob: bytes) -> bool:
+        """Czy wartosc jest juz zaszyfrowana AKTUALNYM kluczem.
+
+        Uzywane przez rotate_secrets.py, zeby nie przepisywac tego, co nie
+        wymaga przepisania - i zeby raport z rotacji mowil prawde.
+        """
+        try:
+            self._aes.decrypt(blob[:12], blob[12:], None)
+            return True
+        except Exception:
+            return False
 
 
 def constant_time_eq(a: str, b: str) -> bool:
+    """Porownanie odporne na pomiar czasu.
+
+    Uzywane do kodow TOTP. Zwykle `==` konczy sie na pierwszej roznicy, wiec
+    czas odpowiedzi niesie informacje o tym, ile znakow bylo poprawnych.
+    """
     return hmac.compare_digest(a, b)
 
 
