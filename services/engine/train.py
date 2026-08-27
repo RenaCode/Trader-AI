@@ -61,6 +61,10 @@ MIN_CONF = 0.25
 # Bez tego jedno dodatnie okno przy 40 pominietych dawalo 100% skutecznosci
 # i status otwierajacy droge do handlu na zywo.
 MIN_WINDOWS_FOR_VALIDATION = 20
+
+# Minimalna liczba instrumentow, ktore musza byc notowane w danym oknie.
+# Portfel z garstki rynkow to inna strategia niz portfel z dwudziestu czterech.
+MIN_INSTRUMENTS = 8
 FEE = 0.00055
 SLIP = 0.0004
 
@@ -247,22 +251,36 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon) -> N
         test_from = train_to
         test_to = test_from + timedelta(days=h.test_days)
 
-        train_slices = {s: [r for r in p if train_from <= r["t"] < train_to]
-                        for s, p in panels.items()}
-        test_slices = {s: [r for r in p if test_from <= r["t"] < test_to]
-                       for s, p in panels.items()}
+        # Instrument, ktory w tym oknie jeszcze nie byl notowany, ZOSTAJE POMINIETY -
+        # nie kasuje calego okna.
+        #
+        # Poprzednia wersja sprawdzala min() po WSZYSTKICH instrumentach, wiec
+        # jeden mlody szereg (SUI, TIA i SEI weszly na gielde w 2023) zerowal
+        # warunek i wyrzucal komplet wczesniejszych okien. Przy 24 instrumentach
+        # kosztowalo to dziewiec okien z czterdziestu - czyli prawie czwarta
+        # czesc dowodow, i to bez zadnego komunikatu.
         min_train_bars = max(100, h.train_days * 1440 // h.bar_minutes // 4)
-        if min((len(v) for v in train_slices.values()), default=0) < min_train_bars:
+        aktywne = [s for s, p in panels.items()
+                   if sum(1 for r in p if train_from <= r["t"] < train_to) >= min_train_bars]
+        # Portfel z garstki instrumentow to juz inna strategia, nie ta sama
+        # w chudszym okresie - ponizej tego progu okno naprawde nie niesie
+        # informacji o tym, co testujemy.
+        if len(aktywne) < MIN_INSTRUMENTS:
             start += timedelta(days=h.step_days)
             continue
 
-        thresholds = {s: atr_threshold(train_slices[s]) for s in panels}
+        train_slices = {s: [r for r in panels[s] if train_from <= r["t"] < train_to]
+                        for s in aktywne}
+        test_slices = {s: [r for r in panels[s] if test_from <= r["t"] < test_to]
+                       for s in aktywne}
+
+        thresholds = {s: atr_threshold(train_slices[s]) for s in aktywne}
         # Progi wyniku ustalane raz na okno, z zalozen poczatkowych i wylacznie
         # na danych treningowych. Te same progi obowiazuja wszystkie hipotezy
         # w tym oknie - inaczej kazda konfiguracja dostawalaby wlasny prog
         # dobrany pod siebie, co jest kolejnym stopniem swobody do przeuczenia.
         gates = {s: score_threshold(train_slices[s], DEFAULT_WEIGHTS, thresholds[s], h)
-                 for s in panels}
+                 for s in aktywne}
 
         # --- dobor wag WYLACZNIE na oknie treningowym ------------------------
         # Celem jest Sharpe CALEGO PORTFELA, nie srednia z Sharpe'ow liczonych
@@ -328,7 +346,7 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon) -> N
 
         step = max(1, len(next(iter(test_slices.values()), [])) // 50)
         regimes = [classify_regime(r["f"], thresholds[s])[0]
-                   for s in panels for r in test_slices[s][::step]]
+                   for s in aktywne for r in test_slices[s][::step]]
         dominant = max(set(regimes), key=regimes.count) if regimes else None
 
         cur.execute(
