@@ -372,9 +372,9 @@ def main(reset: bool) -> int:
             status = ("validated" if pct >= 70 and median_sharpe and median_sharpe > 0.3
                       else "degraded" if pct < 40 else "learning")
             reason = {
-                "validated": "Kryteria wyjscia z demo spelnione w oknie obserwacji.",
-                "learning": f"Dodatnie {positive}/18 okien OOS. Prog przejscia na live: 70%.",
-                "degraded": "Odsetek dodatnich okien ponizej 40% - strategia nie wykazuje alfy.",
+                "validated": "Kryteria wyjścia z demo spełnione w oknie obserwacji.",
+                "learning": f"Dodatnie {positive}/18 okien OOS. Próg przejścia na live: 70%.",
+                "degraded": "Odsetek dodatnich okien poniżej 40% — strategia nie wykazuje alfy.",
             }[status]
             # UPSERT, nie UPDATE: TRUNCATE ... CASCADE na learn.model_version czysci
             # rowniez learning_state (FK), wiec wiersz moze nie istniec.
@@ -401,14 +401,14 @@ def main(reset: bool) -> int:
                 INSERT INTO learn.postmortem (engine, period_from, period_to, model, summary, findings)
                 VALUES (%s,%s,%s,'claude-opus-5',%s,%s)
             """, (eng, NOW - timedelta(days=7), NOW,
-                  "Tydzien zdominowany przez rezim range. Sygnal mean_reversion_rsi odpowiada za "
-                  "wiekszosc dodatniego wyniku; momentum_breakout generowal falszywe wejscia przy "
-                  "niskiej zmiennosci i obniza laczny rezultat.",
+                  "Tydzień zdominowany przez reżim konsolidacji. Sygnał mean_reversion_rsi "
+                  "odpowiada za większość dodatniego wyniku; momentum_breakout generował fałszywe "
+                  "wejścia przy niskiej zmienności i obniża łączny rezultat.",
                   json.dumps([
-                      {"finding": "momentum_breakout ma ujemne oczekiwanie w rezimie range",
-                       "action": "Obnizyc wage sygnalu w tym rezimie"},
-                      {"finding": "Wejscia w ciagu 15 min po newsie o niskiej nowosci sa nietrafione",
-                       "action": "Podniesc prog novelty dla sygnalu news_shock"},
+                      {"finding": "momentum_breakout ma ujemne oczekiwanie w reżimie konsolidacji",
+                       "action": "obniżyć wagę sygnału w tym reżimie"},
+                      {"finding": "wejścia w ciągu 15 min po newsie o niskiej nowości są nietrafione",
+                       "action": "podnieść próg novelty dla sygnału news_shock"},
                   ])))
         print("ok")
 
@@ -447,17 +447,26 @@ def main(reset: bool) -> int:
                     verdict = random.choices(["allow", "downsize", "block"], [0.78, 0.14, 0.08])[0]
                     risk_reason = {
                         "allow": None,
-                        "downsize": "Zlecenie przekracza max_position_notional - wielkosc obcieta",
-                        "block": "Wykorzystanie max_total_exposure powyzej progu",
+                        "downsize": "zlecenie przekracza max_position_notional, wielkość obcięta",
+                        "block": "wykorzystanie max_total_exposure powyżej progu",
                     }[verdict]
                     px = closes[iid][random.randint(0, len(closes[iid]) - 1)]
                     qty = round(random.uniform(0.02, 0.6), 6)
 
                     snapshot = {feat_name_by_id[fid_]: round(random.gauss(0, 1), 4)
                                 for fid_ in feat_ids.values()}
+                    regime_pl = {
+                        "trend_up": "trendzie wzrostowym", "trend_down": "trendzie spadkowym",
+                        "range": "konsolidacji", "high_vol": "podwyzszonej zmiennosci",
+                        "news_shock": "szoku newsowym",
+                    }[regime].replace("podwyzszonej", "podwyższonej")
+                    action_pl = {
+                        "enter_long": "wejściem long", "enter_short": "wejściem short",
+                        "exit": "wyjściem z pozycji", "hold": "wstrzymaniem się",
+                    }[action]
                     rationale = (
-                        f"Rezim {regime}. Sygnal dominujacy wskazuje kierunek zgodny z akcja "
-                        f"{action}; potwierdzenie z przeplywu zlecen. Pewnosc {conf:.0%}."
+                        f"Rynek w {regime_pl}. Dominujący sygnał wskazuje kierunek zgodny "
+                        f"z {action_pl}; potwierdzenie z przepływu zleceń. Pewność {conf:.0%}."
                         + (f" Ryzyko: {risk_reason}." if risk_reason else "")
                     )
                     cur.execute("""

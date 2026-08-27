@@ -1,9 +1,39 @@
 /* Wykresy SVG, bez zewnetrznych bibliotek - tak jak Dietetyk trzyma zero zaleznosci
    na wizualizacje. Wszystkie kolory ida z tokenow CSS, wiec zmiana motywu w jednym
    miejscu przenosi sie na wykresy. */
-import React, { useMemo, useState, useId } from 'react';
+import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 
 const PAD = { t: 12, r: 12, b: 24, l: 46 };
+
+/* Mierzy realna szerokosc kontenera i uzywa jej jako szerokosci viewBox.
+   Bez tego SVG z viewBox="0 0 800 H" i sztywna wysokoscia renderuje sie w skali
+   dopasowanej do WYSOKOSCI (domyslne preserveAspectRatio="xMidYMid meet"), czyli
+   na 800 px wysrodkowanych - wykres zajmowal polowe karty, a reszta byla pusta.
+   Mapowanie 1:1 daje przy okazji ostry tekst osi. */
+function useWidth(fallback = 800) {
+  const ref = useRef(null);
+  const [w, setW] = useState(fallback);
+
+  const measure = useCallback(() => {
+    if (ref.current) {
+      const next = ref.current.clientWidth;
+      if (next > 0) setW(next);
+    }
+  }, []);
+
+  useEffect(() => {
+    measure();
+    if (typeof ResizeObserver === 'undefined') {
+      window.addEventListener('resize', measure);
+      return () => window.removeEventListener('resize', measure);
+    }
+    const ro = new ResizeObserver(measure);
+    if (ref.current) ro.observe(ref.current);
+    return () => ro.disconnect();
+  }, [measure]);
+
+  return [ref, w];
+}
 
 function niceTicks(min, max, count = 4) {
   if (!isFinite(min) || !isFinite(max) || min === max) return [min];
@@ -21,7 +51,7 @@ function niceTicks(min, max, count = 4) {
 export function AreaChart({ data, height = 220, valueKey = 'v', labelFmt, valueFmt, color }) {
   const gid = useId();
   const [hover, setHover] = useState(null);
-  const w = 800;
+  const [ref, w] = useWidth();
   const h = height;
 
   const { pts, min, max, ticks } = useMemo(() => {
@@ -36,9 +66,7 @@ export function AreaChart({ data, height = 220, valueKey = 'v', labelFmt, valueF
       PAD.t + ih - ((d[valueKey] - lo) / (hi - lo)) * ih,
     ]);
     return { pts, min: lo, max: hi, ticks: niceTicks(lo, hi, 4) };
-  }, [data, valueKey, h]);
-
-  if (!data?.length) return <div className="empty">Brak danych do wykresu</div>;
+  }, [data, valueKey, h, w]);
 
   const ih = h - PAD.t - PAD.b;
   const line = pts.map((p, i) => `${i ? 'L' : 'M'}${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(' ');
@@ -54,8 +82,10 @@ export function AreaChart({ data, height = 220, valueKey = 'v', labelFmt, valueF
   };
 
   return (
-    <div className="chart-wrap">
+    <div className="chart-wrap" ref={ref}>
+      {!data?.length ? <div className="empty">Brak danych do wykresu</div> : (
       <svg viewBox={`0 0 ${w} ${h}`} width="100%" height={h} role="img"
+           preserveAspectRatio="none"
            onMouseMove={onMove} onMouseLeave={() => setHover(null)}>
         <defs>
           <linearGradient id={`g-${gid}`} x1="0" y1="0" x2="0" y2="1">
@@ -90,7 +120,7 @@ export function AreaChart({ data, height = 220, valueKey = 'v', labelFmt, valueF
                     stroke="var(--bg-dark)" strokeWidth="2" />
           </g>
         )}
-      </svg>
+      </svg>)}
       <div className="chart-legend">
         {hover !== null && data[hover] ? (
           <>
@@ -112,7 +142,8 @@ export function AreaChart({ data, height = 220, valueKey = 'v', labelFmt, valueF
    widac, ile okien OOS wyszlo na plus. */
 export function BarChart({ data, height = 200, valueKey = 'v', labelKey = 'label', valueFmt, threshold = 0 }) {
   const [hover, setHover] = useState(null);
-  const w = 800, h = height;
+  const [ref, w] = useWidth();
+  const h = height;
   if (!data?.length) return <div className="empty">Brak danych do wykresu</div>;
 
   const vals = data.map((d) => d[valueKey] ?? 0);
@@ -124,8 +155,9 @@ export function BarChart({ data, height = 200, valueKey = 'v', labelKey = 'label
   const y0 = PAD.t + ih - ((0 - lo) / span) * ih;
 
   return (
-    <div className="chart-wrap">
-      <svg viewBox={`0 0 ${w} ${h}`} width="100%" height={h} role="img">
+    <div className="chart-wrap" ref={ref}>
+      <svg viewBox={`0 0 ${w} ${h}`} width="100%" height={h} role="img"
+           preserveAspectRatio="none">
         {niceTicks(lo, hi, 4).map((tv) => {
           const y = PAD.t + ih - ((tv - lo) / span) * ih;
           return (
@@ -176,37 +208,48 @@ export function BarChart({ data, height = 200, valueKey = 'v', labelKey = 'label
 /* ------------------------------------------------------------------ CalibrationChart
    Przekatna = model idealnie skalibrowany. Punkty pod przekatna = model jest
    zbyt pewny siebie; nad = zbyt ostrozny. */
-export function CalibrationChart({ data, height = 230 }) {
-  const w = 300, h = height;
+export function CalibrationChart({ data, height = 300 }) {
+  const [ref, w] = useWidth(300);
   if (!data?.length) return <div className="empty">Brak danych kalibracji</div>;
-  const P = 34;
-  const iw = w - P * 1.4, ih = h - P * 1.4;
-  const sx = (v) => P + v * iw;
-  const sy = (v) => h - P - v * ih;
+
+  // Obie osie sa w skali 0..1, wiec pole wykresu musi zostac kwadratem -
+  // inaczej odchylenie od przekatnej przestaje byc czytelne wzrokowo.
+  const P = 40;
+  const side = Math.max(120, Math.min(w - P * 1.6, height - P * 1.5));
+  const x0 = (w - side) / 2;
+  const y0 = height - P;
+  const sx = (v) => x0 + v * side;
+  const sy = (v) => y0 - v * side;
 
   return (
-    <div className="chart-wrap">
-      <svg viewBox={`0 0 ${w} ${h}`} width="100%" height={h} role="img">
+    <div className="chart-wrap" ref={ref}>
+      <svg viewBox={`0 0 ${w} ${height}`} width="100%" height={height} role="img"
+           preserveAspectRatio="none">
         {[0, 0.25, 0.5, 0.75, 1].map((g) => (
           <g key={g}>
             <line x1={sx(0)} y1={sy(g)} x2={sx(1)} y2={sy(g)} stroke="rgba(255,255,255,0.05)" />
             <line x1={sx(g)} y1={sy(0)} x2={sx(g)} y2={sy(1)} stroke="rgba(255,255,255,0.05)" />
+            <text x={sx(0) - 8} y={sy(g) + 3.5} textAnchor="end" fill="var(--text-dim)"
+                  fontSize="10" fontFamily="var(--font-mono)">{g.toFixed(2)}</text>
           </g>
         ))}
+        {/* Przekatna = model idealnie skalibrowany. */}
         <line x1={sx(0)} y1={sy(0)} x2={sx(1)} y2={sy(1)}
               stroke="var(--text-dim)" strokeDasharray="4 4" strokeWidth="1.2" />
         <path d={data.map((d, i) => `${i ? 'L' : 'M'}${sx(d.predicted)},${sy(d.observed)}`).join(' ')}
               fill="none" stroke="var(--color-primary)" strokeWidth="2" />
         {data.map((d, i) => (
           <circle key={i} cx={sx(d.predicted)} cy={sy(d.observed)}
-                  r={Math.min(7, 3 + Math.log10(Math.max(d.n, 1)) * 1.6)}
+                  r={Math.min(8, 3.5 + Math.log10(Math.max(d.n, 1)) * 1.7)}
                   fill="#c084fc" stroke="var(--bg-dark)" strokeWidth="1.5">
             <title>{`deklarowana ${(d.predicted * 100).toFixed(0)}% → rzeczywista ${(d.observed * 100).toFixed(0)}% (n=${d.n})`}</title>
           </circle>
         ))}
-        <text x={w / 2} y={h - 6} textAnchor="middle" fill="var(--text-dim)" fontSize="10">deklarowana pewność</text>
-        <text x={10} y={h / 2} textAnchor="middle" fill="var(--text-dim)" fontSize="10"
-              transform={`rotate(-90 10 ${h / 2})`}>rzeczywista trafność</text>
+        <text x={w / 2} y={height - 8} textAnchor="middle" fill="var(--text-dim)" fontSize="11">
+          deklarowana pewność
+        </text>
+        <text x={14} y={height / 2} textAnchor="middle" fill="var(--text-dim)" fontSize="11"
+              transform={`rotate(-90 14 ${height / 2})`}>rzeczywista trafność</text>
       </svg>
     </div>
   );

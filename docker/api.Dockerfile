@@ -7,6 +7,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY services/ ./services/
 COPY db/ ./db/
+COPY scripts/ ./scripts/
 
 # Nie root - kontener nie ma powodu miec uprawnien administracyjnych.
 RUN useradd --system --uid 10001 trader && chown -R trader:trader /app

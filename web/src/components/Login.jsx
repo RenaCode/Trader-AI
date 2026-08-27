@@ -60,13 +60,45 @@ export default function Login({ onSuccess }) {
 
   return (
     <div className="login-shell">
-      <div className="login-card glass-card">
-        <div className="login-brand">
-          <div className="logo-icon">◈</div>
-          <div>
-            <div className="logo-text">Trader AI</div>
-            <div className="login-sub">Autonomiczny system tradingowy</div>
+      <div className="login-layout">
+        {/* Lewa kolumna znika ponizej 900 px - na telefonie liczy sie sam formularz. */}
+        <aside className="login-aside">
+          <div className="login-brand">
+            <div className="logo-icon">◈</div>
+            <div>
+              <div className="logo-text">Trader AI</div>
+              <div className="login-sub">Autonomiczny system tradingowy</div>
+            </div>
           </div>
+
+          <p className="login-lede">
+            Dwa niezależne silniki decyzyjne — kryptowaluty i giełda tradycyjna —
+            z własnym dziennikiem decyzji, mierzonym postępem uczenia i twardymi
+            limitami ryzyka.
+          </p>
+
+          <ul className="login-points">
+            <li>
+              <strong>Każda decyzja jest wyjaśniona</strong>
+              Wkład każdego sygnału, cechy i artykułu zapisany przed poznaniem wyniku.
+            </li>
+            <li>
+              <strong>Metryki wyłącznie out-of-sample</strong>
+              Walk-forward z licznikiem przetestowanych hipotez — bez ładnych backtestów.
+            </li>
+            <li>
+              <strong>Ryzyko egzekwowane w kodzie</strong>
+              Limity dzienne, obsunięcie kapitału i kill-switch niezależne od modelu.
+            </li>
+          </ul>
+        </aside>
+
+      <div className="login-card glass-card">
+        <div className="login-card-head">
+          <h1>{step === 'password' ? 'Zaloguj się' : 'Weryfikacja dwuetapowa'}</h1>
+          <p>{step === 'password'
+            ? 'Dostęp wyłącznie dla właściciela systemu.'
+            : 'Drugi składnik potwierdza, że to nadal Ty.'}</p>
         </div>
 
         {step === 'password' ? (
@@ -142,8 +174,10 @@ export default function Login({ onSuccess }) {
         )}
 
         <div className="login-foot">
-          Faza demo · handel wyłącznie na koncie demonstracyjnym
+          <span className="badge warn">FAZA DEMO</span>
+          Handel wyłącznie na koncie demonstracyjnym
         </div>
+      </div>
       </div>
 
       <div className="login-legal">

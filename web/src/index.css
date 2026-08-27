@@ -334,3 +334,47 @@ a.src-link:hover { text-decoration: underline; }
   cursor: pointer; transition: var(--transition-smooth);
 }
 .btn-ghost:hover { color: var(--text-main); border-color: var(--border-glass-strong); background: rgba(255,255,255,0.04); }
+
+/* Uklad dwukolumnowy ekranu logowania. Lewa kolumna to kontekst systemu,
+   nie marketing - na waskim ekranie znika, bo liczy sie sam formularz. */
+.login-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 400px;
+  gap: 64px; align-items: center;
+  width: 100%; max-width: 980px;
+}
+@media (max-width: 900px) {
+  .login-layout { grid-template-columns: minmax(0, 400px); justify-content: center; gap: 0; }
+  .login-aside { display: none; }
+}
+
+.login-aside .login-brand { margin-bottom: 22px; }
+
+.login-lede {
+  font-size: 0.95rem; line-height: 1.65; color: var(--text-muted);
+  margin-bottom: 26px; max-width: 46ch;
+}
+
+.login-points { list-style: none; display: flex; flex-direction: column; gap: 16px; }
+.login-points li {
+  position: relative; padding-left: 20px;
+  font-size: 0.82rem; line-height: 1.55; color: var(--text-dim);
+}
+.login-points li::before {
+  content: ''; position: absolute; left: 0; top: 7px;
+  width: 7px; height: 7px; border-radius: 2px;
+  background: var(--gradient-ai);
+}
+.login-points strong {
+  display: block; color: var(--text-main); font-size: 0.87rem;
+  font-weight: 600; margin-bottom: 3px;
+}
+
+.login-card-head { margin-bottom: 24px; }
+.login-card-head h1 {
+  font-family: var(--font-display); font-size: 1.32rem; font-weight: 600;
+  letter-spacing: -0.02em; margin-bottom: 5px;
+}
+.login-card-head p { font-size: 0.82rem; color: var(--text-dim); line-height: 1.5; }
+
+.login-foot { display: flex; align-items: center; gap: 9px; justify-content: center; flex-wrap: wrap; }
