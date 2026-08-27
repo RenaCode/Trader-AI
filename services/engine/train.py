@@ -44,9 +44,25 @@ from services.engine.signals import DEFAULT_WEIGHTS, REGIMES, SIGNALS, classify_
 # Podloga odchylenia standardowego zwrotow (0,01% = jedna dziesiata prowizji).
 MIN_SD = 1e-4
 
-ENTER = 0.25
-EXIT = 0.12
-MIN_CONF = 0.35
+# Prog wejscia NIE jest stala. Jest percentylem rozkladu |wyniku| policzonego
+# na oknie TRENINGOWYM - a wiec dobieranym pod zadana CZESTOTLIWOSC handlu,
+# nigdy pod zwrot. To rozroznienie jest tu najwazniejsze: dobieranie progu az
+# wynik wyjdzie dodatni to definicja przeuczenia, natomiast powiedzenie
+# "chce handlowac w 12% najsilniejszych sytuacji" jest decyzja podjeta przed
+# zobaczeniem jakiegokolwiek wyniku.
+#
+# Stala 0,25 dobrana byla pod rozklad wynikow ze swiecy 5-minutowej. Po zmianie
+# normalizacji na bezwymiarowa rozklad sie przesunal i ta sama stala dawala
+# 2 transakcje na okno testowe - za malo, by cokolwiek zmierzyc. Percentyl
+# przenosi sie miedzy horyzontami sam.
+ENTER_PCTL = 0.88
+EXIT_RATIO = 0.45          # wyjscie przy spadku sily sygnalu do 45% progu wejscia
+MIN_CONF = 0.25
+
+# Minimum informatywnych okien, ponizej ktorego NIE WOLNO orzec "zwalidowane".
+# Bez tego jedno dodatnie okno przy 40 pominietych dawalo 100% skutecznosci
+# i status otwierajacy droge do handlu na zywo.
+MIN_WINDOWS_FOR_VALIDATION = 20
 FEE = 0.00055
 SLIP = 0.0004
 
@@ -123,8 +139,31 @@ def atr_threshold(panel: list[dict]) -> float | None:
 
 
 # ------------------------------------------------------------------ symulacja
+def score_threshold(panel: list[dict], weights: dict[str, dict[str, float]],
+                    atr_p80: float | None, h: Horizon) -> tuple[float, float]:
+    """Progi wejscia i wyjscia z rozkladu |wyniku| na TYM panelu.
+
+    Wolno to policzyc wylacznie na oknie treningowym. Policzone na testowym
+    byloby zagladaniem w przyszlosc - prog znalby wtedy rozklad, ktorego
+    w tamtym momencie nie dalo sie znac.
+    """
+    scores = []
+    for row in panel:
+        regime, _ = classify_regime(row["f"], atr_p80)
+        sc, conf, _ = evaluate(row["f"], regime, weights.get(regime), h)
+        if conf >= MIN_CONF:
+            scores.append(abs(sc))
+    if len(scores) < 50:
+        return 0.25, 0.12
+    scores.sort()
+    enter = scores[min(len(scores) - 1, int(len(scores) * ENTER_PCTL))]
+    enter = max(enter, 1e-4)
+    return enter, enter * EXIT_RATIO
+
+
 def simulate(panel: list[dict], weights: dict[str, dict[str, float]],
-             atr_p80: float | None, h: Horizon) -> dict:
+             atr_p80: float | None, h: Horizon,
+             enter: float, exit_: float) -> dict:
     """Odtwarza strategie na panelu. Zwraca metryki i liste transakcji.
 
     Wejscie i wyjscie po cenie NASTEPNEJ swiecy, nie biezacej - decyzja podjeta
@@ -153,14 +192,14 @@ def simulate(panel: list[dict], weights: dict[str, dict[str, float]],
         score, conf, _ = evaluate(row["f"], regime, weights.get(regime), h)
 
         if position is None:
-            if abs(score) >= ENTER and conf >= MIN_CONF:
+            if abs(score) >= enter and conf >= MIN_CONF:
                 side = 1 if score > 0 else -1
                 position = {"side": side, "entry": nxt * (1 + SLIP * side),
                             "conf": conf, "score": score}
                 equity *= (1 - FEE)
         else:
             same = (position["side"] > 0 and score > 0) or (position["side"] < 0 and score < 0)
-            if not same or abs(score) < EXIT:
+            if not same or abs(score) < exit_:
                 exit_px = nxt * (1 - SLIP * position["side"])
                 ret = position["side"] * (exit_px / position["entry"] - 1)
                 equity *= (1 + ret) * (1 - FEE)
@@ -292,6 +331,8 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon) -> N
 
     idx = 0
     positive = 0
+    gate_history: list[float] = []
+    weight_history: list[dict] = []
     all_sharpes: list[float] = []
     worst_dd = 0.0
     predictions: list[tuple[float, bool]] = []
@@ -313,13 +354,20 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon) -> N
             continue
 
         thresholds = {s: atr_threshold(train_slices[s]) for s in panels}
+        # Progi wyniku ustalane raz na okno, z zalozen poczatkowych i wylacznie
+        # na danych treningowych. Te same progi obowiazuja wszystkie hipotezy
+        # w tym oknie - inaczej kazda konfiguracja dostawalaby wlasny prog
+        # dobrany pod siebie, co jest kolejnym stopniem swobody do przeuczenia.
+        gates = {s: score_threshold(train_slices[s], DEFAULT_WEIGHTS, thresholds[s], h)
+                 for s in panels}
 
         # --- dobor wag WYLACZNIE na oknie treningowym ------------------------
         best_w, best_score = DEFAULT_WEIGHTS, -1e9
         for _ in range(trials_per_window):
             cand = random_weights(rng)
             score = statistics.fmean([
-                simulate(train_slices[s], cand, thresholds[s], h)["sharpe"] for s in panels
+                simulate(train_slices[s], cand, thresholds[s], h, *gates[s])["sharpe"]
+                for s in panels
             ])
             cfg_hash = hashlib.sha256(json.dumps(cand, sort_keys=True).encode()).digest()
             cur.execute(
@@ -332,13 +380,13 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon) -> N
         # Zalozenia poczatkowe tez sa kandydatem - jesli losowanie nie potrafi ich
         # pobic na oknie treningowym, to znaczy, ze nie ma czego kalibrowac.
         base_score = statistics.fmean([
-            simulate(train_slices[s], DEFAULT_WEIGHTS, thresholds[s], h)["sharpe"]
+            simulate(train_slices[s], DEFAULT_WEIGHTS, thresholds[s], h, *gates[s])["sharpe"]
             for s in panels])
         if base_score > best_score:
             best_w, best_score = DEFAULT_WEIGHTS, base_score
 
         # --- ocena OUT-OF-SAMPLE --------------------------------------------
-        oos = [simulate(test_slices[s], best_w, thresholds[s], h)
+        oos = [simulate(test_slices[s], best_w, thresholds[s], h, *gates[s])
                for s in panels if test_slices[s]]
         if not oos:
             start += timedelta(days=h.step_days)
@@ -387,6 +435,8 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon) -> N
             [(w_id, k, round(v, 4)) for k, v in agg.items()])
         conn.commit()
 
+        gate_history.extend(g[0] for g in gates.values())
+        weight_history.append(best_w)
         mark = "" if informative else "  (za mało transakcji — pominięte w ocenie)"
         print(f"  okno {idx:>2d}  {test_from:%m-%d}–{test_to:%m-%d}  "
               f"Sharpe/transakcję={agg['sharpe']:+.4f}  transakcje={n_trades}  "
@@ -450,19 +500,68 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon) -> N
     # Prog dobrany do miary NA TRANSAKCJE, nie anualizowanej. 0,05 oznacza,
     # ze sredni zwrot z transakcji to 5% jej wlasnego odchylenia - skromnie,
     # ale mierzalnie powyzej zera po kosztach.
-    status = ("validated" if pct >= 70 and median and median > 0.05
-              else "degraded" if total >= 5 and pct < 40 else "learning")
-    reason = {
-        "validated": f"Dodatnie {positive}/{total} okien out-of-sample ({pct:.0f}%). Kryteria spełnione.",
-        "learning": f"Dodatnie {positive}/{total} okien out-of-sample ({pct:.0f}%). Próg przejścia na live: 70%.",
-        "degraded": f"Dodatnie tylko {positive}/{total} okien ({pct:.0f}%) — strategia nie wykazuje przewagi.",
-    }[status]
+    #
+    # MIN_WINDOWS_FOR_VALIDATION jest warunkiem koniecznym, nie ozdoba. Bez niego
+    # przebieg, w ktorym 39 okien pominieto z braku transakcji, a jedno wyszlo
+    # dodatnio, dawal 100% skutecznosci i status "kryteria spelnione" - czyli
+    # zielone swiatlo do handlu prawdziwymi pieniedzmi na podstawie jednego okna.
+    if total < MIN_WINDOWS_FOR_VALIDATION:
+        status = "learning"
+        reason = (f"Za mało informatywnych okien: {total} z wymaganych "
+                  f"{MIN_WINDOWS_FOR_VALIDATION}. Strategia zawiera zbyt mało transakcji, "
+                  f"żeby cokolwiek orzec — to nie jest wynik ujemny, to brak wyniku.")
+    else:
+        status = ("validated" if pct >= 70 and median and median > 0.05
+                  else "degraded" if pct < 40 else "learning")
+        reason = {
+            "validated": f"Dodatnie {positive}/{total} okien out-of-sample ({pct:.0f}%). Kryteria spełnione.",
+            "learning": f"Dodatnie {positive}/{total} okien out-of-sample ({pct:.0f}%). Próg przejścia na live: 70%.",
+            "degraded": f"Dodatnie tylko {positive}/{total} okien ({pct:.0f}%) — strategia nie wykazuje przewagi.",
+        }[status]
 
+    # Progi obowiazujace produkcje - mediana z okien. Petla decyzyjna czyta je
+    # z rejestru, zeby nie ustalac ich wlasna, rownolegla logika.
+    prod_enter = round(statistics.median(gate_history), 6) if gate_history else 0.25
+
+    # WAGI DLA PRODUKCJI.
+    #
+    # Do tej pory `best_w` bylo liczone w kazdym oknie, uzywane do oceny
+    # out-of-sample i WYRZUCANE. Nigdzie nie trafialo, a petla decyzyjna nie
+    # czytala zadnych wag - dzialala wiecznie na zalozeniach poczatkowych.
+    # Warstwa uczenia mierzyla wiec, czy kalibracja POMOGLABY, nie mogac jej
+    # nigdy zastosowac.
+    #
+    # Bierzemy MEDIANE wag po oknach, nie wagi z ostatniego okna. Pojedyncze
+    # okno to jedno losowanie; mediana po kilkudziesieciu jest odporna na to,
+    # ze akurat ostatnie wypadlo nietypowo.
+    prod_weights = {}
+    if weight_history:
+        for regime in REGIMES:
+            per_signal = {
+                name: statistics.median([w[regime].get(name, 0.0) for w in weight_history])
+                for name in SIGNALS
+            }
+            total_w = sum(per_signal.values()) or 1.0
+            prod_weights[regime] = {k: round(v / total_w, 4) for k, v in per_signal.items()}
+
+    cur.execute(
+        "UPDATE learn.model_version SET params = params || %s::jsonb WHERE id = %s",
+        (json.dumps({"enter_threshold": prod_enter,
+                     "exit_threshold": round(prod_enter * EXIT_RATIO, 6),
+                     "min_confidence": MIN_CONF,
+                     "weights": prod_weights}), mv_id))
+
+    # KOLEJNOSC MA ZNACZENIE: najpierw wycofujemy poprzednia wersje, dopiero
+    # potem promujemy nowa. Odwrotna kolejnosc lamie unikalny indeks
+    # "jedna aktywna wersja na model" i wywraca caly przebieg NA SAMYM KONCU -
+    # a co gorsza tylko wtedy, gdy wynik byl DOBRY, bo zly konczy sie statusem
+    # 'candidate' i konfliktu nie ma. Blad ujawnial sie wiec dokladnie w tym
+    # jednym przypadku, na ktorym najbardziej zalezy.
+    cur.execute("UPDATE learn.model_version SET status='retired', retired_at=now()"
+                " WHERE model_id=%s AND id<>%s AND status='active'", (model_id, mv_id))
     cur.execute(
         "UPDATE learn.model_version SET status = (CASE WHEN %s = 'degraded' THEN 'candidate'"
         " ELSE 'active' END)::learn.mv_status, promoted_at = now() WHERE id = %s", (status, mv_id))
-    cur.execute("UPDATE learn.model_version SET status='retired', retired_at=now()"
-                " WHERE model_id=%s AND id<>%s AND status='active'", (model_id, mv_id))
     cur.execute("UPDATE learn.training_run SET status='done', finished_at=now(), n_windows=%s"
                 " WHERE id=%s", (total, run_id))
     cur.execute(

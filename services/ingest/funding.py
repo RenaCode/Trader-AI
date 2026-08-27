@@ -56,17 +56,50 @@ def ensure_perp(cur, spot: dict) -> int:
     return perp_id
 
 
+def missing_ranges(lo: datetime | None, hi: datetime | None, since: datetime,
+                   now: datetime, step: timedelta) -> list[tuple[datetime, datetime]]:
+    """Przedzialy, ktorych brakuje - takze PRZED tym, co juz mamy.
+
+    Wznawianie wylacznie od najnowszego posiadanego rekordu wyglada rozsadnie
+    i jest pulapka: wystarczy, ze inny proces dociagnie swiezy ogonek, a zadanie
+    "sciagnij cztery lata" widzi "mam dane az do teraz" i konczy sie zerem, nie
+    zglaszajac bledu. Dokladnie to sie tu wydarzylo - worker biezacy wstawil
+    27 najnowszych stawek, po czym pelny backfill nie zrobil nic.
+
+    Dlatego liczymy oba brzegi: dziure przed najstarszym rekordem i ogon po
+    najnowszym.
+    """
+    if lo is None or hi is None:
+        return [(since, now)]
+    out = []
+    if since < lo:
+        out.append((since, lo))
+    if hi + step < now:
+        out.append((hi + step, now))
+    return out
+
+
 async def backfill(adapter, conn, perp_id: int, symbol: str, since: datetime) -> int:
     cur = conn.cursor()
-    cur.execute("SELECT max(event_time) AS m FROM market.funding_rate WHERE instrument_id=%s",
-                (perp_id,))
-    have = cur.fetchone()["m"]
-    start = max(since, have + timedelta(hours=INTERVAL_H)) if have else since
+    cur.execute("SELECT min(event_time) AS lo, max(event_time) AS hi"
+                " FROM market.funding_rate WHERE instrument_id=%s", (perp_id,))
+    row = cur.fetchone()
     now = datetime.now(timezone.utc)
+    step = timedelta(hours=INTERVAL_H)
     total = 0
 
-    while start < now:
-        end = min(start + timedelta(hours=INTERVAL_H * PAGE), now)
+    for start, stop in missing_ranges(row["lo"], row["hi"], since, now, step):
+        total += await _fetch_range(adapter, conn, cur, perp_id, symbol, start, stop, now)
+
+    print(f"  {symbol:12s} {total:>6,} stawek")
+    return total
+
+
+async def _fetch_range(adapter, conn, cur, perp_id: int, symbol: str,
+                       start: datetime, stop: datetime, now: datetime) -> int:
+    total = 0
+    while start < stop:
+        end = min(start + timedelta(hours=INTERVAL_H * PAGE), stop)
         try:
             rows = await adapter.fetch_funding(symbol, start, end)
         except ExchangeError as e:
@@ -91,7 +124,6 @@ async def backfill(adapter, conn, perp_id: int, symbol: str, since: datetime) ->
             start = end
         await asyncio.sleep(0.05)
 
-    print(f"  {symbol:12s} {total:>6,} stawek")
     return total
 
 

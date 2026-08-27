@@ -39,12 +39,13 @@ from services.engine.horizons import DEFAULT_BAR, HORIZONS, Horizon, get as get_
 from services.engine.risk import RiskKernel
 from services.engine.signals import SIGNALS, classify_regime, evaluate
 
-# Progi decyzyjne. Ponizej ENTER nie wchodzimy - lepiej nie zrobic nic niz
-# handlowac szumem; wiekszosc kosztow w tradingu to prowizje od decyzji,
-# ktore nie mialy przewagi.
+# Progi awaryjne - obowiazuja WYLACZNIE, dopoki nie ma aktywnej wersji modelu.
+# Docelowo pochodza z rejestru (learn.model_version.params), gdzie zapisuje je
+# trener, wyliczone z rozkladu wynikow na oknach treningowych. Trzymanie ich
+# w dwoch miejscach bylo pewna droga do rozjazdu trening-produkcja.
 ENTER_THRESHOLD = 0.25
 EXIT_THRESHOLD = 0.12
-MIN_CONFIDENCE = 0.35
+MIN_CONFIDENCE = 0.25
 
 FEE_RATE = Decimal("0.00055")        # prowizja taker Bybit spot
 SLIPPAGE = Decimal("0.0004")         # ostrozne zalozenie poslizgu
@@ -63,6 +64,35 @@ def ensure_signal_defs(cur, engine: str) -> dict[str, int]:
             (name, engine, family, f"services.engine.signals:{name}", label))
         ids[name] = cur.fetchone()["id"]
     return ids
+
+
+def active_model(cur, engine: str, h: Horizon) -> dict:
+    """Wagi i progi z AKTYWNEJ wersji modelu - albo zalozenia poczatkowe.
+
+    Wersja o statusie 'candidate' (czyli taka, ktora nie przeszla walidacji)
+    swiadomie NIE jest tu brana. Model, ktory nie wykazal przewagi out-of-sample,
+    nie ma prawa sterowac produkcja - a jedyne, co go od niej dzieli, to ten
+    warunek na status.
+    """
+    cur.execute(
+        "SELECT mv.id, mv.version, mv.params FROM learn.model_version mv"
+        " JOIN learn.model m ON m.id = mv.model_id"
+        " WHERE m.name = %s AND mv.status = 'active'"
+        " ORDER BY mv.version DESC LIMIT 1",
+        (f"{engine}_signal_weighting_{h.bar}",))
+    row = cur.fetchone()
+    if not row or not (row["params"] or {}).get("weights"):
+        return {"weights": None, "enter": ENTER_THRESHOLD, "exit": EXIT_THRESHOLD,
+                "min_conf": MIN_CONFIDENCE, "version": None}
+    p = row["params"]
+    return {
+        "weights": p["weights"],
+        "enter": float(p.get("enter_threshold", ENTER_THRESHOLD)),
+        "exit": float(p.get("exit_threshold", EXIT_THRESHOLD)),
+        "min_conf": float(p.get("min_confidence", MIN_CONFIDENCE)),
+        "version": row["version"],
+        "model_version_id": row["id"],
+    }
 
 
 def horizon_feature_ids(cur, h: Horizon) -> list[int]:
@@ -281,6 +311,10 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
     now = datetime.now(timezone.utc)
     bar_start = current_bar(now, h)
     feature_ids = horizon_feature_ids(cur, h)
+    model = active_model(cur, engine, h)
+    if verbose:
+        print(f"  wagi: {'wersja modelu ' + str(model['version']) if model['version'] else 'założenia początkowe (brak zwalidowanego modelu)'}"
+              f", próg wejścia {model['enter']:.4f}")
     stats = {"rozwazone": 0, "wejscia": 0, "wyjscia": 0, "wstrzymane": 0,
              "zablokowane": 0, "poza_swieca": 0}
 
@@ -306,18 +340,19 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
             continue
 
         regime, regime_conf = classify_regime(features, atr_percentile_80(cur, iid, now, h))
-        score, confidence, contributions = evaluate(features, regime, None, h)
+        weights = (model["weights"] or {}).get(regime)
+        score, confidence, contributions = evaluate(features, regime, weights, h)
         position = open_position(cur, engine, mode, iid)
 
         # --- wybor akcji ----------------------------------------------------
         if position:
             same_way = (position["side"] == "long" and score > 0) or \
                        (position["side"] == "short" and score < 0)
-            if not same_way or abs(score) < EXIT_THRESHOLD:
+            if not same_way or abs(score) < model["exit"]:
                 action = "exit"
             else:
                 action = "hold"
-        elif abs(score) >= ENTER_THRESHOLD and confidence >= MIN_CONFIDENCE:
+        elif abs(score) >= model["enter"] and confidence >= model["min_conf"]:
             action = "enter_long" if score > 0 else "enter_short"
         else:
             action = "hold"

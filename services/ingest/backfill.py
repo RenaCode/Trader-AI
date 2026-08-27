@@ -49,21 +49,46 @@ async def backfill_symbol(adapter, conn, instrument_id: int, symbol: str,
     step = timedelta(minutes=TF_MINUTES[timeframe])
     cur = conn.cursor()
 
-    # Wznow od miejsca, w ktorym skonczylismy - nie sciagamy tego, co juz mamy.
+    # Nie sciagamy tego, co juz mamy - ale sprawdzamy OBA brzegi. Wznawianie
+    # wylacznie od najnowszej posiadanej swiecy nie potrafi dociagnac historii
+    # starszej niz to, co juz jest w bazie: zadanie "daj cztery lata" widzi
+    # "mam dane az do teraz" i konczy sie zerem, nie zglaszajac bledu.
     cur.execute(
-        "SELECT max(event_time) FROM market.candle WHERE instrument_id = %s AND timeframe = %s",
+        "SELECT min(event_time), max(event_time) FROM market.candle"
+        " WHERE instrument_id = %s AND timeframe = %s",
         (instrument_id, timeframe),
     )
-    have_until = cur.fetchone()[0]
-    start = max(since, have_until + step) if have_until else since
+    have_from, have_until = cur.fetchone()
     now = datetime.now(timezone.utc)
-    if start >= now:
-        print(f"  {symbol:10s} juz aktualne")
+
+    ranges: list[tuple[datetime, datetime]] = []
+    if have_until is None:
+        ranges.append((since, now))
+    else:
+        if since < have_from:
+            ranges.append((since, have_from))
+        if have_until + step < now:
+            ranges.append((have_until + step, now))
+    if not ranges:
+        print(f"  {symbol:10s} już aktualne")
         return 0
 
     total = 0
+    for range_start, range_stop in ranges:
+        total += await _fetch_range(adapter, conn, cur, instrument_id, symbol,
+                                    timeframe, step, range_start, range_stop, now)
+
+    print(f"\r  {symbol:10s} {total:>7d} swiec{' ' * 30}" if sys.stdout.isatty()
+          else f"  {symbol:10s} {total:>7d} swiec")
+    return total
+
+
+async def _fetch_range(adapter, conn, cur, instrument_id: int, symbol: str,
+                       timeframe: str, step, start: datetime, stop: datetime,
+                       now: datetime) -> int:
+    total = 0
     empty_rounds = 0
-    while start < now:
+    while start < stop:
         try:
             candles = await adapter.fetch_candles(symbol, timeframe, limit=1000, start=start)
         except ExchangeError as e:
@@ -81,7 +106,7 @@ async def backfill_symbol(adapter, conn, instrument_id: int, symbol: str,
             # milczaco udajac sukces. Przeskakujemy dziure i idziemy dalej.
             empty_rounds += 1
             start += step * 1000
-            if start >= now or empty_rounds > MAX_EMPTY_PROBES:
+            if start >= stop or empty_rounds > MAX_EMPTY_PROBES:
                 break
             continue
         empty_rounds = 0
@@ -89,7 +114,7 @@ async def backfill_symbol(adapter, conn, instrument_id: int, symbol: str,
         rows = [
             (instrument_id, timeframe, c.event_time, c.open, c.high, c.low, c.close,
              c.volume, c.trades, now)
-            for c in candles if c.event_time < now
+            for c in candles if c.event_time < min(stop, now)
         ]
         if rows:
             batched_insert(cur, rows)
@@ -108,8 +133,6 @@ async def backfill_symbol(adapter, conn, instrument_id: int, symbol: str,
         # Limit Bybit to 120 zapytan / 5 s; 50 ms przerwy trzyma nas daleko ponizej.
         await asyncio.sleep(0.05)
 
-    print(f"\r  {symbol:10s} {total:>7d} swiec{' ' * 30}" if sys.stdout.isatty()
-          else f"  {symbol:10s} {total:>7d} swiec")
     return total
 
 
