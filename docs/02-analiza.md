@@ -25,9 +25,10 @@ QuestDB/ClickHouse był trafny dla tej skali.
 Żaden endpoint API nie był chroniony. Po wdrożeniu pod publiczną domeną cały dashboard —
 pozycje, decyzje, stan konta — byłby czytelny dla każdego.
 
-**Zrobione:** middleware BasicAuth na Traefiku (`charts/trader/templates/basicauth.yaml`).
-**To nie jest rozwiązanie docelowe** — zamyka okno do czasu wdrożenia hasła + TOTP.
-Do usunięcia razem z wdrożeniem 2FA.
+**Zrobione:** middleware BasicAuth na Traefiku (`charts/trader/templates/basicauth.yaml`),
+użytkownik `admin`. Zgodnie z decyzją właściciela do czasu uruchomienia produkcyjnego
+wystarcza admin + hasło; **2FA (TOTP) pozostaje celem docelowym** i musi wejść przed
+przejściem na tryb live — wtedy ten middleware znika na rzecz logowania w samym API.
 
 ### 2.2 `feat.as_of` z domyślną świeżością 1 h zwraca pustkę
 

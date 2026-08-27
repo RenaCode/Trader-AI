@@ -6,8 +6,9 @@
 # pozycjami, decyzjami i stanem konta bylby publicznie dostepny pod
 # trader.renacode.com.
 #
-# To NIE zastepuje docelowego logowania - ma tylko zamknac okno miedzy wdrozeniem
-# a dodaniem wlasciwej autoryzacji. Usunac po wdrozeniu 2FA.
+# Decyzja wlasciciela: do czasu uruchomienia produkcyjnego wystarcza admin + haslo,
+# 2FA (TOTP) jest celem docelowym i wchodzi przed przejsciem na tryb live.
+# Usunac ten middleware dopiero gdy API bedzie mialo wlasne logowanie.
 apiVersion: traefik.io/v1alpha1
 kind: Middleware
 metadata:
@@ -16,5 +17,5 @@ metadata:
 spec:
   basicAuth:
     secret: {{ .Values.ingress.basicAuth.secretName }}
-    realm: "Trader AI (dostep tymczasowy)"
+    realm: "Trader AI"
 {{- end }}
