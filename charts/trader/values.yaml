@@ -154,6 +154,10 @@ trainerCron:
   bar: "4h"
   days: 1400
   trials: 60
+  # Limity dobrane do ZMIERZONEGO zuzycia (388 MB przy pelnym przebiegu na
+  # 24 instrumentach), nie do zapasu "na wszelki wypadek". Wezel ma 7,8 GB
+  # i dzieli je z trzema innymi projektami; limit 3 GB dla zadania, ktore
+  # bierze 0,4 GB, podnosil przeciazenie do 186% bez zadnego pozytku.
   resources:
-    limits:   { cpu: 3000m, memory: 3Gi }
-    requests: { cpu: 200m,  memory: 512Mi }
+    limits:   { cpu: 2000m, memory: 1Gi }
+    requests: { cpu: 200m,  memory: 384Mi }
