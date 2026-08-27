@@ -148,7 +148,15 @@ async def walk_forward(engine: str, limit: int = Query(40, le=200)):
 
 @router.get("/calibration")
 async def calibration(engine: str):
-    """Czy pewnosc 70% oznacza trafnosc ~70%. Rozjazd = model klamie o swojej pewnosci."""
+    """Czy pewnosc 70% oznacza trafnosc ~70%. Rozjazd = model klamie o swojej pewnosci.
+
+    Zwracamy tez PODSUMOWANIE, bo sam wykres latwo przeczytac zyczeniowo.
+    Kluczowe pytanie nie brzmi "czy punkty leza blisko przekatnej", tylko
+    "czy wyzsza deklarowana pewnosc oznacza wyzsza trafnosc". Miara przy nim to
+    rozpietosc trafnosci miedzy kubelkami: gdy trafnosc jest plaska niezaleznie
+    od pewnosci, liczba nie niesie informacji o jakosci sytuacji - i wtedy prog
+    wejscia oparty na pewnosci filtruje przypadkowo.
+    """
     rows = await fetch_all(
         """
         SELECT cb.bin_lo, cb.bin_hi, cb.predicted_mean, cb.observed_rate, cb.n_samples
@@ -163,11 +171,47 @@ async def calibration(engine: str):
         """,
         (engine,),
     )
-    return [
+    kubelki = [
         {"bin_lo": r["bin_lo"], "bin_hi": r["bin_hi"], "predicted": r["predicted_mean"],
          "observed": r["observed_rate"], "n": r["n_samples"]}
         for r in rows
     ]
+    if not kubelki:
+        return {"kubelki": [], "podsumowanie": None}
+
+    n = sum(k["n"] for k in kubelki)
+    trafnosc = sum(k["observed"] * k["n"] for k in kubelki) / n
+    ece = sum(abs(k["observed"] - k["predicted"]) * k["n"] for k in kubelki) / n
+    # Rozpietosc liczona tylko na kubelkach o sensownej liczebnosci - inaczej
+    # jeden kubelek z czternastoma transakcjami wyznaczalby wniosek.
+    istotne = [k for k in kubelki if k["n"] >= 50]
+    rozpietosc = (max(k["observed"] for k in istotne) - min(k["observed"] for k in istotne)
+                  if len(istotne) >= 2 else None)
+
+    if rozpietosc is None:
+        werdykt = "Za mało danych, żeby ocenić."
+    elif rozpietosc < 0.10:
+        werdykt = (f"Trafność jest praktycznie płaska ({trafnosc:.0%}) niezależnie od "
+                   f"deklarowanej pewności. Ta liczba NIE porządkuje sytuacji według "
+                   f"jakości — próg wejścia oparty na niej filtruje przypadkowo.")
+    elif rozpietosc < 0.20:
+        werdykt = (f"Pewność słabo różnicuje trafność (rozpiętość {rozpietosc:.0%} "
+                   f"przy średniej {trafnosc:.0%}). Sygnał jest, ale wątły.")
+    else:
+        werdykt = (f"Pewność różnicuje trafność (rozpiętość {rozpietosc:.0%} przy "
+                   f"średniej {trafnosc:.0%}).")
+
+    return {
+        "kubelki": kubelki,
+        "podsumowanie": {
+            "transakcji": n,
+            "trafnosc": round(trafnosc, 4),
+            "ece": round(ece, 4),
+            "rozpietosc_trafnosci": round(rozpietosc, 4) if rozpietosc is not None else None,
+            "kubelkow_istotnych": len(istotne),
+            "werdykt": werdykt,
+        },
+    }
 
 
 @router.get("/drift")

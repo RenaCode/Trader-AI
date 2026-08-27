@@ -535,3 +535,15 @@ select.input-field option { background: var(--bg-dark); color: var(--text-main);
   text-align: right;
   font-variant-numeric: tabular-nums;
 }
+
+/* --- werdykt (kalibracja) --- */
+.verdict {
+  background: rgba(255, 255, 255, 0.04);
+  border-left: 3px solid var(--accent);
+  border-radius: 0 8px 8px 0;
+  padding: 10px 12px;
+}
+.verdict-line {
+  font-size: 0.86rem;
+  line-height: 1.45;
+}

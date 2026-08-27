@@ -145,11 +145,25 @@ export default function Learning({ engine }) {
             Kalibracja pewności
             <span className="hint">błąd ECE: {fmtNum(s?.calibration_error, 3)}</span>
           </div>
-          <CalibrationChart data={cal.data || []} />
-          <div className="row-body" style={{ marginTop: 4 }}>
+          <CalibrationChart data={cal.data?.kubelki || []} />
+          {cal.data?.podsumowanie && (
+            <div className="verdict" style={{ marginTop: 10 }}>
+              <div className="verdict-line">{cal.data.podsumowanie.werdykt}</div>
+              <div className="hint" style={{ marginTop: 6 }}>
+                {cal.data.podsumowanie.transakcji.toLocaleString('pl')} transakcji ·
+                {' '}trafność {(cal.data.podsumowanie.trafnosc * 100).toFixed(1)}% ·
+                {' '}rozpiętość między kubełkami{' '}
+                {cal.data.podsumowanie.rozpietosc_trafnosci != null
+                  ? `${(cal.data.podsumowanie.rozpietosc_trafnosci * 100).toFixed(1)} pkt proc.`
+                  : '—'}
+              </div>
+            </div>
+          )}
+          <div className="row-body" style={{ marginTop: 8 }}>
             Punkty poniżej przekątnej oznaczają model <strong>zbyt pewny siebie</strong>: deklaruje
-            70% pewności, a trafia rzadziej. To osobny wymiar oceny niż zysk — model może
-            zarabiać i jednocześnie kłamać o swojej pewności.
+            70% pewności, a trafia rzadziej. Ale ważniejsze od odległości od przekątnej jest to,
+            czy trafność w ogóle <strong>rośnie</strong> wraz z pewnością — jeśli jest płaska,
+            deklarowana pewność nie mówi nic o jakości sytuacji.
           </div>
         </div>
 
