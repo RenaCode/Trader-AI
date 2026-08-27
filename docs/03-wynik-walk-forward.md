@@ -261,3 +261,61 @@ hipotez (2 400) tego nie łapie, bo liczy konfiguracje wag, nie decyzje
 projektowe. Przy czytaniu każdego wyniku z tej serii trzeba to trzymać w głowie.
 Prawdziwym testem będzie zachowanie na danych, których jeszcze nie ma — czyli
 najbliższe miesiące fazy demo.
+
+## Wynik trzeciej iteracji
+
+| Miara | 5 min / 3 instr. | 4 h / 12 instr. | **4 h / 24 instr. + risk kernel** |
+|---|---|---|---|
+| Okna informatywne | 29 | 33 | **29** |
+| Okna dodatnie | 24,1% | 60,6% | **55,2%** |
+| Mediana Sharpe/transakcję | −0,152 | +0,153 | **+0,038** |
+| Najgorsze obsunięcie | −8,02% | −37,07% | **−1,97%** |
+| Błąd kalibracji (ECE) | — | — | 0,124 |
+
+Stan: `learning`. Próg przejścia na live to 70% dodatnich okien; jest 55%.
+
+### Dlaczego wynik SPADŁ i dlaczego to dobrze
+
+Przed poprawką „młody instrument nie kasuje okna" walk-forward liczył 25 okien
+i dawał 64% dodatnich przy medianie +0,198. Po poprawce liczy 29 okien — 55%
+i +0,038.
+
+Dziewięć dołożonych okien to okresy z lat 2022–2023, wcześniej **po cichu
+pomijane**, bo SUI, TIA i SEI nie były jeszcze notowane. Były trudniejsze
+i obniżyły wynik.
+
+To jest właściwy kierunek dla poprawki poprawnościowej: usunęła korzystne
+obciążenie, którego nikt nie wprowadził celowo i którego nic nie sygnalizowało.
+Wynik 64% opisywał strategię ocenianą wyłącznie na łatwiejszym fragmencie
+historii.
+
+### Czego algorytm się nauczył
+
+Najciekawsza zmiana jest w reżimie konsolidacji (`range`), gdzie założenia
+początkowe stawiały na powrót do średniej:
+
+| Sygnał | Założenie | Wyuczona | Zmiana |
+|---|---|---|---|
+| Powrót do średniej przy RSI | 0,26 | 0,089 | **−0,171** |
+| Pozycja przy krawędzi zakresu | 0,22 | 0,110 | −0,110 |
+| Zgodność zwrotów (momentum) | 0,08 | 0,178 | **+0,098** |
+| Kierunek trendu z EMA | 0,08 | 0,147 | +0,067 |
+| Nietypowy wolumen | 0,09 | 0,156 | +0,066 |
+| Skrajne finansowanie | 0,15 | 0,182 | +0,032 |
+
+Model **odrzucił podręcznikowe założenie**, że w konsolidacji opłaca się grać na
+powrót do średniej, i przesunął wagę do momentum. Nie twierdzę, że to prawda
+o rynku — twierdzę, że tak wypadło na czterech latach danych, out-of-sample,
+i że jest to konkretna, sprawdzalna zmiana w rozumowaniu systemu, a nie
+ogólnik o „uczeniu się".
+
+Wagi w każdym reżimie sumują się do jedności, więc wzrost jednego sygnału zawsze
+odbywa się kosztem pozostałych.
+
+### Kalibracja
+
+ECE 0,124 znaczy, że deklarowana pewność rozmija się z trafnością średnio
+o 12 punktów procentowych. To dużo. Warstwa uczenia mierzy to od dziś poprawnie
+(wcześniej wykres kalibracji porównywał wynik sam ze sobą), więc jest to
+pierwszy uczciwy odczyt tej miary — i pierwsza rzecz do poprawy w kolejnej
+iteracji.
