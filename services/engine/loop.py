@@ -315,6 +315,18 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
     conn.commit()
 
     risk = RiskKernel(conn, engine, mode)
+
+    # Limity konta sprawdzamy RAZ NA CYKL, zanim cokolwiek rozwazymy.
+    # Wczesniej risk.check() wolane bylo wylacznie przy probie wejscia, wiec
+    # obsuniecie kapitalu podczas samego trzymania pozycji nie bylo oceniane
+    # przez nikogo - kill-switch nie mogl zadzialac dokladnie w tej sytuacji,
+    # dla ktorej istnieje.
+    konto = risk.check_account()
+    conn.commit()
+    wejscia_wstrzymane = konto.verdict != "allow"
+    if wejscia_wstrzymane and verbose:
+        print(f"  UWAGA: wejścia wstrzymane — {konto.reason}")
+
     now = datetime.now(timezone.utc)
     bar_start = current_bar(now, h)
     feature_ids = horizon_feature_ids(cur, h)
@@ -372,9 +384,17 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
             notional = (Decimal(3000) * Decimal(str(min(1.0, abs(score) * 2)))).quantize(Decimal("0.01"))
             qty = (notional / price).quantize(Decimal("0.000001"))
 
-        verdict = risk.check(iid, notional, qty) if action.startswith("enter") \
-            else type("V", (), {"verdict": "allow", "reason": None, "qty": qty,
-                                "violations": [], "usage": []})()
+        if action.startswith("enter") and wejscia_wstrzymane:
+            # Kill-switch albo przekroczony limit konta - wejscie odpada,
+            # ale decyzje i tak zapisujemy, zeby dziennik pokazywal, ze system
+            # CHCIAL wejsc i co go zatrzymalo.
+            verdict = konto
+            action = "hold"
+        elif action.startswith("enter"):
+            verdict = risk.check(iid, notional, qty)
+        else:
+            verdict = type("V", (), {"verdict": "allow", "reason": None, "qty": qty,
+                                     "violations": [], "usage": []})()
 
         top = sorted(contributions, key=lambda c: -abs(c["contribution"]))[:2]
         top_txt = ", ".join(f"{c['label'].lower()} ({c['contribution']:+.3f})" for c in top)

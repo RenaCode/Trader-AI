@@ -39,10 +39,8 @@ import psycopg
 from psycopg.rows import dict_row
 
 from services.engine.horizons import DEFAULT_BAR, HORIZONS, Horizon, get as get_horizon
+from services.engine.portfolio import metrics as portfolio_metrics, simulate_portfolio
 from services.engine.signals import DEFAULT_WEIGHTS, REGIMES, SIGNALS, classify_regime, evaluate
-
-# Podloga odchylenia standardowego zwrotow (0,01% = jedna dziesiata prowizji).
-MIN_SD = 1e-4
 
 # Prog wejscia NIE jest stala. Jest percentylem rozkladu |wyniku| policzonego
 # na oknie TRENINGOWYM - a wiec dobieranym pod zadana CZESTOTLIWOSC handlu,
@@ -161,102 +159,6 @@ def score_threshold(panel: list[dict], weights: dict[str, dict[str, float]],
     return enter, enter * EXIT_RATIO
 
 
-def simulate(panel: list[dict], weights: dict[str, dict[str, float]],
-             atr_p80: float | None, h: Horizon,
-             enter: float, exit_: float) -> dict:
-    """Odtwarza strategie na panelu. Zwraca metryki i liste transakcji.
-
-    Wejscie i wyjscie po cenie NASTEPNEJ swiecy, nie biezacej - decyzja podjeta
-    na zamknieciu swiecy T nie moze zostac wykonana po cenie tej samej swiecy.
-    To jeden z najczestszych i najbardziej optymistycznych bledow w backtestach.
-
-    Kazda transakcja zapamietuje PEWNOSC Z CHWILI WEJSCIA. Bez niej nie da sie
-    policzyc kalibracji: pytanie brzmi "czy sygnal, ktory twierdzil 70 %, trafial
-    w 70 % przypadkow", a odpowiedzi nie da sie odtworzyc z samego wyniku.
-
-    Krzywa kapitalu jest wyceniana co swiece (mark-to-market), nie tylko przy
-    zamknieciu pozycji. Krzywa liczona wylacznie na zrealizowanym wyniku
-    pokazuje obsuniecie mniejsze niz prawdziwe, bo pozycja przeceniona
-    w miedzyczasie o kilkanascie procent nie zostawia w niej sladu, o ile
-    zdazy wrocic przed zamknieciem.
-    """
-    position = None          # {"side","entry","conf","score"}
-    trades: list[dict] = []
-    equity = 1.0
-    curve = [1.0]
-
-    for i in range(len(panel) - 1):
-        row = panel[i]
-        nxt = panel[i + 1]["price"]
-        regime, _ = classify_regime(row["f"], atr_p80)
-        score, conf, _ = evaluate(row["f"], regime, weights.get(regime), h)
-
-        if position is None:
-            if abs(score) >= enter and conf >= MIN_CONF:
-                side = 1 if score > 0 else -1
-                position = {"side": side, "entry": nxt * (1 + SLIP * side),
-                            "conf": conf, "score": score}
-                equity *= (1 - FEE)
-        else:
-            same = (position["side"] > 0 and score > 0) or (position["side"] < 0 and score < 0)
-            if not same or abs(score) < exit_:
-                exit_px = nxt * (1 - SLIP * position["side"])
-                ret = position["side"] * (exit_px / position["entry"] - 1)
-                equity *= (1 + ret) * (1 - FEE)
-                trades.append({"ret": ret, "conf": position["conf"],
-                               "score": position["score"]})
-                position = None
-
-        # Wycena biezaca: kapital + niezrealizowany wynik otwartej pozycji.
-        if position is None:
-            curve.append(equity)
-        else:
-            unreal = position["side"] * (nxt / position["entry"] - 1)
-            curve.append(equity * (1 + unreal))
-
-    rets = [t["ret"] for t in trades]
-
-    # Ponizej progu kazda statystyka jest szumem. Zwracamy jawne zero
-    # i licznik transakcji, zeby okno dalo sie odroznic od takiego, ktore
-    # naprawde wyszlo na zero.
-    peak = curve[0]
-    max_dd = 0.0
-    for v in curve:
-        peak = max(peak, v)
-        max_dd = min(max_dd, (v - peak) / peak * 100)
-
-    if len(trades) < h.min_trades:
-        return {"sharpe": 0.0, "sortino": 0.0, "max_dd": round(max_dd, 4), "hit_rate": 0.0,
-                "avg_r": 0.0, "profit_factor": 0.0, "n_trades": len(trades),
-                "total_return": round((equity - 1) * 100, 4), "trades": trades,
-                "insufficient": True}
-
-    mean = statistics.fmean(rets)
-    sd = statistics.pstdev(rets)
-    downside = [r for r in rets if r < 0]
-    dsd = statistics.pstdev(downside) if len(downside) > 1 else sd
-
-    # Podloga na odchyleniu. Bez niej kilka niemal identycznych transakcji daje
-    # sd bliskie zeru i Sharpe rzedu milionow - liczbe, ktora nic nie znaczy,
-    # a wyglada jak wynik.
-    sd = max(sd, MIN_SD)
-    dsd = max(dsd, MIN_SD)
-
-    # Sharpe NA TRANSAKCJE, bez anualizacji. Anualizowanie wyniku z krotkiego
-    # okna mnozy szum i produkuje liczby nieporownywalne miedzy oknami.
-    gains = sum(r for r in rets if r > 0)
-    losses = -sum(r for r in rets if r < 0)
-    return {
-        "sharpe": round(mean / sd, 4), "sortino": round(mean / dsd, 4),
-        "max_dd": round(max_dd, 4),
-        "hit_rate": round(sum(1 for r in rets if r > 0) / len(rets), 4),
-        "avg_r": round(mean * 100, 4),
-        "profit_factor": round(gains / losses, 4) if losses > 0 else 0.0,
-        "n_trades": len(trades), "total_return": round((equity - 1) * 100, 4),
-        "trades": trades,
-    }
-
-
 def random_weights(rng: random.Random) -> dict[str, dict[str, float]]:
     """Losowy zestaw wag per rezim, znormalizowany do sumy 1."""
     out = {}
@@ -317,6 +219,7 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon) -> N
 
     # Panel wczytujemy RAZ na instrument - to najdrozsza operacja w calym treningu.
     panels = {}
+    inst_ids = {inst["symbol"]: inst["id"] for inst in instruments}
     for inst in instruments:
         p = load_panel(cur, inst["id"], h, now - timedelta(days=days), now)
         if len(p) > 500:
@@ -362,13 +265,20 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon) -> N
                  for s in panels}
 
         # --- dobor wag WYLACZNIE na oknie treningowym ------------------------
+        # Celem jest Sharpe CALEGO PORTFELA, nie srednia z Sharpe'ow liczonych
+        # osobno per instrument. Roznica nie jest kosmetyczna: portfel podlega
+        # limitowi lacznej ekspozycji i kill-switchowi, wiec uklad wag, ktory
+        # wygląda dobrze na kazdym instrumencie z osobna, moze byc niewykonalny,
+        # gdy wszystkie chca wejsc jednoczesnie.
+        def ocen(w, sl):
+            res = simulate_portfolio(sl, w, thresholds, gates, h, MIN_CONF,
+                                     instrument_ids=inst_ids)
+            return portfolio_metrics(res, h.min_trades)
+
         best_w, best_score = DEFAULT_WEIGHTS, -1e9
         for _ in range(trials_per_window):
             cand = random_weights(rng)
-            score = statistics.fmean([
-                simulate(train_slices[s], cand, thresholds[s], h, *gates[s])["sharpe"]
-                for s in panels
-            ])
+            score = ocen(cand, train_slices)["sharpe"]
             cfg_hash = hashlib.sha256(json.dumps(cand, sort_keys=True).encode()).digest()
             cur.execute(
                 "INSERT INTO learn.hypothesis_trial (model_id, config_hash, params, n_windows)"
@@ -379,55 +289,30 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon) -> N
 
         # Zalozenia poczatkowe tez sa kandydatem - jesli losowanie nie potrafi ich
         # pobic na oknie treningowym, to znaczy, ze nie ma czego kalibrowac.
-        base_score = statistics.fmean([
-            simulate(train_slices[s], DEFAULT_WEIGHTS, thresholds[s], h, *gates[s])["sharpe"]
-            for s in panels])
+        base_score = ocen(DEFAULT_WEIGHTS, train_slices)["sharpe"]
         if base_score > best_score:
             best_w, best_score = DEFAULT_WEIGHTS, base_score
 
         # --- ocena OUT-OF-SAMPLE --------------------------------------------
-        oos = [simulate(test_slices[s], best_w, thresholds[s], h, *gates[s])
-               for s in panels if test_slices[s]]
-        if not oos:
+        oos_res = simulate_portfolio(
+            {s: v for s, v in test_slices.items() if v}, best_w, thresholds, gates, h,
+            MIN_CONF, instrument_ids=inst_ids)
+        oos_m = portfolio_metrics(oos_res, h.min_trades)
+        if not oos_res.equity_curve:
             start += timedelta(days=h.step_days)
             continue
 
-        # Transakcje LACZYMY miedzy instrumentami, zamiast usredniac Sharpe
-        # policzony osobno dla kazdego.
+        # Transakcje pochodza z JEDNEJ symulacji portfela, wiec sa juz wspolne
+        # dla wszystkich instrumentow i podlegaly wspolnym limitom.
         #
-        # Powod jest ilosciowy: na swiecy 4-godzinnej wychodzi 4-8 transakcji na
-        # instrument na miesiac. Srednia z trzech Sharpe'ow, z ktorych kazdy stoi
-        # na czterech transakcjach, to srednia z trzech szumow. Te same 15
-        # transakcji potraktowane jako jedna proba daje miare, ktora cokolwiek
-        # znaczy. Pytanie brzmi "czy ta strategia ma przewage na transakcje",
-        # a nie "czy ma ja osobno na BTC" - wiec pula jest wlasciwa jednostka.
-        #
-        # ZASTRZEZENIE, ktore trzeba czytac razem z wynikiem: BTC, ETH i SOL sa
-        # silnie skorelowane, wiec te transakcje nie sa niezalezne. Efektywna
+        # ZASTRZEZENIE, ktore trzeba czytac razem z wynikiem: instrumenty krypto
+        # sa silnie skorelowane, wiec te transakcje nie sa niezalezne. Efektywna
         # liczba obserwacji jest MNIEJSZA niz ich liczba, a istotnosc
         # statystyczna odpowiednio nizsza, niz sugerowalby sam licznik.
-        pooled = [t["ret"] for m in oos for t in m["trades"]]
-        n_trades = len(pooled)
-        informative = n_trades >= h.min_trades
-
-        if informative:
-            mean_p = statistics.fmean(pooled)
-            sd_p = max(statistics.pstdev(pooled), MIN_SD)
-            down_p = [r for r in pooled if r < 0]
-            dsd_p = max(statistics.pstdev(down_p) if len(down_p) > 1 else sd_p, MIN_SD)
-            gains_p = sum(r for r in pooled if r > 0)
-            losses_p = -sum(r for r in pooled if r < 0)
-            agg = {
-                "sharpe": mean_p / sd_p,
-                "sortino": mean_p / dsd_p,
-                "max_dd": min(m["max_dd"] for m in oos),
-                "hit_rate": sum(1 for r in pooled if r > 0) / len(pooled),
-                "avg_r": mean_p * 100,
-                "profit_factor": (gains_p / losses_p) if losses_p > 0 else 0.0,
-            }
-        else:
-            agg = {"sharpe": 0.0, "sortino": 0.0, "max_dd": min(m["max_dd"] for m in oos),
-                   "hit_rate": 0.0, "avg_r": 0.0, "profit_factor": 0.0}
+        n_trades = oos_m["n_trades"]
+        informative = not oos_m.get("insufficient")
+        agg = {k: oos_m[k] for k in
+               ("sharpe", "sortino", "max_dd", "hit_rate", "avg_r", "profit_factor")}
         if informative:
             all_sharpes.append(agg["sharpe"])
             worst_dd = min(worst_dd, agg["max_dd"])
@@ -438,9 +323,8 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon) -> N
         # Wczesniejsza wersja budowala "prognoze" z wielkosci samego zwrotu
         # (abs(t) * 50 + 0.5), czyli z rzeczy znanej dopiero po fakcie - wykres
         # kalibracji mierzyl wtedy wlasny wynik i zawsze wygladal dobrze.
-        for m in oos:
-            for t in m["trades"]:
-                predictions.append((t["conf"], t["ret"] > 0))
+        for t in oos_res.trades:
+            predictions.append((t["conf"], t["ret"] > 0))
 
         step = max(1, len(next(iter(test_slices.values()), [])) // 50)
         regimes = [classify_regime(r["f"], thresholds[s])[0]
@@ -462,6 +346,10 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon) -> N
         weight_history.append(best_w)
         mark = "" if informative else (f"  (poniżej {h.min_trades} transakcji — "
                                        "pominięte w ocenie)")
+        if oos_res.killswitch_at:
+            mark += f"  [KILL-SWITCH {oos_res.killswitch_at:%m-%d %H:%M}]"
+        if oos_m["blocked"]:
+            mark += f"  odrzuconych wejść: {oos_m['blocked']}"
         print(f"  okno {idx:>2d}  {test_from:%m-%d}–{test_to:%m-%d}  "
               f"Sharpe/transakcję={agg['sharpe']:+.4f}  transakcje={n_trades}  "
               f"reżim={dominant}{mark}")

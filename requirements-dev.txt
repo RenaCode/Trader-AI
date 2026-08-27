@@ -1,0 +1,2 @@
+# Zaleznosci wylacznie do testow - nie trafiaja do obrazu produkcyjnego.
+pytest>=8.0

@@ -12,18 +12,12 @@ zlecenie i wyslac je mimo aktywnego kill-switcha.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
-
-@dataclass
-class RiskVerdict:
-    verdict: str                      # 'allow' | 'downsize' | 'block'
-    reason: str | None = None
-    qty: Decimal | None = None        # wielkosc po ewentualnym obcieciu
-    violations: list[dict] = field(default_factory=list)
-    usage: list[dict] = field(default_factory=list)
+from services.engine.risk_rules import (
+    RiskState, RiskVerdict, evaluate_account, evaluate_limits,
+)
 
 
 class RiskKernel:
@@ -90,104 +84,48 @@ class RiskKernel:
         return cur.fetchone()
 
     # ------------------------------------------------------------- ocena
+    def check_account(self) -> RiskVerdict:
+        """Limity CALEGO KONTA, sprawdzane w kazdym cyklu.
+
+        Wolane niezaleznie od tego, czy silnik chce w cokolwiek wejsc. Bez tego
+        obsuniecie kapitalu podczas trzymania pozycji nie bylo przez nikogo
+        oceniane i kill-switch nie mial szans zadzialac - patrz komentarz przy
+        evaluate_account().
+        """
+        equity, peak, day_ago = self._equity()
+        exposure, per_instrument = self._open_exposure()
+        state = RiskState(
+            equity=equity, peak=peak, day_ago=day_ago, exposure=exposure,
+            per_instrument=per_instrument, orders_last_hour=0,
+            killswitch=self.killswitch_active(),
+        )
+        verdict = evaluate_account(state, self._limits)
+        if verdict.trigger_killswitch:
+            self._trigger_killswitch(verdict.trigger_killswitch)
+        return verdict
+
     def check(self, instrument_id: int, notional: Decimal,
               qty: Decimal) -> RiskVerdict:
-        violations: list[dict] = []
-        usage: list[dict] = []
+        """Zbiera stan konta z bazy i oddaje ocene czystym regulom.
 
-        # 1. Kill-switch. Nic dalej nie ma znaczenia.
-        ks = self.killswitch_active()
-        if ks:
-            return RiskVerdict("block",
-                               f"Kill-switch aktywny od {ks['triggered_at']:%Y-%m-%d %H:%M}: {ks['reason']}",
-                               violations=violations)
-
+        Cala logika limitow siedzi w services.engine.risk_rules i jest wspolna
+        z symulacja walk-forward. Ten modul odpowiada wylacznie za to, SKAD
+        pochodzi stan - nie za to, jak sie go ocenia. Dzieki temu backtest nie
+        moze mierzyc innego systemu niz ten, ktory naprawde handluje.
+        """
         equity, peak, day_ago = self._equity()
         exposure, per_instrument = self._open_exposure()
 
-        # 2. Strata dzienna.
-        lim = self._limits.get("max_daily_loss")
-        if lim and day_ago > 0:
-            loss_pct = float((day_ago - equity) / day_ago * 100)
-            usage.append({"name": "max_daily_loss", "used": max(0.0, loss_pct),
-                          "threshold": float(lim["value"])})
-            if loss_pct >= float(lim["value"]):
-                violations.append({"limit": "max_daily_loss", "observed": loss_pct,
-                                   "threshold": float(lim["value"]), "action": lim["action"]})
-                if lim["action"] == "killswitch":
-                    self._trigger_killswitch(
-                        f"Strata dzienna {loss_pct:.2f}% przekroczyła limit {lim['value']}%")
-                return RiskVerdict("block",
-                                   f"Strata dzienna {loss_pct:.2f}% osiągnęła limit {lim['value']}%",
-                                   violations=violations, usage=usage)
-
-        # 3. Obsuniecie od szczytu.
-        lim = self._limits.get("max_drawdown")
-        if lim and peak > 0:
-            dd_pct = float((peak - equity) / peak * 100)
-            usage.append({"name": "max_drawdown", "used": max(0.0, dd_pct),
-                          "threshold": float(lim["value"])})
-            if dd_pct >= float(lim["value"]):
-                violations.append({"limit": "max_drawdown", "observed": dd_pct,
-                                   "threshold": float(lim["value"]), "action": lim["action"]})
-                if lim["action"] == "killswitch":
-                    self._trigger_killswitch(
-                        f"Obsunięcie kapitału {dd_pct:.2f}% przekroczyło limit {lim['value']}%")
-                return RiskVerdict("block",
-                                   f"Obsunięcie {dd_pct:.2f}% osiągnęło limit {lim['value']}%",
-                                   violations=violations, usage=usage)
-
-        # 4. Czestotliwosc zlecen - ochrona przed petla bledu.
-        lim = self._limits.get("max_orders_per_hour")
-        if lim:
-            n = self._orders_last_hour()
-            usage.append({"name": "max_orders_per_hour", "used": float(n),
-                          "threshold": float(lim["value"])})
-            if n >= float(lim["value"]):
-                violations.append({"limit": "max_orders_per_hour", "observed": float(n),
-                                   "threshold": float(lim["value"]), "action": lim["action"]})
-                return RiskVerdict("block",
-                                   f"Wykonano {n} zleceń w ostatniej godzinie przy limicie {lim['value']}",
-                                   violations=violations, usage=usage)
-
-        # 5. Laczna ekspozycja.
-        lim = self._limits.get("max_total_exposure")
-        if lim:
-            after = exposure + notional
-            usage.append({"name": "max_total_exposure", "used": float(exposure),
-                          "threshold": float(lim["value"])})
-            if after > Decimal(lim["value"]):
-                violations.append({"limit": "max_total_exposure", "observed": float(after),
-                                   "threshold": float(lim["value"]), "action": lim["action"]})
-                return RiskVerdict("block",
-                                   f"Ekspozycja po wejściu wyniosłaby {after:.0f} przy limicie {lim['value']:.0f}",
-                                   violations=violations, usage=usage)
-
-        # 6. Wielkosc pojedynczej pozycji - tutaj obcinamy zamiast blokowac.
-        lim = self._limits.get("max_position_notional")
-        if lim:
-            cap = Decimal(lim["value"])
-            current = per_instrument.get(instrument_id, Decimal(0))
-            usage.append({"name": "max_position_notional", "used": float(current),
-                          "threshold": float(cap)})
-            if current + notional > cap:
-                allowed = cap - current
-                if allowed <= 0:
-                    violations.append({"limit": "max_position_notional", "observed": float(current),
-                                       "threshold": float(cap), "action": "block"})
-                    return RiskVerdict("block",
-                                       f"Pozycja na tym instrumencie już wypełnia limit {cap:.0f}",
-                                       violations=violations, usage=usage)
-                factor = allowed / notional
-                violations.append({"limit": "max_position_notional",
-                                   "observed": float(current + notional),
-                                   "threshold": float(cap), "action": "downsize"})
-                return RiskVerdict("downsize",
-                                   f"Zlecenie obcięte do limitu wielkości pozycji ({cap:.0f})",
-                                   qty=(qty * factor).quantize(Decimal("0.000001")),
-                                   violations=violations, usage=usage)
-
-        return RiskVerdict("allow", qty=qty, usage=usage)
+        state = RiskState(
+            equity=equity, peak=peak, day_ago=day_ago,
+            exposure=exposure, per_instrument=per_instrument,
+            orders_last_hour=self._orders_last_hour(),
+            killswitch=self.killswitch_active(),
+        )
+        verdict = evaluate_limits(state, self._limits, instrument_id, notional, qty)
+        if verdict.trigger_killswitch:
+            self._trigger_killswitch(verdict.trigger_killswitch)
+        return verdict
 
     def _trigger_killswitch(self, reason: str) -> None:
         """Kill-switch wymaga RECZNEGO odblokowania.
