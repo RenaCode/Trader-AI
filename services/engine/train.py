@@ -343,7 +343,15 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon) -> N
         # na danych treningowych. Te same progi obowiazuja wszystkie hipotezy
         # w tym oknie - inaczej kazda konfiguracja dostawalaby wlasny prog
         # dobrany pod siebie, co jest kolejnym stopniem swobody do przeuczenia.
-        gates = {s: score_threshold(train_slices[s], DEFAULT_WEIGHTS, thresholds[s], h,
+        #
+        # Wagi bazowe MUSZA byc te same, ktorymi potem sie handluje, czyli juz
+        # po wyzerowaniu martwych sygnalow. Liczenie progu z pelnych zalozen,
+        # a handlowanie wagami po renormalizacji dawalo wyniki systematycznie
+        # wieksze od progu - liczba transakcji na okno skoczyla wtedy z ~40 do
+        # ~120, co nie bylo zmiana strategii, tylko rozjazdem miedzy progiem
+        # a tym, co go przekracza.
+        bazowe = _bez_martwych(DEFAULT_WEIGHTS, martwe)
+        gates = {s: score_threshold(train_slices[s], bazowe, thresholds[s], h,
                                     cache_tr[s])
                  for s in aktywne}
 
@@ -372,7 +380,6 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon) -> N
 
         # Zalozenia poczatkowe tez sa kandydatem - jesli losowanie nie potrafi ich
         # pobic na oknie treningowym, to znaczy, ze nie ma czego kalibrowac.
-        bazowe = _bez_martwych(DEFAULT_WEIGHTS, martwe)
         base_score = ocen(bazowe, train_slices, cache_tr)["sharpe"]
         if base_score > best_score:
             best_w, best_score = bazowe, base_score

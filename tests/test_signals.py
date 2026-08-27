@@ -141,3 +141,45 @@ def test_szybka_sciezka_daje_ten_sam_wynik():
             assert pelne[0] == szybkie[0], f"wynik rozjechany w reżimie {rezim}"
             assert pelne[1] == szybkie[1], f"pewność rozjechana w reżimie {rezim}"
             assert len(pelne[2]) == len(SIGNALS) and szybkie[2] == []
+
+
+# ------------------------------------------------------ siatka swiec
+@pytest.mark.parametrize("wejscie,oczekiwane", [
+    ("2026-08-27T16:19:49.408934+00:00", "2026-08-27T16:00:00+00:00"),
+    ("2026-08-27T00:00:00+00:00", "2026-08-27T00:00:00+00:00"),
+    ("2026-08-27T03:59:59+00:00", "2026-08-27T00:00:00+00:00"),
+    ("2026-08-27T23:59:59.999999+00:00", "2026-08-27T20:00:00+00:00"),
+])
+def test_wyrownanie_do_siatki_swiec(wejscie, oczekiwane):
+    """Cechy liczone na wlasnej siatce MUSZA trafiac w granice swiec.
+
+    Bez tego funding i news laduly na znacznikach typu 16:19:49 i nigdy nie
+    wchodzily do panelu trenera, dzialajac jednoczesnie w produkcji przez
+    feat.as_of() - czyli rozjazd trening-produkcja nie do wykrycia po wynikach.
+    """
+    from datetime import datetime
+
+    from services.ingest.features import na_siatce
+
+    got = na_siatce(datetime.fromisoformat(wejscie), H4)
+    assert got == datetime.fromisoformat(oczekiwane)
+
+
+def test_wyrownanie_jest_idempotentne():
+    from datetime import datetime
+
+    from services.ingest.features import na_siatce
+
+    t = datetime.fromisoformat("2026-08-27T16:19:49.408934+00:00")
+    raz = na_siatce(t, H4)
+    assert na_siatce(raz, H4) == raz
+
+
+def test_wyrownanie_zalezy_od_horyzontu():
+    from datetime import datetime
+
+    from services.ingest.features import na_siatce
+
+    t = datetime.fromisoformat("2026-08-27T16:19:49+00:00")
+    assert na_siatce(t, H4).hour == 16
+    assert na_siatce(t, H5).minute == 15      # świeca 5-minutowa

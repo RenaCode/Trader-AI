@@ -364,6 +364,37 @@ async def sprawdz(conn, engine: str = "crypto", h: Horizon | None = None) -> int
                    lambda ff=f, r=regime: evaluate(
                        ff, r, (model or {}).get("weights", {}).get(r), h))
 
+    # KONTROLA STRUKTURALNA: czy wszystkie cechy horyzontu siedza na siatce swiec.
+    # Cechy liczone na wlasnej siatce (funding, news) potrafily wyladowac na
+    # znacznikach typu 16:19:49 i wtedy NIGDY nie wchodzily do panelu trenera,
+    # dzialajac jednoczesnie w produkcji przez feat.as_of(). Rozjazd
+    # trening-produkcja nie do wykrycia po samych wynikach.
+    def kontrola_siatki():
+        krok = h.bar_minutes * 60
+        cur.execute(
+            """
+            SELECT fd.name,
+                   count(*) AS n,
+                   sum(CASE WHEN extract(epoch FROM fv.event_time)::bigint %% %s = 0
+                            THEN 1 ELSE 0 END) AS na_siatce
+            FROM feat.feature_value fv
+            JOIN feat.feature_def fd ON fd.id = fv.feature_def_id
+            WHERE fd.params->>'bar' = %s
+              AND fv.event_time > now() - interval '7 days'
+            GROUP BY 1
+            """,
+            (krok, h.bar),
+        )
+        krzywe = [(r["name"], r["n"], r["na_siatce"]) for r in cur.fetchall()
+                  if r["n"] and r["na_siatce"] < r["n"]]
+        if krzywe:
+            raise RuntimeError(
+                "cechy poza siatką świec: " +
+                ", ".join(f"{n} ({na}/{tot})" for n, tot, na in krzywe))
+        return True
+
+    probuj("cechy leżą na siatce świec", kontrola_siatki)
+
     conn.rollback()
     print()
     if bledy:

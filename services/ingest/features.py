@@ -49,6 +49,32 @@ from services.engine.horizons import DEFAULT_BAR, HORIZONS, Horizon, get as get_
 # Opoznienie obliczeniowe doliczane do ingested_at przy datowaniu wstecz.
 COMPUTE_LAG = timedelta(seconds=3)
 
+
+def na_siatce(t: datetime, h: Horizon) -> datetime:
+    """Zaokragla czas W DOL do poczatku swiecy tego horyzontu.
+
+    KRYTYCZNE, a przez dlugi czas pomijane. Cechy cenowe powstaja z
+    `time_bucket(...)`, wiec siedza dokladnie na granicach swiec: 00:00, 04:00,
+    08:00. Cechy liczone na wlasnej siatce - funding i news - zaczynaly od
+    `now() - N dni`, czyli od przypadkowej chwili z mikrosekundami, i laduly
+    na znacznikach w rodzaju 16:19:49.408934.
+
+    Skutek byl asymetryczny i przez to trudny do zauwazenia:
+
+      * TRENING laczy cechy z cenami przez `p.t = f.event_time`, wiec funding
+        i news NIGDY nie wchodzily do panelu. Oba sygnaly byly martwe w kazdym
+        dotychczasowym przebiegu walk-forward.
+      * PRODUKCJA czyta przez `feat.as_of()`, ktore bierze najswiezsza wartosc
+        kazdej cechy w oknie swiezosci - i tam funding dzialal normalnie.
+
+    Czyli dokladnie ten rozjazd trening-produkcja, przed ktorym broni cala
+    reszta architektury: silnik uzywal sygnalu, ktorego trener nigdy nie widzial.
+    """
+    krok = h.bar_minutes * 60
+    epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
+    n = int((t - epoch).total_seconds() // krok)
+    return epoch + timedelta(seconds=n * krok)
+
 BATCH = 4000
 
 # Ponizej tylu instrumentow notowanych jednoczesnie ranking przekrojowy nie
@@ -287,6 +313,8 @@ def compute_news(cur, instrument_id: int, h: Horizon, feat_id: int,
     GOTOWA przed T (an.ingested_at <= T). Bez tego warunku model uczylby sie
     z newsow, ktorych wtedy jeszcze nie znal.
     """
+    since = na_siatce(since, h)
+    until = na_siatce(until, h)
     cur.execute(
         """
         SELECT b.t,
@@ -399,6 +427,10 @@ def compute_funding(cur, instrument_id: int, h: Horizon, feat_ids: dict[str, int
     rates = [(r["event_time"], float(r["rate"])) for r in cur.fetchall()]
     if not rates:
         return 0
+
+    # Siatka MUSI byc ta sama co dla cech cenowych - patrz na_siatce().
+    since = na_siatce(since, h)
+    until = na_siatce(until, h)
 
     step = timedelta(minutes=h.bar_minutes)
     # Okno z-score: 30 dni wyrazone w swiecach tego horyzontu.
