@@ -69,9 +69,16 @@ export function AreaChart({ data, height = 220, valueKey = 'v', labelFmt, valueF
   }, [data, valueKey, h, w]);
 
   const ih = h - PAD.t - PAD.b;
-  const line = pts.map((p, i) => `${i ? 'L' : 'M'}${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(' ');
-  const area = `${line} L${pts[pts.length - 1][0].toFixed(1)},${PAD.t + ih} L${pts[0][0].toFixed(1)},${PAD.t + ih} Z`;
   const stroke = color || 'var(--profit)';
+  // Puste dane licza sie tutaj, a nie dopiero w JSX: pts[pts.length - 1] przy
+  // pustej tablicy jest undefined i wysypuje cala aplikacje, nie tylko wykres.
+  const hasPts = pts.length > 0;
+  const line = hasPts
+    ? pts.map((p, i) => `${i ? 'L' : 'M'}${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(' ')
+    : '';
+  const area = hasPts
+    ? `${line} L${pts[pts.length - 1][0].toFixed(1)},${PAD.t + ih} L${pts[0][0].toFixed(1)},${PAD.t + ih} Z`
+    : '';
 
   const onMove = (e) => {
     const rect = e.currentTarget.getBoundingClientRect();
@@ -83,7 +90,7 @@ export function AreaChart({ data, height = 220, valueKey = 'v', labelFmt, valueF
 
   return (
     <div className="chart-wrap" ref={ref}>
-      {!data?.length ? <div className="empty">Brak danych do wykresu</div> : (
+      {!hasPts ? <div className="empty">Brak danych do wykresu</div> : (
       <svg viewBox={`0 0 ${w} ${h}`} width="100%" height={h} role="img"
            preserveAspectRatio="none"
            onMouseMove={onMove} onMouseLeave={() => setHover(null)}>
