@@ -4,6 +4,21 @@ Kazdy sygnal jest prosta, wytlumaczalna hipoteza zwracajaca wartosc w zakresie
 -1..1 (kierunek i sila) oraz pewnosc 0..1. Zaden nie jest madry sam z siebie -
 madrosc ma sie brac z KALIBRACJI ich wag per rezim, ktora robi warstwa uczenia.
 
+DWIE ZASADY, KTORE TRZYMAJA TEN PLIK NIEZALEZNYM OD HORYZONTU:
+
+1. Sygnaly czytaja ROLE cech (`ret_short`, `rsi`), nie nazwy z horyzontem
+   (`ret_short__4h`). Panel podaje im slownik juz przemapowany na role.
+
+2. Zwroty normalizuje sie przez ZMIENNOSC, nie przez stala. Pierwsza wersja
+   dzielila zwrot przez wpisane na sztywno 1,5 % / 3 % / 6 % - liczby dobrane
+   pod okna 1 h / 4 h / 24 h na swiecy 5-minutowej. Ten sam kod na swiecy
+   4-godzinnej dostaje zwroty 24-godzinne, 7- i 30-dniowe, wiec kazda z tych
+   stalych nasycalaby sie natychmiast i sygnal zwracalby +-1 niemal zawsze.
+   Dzielenie przez oczekiwany ruch (`atr_pct * sqrt(liczba_swiec)`) daje
+   wielkosc bezwymiarowa: "ile odchylen standardowych" zamiast "ile procent".
+   Dziala tak samo na kazdej swiecy i na kazdym instrumencie - SOL nie wymaga
+   innych progow niz BTC.
+
 Wagi ponizej to jawne zalozenia poczatkowe, nie wynik dopasowania do danych.
 Sa tu po to, zeby system mial od czego zaczac, i maja zostac zastapione wagami
 wyliczonymi z okien walk-forward. Dopoki tak sie nie stanie, kazda decyzja jest
@@ -11,7 +26,10 @@ decyzja tych zalozen - i tak nalezy ja czytac.
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
+
+from services.engine.horizons import Horizon
 
 REGIMES = ("trend_up", "trend_down", "range", "high_vol", "news_shock")
 
@@ -27,89 +45,142 @@ def _clip(v: float, lo: float = -1.0, hi: float = 1.0) -> float:
     return max(lo, min(hi, v))
 
 
+def _expected_move(f: dict, bars: int) -> float | None:
+    """Oczekiwany ruch przez `bars` swiec, w procentach.
+
+    Blad losowy skaluje sie z pierwiastkiem czasu, wiec ruch przez n swiec to
+    w przyblizeniu zmiennosc jednej swiecy razy sqrt(n). Podloga chroni przed
+    dzieleniem przez zero w martwym rynku.
+    """
+    atr = f.get("atr_pct")
+    if atr is None or atr <= 0:
+        return None
+    return max(atr * math.sqrt(bars), 1e-6)
+
+
 # ------------------------------------------------------------------ sygnaly
-def momentum_multi(f: dict) -> SignalOutput | None:
+def momentum_multi(f: dict, h: Horizon) -> SignalOutput | None:
     """Zgodnosc zwrotow w trzech horyzontach.
 
-    Pojedynczy zwrot to szum. Dopiero zgodnosc 1 h, 4 h i 24 h mowi cokolwiek
+    Pojedynczy zwrot to szum. Dopiero zgodnosc trzech skal mowi cokolwiek
     o kierunku - i wlasnie brak zgodnosci obniza tu pewnosc, a nie wynik.
     """
-    r1, r4, r24 = f.get("ret_1h"), f.get("ret_4h"), f.get("ret_24h")
-    if r1 is None or r4 is None or r24 is None:
+    vals = [(f.get("ret_short"), h.ret_short), (f.get("ret_mid"), h.ret_mid),
+            (f.get("ret_long"), h.ret_long)]
+    if any(v is None for v, _ in vals):
         return None
-    parts = [_clip(r1 / 1.5), _clip(r4 / 3.0), _clip(r24 / 6.0)]
+    parts = []
+    for v, bars in vals:
+        scale = _expected_move(f, bars)
+        if scale is None:
+            return None
+        parts.append(_clip(v / scale))
     score = sum(parts) / 3
+    if score == 0:
+        return SignalOutput(0.0, 0.1, {"uwaga": "zwroty się znoszą"})
     agree = sum(1 for p in parts if (p > 0) == (score > 0)) / 3
-    return SignalOutput(_clip(score), agree * min(1.0, abs(score) * 2),
-                        {"ret_1h": r1, "ret_4h": r4, "ret_24h": r24, "zgodnosc": agree})
+    return SignalOutput(
+        _clip(score), agree * min(1.0, abs(score) * 2),
+        {f"zwrot_{h.labels['ret_short']}": round(vals[0][0], 3),
+         f"zwrot_{h.labels['ret_mid']}": round(vals[1][0], 3),
+         f"zwrot_{h.labels['ret_long']}": round(vals[2][0], 3),
+         "zgodnosc": round(agree, 2)})
 
 
-def mean_reversion_rsi(f: dict) -> SignalOutput | None:
+def mean_reversion_rsi(f: dict, h: Horizon) -> SignalOutput | None:
     """Skrajne RSI. Kupno przy wyprzedaniu, sprzedaz przy wykupieniu."""
-    rsi = f.get("rsi_14")
-    if rsi is None:
+    r = f.get("rsi")
+    if r is None:
         return None
-    if 35 <= rsi <= 65:
-        return SignalOutput(0.0, 0.1, {"rsi_14": rsi, "uwaga": "strefa neutralna"})
-    score = _clip((50 - rsi) / 30)
-    return SignalOutput(score, min(1.0, abs(50 - rsi) / 30), {"rsi_14": rsi})
+    if 35 <= r <= 65:
+        return SignalOutput(0.0, 0.1, {"rsi": round(r, 1), "uwaga": "strefa neutralna"})
+    return SignalOutput(_clip((50 - r) / 30), min(1.0, abs(50 - r) / 30), {"rsi": round(r, 1)})
 
 
-def range_extreme(f: dict) -> SignalOutput | None:
-    """Pozycja w zakresie doby. Przy krawedziach zaklada powrot do srodka."""
-    pos = f.get("range_pos_24h")
+def range_extreme(f: dict, h: Horizon) -> SignalOutput | None:
+    """Pozycja w zakresie okresu. Przy krawedziach zaklada powrot do srodka."""
+    pos = f.get("range_pos")
     if pos is None:
         return None
-    score = _clip((0.5 - pos) * 2.5)
-    return SignalOutput(score, min(1.0, abs(pos - 0.5) * 2.4), {"range_pos_24h": pos})
+    return SignalOutput(_clip((0.5 - pos) * 2.5), min(1.0, abs(pos - 0.5) * 2.4),
+                        {"pozycja_w_zakresie": round(pos, 3), "okno": h.labels.get("range")})
 
 
-def trend_follow(f: dict) -> SignalOutput | None:
-    """Iloraz srednich wykladniczych - kierunek trendu sredniookresowego."""
-    ratio = f.get("ema_ratio_20_50")
+def trend_follow(f: dict, h: Horizon) -> SignalOutput | None:
+    """Iloraz srednich wykladniczych, mierzony w jednostkach zmiennosci."""
+    ratio = f.get("ema_ratio")
     if ratio is None:
         return None
-    dev = (ratio - 1.0) * 100          # w procentach
-    return SignalOutput(_clip(dev / 0.5), min(1.0, abs(dev) / 0.5),
-                        {"ema_ratio_20_50": ratio, "odchylenie_pct": dev})
+    dev = (ratio - 1.0) * 100
+    # Rozjazd srednich porownujemy do ruchu oczekiwanego na dystansie miedzy nimi.
+    scale = _expected_move(f, max(1, h.ema_slow - h.ema_fast))
+    if scale is None:
+        return None
+    return SignalOutput(_clip(dev / scale), min(1.0, abs(dev) / scale),
+                        {"ema_ratio": round(ratio, 5), "odchylenie_pct": round(dev, 3)})
 
 
-def volume_breakout(f: dict) -> SignalOutput | None:
+def volume_breakout(f: dict, h: Horizon) -> SignalOutput | None:
     """Nietypowy wolumen POTWIERDZA kierunek, sam go nie wyznacza.
 
     Wolumen bez kierunku jest bezwartosciowy - stad iloczyn z krotkim zwrotem.
     """
-    z, r1 = f.get("volume_z_1h"), f.get("ret_1h")
-    if z is None or r1 is None:
+    z, r = f.get("volume_z"), f.get("ret_short")
+    if z is None or r is None:
         return None
     if z < 1.5:
-        return SignalOutput(0.0, 0.1, {"volume_z_1h": z, "uwaga": "wolumen w normie"})
-    direction = 1.0 if r1 > 0 else -1.0
+        return SignalOutput(0.0, 0.1, {"volume_z": round(z, 2), "uwaga": "wolumen w normie"})
+    direction = 1.0 if r > 0 else -1.0
     return SignalOutput(_clip(direction * min(1.0, (z - 1.5) / 2.5)),
-                        min(1.0, (z - 1.5) / 3), {"volume_z_1h": z, "ret_1h": r1})
+                        min(1.0, (z - 1.5) / 3),
+                        {"volume_z": round(z, 2), "zwrot_krotki": round(r, 3)})
 
 
-def news_shock(f: dict) -> SignalOutput | None:
+def news_shock(f: dict, h: Horizon) -> SignalOutput | None:
     """Sentyment newsowy juz wazony sila, pewnoscia i NOWOSCIA.
 
     Nowosc jest w wadze celowo: news, ktory rynek wycenil, ma wartosc zero
     niezaleznie od tego, jak mocno brzmi.
     """
-    s = f.get("news_sent_24h")
+    s = f.get("news_sent")
     if s is None:
         return None
     if abs(s) < 0.05:
-        return SignalOutput(0.0, 0.1, {"news_sent_24h": s, "uwaga": "brak istotnych newsów"})
-    return SignalOutput(_clip(s / 1.5), min(1.0, abs(s) / 2), {"news_sent_24h": s})
+        return SignalOutput(0.0, 0.1, {"news_sent": round(s, 3),
+                                       "uwaga": "brak istotnych newsów"})
+    return SignalOutput(_clip(s / 1.5), min(1.0, abs(s) / 2), {"news_sent": round(s, 3)})
+
+
+def funding_carry(f: dict, h: Horizon) -> SignalOutput | None:
+    """Skrajna stawka finansowania perpetuala - sygnal KONTRARIANSKI.
+
+    Dodatni funding znaczy, ze dlugie place krotkim, czyli rynek jest wychylony
+    na wzrost i za to wychylenie placi. Skrajnie dodatni funding to obraz tlumu
+    lewarowanego w jedna strone - stan, ktory historycznie konczy sie wycisnieciem
+    tej strony, nie jej dalszym zyskiem. Stad znak minus.
+
+    To jedyny sygnal w tym zestawie, ktory nie pochodzi z ceny. Ma wlasna,
+    niezalezna tresc informacyjna - i wlasnie dlatego wart jest testu.
+    """
+    z = f.get("funding_z")
+    rate = f.get("funding_rate")
+    if z is None:
+        return None
+    if abs(z) < 1.0:
+        return SignalOutput(0.0, 0.1, {"funding_z": round(z, 2), "stawka_pct": rate,
+                                       "uwaga": "finansowanie w normie"})
+    return SignalOutput(_clip(-z / 2.5), min(1.0, (abs(z) - 1.0) / 2.0),
+                        {"funding_z": round(z, 2), "stawka_pct": rate})
 
 
 SIGNALS = {
-    "momentum_multi":     (momentum_multi,     "momentum",       "Zgodność zwrotów 1 h / 4 h / 24 h"),
+    "momentum_multi":     (momentum_multi,     "momentum",       "Zgodność zwrotów w trzech skalach"),
     "mean_reversion_rsi": (mean_reversion_rsi, "mean_reversion", "Powrót do średniej przy skrajnym RSI"),
-    "range_extreme":      (range_extreme,      "mean_reversion", "Pozycja przy krawędzi zakresu dobowego"),
+    "range_extreme":      (range_extreme,      "mean_reversion", "Pozycja przy krawędzi zakresu"),
     "trend_follow":       (trend_follow,       "momentum",       "Kierunek trendu z ilorazu EMA"),
     "volume_breakout":    (volume_breakout,    "flow",           "Nietypowy wolumen potwierdzający kierunek"),
     "news_shock":         (news_shock,         "news",           "Sentyment newsowy ważony nowością"),
+    "funding_carry":      (funding_carry,      "derivatives",    "Skrajne finansowanie perpetuala (kontrariańsko)"),
 }
 
 # Wagi per rezim. ZALOZENIA POCZATKOWE - do zastapienia kalibracja walk-forward.
@@ -117,16 +188,21 @@ SIGNALS = {
 # przy wysokiej zmiennosci nie ufamy niczemu mocno, a przy szoku newsowym
 # news dominuje, bo pozostale sygnaly opisuja rynek sprzed zdarzenia.
 DEFAULT_WEIGHTS = {
-    "trend_up":   {"momentum_multi": 0.30, "trend_follow": 0.25, "volume_breakout": 0.15,
-                   "mean_reversion_rsi": 0.10, "range_extreme": 0.05, "news_shock": 0.15},
-    "trend_down": {"momentum_multi": 0.30, "trend_follow": 0.25, "volume_breakout": 0.15,
-                   "mean_reversion_rsi": 0.10, "range_extreme": 0.05, "news_shock": 0.15},
-    "range":      {"mean_reversion_rsi": 0.30, "range_extreme": 0.25, "momentum_multi": 0.10,
-                   "trend_follow": 0.10, "volume_breakout": 0.10, "news_shock": 0.15},
-    "high_vol":   {"momentum_multi": 0.15, "trend_follow": 0.15, "mean_reversion_rsi": 0.15,
-                   "range_extreme": 0.15, "volume_breakout": 0.20, "news_shock": 0.20},
-    "news_shock": {"news_shock": 0.45, "momentum_multi": 0.20, "volume_breakout": 0.20,
-                   "trend_follow": 0.10, "mean_reversion_rsi": 0.03, "range_extreme": 0.02},
+    "trend_up":   {"momentum_multi": 0.28, "trend_follow": 0.22, "volume_breakout": 0.13,
+                   "mean_reversion_rsi": 0.08, "range_extreme": 0.04, "news_shock": 0.13,
+                   "funding_carry": 0.12},
+    "trend_down": {"momentum_multi": 0.28, "trend_follow": 0.22, "volume_breakout": 0.13,
+                   "mean_reversion_rsi": 0.08, "range_extreme": 0.04, "news_shock": 0.13,
+                   "funding_carry": 0.12},
+    "range":      {"mean_reversion_rsi": 0.26, "range_extreme": 0.22, "momentum_multi": 0.08,
+                   "trend_follow": 0.08, "volume_breakout": 0.09, "news_shock": 0.12,
+                   "funding_carry": 0.15},
+    "high_vol":   {"momentum_multi": 0.13, "trend_follow": 0.13, "mean_reversion_rsi": 0.13,
+                   "range_extreme": 0.13, "volume_breakout": 0.17, "news_shock": 0.16,
+                   "funding_carry": 0.15},
+    "news_shock": {"news_shock": 0.42, "momentum_multi": 0.18, "volume_breakout": 0.17,
+                   "trend_follow": 0.09, "mean_reversion_rsi": 0.03, "range_extreme": 0.02,
+                   "funding_carry": 0.09},
 }
 
 
@@ -138,26 +214,28 @@ def classify_regime(f: dict, atr_p80: float | None) -> tuple[str, float]:
     obowiazywac - a to wlasnie wtedy modele przeuczone do "normalnego" rynku
     trace najwiecej.
     """
-    news = f.get("news_sent_24h") or 0.0
-    atr = f.get("atr_pct_14")
-    ratio = f.get("ema_ratio_20_50")
-    r24 = f.get("ret_24h")
+    news = f.get("news_sent") or 0.0
+    atr = f.get("atr_pct")
+    ratio = f.get("ema_ratio")
+    r_long = f.get("ret_long")
 
     if abs(news) > 1.2:
         return "news_shock", min(1.0, abs(news) / 2.5)
     if atr is not None and atr_p80 is not None and atr > atr_p80:
         return "high_vol", min(1.0, atr / (atr_p80 * 1.6))
-    if ratio is not None and r24 is not None:
-        dev = (ratio - 1.0) * 100
-        if dev > 0.12 and r24 > 0:
-            return "trend_up", min(1.0, dev / 0.4)
-        if dev < -0.12 and r24 < 0:
-            return "trend_down", min(1.0, abs(dev) / 0.4)
+    if ratio is not None and r_long is not None and atr is not None and atr > 0:
+        # Prog rozjazdu srednich tez skalujemy zmiennoscia - inaczej "trend"
+        # znaczylby co innego na BTC i co innego na SOL.
+        dev = (ratio - 1.0) * 100 / atr
+        if dev > 0.25 and r_long > 0:
+            return "trend_up", min(1.0, dev / 0.8)
+        if dev < -0.25 and r_long < 0:
+            return "trend_down", min(1.0, abs(dev) / 0.8)
     return "range", 0.6
 
 
-def evaluate(features: dict, regime: str,
-             weights: dict[str, float] | None = None) -> tuple[float, float, list[dict]]:
+def evaluate(features: dict, regime: str, weights: dict[str, float] | None,
+             horizon: Horizon) -> tuple[float, float, list[dict]]:
     """Laczy sygnaly w jeden wynik.
 
     Zwraca (wynik -1..1, pewnosc 0..1, rozbicie na wklady). Rozbicie jest
@@ -170,7 +248,7 @@ def evaluate(features: dict, regime: str,
     conf_num = conf_den = 0.0
 
     for name, (fn, family, label) in SIGNALS.items():
-        out = fn(features)
+        out = fn(features, horizon)
         if out is None:
             continue
         weight = w.get(name, 0.0)

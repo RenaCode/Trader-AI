@@ -85,10 +85,21 @@ workers:
       limits:   { cpu: 500m, memory: 384Mi }
       requests: { cpu: 50m,  memory: 96Mi }
 
-  # Liczy cechy z realnych swiec. Co 5 minut, bo taka jest rozdzielczosc cech.
+  # Utrzymuje aktualna historie godzinowa i stawki finansowania. Swiece 4h powstaja
+  # z agregacji 1h, wiec bez tego procesu horyzont domyslny stanalby w miejscu.
+  # Backfill jest idempotentny i wznawia od ostatniej posiadanej swiecy, wiec
+  # czestsze uruchomienie nic nie psuje - dociaga tylko to, czego brakuje.
+  history:
+    enabled: true
+    command: ["sh", "-c", "while true; do python services/ingest/backfill.py --timeframe 1h --days 3 || true; python services/ingest/funding.py --days 3 || true; sleep 1200; done"]
+    resources:
+      limits:   { cpu: 500m, memory: 384Mi }
+      requests: { cpu: 50m,  memory: 96Mi }
+
+  # Liczy cechy z realnych swiec na horyzoncie domyslnym (4h).
   features:
     enabled: true
-    command: ["sh", "-c", "while true; do python services/ingest/features.py --once || true; sleep 300; done"]
+    command: ["sh", "-c", "while true; do python services/ingest/features.py --bar 4h --once || true; sleep 900; done"]
     resources:
       limits:   { cpu: 1000m, memory: 768Mi }
       requests: { cpu: 100m,  memory: 192Mi }
@@ -96,19 +107,19 @@ workers:
   # Petla decyzyjna. Odpala sie po cechach, wiec ma wlasny, przesuniety cykl.
   engine:
     enabled: true
-    command: ["sh", "-c", "sleep 90; while true; do python services/engine/loop.py --once --quiet || true; sleep 300; done"]
+    command: ["sh", "-c", "sleep 90; while true; do python services/engine/loop.py --bar 4h --once --quiet || true; sleep 300; done"]
     resources:
       limits:   { cpu: 1000m, memory: 512Mi }
       requests: { cpu: 100m,  memory: 128Mi }
 
   # Trener walk-forward. Wlasny proces, bo trwa dziesiatki minut - uruchamiany
   # w podzie API ginal przy kazdym wdrozeniu razem z podem. Raz na dobe wystarczy:
-  # okna przesuwaja sie o 2 dni, wiec czestsze przeliczanie nic nie wnosi, a
+  # okna przesuwaja sie o 30 dni, wiec czestsze przeliczanie nic nie wnosi, a
   # kusiloby do zagladania w wyniki i dobierania parametrow, czyli dokladnie tego,
   # przed czym ma chronic walk-forward.
   trainer:
     enabled: true
-    command: ["sh", "-c", "sleep 300; while true; do python services/engine/train.py --days 90 --trials 40 || true; sleep 86400; done"]
+    command: ["sh", "-c", "sleep 300; while true; do python services/engine/train.py --bar 4h --days 1400 --trials 60 || true; sleep 86400; done"]
     resources:
       limits:   { cpu: 2000m, memory: 2Gi }
       requests: { cpu: 100m,  memory: 256Mi }

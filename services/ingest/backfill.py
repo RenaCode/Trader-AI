@@ -30,6 +30,10 @@ TF_MINUTES = {"1m": 1, "3m": 3, "5m": 5, "15m": 15, "30m": 30, "1h": 60, "4h": 2
 
 BATCH = 2000
 
+# Zabezpieczenie przed nieskonczona petla, gdyby endpoint zwracal same pustki.
+# Kazda proba przeskakuje 1000 swiec, wiec dla 1h to ponad 500 lat.
+MAX_EMPTY_PROBES = 5000
+
 
 def batched_insert(cur, rows: list) -> int:
     sql = ("INSERT INTO market.candle (instrument_id, timeframe, event_time, open, high, low,"
@@ -70,12 +74,15 @@ async def backfill_symbol(adapter, conn, instrument_id: int, symbol: str,
             continue
 
         if not candles:
-            # Dwie puste odpowiedzi z rzedu oznaczaja koniec dostepnej historii,
-            # a nie chwilowa dziure - inaczej petla krecilaby sie w nieskonczonosc.
+            # Pusta odpowiedz NIE oznacza konca historii. Oznacza ja dopiero
+            # dojscie do terazniejszosci. Instrument notowany od pozniejszej daty
+            # niz `since` zwraca pustki na poczatku - wczesniejsza wersja tego
+            # kodu konczyla wtedy po dwoch probach i sciagala zero swiec,
+            # milczaco udajac sukces. Przeskakujemy dziure i idziemy dalej.
             empty_rounds += 1
-            if empty_rounds >= 2:
-                break
             start += step * 1000
+            if start >= now or empty_rounds > MAX_EMPTY_PROBES:
+                break
             continue
         empty_rounds = 0
 

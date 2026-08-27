@@ -38,14 +38,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import psycopg
 from psycopg.rows import dict_row
 
+from services.engine.horizons import DEFAULT_BAR, HORIZONS, Horizon, get as get_horizon
 from services.engine.signals import DEFAULT_WEIGHTS, REGIMES, SIGNALS, classify_regime, evaluate
 
-TRAIN_DAYS = 14
-TEST_DAYS = 2
-STEP_DAYS = 2
-
-# Ponizej tylu transakcji okno nie daje podstaw do zadnej statystyki.
-MIN_TRADES = 5
 # Podloga odchylenia standardowego zwrotow (0,01% = jedna dziesiata prowizji).
 MIN_SD = 1e-4
 
@@ -59,39 +54,68 @@ SEED = 20260827
 
 
 # ------------------------------------------------------------------ dane
-def load_panel(cur, instrument_id: int, since: datetime, until: datetime) -> list[dict]:
-    """Panel cech w ukladzie czas -> {cecha: wartosc}, plus cena i przyszly zwrot.
+def load_panel(cur, instrument_id: int, h: Horizon,
+               since: datetime, until: datetime) -> list[dict]:
+    """Panel cech w ukladzie czas -> {rola: wartosc}, plus cena swiecy.
 
-    `forward_ret` liczymy TYLKO do oceny wyniku symulacji. Nie trafia do sygnalow
-    i nie jest widoczne dla wag - inaczej optymalizacja uczylaby sie przyszlosci.
+    Cechy filtrujemy po `params->>'bar'`, wiec panel horyzontu 4 h nigdy nie
+    zobaczy cech policzonych na swiecy 5-minutowej. Klucze slownika to ROLE,
+    dzieki czemu sygnaly nie musza znac horyzontu.
+
+    STRAZNIK BITEMPORALNY - `fv.ingested_at <= fv.event_time + jedna swieca`:
+
+    Warunek nie brzmi `ingested_at <= event_time`, bo cechy sa datowane wstecz
+    z trzysekundowym opoznieniem obliczeniowym i taki warunek odrzucilby
+    wszystko. Brzmi "najpozniej jedna swieca po zdarzeniu", bo tyle realnie
+    trwa domkniecie swiecy i policzenie z niej cechy. Cecha, ktora trafila do
+    bazy pozniej, w tamtym momencie NIE byla dostepna i nie wolno na niej
+    trenowac. Wczesniejsza wersja tego zapytania nie filtrowala po
+    `ingested_at` w ogole - polegala na tym, ze potok datuje poprawnie, zamiast
+    to sprawdzac. Roznica ujawnia sie dokladnie wtedy, gdy potok przestanie
+    datowac poprawnie, czyli wtedy, gdy jest za pozno.
     """
-    cur.execute(
-        """
-        WITH f AS (
-            SELECT fv.event_time, fd.name, fv.value
-            FROM feat.feature_value fv JOIN feat.feature_def fd ON fd.id = fv.feature_def_id
-            WHERE fv.instrument_id = %s AND fv.event_time BETWEEN %s AND %s
-        ),
-        p AS (
-            SELECT time_bucket('5 minutes', event_time) AS t,
+    if h.aggregate:
+        price_cte = """
+            SELECT time_bucket(%(bar)s::interval, event_time) AS t,
                    (array_agg(close ORDER BY event_time DESC))[1] AS close
             FROM market.candle
-            WHERE instrument_id = %s AND timeframe='1m' AND event_time BETWEEN %s AND %s
+            WHERE instrument_id = %(iid)s AND timeframe = %(tf)s
+              AND event_time BETWEEN %(since)s AND %(until)s
             GROUP BY 1
-        )
-        SELECT f.event_time AS t, jsonb_object_agg(f.name, f.value) AS feats, p.close
+        """
+    else:
+        price_cte = """
+            SELECT event_time AS t, close
+            FROM market.candle
+            WHERE instrument_id = %(iid)s AND timeframe = %(tf)s
+              AND event_time BETWEEN %(since)s AND %(until)s
+        """
+
+    cur.execute(
+        f"""
+        WITH f AS (
+            SELECT fv.event_time, fd.params->>'role' AS role, fv.value
+            FROM feat.feature_value fv
+            JOIN feat.feature_def fd ON fd.id = fv.feature_def_id
+            WHERE fv.instrument_id = %(iid)s
+              AND fv.event_time BETWEEN %(since)s AND %(until)s
+              AND fd.params->>'bar' = %(bar_name)s
+              AND fv.ingested_at <= fv.event_time + %(bar)s::interval
+        ),
+        p AS ({price_cte})
+        SELECT f.event_time AS t, jsonb_object_agg(f.role, f.value) AS feats, p.close
         FROM f JOIN p ON p.t = f.event_time
         GROUP BY f.event_time, p.close ORDER BY f.event_time
         """,
-        (instrument_id, since, until, instrument_id, since, until),
+        {"iid": instrument_id, "since": since, "until": until, "tf": h.source_timeframe,
+         "bar": f"{h.bar_minutes} minutes", "bar_name": h.bar},
     )
-    rows = [{"t": r["t"], "f": {k: float(v) for k, v in r["feats"].items()},
+    return [{"t": r["t"], "f": {k: float(v) for k, v in r["feats"].items()},
              "price": float(r["close"])} for r in cur.fetchall()]
-    return rows
 
 
 def atr_threshold(panel: list[dict]) -> float | None:
-    vals = [r["f"]["atr_pct_14"] for r in panel if "atr_pct_14" in r["f"]]
+    vals = [r["f"]["atr_pct"] for r in panel if "atr_pct" in r["f"]]
     if len(vals) < 50:
         return None
     vals.sort()
@@ -100,15 +124,25 @@ def atr_threshold(panel: list[dict]) -> float | None:
 
 # ------------------------------------------------------------------ symulacja
 def simulate(panel: list[dict], weights: dict[str, dict[str, float]],
-             atr_p80: float | None) -> dict:
-    """Odtwarza strategie na panelu. Zwraca metryki i liste zwrotow z transakcji.
+             atr_p80: float | None, h: Horizon) -> dict:
+    """Odtwarza strategie na panelu. Zwraca metryki i liste transakcji.
 
     Wejscie i wyjscie po cenie NASTEPNEJ swiecy, nie biezacej - decyzja podjeta
     na zamknieciu swiecy T nie moze zostac wykonana po cenie tej samej swiecy.
     To jeden z najczestszych i najbardziej optymistycznych bledow w backtestach.
+
+    Kazda transakcja zapamietuje PEWNOSC Z CHWILI WEJSCIA. Bez niej nie da sie
+    policzyc kalibracji: pytanie brzmi "czy sygnal, ktory twierdzil 70 %, trafial
+    w 70 % przypadkow", a odpowiedzi nie da sie odtworzyc z samego wyniku.
+
+    Krzywa kapitalu jest wyceniana co swiece (mark-to-market), nie tylko przy
+    zamknieciu pozycji. Krzywa liczona wylacznie na zrealizowanym wyniku
+    pokazuje obsuniecie mniejsze niz prawdziwe, bo pozycja przeceniona
+    w miedzyczasie o kilkanascie procent nie zostawia w niej sladu, o ile
+    zdazy wrocic przed zamknieciem.
     """
-    position = None          # {"side","entry","idx"}
-    trades: list[float] = []
+    position = None          # {"side","entry","conf","score"}
+    trades: list[dict] = []
     equity = 1.0
     curve = [1.0]
 
@@ -116,13 +150,13 @@ def simulate(panel: list[dict], weights: dict[str, dict[str, float]],
         row = panel[i]
         nxt = panel[i + 1]["price"]
         regime, _ = classify_regime(row["f"], atr_p80)
-        score, conf, _ = evaluate(row["f"], regime, weights.get(regime))
+        score, conf, _ = evaluate(row["f"], regime, weights.get(regime), h)
 
         if position is None:
             if abs(score) >= ENTER and conf >= MIN_CONF:
                 side = 1 if score > 0 else -1
-                entry = nxt * (1 + SLIP * side)
-                position = {"side": side, "entry": entry}
+                position = {"side": side, "entry": nxt * (1 + SLIP * side),
+                            "conf": conf, "score": score}
                 equity *= (1 - FEE)
         else:
             same = (position["side"] > 0 and score > 0) or (position["side"] < 0 and score < 0)
@@ -130,22 +164,37 @@ def simulate(panel: list[dict], weights: dict[str, dict[str, float]],
                 exit_px = nxt * (1 - SLIP * position["side"])
                 ret = position["side"] * (exit_px / position["entry"] - 1)
                 equity *= (1 + ret) * (1 - FEE)
-                trades.append(ret)
+                trades.append({"ret": ret, "conf": position["conf"],
+                               "score": position["score"]})
                 position = None
-        curve.append(equity)
 
-    # Ponizej MIN_TRADES kazda statystyka jest szumem. Zwracamy jawne zero
+        # Wycena biezaca: kapital + niezrealizowany wynik otwartej pozycji.
+        if position is None:
+            curve.append(equity)
+        else:
+            unreal = position["side"] * (nxt / position["entry"] - 1)
+            curve.append(equity * (1 + unreal))
+
+    rets = [t["ret"] for t in trades]
+
+    # Ponizej progu kazda statystyka jest szumem. Zwracamy jawne zero
     # i licznik transakcji, zeby okno dalo sie odroznic od takiego, ktore
     # naprawde wyszlo na zero.
-    if len(trades) < MIN_TRADES:
-        return {"sharpe": 0.0, "sortino": 0.0, "max_dd": 0.0, "hit_rate": 0.0,
+    peak = curve[0]
+    max_dd = 0.0
+    for v in curve:
+        peak = max(peak, v)
+        max_dd = min(max_dd, (v - peak) / peak * 100)
+
+    if len(trades) < h.min_trades:
+        return {"sharpe": 0.0, "sortino": 0.0, "max_dd": round(max_dd, 4), "hit_rate": 0.0,
                 "avg_r": 0.0, "profit_factor": 0.0, "n_trades": len(trades),
                 "total_return": round((equity - 1) * 100, 4), "trades": trades,
                 "insufficient": True}
 
-    mean = statistics.fmean(trades)
-    sd = statistics.pstdev(trades)
-    downside = [t for t in trades if t < 0]
+    mean = statistics.fmean(rets)
+    sd = statistics.pstdev(rets)
+    downside = [r for r in rets if r < 0]
     dsd = statistics.pstdev(downside) if len(downside) > 1 else sd
 
     # Podloga na odchyleniu. Bez niej kilka niemal identycznych transakcji daje
@@ -154,25 +203,14 @@ def simulate(panel: list[dict], weights: dict[str, dict[str, float]],
     sd = max(sd, MIN_SD)
     dsd = max(dsd, MIN_SD)
 
-    # Sharpe NA TRANSAKCJE, bez anualizacji. Anualizowanie wyniku z okna
-    # dwudniowego mnozy szum przez ~50 i produkuje liczby nieporownywalne
-    # miedzy oknami. Efekt na transakcje jest ograniczony, stabilny i uczciwy;
-    # prog "dodatnie okno" i tak patrzy tylko na znak.
-    sharpe = mean / sd
-    sortino = mean / dsd
-
-    peak = curve[0]
-    max_dd = 0.0
-    for v in curve:
-        peak = max(peak, v)
-        max_dd = min(max_dd, (v - peak) / peak * 100)
-
-    gains = sum(t for t in trades if t > 0)
-    losses = -sum(t for t in trades if t < 0)
+    # Sharpe NA TRANSAKCJE, bez anualizacji. Anualizowanie wyniku z krotkiego
+    # okna mnozy szum i produkuje liczby nieporownywalne miedzy oknami.
+    gains = sum(r for r in rets if r > 0)
+    losses = -sum(r for r in rets if r < 0)
     return {
-        "sharpe": round(sharpe, 4), "sortino": round(sortino, 4),
+        "sharpe": round(mean / sd, 4), "sortino": round(mean / dsd, 4),
         "max_dd": round(max_dd, 4),
-        "hit_rate": round(sum(1 for t in trades if t > 0) / len(trades), 4),
+        "hit_rate": round(sum(1 for r in rets if r > 0) / len(rets), 4),
         "avg_r": round(mean * 100, 4),
         "profit_factor": round(gains / losses, 4) if losses > 0 else 0.0,
         "n_trades": len(trades), "total_return": round((equity - 1) * 100, 4),
@@ -191,13 +229,13 @@ def random_weights(rng: random.Random) -> dict[str, dict[str, float]]:
 
 
 # ------------------------------------------------------------------ trening
-def train(conn, engine: str, days: int, trials_per_window: int) -> None:
+def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon) -> None:
     cur = conn.cursor()
     rng = random.Random(SEED)
     now = datetime.now(timezone.utc)
 
-    cur.execute("SELECT id, symbol FROM ref.instrument WHERE engine=%s AND active ORDER BY symbol",
-                (engine,))
+    cur.execute("SELECT id, symbol FROM ref.instrument WHERE engine=%s AND active"
+                " AND kind <> 'perp' ORDER BY symbol", (engine,))
     instruments = cur.fetchall()
     if not instruments:
         print("brak instrumentow")
@@ -206,15 +244,16 @@ def train(conn, engine: str, days: int, trials_per_window: int) -> None:
     cur.execute(
         "INSERT INTO learn.model (name, engine, kind, description) VALUES (%s,%s,%s,%s)"
         " ON CONFLICT (name) DO UPDATE SET kind = EXCLUDED.kind RETURNING id",
-        (f"{engine}_signal_weighting", engine, "signal_weighting",
-         "Kalibracja wag sygnałów per reżim rynkowy metodą walk-forward"))
+        (f"{engine}_signal_weighting_{h.bar}", engine, "signal_weighting",
+         f"Kalibracja wag sygnałów per reżim rynkowy metodą walk-forward, świeca {h.bar}"))
     model_id = cur.fetchone()["id"]
 
     cur.execute("SELECT COALESCE(max(version), 0) + 1 AS v FROM learn.model_version"
                 " WHERE model_id = %s", (model_id,))
     version = cur.fetchone()["v"]
 
-    cur.execute("SELECT array_agg(id) AS ids FROM feat.feature_def WHERE active")
+    cur.execute("SELECT array_agg(id) AS ids FROM feat.feature_def"
+                " WHERE active AND params->>'bar' = %s", (h.bar,))
     feature_ids = cur.fetchone()["ids"] or []
     cur.execute("SELECT array_agg(id) AS ids FROM sig.signal_def WHERE engine = %s", (engine,))
     signal_ids = cur.fetchone()["ids"] or []
@@ -224,7 +263,8 @@ def train(conn, engine: str, days: int, trials_per_window: int) -> None:
         " signal_def_ids, trained_from, trained_to) VALUES (%s,%s,'training',%s,%s,%s,%s,%s)"
         " RETURNING id",
         (model_id, version,
-         json.dumps({"train_days": TRAIN_DAYS, "test_days": TEST_DAYS, "step_days": STEP_DAYS,
+         json.dumps({"bar": h.bar, "train_days": h.train_days, "test_days": h.test_days,
+                     "step_days": h.step_days, "min_trades": h.min_trades,
                      "trials_per_window": trials_per_window, "seed": SEED}),
          feature_ids, signal_ids, now - timedelta(days=days), now))
     mv_id = cur.fetchone()["id"]
@@ -239,7 +279,7 @@ def train(conn, engine: str, days: int, trials_per_window: int) -> None:
     # Panel wczytujemy RAZ na instrument - to najdrozsza operacja w calym treningu.
     panels = {}
     for inst in instruments:
-        p = load_panel(cur, inst["id"], now - timedelta(days=days), now)
+        p = load_panel(cur, inst["id"], h, now - timedelta(days=days), now)
         if len(p) > 500:
             panels[inst["symbol"]] = p
         print(f"  {inst['symbol']:10s} {len(p):>7,} punktów panelu")
@@ -257,18 +297,19 @@ def train(conn, engine: str, days: int, trials_per_window: int) -> None:
     predictions: list[tuple[float, bool]] = []
     start = now - timedelta(days=days)
 
-    while start + timedelta(days=TRAIN_DAYS + TEST_DAYS) <= now:
+    while start + timedelta(days=h.train_days + h.test_days) <= now:
         train_from = start
-        train_to = start + timedelta(days=TRAIN_DAYS)
+        train_to = start + timedelta(days=h.train_days)
         test_from = train_to
-        test_to = test_from + timedelta(days=TEST_DAYS)
+        test_to = test_from + timedelta(days=h.test_days)
 
         train_slices = {s: [r for r in p if train_from <= r["t"] < train_to]
                         for s, p in panels.items()}
         test_slices = {s: [r for r in p if test_from <= r["t"] < test_to]
                        for s, p in panels.items()}
-        if min((len(v) for v in train_slices.values()), default=0) < 200:
-            start += timedelta(days=STEP_DAYS)
+        min_train_bars = max(100, h.train_days * 1440 // h.bar_minutes // 4)
+        if min((len(v) for v in train_slices.values()), default=0) < min_train_bars:
+            start += timedelta(days=h.step_days)
             continue
 
         thresholds = {s: atr_threshold(train_slices[s]) for s in panels}
@@ -278,7 +319,7 @@ def train(conn, engine: str, days: int, trials_per_window: int) -> None:
         for _ in range(trials_per_window):
             cand = random_weights(rng)
             score = statistics.fmean([
-                simulate(train_slices[s], cand, thresholds[s])["sharpe"] for s in panels
+                simulate(train_slices[s], cand, thresholds[s], h)["sharpe"] for s in panels
             ])
             cfg_hash = hashlib.sha256(json.dumps(cand, sort_keys=True).encode()).digest()
             cur.execute(
@@ -291,14 +332,16 @@ def train(conn, engine: str, days: int, trials_per_window: int) -> None:
         # Zalozenia poczatkowe tez sa kandydatem - jesli losowanie nie potrafi ich
         # pobic na oknie treningowym, to znaczy, ze nie ma czego kalibrowac.
         base_score = statistics.fmean([
-            simulate(train_slices[s], DEFAULT_WEIGHTS, thresholds[s])["sharpe"] for s in panels])
+            simulate(train_slices[s], DEFAULT_WEIGHTS, thresholds[s], h)["sharpe"]
+            for s in panels])
         if base_score > best_score:
             best_w, best_score = DEFAULT_WEIGHTS, base_score
 
         # --- ocena OUT-OF-SAMPLE --------------------------------------------
-        oos = [simulate(test_slices[s], best_w, thresholds[s]) for s in panels if test_slices[s]]
+        oos = [simulate(test_slices[s], best_w, thresholds[s], h)
+               for s in panels if test_slices[s]]
         if not oos:
-            start += timedelta(days=STEP_DAYS)
+            start += timedelta(days=h.step_days)
             continue
 
         agg = {
@@ -320,12 +363,17 @@ def train(conn, engine: str, days: int, trials_per_window: int) -> None:
             if agg["sharpe"] > 0:
                 positive += 1
 
+        # Kalibracja: deklarowana PRZED wejsciem pewnosc kontra faktyczny wynik.
+        # Wczesniejsza wersja budowala "prognoze" z wielkosci samego zwrotu
+        # (abs(t) * 50 + 0.5), czyli z rzeczy znanej dopiero po fakcie - wykres
+        # kalibracji mierzyl wtedy wlasny wynik i zawsze wygladal dobrze.
         for m in oos:
             for t in m["trades"]:
-                predictions.append((min(1.0, abs(t) * 50 + 0.5), t > 0))
+                predictions.append((t["conf"], t["ret"] > 0))
 
+        step = max(1, len(next(iter(test_slices.values()), [])) // 50)
         regimes = [classify_regime(r["f"], thresholds[s])[0]
-                   for s in panels for r in test_slices[s][::20]]
+                   for s in panels for r in test_slices[s][::step]]
         dominant = max(set(regimes), key=regimes.count) if regimes else None
 
         cur.execute(
@@ -344,7 +392,7 @@ def train(conn, engine: str, days: int, trials_per_window: int) -> None:
               f"Sharpe/transakcję={agg['sharpe']:+.4f}  transakcje={n_trades}  "
               f"reżim={dominant}{mark}")
         idx += 1
-        start += timedelta(days=STEP_DAYS)
+        start += timedelta(days=h.step_days)
 
     # --- kalibracja -------------------------------------------------------
     ece = None
@@ -445,9 +493,10 @@ def train(conn, engine: str, days: int, trials_per_window: int) -> None:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--days", type=int, default=90)
+    ap.add_argument("--days", type=int, default=1400)
     ap.add_argument("--trials", type=int, default=40)
     ap.add_argument("--engine", default="crypto")
+    ap.add_argument("--bar", default=DEFAULT_BAR, choices=sorted(HORIZONS))
     args = ap.parse_args()
 
     url = os.environ.get("DATABASE_URL")
@@ -455,7 +504,10 @@ def main() -> int:
         sys.exit("DATABASE_URL nie jest ustawiony")
 
     with psycopg.connect(url, row_factory=dict_row) as conn:
-        train(conn, args.engine, args.days, args.trials)
+        h = get_horizon(args.bar)
+        print(f"Walk-forward: świeca {h.bar}, trening {h.train_days} dni / "
+              f"test {h.test_days} dni, krok {h.step_days} dni\n")
+        train(conn, args.engine, args.days, args.trials, h)
     return 0
 
 

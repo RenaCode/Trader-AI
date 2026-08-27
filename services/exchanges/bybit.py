@@ -141,6 +141,31 @@ class BybitAdapter:
             ))
         return out
 
+    async def fetch_funding(self, symbol: str, start: datetime, end: datetime,
+                            limit: int = 200) -> list[tuple[datetime, float]]:
+        """Historia stawek finansowania perpetuala.
+
+        Funding istnieje wylacznie dla kontraktow wieczystych, wiec zapytanie
+        idzie zawsze do kategorii `linear` - niezaleznie od tego, czy adapter
+        obsluguje spot. Zwraca [(czas_ogloszenia, stawka)] rosnaco po czasie.
+        """
+        res = await self._get(
+            "/v5/market/funding/history",
+            {"category": "linear", "symbol": symbol,
+             "startTime": int(start.timestamp() * 1000),
+             "endTime": int(end.timestamp() * 1000),
+             "limit": min(limit, 200)},
+            private=False, host=PUBLIC_HOST,
+        )
+        out = []
+        for row in res.get("list", []):
+            out.append((
+                datetime.fromtimestamp(int(row["fundingRateTimestamp"]) / 1000, tz=timezone.utc),
+                float(row["fundingRate"]),
+            ))
+        out.sort(key=lambda x: x[0])
+        return out
+
     async def fetch_order_book(self, symbol: str, depth: int = 50) -> OrderBook:
         res = await self._get(
             "/v5/market/orderbook",

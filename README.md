@@ -67,14 +67,13 @@ python -m venv .venv && .venv/bin/pip install -r services/api/requirements.txt
 
 set -a; . ./.env; set +a
 .venv/bin/python db/migrate.py            # migracje
-.venv/bin/python services/seed_demo.py --reset   # dane demonstracyjne (opcjonalnie)
 
 .venv/bin/uvicorn services.api.main:app --port 8099 &
 cd web && npm install && npm run dev      # http://localhost:5174
 ```
 
 **Dane demonstracyjne zostały usunięte** — system pracuje wyłącznie na realnych
-świecach z giełdy. `seed_demo.py` pozostaje do rozwoju lokalnego; `purge_demo.py`
+świecach z giełdy. `purge_demo.py`
 kasuje wszystko, co wygenerował, zostawiając realne dane rynkowe.
 
 ## Procesy tła

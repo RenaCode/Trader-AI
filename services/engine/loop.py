@@ -35,6 +35,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import psycopg
 from psycopg.rows import dict_row
 
+from services.engine.horizons import DEFAULT_BAR, HORIZONS, Horizon, get as get_horizon
 from services.engine.risk import RiskKernel
 from services.engine.signals import SIGNALS, classify_regime, evaluate
 
@@ -64,28 +65,69 @@ def ensure_signal_defs(cur, engine: str) -> dict[str, int]:
     return ids
 
 
-def latest_features(cur, instrument_id: int, as_of: datetime) -> dict:
+def horizon_feature_ids(cur, h: Horizon) -> list[int]:
+    """Identyfikatory cech NALEZACYCH DO TEGO HORYZONTU.
+
+    feat.as_of() z NULL zwrocilby komplet cech wszystkich horyzontow naraz -
+    silnik 4-godzinny dostalby wtedy takze cechy 5-minutowe i podejmowal decyzje
+    na mieszance, ktorej trener nigdy nie widzial.
+    """
+    cur.execute("SELECT array_agg(id) AS ids FROM feat.feature_def"
+                " WHERE active AND params->>'bar' = %s", (h.bar,))
+    return cur.fetchone()["ids"] or []
+
+
+def latest_features(cur, instrument_id: int, as_of: datetime, h: Horizon,
+                    feature_ids: list[int]) -> dict:
     """Odczyt point-in-time. Jedyna dozwolona sciezka - patrz komentarz modulu."""
     cur.execute(
-        "SELECT feature_name, value FROM feat.as_of(%s, %s, NULL, interval '90 minutes')",
-        (instrument_id, as_of))
-    # feature_name ma postac 'nazwa@wersja' - do sygnalow idzie sama nazwa.
-    return {r["feature_name"].split("@")[0]: r["value"] for r in cur.fetchall()}
+        "SELECT feature_name, value FROM feat.as_of(%s, %s, %s, %s::interval)",
+        (instrument_id, as_of, feature_ids or None, f"{h.max_staleness_min} minutes"))
+    # feature_name ma postac 'rola__swieca@wersja'; do sygnalow idzie sama rola.
+    return {Horizon.role_of(r["feature_name"]): r["value"] for r in cur.fetchall()}
 
 
-def atr_percentile_80(cur, instrument_id: int, as_of: datetime) -> float | None:
+def current_bar(as_of: datetime, h: Horizon) -> datetime:
+    """Poczatek swiecy, ktora wlasnie sie domknela."""
+    epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
+    span = h.bar_minutes * 60
+    n = int((as_of - epoch).total_seconds() // span)
+    return epoch + timedelta(seconds=(n - 1) * span)
+
+
+def decided_for_bar(cur, engine: str, mode: str, instrument_id: int,
+                    bar_start: datetime) -> bool:
+    """Czy dla tej swiecy podjeto juz decyzje.
+
+    Petla chodzi czesciej niz zamykaja sie swiece (co 5 minut przy swiecy
+    4-godzinnej). Bez tego warunku silnik podjalby do 48 decyzji na jedna
+    swiece, a symulacja, na ktorej byl kalibrowany, zaklada dokladnie jedna.
+    Rozjazd trening-produkcja bralby sie wtedy z samego harmonogramu.
+    """
+    cur.execute(
+        "SELECT 1 FROM journal.decision WHERE engine=%s AND mode=%s AND instrument_id=%s"
+        " AND event_time >= %s LIMIT 1",
+        (engine, mode, instrument_id, bar_start))
+    return cur.fetchone() is not None
+
+
+def atr_percentile_80(cur, instrument_id: int, as_of: datetime,
+                      h: Horizon) -> float | None:
     """Prog wysokiej zmiennosci liczony z HISTORII TEGO instrumentu.
 
     Stala wartosc nie ma sensu: 0,3% na 5 min to spokoj dla SOL i szok dla SPY.
+    Okno historii skaluje sie z horyzontem - na swiecy 4-godzinnej 14 dni to
+    zaledwie 84 obserwacje, czyli za malo na stabilny percentyl.
     """
     cur.execute(
         """
         SELECT percentile_cont(0.8) WITHIN GROUP (ORDER BY fv.value) AS p80
         FROM feat.feature_value fv JOIN feat.feature_def fd ON fd.id = fv.feature_def_id
-        WHERE fd.name = 'atr_pct_14' AND fv.instrument_id = %s
-          AND fv.event_time BETWEEN %s - interval '14 days' AND %s
+        WHERE fd.name = %s AND fv.instrument_id = %s
+          AND fv.event_time BETWEEN %s - %s::interval AND %s
         """,
-        (instrument_id, as_of, as_of))
+        (h.name("atr_pct"), instrument_id, as_of,
+         f"{h.train_days} days", as_of))
     row = cur.fetchone()
     return float(row["p80"]) if row and row["p80"] is not None else None
 
@@ -228,7 +270,8 @@ def close_paper(cur, position: dict, price: Decimal, as_of: datetime,
 
 
 async def run_once(conn, engine: str = "crypto", mode: str = "demo",
-                   verbose: bool = True) -> dict:
+                   verbose: bool = True, h: Horizon | None = None) -> dict:
+    h = h or get_horizon(DEFAULT_BAR)
     cur = conn.cursor()
     signal_ids = ensure_signal_defs(cur, engine)
     seed_equity(cur, engine, mode)
@@ -236,14 +279,22 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
 
     risk = RiskKernel(conn, engine, mode)
     now = datetime.now(timezone.utc)
-    stats = {"rozwazone": 0, "wejscia": 0, "wyjscia": 0, "wstrzymane": 0, "zablokowane": 0}
+    bar_start = current_bar(now, h)
+    feature_ids = horizon_feature_ids(cur, h)
+    stats = {"rozwazone": 0, "wejscia": 0, "wyjscia": 0, "wstrzymane": 0,
+             "zablokowane": 0, "poza_swieca": 0}
 
-    cur.execute("SELECT id, symbol FROM ref.instrument WHERE engine=%s AND active ORDER BY symbol",
-                (engine,))
+    cur.execute("SELECT id, symbol FROM ref.instrument WHERE engine=%s AND active"
+                " AND kind <> 'perp' ORDER BY symbol", (engine,))
     for inst in cur.fetchall():
         started = time.perf_counter()
         iid, symbol = inst["id"], inst["symbol"]
-        features = latest_features(cur, iid, now)
+
+        if decided_for_bar(cur, engine, mode, iid, bar_start):
+            stats["poza_swieca"] += 1
+            continue
+
+        features = latest_features(cur, iid, now, h, feature_ids)
         if len(features) < 4:
             if verbose:
                 print(f"  {symbol:10s} pominięty — za mało cech ({len(features)})")
@@ -254,8 +305,8 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
         if price is None:
             continue
 
-        regime, regime_conf = classify_regime(features, atr_percentile_80(cur, iid, now))
-        score, confidence, contributions = evaluate(features, regime)
+        regime, regime_conf = classify_regime(features, atr_percentile_80(cur, iid, now, h))
+        score, confidence, contributions = evaluate(features, regime, None, h)
         position = open_position(cur, engine, mode, iid)
 
         # --- wybor akcji ----------------------------------------------------
@@ -337,20 +388,25 @@ async def main() -> int:
     ap.add_argument("--interval", type=int, default=300)
     ap.add_argument("--engine", default="crypto")
     ap.add_argument("--quiet", action="store_true")
+    ap.add_argument("--bar", default=DEFAULT_BAR, choices=sorted(HORIZONS))
     args = ap.parse_args()
 
     url = os.environ.get("DATABASE_URL")
     if not url:
         sys.exit("DATABASE_URL nie jest ustawiony")
 
+    h = get_horizon(args.bar)
+    print(f"Silnik {args.engine}, świeca {h.bar} — jedna decyzja na świecę.\n")
+
     with psycopg.connect(url, row_factory=dict_row) as conn:
         while True:
             t0 = datetime.now(timezone.utc)
             try:
-                s = await run_once(conn, args.engine, verbose=not args.quiet)
+                s = await run_once(conn, args.engine, verbose=not args.quiet, h=h)
                 print(f"[{t0:%H:%M:%S}] rozważone {s['rozwazone']}, wejścia {s['wejscia']}, "
                       f"wyjścia {s['wyjscia']}, wstrzymane {s['wstrzymane']}, "
-                      f"zablokowane {s['zablokowane']}")
+                      f"zablokowane {s['zablokowane']}, "
+                      f"już rozstrzygnięte w tej świecy {s['poza_swieca']}")
             except Exception as e:                            # noqa: BLE001
                 conn.rollback()
                 print(f"[{t0:%H:%M:%S}] przebieg przerwany: {type(e).__name__}: {e}")
