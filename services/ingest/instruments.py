@@ -22,6 +22,31 @@ Wybrana jest trzecia. Instrumenty dobrane po plynnosci na Bybit spot, nie po
 tym, ktore historycznie rosly - dobor po wyniku bylby selekcja przezywalnosci
 i unieważnilby caly backtest.
 
+ILE INSTRUMENTOW - Z POMIARU, NIE Z PRZECZUCIA
+
+Przy dwunastu instrumentach mediana wynosi 10 transakcji na okno testowe
+(30 dni), przy progu informatywnosci 12. Polowa okien wypada wiec ponizej progu
+i walk-forward konczy sie na 19 okienach z wymaganych 20.
+
+Sprawdzilem, czy nie wystarczy wydluzyc okna testowego. NIE wystarczy - i to jest
+wynik przeciwny do intuicji. Dluzsze okno ma wiecej transakcji, ale okien jest
+odpowiednio mniej, a ubywa ich szybciej, niz przybywa informatywnych:
+
+    30 dni -> 40 okien, 19 informatywnych   (stan zmierzony)
+    45 dni -> 26 okien, ~16 informatywnych
+    60 dni -> 20 okien, ~14 informatywnych
+    90 dni -> 13 okien, ~10 informatywnych
+
+30 dni jest wiec juz optimum tego kompromisu. Jedyna pozostala dzwignia, ktora
+nie oslabia samej strategii, to szerszy zbior instrumentow: dwa razy wiecej
+rynkow to dwa razy wiecej okazji przy NIEZMIENIONYCH progach wejscia i przy tej
+samej lacznej ekspozycji, bo budzet na pozycje to limit/liczba_instrumentow.
+
+ZASTRZEZENIE: instrumenty krypto sa silnie skorelowane, wiec podwojenie ich
+liczby NIE podwaja liczby niezaleznych obserwacji. Podnosi moc statystyczna
+mniej, niz sugeruje sam licznik transakcji - i tak nalezy czytac kazdy wynik
+policzony na tym zbiorze.
+
 Uzycie:
     DATABASE_URL=... python services/ingest/instruments.py
 """
@@ -43,6 +68,11 @@ CRYPTO = [
     ("XRPUSDT", "XRP"), ("BNBUSDT", "BNB"), ("DOGEUSDT", "DOGE"),
     ("ADAUSDT", "ADA"), ("LINKUSDT", "LINK"), ("AVAXUSDT", "AVAX"),
     ("DOTUSDT", "DOT"), ("LTCUSDT", "LTC"), ("TRXUSDT", "TRX"),
+    # Rozszerzenie do 24 - uzasadnienie w akapicie "ILE INSTRUMENTOW".
+    ("BCHUSDT", "BCH"), ("ATOMUSDT", "ATOM"), ("FILUSDT", "FIL"),
+    ("NEARUSDT", "NEAR"), ("APTUSDT", "APT"), ("ARBUSDT", "ARB"),
+    ("OPUSDT", "OP"), ("INJUSDT", "INJ"), ("SUIUSDT", "SUI"),
+    ("SEIUSDT", "SEI"), ("TIAUSDT", "TIA"), ("UNIUSDT", "UNI"),
 ]
 
 
