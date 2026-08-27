@@ -136,7 +136,7 @@ def decided_for_bar(cur, engine: str, mode: str, instrument_id: int,
     """
     cur.execute(
         "SELECT 1 FROM journal.decision WHERE engine=%s AND mode=%s AND instrument_id=%s"
-        " AND event_time >= %s LIMIT 1",
+        " AND decided_at >= %s LIMIT 1",
         (engine, mode, instrument_id, bar_start))
     return cur.fetchone() is not None
 
