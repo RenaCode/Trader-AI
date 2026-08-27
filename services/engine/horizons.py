@@ -41,7 +41,8 @@ class Horizon:
     train_days: int
     test_days: int
     step_days: int
-    min_trades: int              # ponizej tego okno nie niesie informacji
+    min_trades: int              # laczna liczba transakcji (wszystkie instrumenty)
+                                 # ponizej ktorej okno nie niesie informacji
     max_staleness_min: int       # dopuszczalny wiek cechy przy odczycie point-in-time
 
     # Etykiety okien zwrotow - trafiaja do opisu cechy w UI, zeby dalo sie
@@ -115,7 +116,7 @@ H4H = Horizon(
     rsi_period=14, atr_period=14, ema_fast=20, ema_slow=50,
     ret_short=6, ret_mid=42, ret_long=180,
     range_window=42, volume_lookback=180, warmup=200,
-    train_days=180, test_days=30, step_days=30, min_trades=8, max_staleness_min=600,
+    train_days=180, test_days=30, step_days=30, min_trades=12, max_staleness_min=600,
     labels={"ret_short": "24 h", "ret_mid": "7 dni", "ret_long": "30 dni",
             "range": "7 dni", "volume": "30 dni"},
 )

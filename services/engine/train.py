@@ -392,19 +392,42 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon) -> N
             start += timedelta(days=h.step_days)
             continue
 
-        agg = {
-            "sharpe": statistics.fmean(m["sharpe"] for m in oos),
-            "sortino": statistics.fmean(m["sortino"] for m in oos),
-            "max_dd": min(m["max_dd"] for m in oos),
-            "hit_rate": statistics.fmean(m["hit_rate"] for m in oos),
-            "avg_r": statistics.fmean(m["avg_r"] for m in oos),
-            "profit_factor": statistics.fmean(m["profit_factor"] for m in oos),
-        }
-        n_trades = sum(m["n_trades"] for m in oos)
-        # Okno bez minimum transakcji nie jest ani dodatnie, ani ujemne -
-        # jest bez informacji. Wliczanie go jako "niedodatnie" zanizaloby
-        # ocene, a jako "dodatnie" zawyzalo.
-        informative = any(not m.get("insufficient") for m in oos)
+        # Transakcje LACZYMY miedzy instrumentami, zamiast usredniac Sharpe
+        # policzony osobno dla kazdego.
+        #
+        # Powod jest ilosciowy: na swiecy 4-godzinnej wychodzi 4-8 transakcji na
+        # instrument na miesiac. Srednia z trzech Sharpe'ow, z ktorych kazdy stoi
+        # na czterech transakcjach, to srednia z trzech szumow. Te same 15
+        # transakcji potraktowane jako jedna proba daje miare, ktora cokolwiek
+        # znaczy. Pytanie brzmi "czy ta strategia ma przewage na transakcje",
+        # a nie "czy ma ja osobno na BTC" - wiec pula jest wlasciwa jednostka.
+        #
+        # ZASTRZEZENIE, ktore trzeba czytac razem z wynikiem: BTC, ETH i SOL sa
+        # silnie skorelowane, wiec te transakcje nie sa niezalezne. Efektywna
+        # liczba obserwacji jest MNIEJSZA niz ich liczba, a istotnosc
+        # statystyczna odpowiednio nizsza, niz sugerowalby sam licznik.
+        pooled = [t["ret"] for m in oos for t in m["trades"]]
+        n_trades = len(pooled)
+        informative = n_trades >= h.min_trades
+
+        if informative:
+            mean_p = statistics.fmean(pooled)
+            sd_p = max(statistics.pstdev(pooled), MIN_SD)
+            down_p = [r for r in pooled if r < 0]
+            dsd_p = max(statistics.pstdev(down_p) if len(down_p) > 1 else sd_p, MIN_SD)
+            gains_p = sum(r for r in pooled if r > 0)
+            losses_p = -sum(r for r in pooled if r < 0)
+            agg = {
+                "sharpe": mean_p / sd_p,
+                "sortino": mean_p / dsd_p,
+                "max_dd": min(m["max_dd"] for m in oos),
+                "hit_rate": sum(1 for r in pooled if r > 0) / len(pooled),
+                "avg_r": mean_p * 100,
+                "profit_factor": (gains_p / losses_p) if losses_p > 0 else 0.0,
+            }
+        else:
+            agg = {"sharpe": 0.0, "sortino": 0.0, "max_dd": min(m["max_dd"] for m in oos),
+                   "hit_rate": 0.0, "avg_r": 0.0, "profit_factor": 0.0}
         if informative:
             all_sharpes.append(agg["sharpe"])
             worst_dd = min(worst_dd, agg["max_dd"])
@@ -437,7 +460,8 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon) -> N
 
         gate_history.extend(g[0] for g in gates.values())
         weight_history.append(best_w)
-        mark = "" if informative else "  (za mało transakcji — pominięte w ocenie)"
+        mark = "" if informative else (f"  (poniżej {h.min_trades} transakcji — "
+                                       "pominięte w ocenie)")
         print(f"  okno {idx:>2d}  {test_from:%m-%d}–{test_to:%m-%d}  "
               f"Sharpe/transakcję={agg['sharpe']:+.4f}  transakcje={n_trades}  "
               f"reżim={dominant}{mark}")
