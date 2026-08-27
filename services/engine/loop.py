@@ -221,19 +221,26 @@ def update_equity(cur, engine: str, mode: str, as_of: datetime) -> None:
 def record_decision(cur, engine: str, mode: str, instrument_id: int, as_of: datetime,
                     action: str, qty, price, confidence: float, regime: str,
                     features: dict, verdict, rationale: str, contributions: list[dict],
-                    signal_ids: dict[str, int], latency_ms: int) -> int | None:
+                    signal_ids: dict[str, int], latency_ms: int,
+                    model_version_id: int | None = None) -> int | None:
+    # model_version_id mowi, KTORA wersja modelu podjela te decyzje. Kolumna
+    # istniala z kluczem obcym od migracji 0006, ale nikt jej nie wypelnial -
+    # bo do tej pory petla nie uzywala zadnego modelu, wiec nie bylo czego
+    # zapisac. NULL znaczy "zalozenia poczatkowe, brak zwalidowanego modelu"
+    # i jest to stan poprawny, nie brak danych.
     cur.execute(
         """
         INSERT INTO journal.decision (engine, mode, instrument_id, decided_at, action,
             target_qty, target_price, confidence, regime, feature_snapshot,
-            risk_verdict, risk_reason, rationale, rationale_model, latency_ms)
-        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'reguły',%s)
+            risk_verdict, risk_reason, rationale, rationale_model, latency_ms,
+            model_version_id)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'reguły',%s,%s)
         ON CONFLICT (engine, instrument_id, decided_at) DO NOTHING
         RETURNING id
         """,
         (engine, mode, instrument_id, as_of, action, qty, price, confidence, regime,
          json.dumps({k: round(v, 6) for k, v in features.items()}),
-         verdict.verdict, verdict.reason, rationale, latency_ms))
+         verdict.verdict, verdict.reason, rationale, latency_ms, model_version_id))
     row = cur.fetchone()
     if not row:
         return None
@@ -382,7 +389,8 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
                               verdict.qty if action.startswith("enter") else (
                                   position["qty"] if position else None),
                               price, confidence, regime, features, verdict,
-                              rationale, contributions, signal_ids, latency)
+                              rationale, contributions, signal_ids, latency,
+                              model.get("model_version_id"))
 
         risk.record_usage(verdict.usage)
         risk.record_violations(verdict.violations, did)
