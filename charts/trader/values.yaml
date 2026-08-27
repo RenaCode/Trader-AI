@@ -12,7 +12,7 @@ imagePullSecrets: []
 api:
   image:
     repository: ghcr.io/renacode/trader-ai-api
-    tag: "sha-195dcfb"
+    tag: "sha-d377791"
     pullPolicy: IfNotPresent
   resources:
     limits:   { cpu: 1000m, memory: 1Gi }
@@ -21,7 +21,7 @@ api:
 web:
   image:
     repository: ghcr.io/renacode/trader-ai-web
-    tag: "sha-195dcfb"
+    tag: "sha-d377791"
     pullPolicy: IfNotPresent
   resources:
     limits:   { cpu: 200m, memory: 256Mi }
