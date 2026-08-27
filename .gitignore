@@ -12,3 +12,9 @@ build/
 .DS_Store
 data/
 artifacts/
+
+# Globalny ~/.gitignore_global uzytkownika wyklucza package-lock.json. Tutaj go
+# przywracamy: `npm ci` w obrazie Dockera wymaga lockfile'a, a bez niego build
+# nie jest odtwarzalny (kazdy przebieg moglby zaciagnac inne wersje zaleznosci).
+!package-lock.json
+!web/package-lock.json
