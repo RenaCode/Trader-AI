@@ -25,6 +25,7 @@ export default function Learning({ engine }) {
   const drift = useApi(`/api/engines/${engine}/learning/drift`, [engine]);
   const perf = useApi(`/api/engines/${engine}/learning/signal-performance`, [engine]);
   const pm = useApi(`/api/engines/${engine}/learning/postmortems?limit=3`, [engine]);
+  const wag = useApi(`/api/engines/${engine}/learning/weights`, [engine], { refreshMs: 60000 });
 
   const s = st.data;
   const pct = s?.windows_positive_pct ?? 0;
@@ -53,6 +54,55 @@ export default function Learning({ engine }) {
                 tone={(s?.median_oos_sharpe ?? 0) > 0 ? 'profit' : 'loss'} hint="out-of-sample, bez anualizacji" />
         <Metric label="Najgorszy drawdown" value={s?.max_drawdown != null ? `${fmtNum(s.max_drawdown, 2)}%` : '—'}
                 tone="loss" hint="w oknie testowym" />
+      </div>
+
+      <div className="glass-card">
+        <div className="card-title">
+          Czego algorytm się nauczył
+          <span className="hint">
+            {wag.data?.wyuczone
+              ? `wersja modelu ${wag.data.wersja_modelu} · świeca ${wag.data.swieca}`
+              : 'brak zwalidowanego modelu'}
+          </span>
+        </div>
+        {!wag.data ? (
+          <div className="empty">Wczytywanie…</div>
+        ) : !wag.data.wyuczone ? (
+          <div className="empty">
+            Silnik pracuje na jawnych założeniach początkowych. Żadna wersja modelu
+            nie została jeszcze promowana, więc nie ma czego porównywać — i tak
+            należy czytać każdą decyzję.
+          </div>
+        ) : (
+          <>
+            <div className="hint" style={{ marginBottom: 12 }}>
+              Metryki mówią, <em>czy</em> wynik jest lepszy. Ta tabela mówi, <em>co</em>{' '}
+              model zmienił: któremu sygnałowi w którym reżimie zaczął ufać bardziej,
+              a któremu mniej. Próg wejścia: {wag.data.prog_wejscia?.toFixed?.(4) ?? '—'}.
+            </div>
+            <div className="regime-grid">
+              {wag.data.rezimy.map((r) => (
+                <div className="regime-box" key={r.rezim}>
+                  <div className="regime-name">{r.rezim}</div>
+                  {r.sygnaly.map((x) => (
+                    <div className="weight-row" key={x.sygnal} title={x.etykieta}>
+                      <span className="weight-label">{x.etykieta}</span>
+                      <span className="mono weight-val">{x.wyuczona.toFixed(3)}</span>
+                      <span className={`mono weight-delta ${x.zmiana > 0.005 ? 'pos' : x.zmiana < -0.005 ? 'neg' : 'dim'}`}>
+                        {x.zmiana > 0 ? '+' : ''}{x.zmiana.toFixed(3)}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              ))}
+            </div>
+            <div className="hint" style={{ marginTop: 10 }}>
+              Liczba po prawej to różnica względem założenia początkowego. Wagi w każdym
+              reżimie sumują się do jedności, więc wzrost jednego sygnału zawsze odbywa
+              się kosztem pozostałych.
+            </div>
+          </>
+        )}
       </div>
 
       <div className="glass-card">

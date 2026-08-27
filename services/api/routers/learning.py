@@ -55,6 +55,63 @@ async def state(engine: str):
     }
 
 
+@router.get("/weights")
+async def weights(engine: str, bar: str = Query("4h")):
+    """Wagi sygnalow: wyliczone przez trening kontra zalozenia poczatkowe.
+
+    To jest najbardziej konkretna odpowiedz na pytanie "czy algorytm sie uczy".
+    Metryki mowia, czy wynik jest lepszy; ta tabela mowi, CO konkretnie model
+    zmienil w swoim rozumowaniu - ktoremu sygnalowi w ktorym rezimie zaczal
+    ufac bardziej, a ktoremu mniej.
+
+    Gdy nie ma aktywnej wersji modelu, zwracamy same zalozenia poczatkowe
+    i mowimy o tym wprost. Silnik pracuje wtedy wlasnie na nich i uczciwie
+    jest to pokazac, zamiast wyswietlac pusta tabele.
+    """
+    from services.engine.signals import DEFAULT_WEIGHTS, SIGNALS
+
+    row = await fetch_one(
+        """
+        SELECT mv.version, mv.params, mv.promoted_at, mv.trained_from, mv.trained_to
+        FROM learn.model_version mv JOIN learn.model m ON m.id = mv.model_id
+        WHERE m.name = %s AND mv.status = 'active'
+        ORDER BY mv.version DESC LIMIT 1
+        """,
+        (f"{engine}_signal_weighting_{bar}",),
+    )
+    wyuczone = (row["params"] or {}).get("weights") if row else None
+
+    etykiety = {n: SIGNALS[n][2] for n in SIGNALS}
+    rodziny = {n: SIGNALS[n][1] for n in SIGNALS}
+    rezimy = []
+    for rezim, bazowe in DEFAULT_WEIGHTS.items():
+        pozycje = []
+        for nazwa in SIGNALS:
+            baza = float(bazowe.get(nazwa, 0.0))
+            teraz = float((wyuczone or {}).get(rezim, {}).get(nazwa, baza))
+            pozycje.append({
+                "sygnal": nazwa,
+                "etykieta": etykiety[nazwa],
+                "rodzina": rodziny[nazwa],
+                "zalozenie": round(baza, 4),
+                "wyuczona": round(teraz, 4),
+                "zmiana": round(teraz - baza, 4),
+            })
+        pozycje.sort(key=lambda x: -x["wyuczona"])
+        rezimy.append({"rezim": rezim, "sygnaly": pozycje})
+
+    return {
+        "swieca": bar,
+        "wersja_modelu": row["version"] if row else None,
+        "wyuczone": wyuczone is not None,
+        "promowany": row["promoted_at"].isoformat() if row and row["promoted_at"] else None,
+        "prog_wejscia": (row["params"] or {}).get("enter_threshold") if row else None,
+        "trenowany_od": row["trained_from"].isoformat() if row and row["trained_from"] else None,
+        "trenowany_do": row["trained_to"].isoformat() if row and row["trained_to"] else None,
+        "rezimy": rezimy,
+    }
+
+
 @router.get("/walk-forward")
 async def walk_forward(engine: str, limit: int = Query(40, le=200)):
     """Metryki per okno walk-forward. Jedyny dopuszczalny protokol oceny."""
