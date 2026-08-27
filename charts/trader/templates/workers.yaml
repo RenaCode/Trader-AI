@@ -39,11 +39,9 @@ spec:
           imagePullPolicy: {{ $.Values.api.image.pullPolicy }}
           command: {{ toJson $w.command }}
           env:
-            - name: POSTGRES_PASSWORD
-              valueFrom:
-                secretKeyRef: { name: {{ $.Values.secretName }}, key: POSTGRES_PASSWORD }
+            {{- include "trader.appDbPasswordEnv" $ | nindent 12 }}
             - name: DATABASE_URL
-              value: {{ include "trader.databaseUrl" $ | quote }}
+              value: {{ include "trader.appDatabaseUrl" $ | quote }}
             - name: SECRETS_KEY
               valueFrom:
                 secretKeyRef: { name: {{ $.Values.secretName }}, key: SECRETS_KEY }

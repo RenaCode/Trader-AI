@@ -25,21 +25,23 @@ spec:
           imagePullPolicy: {{ .Values.api.image.pullPolicy }}
           command: ["python", "db/migrate.py"]
           env:
+            # Migracje ida rola WLASCICIELA - tylko one moga zmieniac strukture.
             - name: POSTGRES_PASSWORD
               valueFrom:
                 secretKeyRef: { name: {{ .Values.secretName }}, key: POSTGRES_PASSWORD }
             - name: DATABASE_URL
               value: {{ include "trader.databaseUrl" . | quote }}
+            # Migrator ustawia tym haslo roli aplikacji (poza plikiem migracji,
+            # zeby nie trafilo do repozytorium ani do sumy kontrolnej).
+            {{- include "trader.appDbPasswordEnv" . | nindent 12 }}
       containers:
         - name: api
           image: "{{ .Values.api.image.repository }}:{{ .Values.api.image.tag }}"
           imagePullPolicy: {{ .Values.api.image.pullPolicy }}
           env:
-            - name: POSTGRES_PASSWORD
-              valueFrom:
-                secretKeyRef: { name: {{ .Values.secretName }}, key: POSTGRES_PASSWORD }
+            {{- include "trader.appDbPasswordEnv" . | nindent 12 }}
             - name: DATABASE_URL
-              value: {{ include "trader.databaseUrl" . | quote }}
+              value: {{ include "trader.appDatabaseUrl" . | quote }}
             - name: REDIS_URL
               value: "redis://{{ include "trader.fullname" . }}-redis:6379/0"
             # Klucz do szyfrowania kluczy API gield i sekretow TOTP w bazie.

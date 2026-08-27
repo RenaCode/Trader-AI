@@ -42,11 +42,9 @@ spec:
                 - --trials
                 - {{ .Values.trainerCron.trials | quote }}
               env:
-                - name: POSTGRES_PASSWORD
-                  valueFrom:
-                    secretKeyRef: { name: {{ .Values.secretName }}, key: POSTGRES_PASSWORD }
+                {{- include "trader.appDbPasswordEnv" . | nindent 16 }}
                 - name: DATABASE_URL
-                  value: "postgresql://{{ .Values.db.username }}:$(POSTGRES_PASSWORD)@{{ include "trader.fullname" . }}-db:5432/{{ .Values.db.database }}"
+                  value: {{ include "trader.appDatabaseUrl" . | quote }}
                 - name: PYTHONUNBUFFERED
                   value: "1"
               resources: {{- toYaml .Values.trainerCron.resources | nindent 16 }}

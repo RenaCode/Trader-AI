@@ -34,7 +34,10 @@ db:
     tag: "pg17"
     pullPolicy: IfNotPresent
   database: trader
+  # Wlasciciel schematow - wylacznie migracje i konserwacja.
   username: trader
+  # Rola aplikacji i procesow roboczych, bez prawa zmiany struktury.
+  appUsername: trader_app
   resources:
     limits:   { cpu: 2000m, memory: 3Gi }
     requests: { cpu: 250m,  memory: 512Mi }

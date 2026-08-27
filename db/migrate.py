@@ -18,6 +18,7 @@ import time
 from pathlib import Path
 
 import psycopg
+from psycopg import sql
 
 MIGRATIONS_DIR = Path(__file__).parent / "migrations"
 
@@ -36,6 +37,31 @@ def dsn() -> str:
     if not url:
         sys.exit("DATABASE_URL nie jest ustawiony")
     return url
+
+
+def ustaw_haslo_roli_aplikacji(conn) -> None:
+    """Ustawia haslo roli `trader_app` z APP_DB_PASSWORD.
+
+    Robione POZA plikiem migracji swiadomie. Haslo w pliku .sql trafiloby do
+    repozytorium i do sumy kontrolnej migracji - a wtedy jego rotacja wymagalaby
+    edycji zastosowanego juz pliku, czego migrator slusznie zabrania.
+
+    Krok jest idempotentny: przy kazdym uruchomieniu ustawia to, co jest
+    w zmiennej srodowiskowej. Dzieki temu rotacja hasla sprowadza sie do zmiany
+    sekretu i restartu - bez dotykania migracji.
+    """
+    haslo = os.environ.get("APP_DB_PASSWORD")
+    if not haslo:
+        print("APP_DB_PASSWORD nie ustawione - pomijam haslo roli aplikacji.")
+        return
+    exists = conn.execute(
+        "SELECT 1 FROM pg_roles WHERE rolname = 'trader_app'").fetchone()
+    if not exists:
+        print("Rola trader_app jeszcze nie istnieje - pomijam.")
+        return
+    conn.execute(
+        sql.SQL("ALTER ROLE trader_app WITH PASSWORD {}").format(sql.Literal(haslo)))
+    print("Haslo roli trader_app ustawione.")
 
 
 def main() -> int:
@@ -84,6 +110,7 @@ def main() -> int:
             print(f"ok ({duration} ms)")
 
         print(f"Zastosowano {len(pending)} migracji.")
+        ustaw_haslo_roli_aplikacji(conn)
     return 0
 
 

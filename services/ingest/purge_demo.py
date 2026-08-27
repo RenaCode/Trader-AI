@@ -19,6 +19,14 @@ ZNIKA:
     learn.*              - modele, okna walk-forward, kalibracja, post-mortemy
     news.article*        - artykuly i ich analizy
     risk.violation, risk.limit_usage, risk.killswitch_event
+
+UWAGA O UPRAWNIENIACH (od migracji 0013)
+
+Skrypt uzywa TRUNCATE, ktorego rola aplikacji `trader_app` swiadomie NIE MA.
+To nie jest przeoczenie - kasowanie hurtem jest operacja konserwacyjna i ma
+wymagac roli wlasciciela. Uruchamiaj z DATABASE_URL wskazujacym na `trader`,
+nie na `trader_app`; z rola aplikacji dostaniesz InsufficientPrivilege i to
+jest zachowanie poprawne.
 """
 from __future__ import annotations
 
