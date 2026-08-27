@@ -306,3 +306,50 @@ Wszystkie pozycje z pierwotnej listy są zamknięte. Zostają dwie rzeczy, któr
 Zrobione w trakcie tego przeglądu: §3.1 (rola bazy), §3.2 (kopie zapasowe),
 §3.3 (TOTP), §3.4 (`constant_time_eq`), §3.5 (rotacja klucza), §3.6 (limit
 wydatków), §3.7 (55 testów), §3.8 (agregaty), §2.3 (kanały RSS).
+
+
+---
+
+## 6. Znalezione po pierwszym przeglądzie
+
+### 6.1 Węzeł jest przeciążony pamięciowo — DO DECYZJI
+
+VPS ma 7,8 GB pamięci, z czego 5,3 GB jest zajęte, a wolne pozostaje ~145 MB
+(2,5 GB licząc bufory). Suma limitów pamięci wszystkich podów to **186% pamięci
+fizycznej**, a limitów CPU — 335%.
+
+Overcommit sam w sobie nie jest błędem: pody rzadko sięgają limitów jednocześnie.
+Ale na tej maszynie działa też Dietetyk-AI, Ogrodnik i strona RenaCode, a baza
+Trader-AI zajmuje 900 MB w stanie spoczynku. Ciężkie zadanie treningowe
+z limitem 2–4 GB może w takich warunkach zostać eksmitowane przez kubelet.
+
+Nie zaobserwowałem eksmisji ani OOM w zdarzeniach — więc to jest ryzyko, nie
+awaria. Wart odnotowania, bo objawiłby się jako „trening losowo się restartuje",
+czyli najtrudniejsza do zdiagnozowania klasa problemu.
+
+Zalecenie: obniżyć limity pamięci zadań okresowych do faktycznego zużycia
+(trening bierze 388 MB przy limicie 2 GB) albo dołożyć pamięci do maszyny.
+
+### 6.2 Wydajność walk-forward — NAPRAWIONE
+
+Profiler pokazał dwie przyczyny, obie o identycznym wyniku po naprawie:
+
+1. **Sygnały liczone od nowa dla każdej próby wag.** Sygnały nie zależą od wag;
+   zależy od nich dopiero ich zsumowanie. Trener sprawdza 60 układów wag na tym
+   samym oknie i liczył komplet ośmiu sygnałów od nowa dla każdego.
+
+2. **4,3 mln wywołań `round()` na wyniki lądujące w koszu.** `combine()`
+   budowało pełne rozbicie na wkłady przy każdej świecy każdej próby, a symulacja
+   tego rozbicia nie czyta — jest potrzebne wyłącznie dziennikowi i interfejsowi.
+   Około 30% czasu szło na zaokrąglanie liczb, które natychmiast były wyrzucane.
+
+Pomiar: 10 prób na oknie 1080 świec × 24 instrumenty spadło z 5,68 s do 1,04 s
+(**5,5×**). Na VPS-ie przebieg pozostaje rzędu godziny, bo maszyna jest wielokrotnie
+wolniejsza od stacji deweloperskiej — ale iteracja lokalna stała się praktyczna.
+
+**Sprawdzone i odrzucone jako przyczyna** (żeby nie wracać do tego drugi raz):
+brak indeksu na `feat.feature_value`. `EXPLAIN ANALYZE` pokazał, że klucz główny
+`(feature_def_id, instrument_id, event_time)` jest wykorzystywany prawidłowo —
+zapytanie o cechy trwa 154 ms, a pełne wczytanie panelu 0,4 s na instrument.
+Hipoteza była błędna i dobrze, że sprawdziłem ją planem zapytania zamiast dodać
+niepotrzebny indeks na tabeli o 4,2 mln wierszy.
