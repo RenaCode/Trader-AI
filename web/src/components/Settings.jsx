@@ -329,6 +329,7 @@ function SecretsPanel() {
   const [busy, setBusy] = useState(null);
   const [error, setError] = useState({});
   const [saved, setSaved] = useState({});
+  const [tested, setTested] = useState({});
 
   const load = useCallback(async () => setSecrets(await get('/api/settings/secrets')), []);
   useEffect(() => { load(); }, [load]);
@@ -351,11 +352,39 @@ function SecretsPanel() {
     finally { setBusy(null); }
   };
 
+  const test = async (name) => {
+    setBusy(name); setError((e) => ({ ...e, [name]: '' }));
+    try {
+      const r = await post(`/api/settings/secrets/${name}/test`);
+      setTested((t) => ({ ...t, [name]: r }));
+    } catch (err) {
+      setTested((t) => ({ ...t, [name]: { ok: false, message: err.message } }));
+    } finally { setBusy(null); }
+  };
+
   return (
     <div className="glass-card">
       <div className="card-title">
         Klucze usług
         <span className="hint">szyfrowane przed zapisem · nigdy nie zwracane przez API</span>
+      </div>
+
+      <div className="notice info" style={{ marginBottom: 16 }}>
+        <strong>Subskrypcja Claude.ai to nie to samo co dostęp do API.</strong> Plan Pro
+        ani Max nie obejmuje wywołań API — to osobny produkt z osobnym rozliczeniem
+        i nie da się zalogować subskrypcją do aplikacji zewnętrznej.
+        <br /><br />
+        Klucz utworzysz tak: załóż konto w{' '}
+        <a className="src-link" href="https://platform.claude.com" target="_blank"
+           rel="noopener noreferrer">Claude Console ↗</a>{' '}
+        (inne niż claude.ai), doładuj je w <em>Billing</em>, a potem wejdź w{' '}
+        <a className="src-link" href="https://platform.claude.com/settings/keys" target="_blank"
+           rel="noopener noreferrer">Settings → API Keys ↗</a>{' '}
+        i użyj <em>Create Key</em>. Klucz zaczyna się od <span className="mono">sk-ant-</span>
+        {' '}i widać go tylko raz.
+        <br /><br />
+        Skaner filtruje artykuły tanim modelem, a analizuje tylko te, które przejdą filtr —
+        przy dziesięciu kanałach RSS to rząd kilku dolarów miesięcznie.
       </div>
 
       {(secrets || []).map((s) => (
@@ -385,6 +414,11 @@ function SecretsPanel() {
               {busy === s.name ? 'Zapisywanie…' : 'Zapisz'}
             </button>
             {s.is_set && (
+              <button className="btn-ghost" disabled={busy === s.name} onClick={() => test(s.name)}>
+                {busy === s.name ? 'Sprawdzam…' : 'Sprawdź klucz'}
+              </button>
+            )}
+            {s.is_set && (
               <button className="btn-ghost" disabled={busy === s.name} onClick={() => clear(s.name)}
                       style={{ borderColor: 'rgba(239,68,68,0.3)', color: 'var(--danger-light)' }}>
                 Usuń
@@ -392,9 +426,16 @@ function SecretsPanel() {
             )}
           </div>
           {error[s.name] && <div className="form-error" style={{ marginTop: 10 }}>{error[s.name]}</div>}
-          {saved[s.name] && !error[s.name] && (
+          {saved[s.name] && !error[s.name] && !tested[s.name] && (
             <div className="notice info" style={{ marginTop: 10 }}>
-              Zapisano. Skaner wiadomości użyje nowego klucza przy następnym cyklu.
+              Zapisano. Kliknij „Sprawdź klucz”, żeby potwierdzić, że działa —
+              poprawny format nic nie dowodzi.
+            </div>
+          )}
+          {tested[s.name] && (
+            <div className={tested[s.name].ok ? 'notice info' : 'form-error'}
+                 style={{ marginTop: 10 }}>
+              {tested[s.name].message}
             </div>
           )}
         </div>

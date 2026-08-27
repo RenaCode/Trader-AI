@@ -20,6 +20,7 @@ KNOWN_SECRETS = {
         "description": "Używany przez skaner wiadomości do filtrowania i analizy artykułów.",
         "pattern": r"^sk-ant-[A-Za-z0-9_\-]{20,}$",
         "pattern_hint": "Klucz Anthropic zaczyna się od 'sk-ant-'.",
+        "testable": True,
     },
 }
 
@@ -182,3 +183,43 @@ async def delete_wallet(wallet_id: int, request: Request, user: dict = Depends(c
     await audit("wallet.delete", user_id=user["id"], entity="app.wallet",
                 entity_id=row["label"], request=request)
     return {"ok": True}
+
+
+@router.post("/secrets/{name}/test", dependencies=[Depends(require_csrf)])
+async def test_secret(name: str, user: dict = Depends(current_user)):
+    """Sprawdza zapisany klucz PRAWDZIWYM wywolaniem API.
+
+    Poprawny format nic nie dowodzi - klucz moze byc odwolany, z wyczerpanym
+    limitem albo z innej organizacji. Jedynym wiarygodnym testem jest zapytanie.
+    Uzywamy najtanszego modelu i jednego tokenu, zeby test kosztowal grosze.
+    """
+    if name not in KNOWN_SECRETS:
+        raise HTTPException(404, f"Nieznany sekret: {name}")
+    row = await fetch_one("SELECT value_enc FROM app.secret WHERE name = %s", (name,))
+    if not row:
+        raise HTTPException(404, "Klucz nie jest jeszcze zapisany")
+
+    key = SecretBox().decrypt(bytes(row["value_enc"]))
+
+    if name == "anthropic_api_key":
+        from anthropic import AsyncAnthropic
+        client = AsyncAnthropic(api_key=key)
+        try:
+            models = await client.models.list()
+            names = [m.id for m in models.data][:6]
+            return {"ok": True,
+                    "message": f"Klucz działa. Dostępne modele: {', '.join(names)}.",
+                    "models": names}
+        except Exception as e:                                  # noqa: BLE001
+            detail = str(e)
+            if "authentication" in detail.lower() or "401" in detail:
+                msg = ("Klucz odrzucony przez Anthropic. Sprawdź, czy nie został odwołany "
+                       "i czy skopiowałeś go w całości.")
+            elif "credit" in detail.lower() or "billing" in detail.lower() or "402" in detail:
+                msg = ("Klucz jest poprawny, ale organizacja nie ma środków. Doładuj konto "
+                       "w Console → Billing.")
+            else:
+                msg = f"Nie udało się zweryfikować: {type(e).__name__}: {detail[:200]}"
+            return {"ok": False, "message": msg}
+
+    raise HTTPException(501, "Test dla tego sekretu nie jest zaimplementowany")

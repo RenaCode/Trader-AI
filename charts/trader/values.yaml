@@ -101,6 +101,18 @@ workers:
       limits:   { cpu: 1000m, memory: 512Mi }
       requests: { cpu: 100m,  memory: 128Mi }
 
+  # Trener walk-forward. Wlasny proces, bo trwa dziesiatki minut - uruchamiany
+  # w podzie API ginal przy kazdym wdrozeniu razem z podem. Raz na dobe wystarczy:
+  # okna przesuwaja sie o 2 dni, wiec czestsze przeliczanie nic nie wnosi, a
+  # kusiloby do zagladania w wyniki i dobierania parametrow, czyli dokladnie tego,
+  # przed czym ma chronic walk-forward.
+  trainer:
+    enabled: true
+    command: ["sh", "-c", "sleep 300; while true; do python services/engine/train.py --days 90 --trials 40 || true; sleep 86400; done"]
+    resources:
+      limits:   { cpu: 2000m, memory: 2Gi }
+      requests: { cpu: 100m,  memory: 256Mi }
+
   # Skaner wiadomosci. Bez klucza Anthropic konczy sie natychmiast z komunikatem -
   # dlatego wlaczony dopiero wtedy, gdy klucz jest w bazie.
   news:
