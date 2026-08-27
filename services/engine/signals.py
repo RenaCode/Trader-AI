@@ -173,6 +173,35 @@ def funding_carry(f: dict, h: Horizon) -> SignalOutput | None:
                         {"funding_z": round(z, 2), "stawka_pct": rate})
 
 
+def cross_section(f: dict, h: Horizon) -> SignalOutput | None:
+    """Sila wzgledna wobec calego zbioru rynkow - momentum przekrojowe.
+
+    Wszystkie pozostale sygnaly opisuja instrument SAM ZE SOBA. W rynku, w ktorym
+    wszystko porusza sie razem - a krypto jest takim rynkiem - wiekszosc tej
+    informacji to wspolny czynnik, czyli po prostu "czy dzis rosnie caly rynek".
+    Ranking odejmuje ten czynnik z definicji: gdy wszystko rosnie o 5%, ranking
+    dalej mowi, kto rosnie mocniej od reszty.
+
+    To jedyny sygnal w zestawie, ktory patrzy na instrument PRZEZ PRYZMAT
+    pozostalych - i dlatego jego tresc informacyjna jest najmniej skorelowana
+    z reszta.
+
+    Srodek rankingu jest celowo martwy. Instrument w okolicach mediany nie mowi
+    nic o niczym, a bez tej strefy sygnal generowalby transakcje przy kazdym
+    drobnym przetasowaniu kolejnosci.
+    """
+    rs = f.get("rel_strength")
+    if rs is None:
+        return None
+    if abs(rs) < 0.5:                       # srodkowa polowa stawki
+        return SignalOutput(0.0, 0.1, {"sila_wzgledna": round(rs, 3),
+                                       "uwaga": "środek stawki"})
+    # Skalujemy tak, zeby skrajne 25% stawki dawalo pelna sile.
+    return SignalOutput(_clip((abs(rs) - 0.5) / 0.5 * (1 if rs > 0 else -1)),
+                        min(1.0, (abs(rs) - 0.5) / 0.4),
+                        {"sila_wzgledna": round(rs, 3), "okno": h.labels.get("ret_mid")})
+
+
 SIGNALS = {
     "momentum_multi":     (momentum_multi,     "momentum",       "Zgodność zwrotów w trzech skalach"),
     "mean_reversion_rsi": (mean_reversion_rsi, "mean_reversion", "Powrót do średniej przy skrajnym RSI"),
@@ -181,6 +210,7 @@ SIGNALS = {
     "volume_breakout":    (volume_breakout,    "flow",           "Nietypowy wolumen potwierdzający kierunek"),
     "news_shock":         (news_shock,         "news",           "Sentyment newsowy ważony nowością"),
     "funding_carry":      (funding_carry,      "derivatives",    "Skrajne finansowanie perpetuala (kontrariańsko)"),
+    "cross_section":      (cross_section,      "cross_section",  "Siła względna wobec pozostałych rynków"),
 }
 
 # Wagi per rezim. ZALOZENIA POCZATKOWE - do zastapienia kalibracja walk-forward.
@@ -188,21 +218,21 @@ SIGNALS = {
 # przy wysokiej zmiennosci nie ufamy niczemu mocno, a przy szoku newsowym
 # news dominuje, bo pozostale sygnaly opisuja rynek sprzed zdarzenia.
 DEFAULT_WEIGHTS = {
-    "trend_up":   {"momentum_multi": 0.28, "trend_follow": 0.22, "volume_breakout": 0.13,
-                   "mean_reversion_rsi": 0.08, "range_extreme": 0.04, "news_shock": 0.13,
-                   "funding_carry": 0.12},
-    "trend_down": {"momentum_multi": 0.28, "trend_follow": 0.22, "volume_breakout": 0.13,
-                   "mean_reversion_rsi": 0.08, "range_extreme": 0.04, "news_shock": 0.13,
-                   "funding_carry": 0.12},
-    "range":      {"mean_reversion_rsi": 0.26, "range_extreme": 0.22, "momentum_multi": 0.08,
-                   "trend_follow": 0.08, "volume_breakout": 0.09, "news_shock": 0.12,
-                   "funding_carry": 0.15},
-    "high_vol":   {"momentum_multi": 0.13, "trend_follow": 0.13, "mean_reversion_rsi": 0.13,
-                   "range_extreme": 0.13, "volume_breakout": 0.17, "news_shock": 0.16,
-                   "funding_carry": 0.15},
-    "news_shock": {"news_shock": 0.42, "momentum_multi": 0.18, "volume_breakout": 0.17,
-                   "trend_follow": 0.09, "mean_reversion_rsi": 0.03, "range_extreme": 0.02,
-                   "funding_carry": 0.09},
+    "trend_up":   {"momentum_multi": 0.24, "trend_follow": 0.19, "volume_breakout": 0.11,
+                   "mean_reversion_rsi": 0.07, "range_extreme": 0.03, "news_shock": 0.11,
+                   "funding_carry": 0.10, "cross_section": 0.15},
+    "trend_down": {"momentum_multi": 0.24, "trend_follow": 0.19, "volume_breakout": 0.11,
+                   "mean_reversion_rsi": 0.07, "range_extreme": 0.03, "news_shock": 0.11,
+                   "funding_carry": 0.10, "cross_section": 0.15},
+    "range":      {"mean_reversion_rsi": 0.22, "range_extreme": 0.19, "momentum_multi": 0.07,
+                   "trend_follow": 0.07, "volume_breakout": 0.08, "news_shock": 0.10,
+                   "funding_carry": 0.13, "cross_section": 0.14},
+    "high_vol":   {"momentum_multi": 0.11, "trend_follow": 0.11, "mean_reversion_rsi": 0.11,
+                   "range_extreme": 0.11, "volume_breakout": 0.15, "news_shock": 0.14,
+                   "funding_carry": 0.13, "cross_section": 0.14},
+    "news_shock": {"news_shock": 0.38, "momentum_multi": 0.16, "volume_breakout": 0.15,
+                   "trend_follow": 0.08, "mean_reversion_rsi": 0.03, "range_extreme": 0.02,
+                   "funding_carry": 0.08, "cross_section": 0.10},
 }
 
 

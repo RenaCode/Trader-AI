@@ -51,6 +51,10 @@ COMPUTE_LAG = timedelta(seconds=3)
 
 BATCH = 4000
 
+# Ponizej tylu instrumentow notowanych jednoczesnie ranking przekrojowy nie
+# niesie informacji o zbiorze - mowi tylko, ktory z trzech rosnie najmocniej.
+MIN_UNIVERSE = 8
+
 # rola -> (code_ref, szablon opisu). {okno} podstawia sie z etykiet horyzontu.
 ROLES = {
     "rsi":         ("features.momentum:rsi",
@@ -76,6 +80,9 @@ ROLES = {
                      "czyli rynek jest wychylony na wzrost."),
     "funding_z":   ("features.derivatives:funding_z",
                     "Odchylenie stawki finansowania od średniej z 30 dni, w odchyleniach standardowych."),
+    "rel_strength": ("features.crosssection:relative_strength",
+                     "Siła względna wobec pozostałych obserwowanych rynków: −1 = najsłabszy, "
+                     "+1 = najmocniejszy w tej chwili. Liczona ze zwrotu z {okno}."),
 }
 
 # Role liczone z samych cen - wolno datowac wstecz bez zastrzezen.
@@ -83,10 +90,14 @@ PRICE_ROLES = ("rsi", "ema_ratio", "atr_pct", "ret_short", "ret_mid", "ret_long"
                "volume_z", "range_pos")
 
 
+# Rola -> klucz etykiety okna w horyzoncie. Bez tego opis cechy w interfejsie
+# ma pusta dziure zamiast okresu.
+OKNO_ROLI = {"range_pos": "range", "volume_z": "volume", "rel_strength": "ret_mid"}
+
+
 def describe(role: str, h: Horizon) -> str:
     tpl = ROLES[role][1]
-    okno = h.labels.get(role) or h.labels.get("range" if role == "range_pos" else
-                                              "volume" if role == "volume_z" else role, "")
+    okno = h.labels.get(role) or h.labels.get(OKNO_ROLI.get(role, role), "")
     return tpl.format(okno=okno, bar=h.bar, period=h.rsi_period if role == "rsi" else h.atr_period,
                       fast=h.ema_fast, slow=h.ema_slow)
 
@@ -105,6 +116,9 @@ def params_for(role: str, h: Horizon) -> dict:
         p |= {"bars": h.range_window, "okno": h.labels.get("range")}
     elif role == "volume_z":
         p |= {"bars": h.volume_lookback, "okno": h.labels.get("volume")}
+    elif role == "rel_strength":
+        p |= {"zrodlo": "ret_mid", "bars": h.ret_mid, "okno": h.labels.get("ret_mid"),
+              "min_universe": MIN_UNIVERSE}
     return p
 
 
@@ -296,6 +310,59 @@ def compute_news(cur, instrument_id: int, h: Horizon, feat_id: int,
     return insert_values(cur, rows)
 
 
+def compute_cross_section(cur, h: Horizon, feat_ids: dict[str, int],
+                         since: datetime, until: datetime) -> int:
+    """Siła względna: pozycja instrumentu w rankingu zwrotów CAŁEGO zbioru.
+
+    DLACZEGO TO JEST INNA INFORMACJA NIŻ POZOSTAŁE SYGNALY
+
+    Wszystkie dotychczasowe cechy opisuja instrument SAM ZE SOBA: jego wlasny
+    zwrot, jego wlasne RSI, jego wlasna zmiennosc. W rynku, w ktorym wszystko
+    porusza sie razem - a krypto jest takim rynkiem - wiekszosc tej informacji
+    to wspolny czynnik, czyli po prostu "czy dzis rosnie caly rynek".
+
+    Ranking zwrotow ODEJMUJE ten wspolny czynnik z definicji: gdy wszystko rosnie
+    o 5%, kazdy instrument ma ten sam zwrot bezwzgledny, ale ranking dalej mowi,
+    kto rosnie mocniej od reszty. To jest tresc, ktorej w cechach absolutnych
+    nie ma.
+
+    KIERUNEK - decyzja podjeta PRZED zobaczeniem wyniku. Sygnal liczymy
+    w wariancie momentum przekrojowego (mocniejsi utrzymuja przewage), bo na
+    horyzoncie tygodniowym to wlasnie ten efekt jest udokumentowany. Gdyby
+    wyszlo zero, wariant odwrotny (powrot do sredniej przekrojowej) jest
+    ODDZIELNA hipoteza do osobnego testu - a nie powodem, zeby odwrocic znak
+    i policzyc jeszcze raz.
+
+    DATOWANIE WSTECZ jest tu uprawnione: ranking w chwili T korzysta wylacznie
+    ze zwrotow znanych w chwili T, tyle ze u wielu instrumentow naraz.
+    """
+    cur.execute(
+        """
+        WITH r AS (
+            SELECT fv.instrument_id, fv.event_time, fv.value
+            FROM feat.feature_value fv
+            WHERE fv.feature_def_id = %s
+              AND fv.event_time >= %s AND fv.event_time < %s
+        ),
+        licznosc AS (
+            SELECT event_time, count(*) AS n FROM r GROUP BY event_time
+        )
+        SELECT r.instrument_id, r.event_time,
+               percent_rank() OVER (PARTITION BY r.event_time ORDER BY r.value) AS pr
+        FROM r JOIN licznosc l ON l.event_time = r.event_time
+        -- Ranking z garstki instrumentow nie niesie informacji o zbiorze.
+        WHERE l.n >= %s
+        """,
+        (feat_ids["ret_mid"], since, until, MIN_UNIVERSE),
+    )
+    rows = [
+        (feat_ids["rel_strength"], r["instrument_id"], r["event_time"],
+         (float(r["pr"]) - 0.5) * 2, r["event_time"] + COMPUTE_LAG)
+        for r in cur.fetchall()
+    ]
+    return insert_values(cur, rows)
+
+
 def compute_funding(cur, instrument_id: int, h: Horizon, feat_ids: dict[str, int],
                     since: datetime, until: datetime) -> int:
     """Stawka finansowania perpetuala, przeniesiona na siatke swiec.
@@ -409,6 +476,13 @@ def main() -> int:
             conn.commit()
             total += n + m + f
             print(f"  {inst['symbol']:10s} {n:>9,} cen  {m:>7,} news  {f:>7,} funding")
+
+        # Przekrojowosc liczymy RAZ dla calego zbioru, po policzeniu zwrotow -
+        # z natury potrzebuje wszystkich instrumentow naraz.
+        x = compute_cross_section(cur, h, feat_ids, since, now)
+        conn.commit()
+        total += x
+        print(f"\n  siła względna (cały zbiór): {x:>9,}")
 
         print(f"\nRazem {total:,} wartości cech")
     return 0
