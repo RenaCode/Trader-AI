@@ -24,6 +24,19 @@ spec:
       template:
         spec:
           restartPolicy: OnFailure
+          # Katalog na hoscie tworzy kubelet jako root:root 0755, a obraz bazy
+          # dziala jako uid 1000 (postgres) - bez tego kroku pg_dump dostaje
+          # "Permission denied" i zadanie pada. Chown robi osobny kontener
+          # z prawami roota, zeby sam zrzut nie musial ich miec.
+          initContainers:
+            - name: przygotuj-katalog
+              image: busybox:1.36
+              command: ["sh", "-c", "chown 1000:1000 /backup && chmod 750 /backup"]
+              securityContext:
+                runAsUser: 0
+              volumeMounts:
+                - name: backup
+                  mountPath: /backup
           containers:
             - name: dump
               image: "{{ .Values.db.image.repository }}:{{ .Values.db.image.tag }}"
