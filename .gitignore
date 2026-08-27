@@ -23,3 +23,8 @@ artifacts/
 # po cichu pomija skrypty operacyjne, a obraz Dockera nie ma czego skopiowac.
 !scripts/
 !scripts/**
+
+# Skrypty diagnostyczne uruchamiane doraznie z katalogu glownego.
+/shot.mjs
+/diag.mjs
+/check.mjs

@@ -560,7 +560,7 @@ def main(reset: bool) -> int:
                               round(px * 0.985, 6),
                               json.dumps({"warunek": "cena <= EMA20 - 1.5 * ATR",
                                           "poziom": round(px * 0.985, 2),
-                                          "potwierdzenie": "wolumen > 1.4x sredniej 1h"}),
+                                          "potwierdzenie": "wolumen > 1,4x średniej 1h"}),
                               NOW + timedelta(hours=random.randint(4, 48)), decided_at))
 
             cur.executemany(

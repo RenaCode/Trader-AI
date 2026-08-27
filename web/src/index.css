@@ -378,3 +378,14 @@ a.src-link:hover { text-decoration: underline; }
 .login-card-head p { font-size: 0.82rem; color: var(--text-dim); line-height: 1.5; }
 
 .login-foot { display: flex; align-items: center; gap: 9px; justify-content: center; flex-wrap: wrap; }
+
+/* Listy przewijalne ucinaly tresc w polowie wiersza bez zadnego sygnalu, ze jest
+   jej wiecej. Maska wygasza dolna krawedz - czytelnie mowi "przewin", a nie
+   wyglada na blad renderowania. */
+.row-list {
+  -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 28px), transparent 100%);
+          mask-image: linear-gradient(to bottom, #000 calc(100% - 28px), transparent 100%);
+}
+/* Gdy lista miesci sie w calosci, maska jest zbedna - klasa dokladana przez JS
+   nie jest tu potrzebna, bo krotka lista i tak nie dochodzi do dolnej krawedzi. */
+.row-list.no-fade { -webkit-mask-image: none; mask-image: none; }
