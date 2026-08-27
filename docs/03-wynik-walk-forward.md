@@ -91,3 +91,85 @@ liczbę podejść.
   nie leży w za małej próbce do dopasowania, tylko w braku sygnału do dopasowania.
 - **Nie promować modelu `candidate` ręcznie.** Blokada jest jedyną rzeczą, która
   dzieli ten system od handlowania na podstawie szumu.
+
+---
+
+# Druga iteracja: świeca 4 h, 12 instrumentów
+
+Data: 2026-08-27, kilka godzin po pierwszej. Dane: 4 lata (2022-08 … 2026-08),
+420 tys. świec godzinowych, 1,1 mln wartości cech, 12 instrumentów.
+
+## Wynik
+
+| Miara | 5 min / 3 instr. | **4 h / 12 instr.** |
+|---|---|---|
+| Okna informatywne | 29 | **33** |
+| Okna dodatnie OOS | 7 (24,1%) | **20 (60,6%)** |
+| Mediana Sharpe/transakcję | −0,152 | **+0,153** |
+| Najgorsze obsunięcie | −8,02% | **−37,07%** |
+| Konfiguracji przetestowanych | 1 520 | 2 400 |
+| Stan | degraded | **learning** |
+
+Próg przejścia na live to 70% dodatnich okien. Jest 61%.
+
+## Czy to zasługa kalibracji, czy samego horyzontu?
+
+Porównanie na tych samych danych i tym samym protokole, przy **stałych** wagach
+(brak dopasowania, więc wynik jest w pełni out-of-sample):
+
+| Wagi | Okna | Dodatnie | Mediana Sharpe |
+|---|---|---|---|
+| Założenia początkowe (ręczne) | 40 | 17 (42,5%) | −0,043 |
+| Równe (1/7 każda) | 21 | 8 (38,1%) | −0,065 |
+
+Sprawdzałem hipotezę, że kalibracja tylko spłaszcza wagi w stronę równych —
+wyuczone wagi są wyraźnie bardziej płaskie niż ręczne założenia. **Hipoteza
+okazała się fałszywa**: równe wagi wypadają gorzej niż ręczne. Poprawa nie
+bierze się z samego spłaszczenia.
+
+Legalne porównanie brzmi więc: **42,5% (ustalone wagi) → 60,6% (kalibracja
+walk-forward)**, przy czym ta druga liczba pochodzi z protokołu, w którym wagi
+każdego okna dobierano wyłącznie na jego własnym oknie treningowym.
+
+**Czego NIE wolno z tego cytować.** Uruchomiłem też ocenę uśrednionych wag
+produkcyjnych na tych samych oknach, z których je wyliczono — wyszło 62,5%.
+Ta liczba jest skażona, bo dane oceny brały udział w doborze wag. Zostawiam ją
+tu wyłącznie jako ostrzeżenie, że da się ją policzyć i że wygląda przekonująco.
+
+## Zastrzeżenie, które waży więcej niż wynik
+
+**Najgorsze obsunięcie w oknie testowym wynosi −37%, a skonfigurowany limit
+`max_drawdown` to 10% z akcją `killswitch`.**
+
+Symulacja walk-forward **nie stosuje risk kernela**: nie skaluje pozycji, nie
+zna limitu ekspozycji, nie zatrzymuje się po serii strat. To znaczy, że wyniki
+powyżej nie są osiągalne w tej konfiguracji — realny system zatrzymałby handel
+zanim doszedłby do połowy tego obsunięcia.
+
+Poprzednie −8,02% nie jest z tym porównywalne: liczone było wyłącznie na wyniku
+zrealizowanym, więc systematycznie zaniżone (patrz przegląd kodu §1.8).
+
+Wniosek: zanim cokolwiek pójdzie na żywo, symulacja musi przejść przez ten sam
+risk kernel co produkcja. Dopóki tego nie robi, mierzy strategię, której system
+i tak nie wykonałby.
+
+## Interpretacja
+
+Wynik przeszedł z „brak przewagi" (24%, mediana ujemna) do „coś tu jest, ale za
+mało" (61%, mediana dodatnia). To istotna zmiana, ale **61% nie jest przewagą** —
+przy 33 oknach i instrumentach silnie skorelowanych ze sobą (efektywna liczba
+niezależnych obserwacji jest mniejsza niż 33) taki wynik mieści się w rozrzucie,
+jakiego można oczekiwać przy niewielkiej przewadze i przy jej braku.
+
+Doszła też selekcja na poziomie meta: horyzont 4 h wybrałem PO zobaczeniu, że
+5 min zawodzi. To jest forma wielokrotnego testowania, której licznik hipotez
+nie łapie, bo liczy konfiguracje wag, nie decyzje projektowe.
+
+## Co dalej
+
+1. **Risk kernel w symulacji** — bez tego wyniki opisują strategię, której
+   system nie wykona.
+2. Pozostałe hipotezy z pierwszej iteracji: mikrostruktura orderbooka,
+   przekrojowość (siła względna zamiast kierunku), sygnał newsowy.
+3. Dopiero potem — kolejny walk-forward, z pełną świadomością, że licznik
+   hipotez urósł do 2 400 i każdy następny wynik trzeba o to dyskontować.
