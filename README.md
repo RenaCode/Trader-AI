@@ -19,16 +19,22 @@ z osobnymi modelami, osobnym ryzykiem i osobnymi zakładkami w UI.
 ## Stan projektu
 
 - [x] Research i architektura
-- [x] Schemat bazy (10 schematów, 8 migracji, hypertables + pgvector)
+- [x] Schemat bazy (11 schematów, 16 migracji, hypertables + pgvector)
 - [x] API odczytu (FastAPI) i dashboard (React + Vite)
 - [x] Chart Helm, obrazy Docker, CI
 - [x] Wdrożenie na `trader.renacode.com` (TLS, Traefik, ArgoCD)
 - [x] Uwierzytelnianie: hasło Argon2id + TOTP + kody zapasowe, sesje serwerowe, CSRF
 - [x] Test dymny całej aplikacji w CI
-- [ ] Szyfrowane klucze API giełd w UI
-- [x] Adapter Bybit + backfill 90 dni realnych świec (388 tys. świec 1-minutowych)
+- [x] Szyfrowane klucze API giełd w UI
+- [x] Adapter Bybit + 4 lata historii: 24 instrumenty, 810 tys. świec godzinowych,
+      39 tys. stawek finansowania, 2,1 mln wartości cech
 - [x] Silnik cech, sygnałów i risk kernel — pętla decyzyjna na realnych danych
-- [x] Trener walk-forward z licznikiem przetestowanych hipotez
+- [x] Trener walk-forward z licznikiem hipotez; horyzont 4 h wybrany pomiarem
+      stosunku kosztu do amplitudy świecy (patrz `docs/03`)
+- [x] Symulacja **portfelowa** przez ten sam risk kernel co produkcja
+- [x] Rola bazy bez uprawnień superużytkownika + kontrola uprawnień
+- [x] Kopie zapasowe (weryfikowane), rotacja `SECRETS_KEY`, limit wydatków na API
+- [x] 55 testów jednostkowych (reguły ryzyka, portfel, TOTP, kryptografia)
 - [x] Ustawienia, powiadomienia (w aplikacji / Telegram / webhook), profil konta
 - [ ] Skaner RSS + analiza Claude — **czeka na klucz API Anthropic**
 - [ ] Egzekucja na koncie demo Bybit — **czeka na klucze giełdy**
@@ -91,7 +97,9 @@ kasuje wszystko, co wygenerował, zostawiając realne dane rynkowe.
 | Schemat | Zawartość |
 |---|---|
 | `ref` | Giełdy, instrumenty, kalendarz sesji, akcje korporacyjne |
-| `market` | Świece (hypertable), orderbook, funding — plus ciągłe agregaty 5m/1h/1d |
+| `market` | Świece (hypertable), orderbook, funding. Godzinówki pobierane wprost
+z giełdy; wyższe interwały liczone w locie — agregaty ciągłe usunięte w 0016 jako
+drugie źródło tej samej prawdy |
 | `news` | Kanały RSS, artykuły, analiza Claude, embeddingi (pgvector + HNSW) |
 | `feat` | Wersjonowane definicje cech, wartości, reżim, funkcja `as_of()` |
 | `sig` | Definicje i wartości sygnałów |
