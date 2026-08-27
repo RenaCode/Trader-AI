@@ -353,3 +353,52 @@ brak indeksu na `feat.feature_value`. `EXPLAIN ANALYZE` pokazał, że klucz gł�
 zapytanie o cechy trwa 154 ms, a pełne wczytanie panelu 0,4 s na instrument.
 Hipoteza była błędna i dobrze, że sprawdziłem ją planem zapytania zamiast dodać
 niepotrzebny indeks na tabeli o 4,2 mln wierszy.
+
+### 6.3 Cechy poza siatką świec — rozjazd trening–produkcja
+
+**Najpoważniejszy błąd znaleziony w tej sesji**, i to taki, którego żaden wynik
+nie sygnalizował.
+
+Cechy cenowe powstają z `time_bucket()`, więc siedzą dokładnie na granicach
+świec: 00:00, 04:00, 08:00. Cechy liczone na własnej siatce — funding i news —
+zaczynały od `now() - N dni`, czyli od przypadkowej chwili z mikrosekundami,
+i lądowały na znacznikach w rodzaju `16:19:49.408934`.
+
+Pomiar przed naprawą:
+
+| Cecha | Na siatce 4 h |
+|---|---|
+| `rsi__4h`, `rel_strength__4h`, pozostałe cenowe | **100%** |
+| `funding_z__4h` | **0%** |
+| `news_sent__4h` | **0%** |
+
+**Skutek był asymetryczny i dlatego niewidoczny:**
+
+- **Trening** łączy cechy z cenami przez `p.t = f.event_time`. Funding i news
+  **nigdy** nie wchodziły do panelu — oba sygnały były martwe w *każdym*
+  dotychczasowym przebiegu walk-forward, łącznie z tym, w którym raportowałem
+  funding jako wartościowy nowy sygnał.
+- **Produkcja** czyta przez `feat.as_of()`, które bierze najświeższą wartość
+  każdej cechy w oknie świeżości. Tam funding działał normalnie — decyzja
+  produkcyjna, którą pokazywałem, miała `funding_carry` jako drugi co do
+  wielkości wkład.
+
+To jest dokładnie ten rozjazd trening–produkcja, przed którym broni cała reszta
+architektury: **silnik używał sygnału, którego trener nigdy nie widział.**
+
+Wykryte przypadkiem: detektor martwych sygnałów zgłosił `funding_carry` jako
+stały, co nie miało sensu, bo `|z| >= 1` zdarza się w 21% świec. Gdyby nie ten
+detektor — dodany godzinę wcześniej z zupełnie innego powodu — błąd zostałby
+w systemie.
+
+Usunięto **1 754 706 wierszy** poza siatką (dokładnie połowę tabeli cech) i
+przeliczono od nowa.
+
+**Zabezpieczenie na przyszłość:** `loop.py --sprawdz` dostał kontrolę
+strukturalną — zgłasza błąd, gdy jakakolwiek cecha horyzontu leży poza siatką.
+Silnik uruchamia ją przy starcie, więc nawrót tej klasy błędu **zatrzyma pod**
+zamiast cicho unieważnić trening.
+
+To najlepszy argument za tym, że kontrola wykonująca prawdziwe zapytania jest
+warta więcej niż kolejny test jednostkowy: żaden przenośny test nie miałby jak
+tego zobaczyć, bo nie ma bazy.
