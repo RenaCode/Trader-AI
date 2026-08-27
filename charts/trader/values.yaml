@@ -1,15 +1,19 @@
 replicaCount: 1
-# Repo jest prywatne, wiec obrazy w ghcr.io tez. Sekret tworzony raz, recznie:
-#   kubectl create secret docker-registry ghcr-pull \
-#     --docker-server=ghcr.io --docker-username=<login> --docker-password=<PAT z read:packages>
-imagePullSecrets:
-  - name: ghcr-pull
+# Repo jest prywatne, wiec pakiety w ghcr.io tez - a k3s nie ma PAT-a z read:packages.
+# Do czasu jego dodania obrazy sa budowane NA VPS i importowane do containerd
+# (scripts/build-on-vps.sh), dlatego pullPolicy ponizej to IfNotPresent, a lista
+# sekretow jest pusta - nie ma zadnego pobierania z rejestru.
+#
+# Po utworzeniu sekretu `ghcr-pull` wystarczy odkomentowac wpis i przywrocic
+# pullPolicy: Always, zeby wrocic do czystego GitOps-a z rejestru.
+imagePullSecrets: []
+#  - name: ghcr-pull
 
 api:
   image:
     repository: ghcr.io/renacode/trader-ai-api
-    tag: "sha-8ec590a"
-    pullPolicy: Always
+    tag: "sha-0dd3e8b"
+    pullPolicy: IfNotPresent
   resources:
     limits:   { cpu: 1000m, memory: 1Gi }
     requests: { cpu: 100m,  memory: 256Mi }
@@ -17,8 +21,8 @@ api:
 web:
   image:
     repository: ghcr.io/renacode/trader-ai-web
-    tag: "sha-16fc098"
-    pullPolicy: Always
+    tag: "sha-0dd3e8b"
+    pullPolicy: IfNotPresent
   resources:
     limits:   { cpu: 200m, memory: 256Mi }
     requests: { cpu: 50m,  memory: 64Mi }
