@@ -264,21 +264,56 @@ def classify_regime(f: dict, atr_p80: float | None) -> tuple[str, float]:
     return "range", 0.6
 
 
-def evaluate(features: dict, regime: str, weights: dict[str, float] | None,
-             horizon: Horizon) -> tuple[float, float, list[dict]]:
-    """Laczy sygnaly w jeden wynik.
+def precompute(features: dict, horizon: Horizon) -> dict[str, SignalOutput]:
+    """Wylicza WSZYSTKIE sygnaly raz, bez wag.
 
-    Zwraca (wynik -1..1, pewnosc 0..1, rozbicie na wklady). Rozbicie jest
-    zwracane ZAWSZE, takze dla sygnalow o zerowym wkladzie - dashboard ma
-    pokazywac, co zostalo rozwazone, a nie tylko to, co zadzialalo.
+    Sygnaly nie zaleza od wag - zalezy od nich dopiero ich zsumowanie. Trener
+    sprawdza kilkadziesiat ukladow wag na tym samym oknie i pierwotnie liczyl
+    komplet sygnalow od nowa dla kazdego z nich. Przy dwudziestu czterech
+    instrumentach, czterdziestu oknach i szescdziesieciu probach dawalo to
+    kilkaset milionow zbednych wywolan - caly przebieg trwal okolo czterdziestu
+    minut, z czego wiekszosc to bylo liczenie w kolko tego samego.
+
+    Wynik tej funkcji jest niezmienny dla danej swiecy, wiec da sie go policzyc
+    raz i uzyc przy kazdej probie.
+    """
+    out = {}
+    for name, (fn, _family, _label) in SIGNALS.items():
+        res = fn(features, horizon)
+        if res is not None:
+            out[name] = res
+    return out
+
+
+def combine(precomputed: dict[str, SignalOutput], regime: str,
+            weights: dict[str, float] | None,
+            with_contributions: bool = True) -> tuple[float, float, list[dict]]:
+    """Skleja policzone wczesniej sygnaly w jeden wynik wedlug wag.
+
+    Musi dawac DOKLADNIE to samo co evaluate() - jest na to test.
+
+    `with_contributions=False` pomija budowanie rozbicia na wklady. Rozbicie jest
+    potrzebne WYLACZNIE do zapisu w dzienniku i pokazania w interfejsie; symulacja
+    walk-forward go nie czyta, a budowala je przy kazdej swiecy kazdej proby.
+    Profiler pokazal 4,3 miliona wywolan round() w jednym przebiegu - okolo 30%
+    calego czasu szlo na zaokraglanie liczb, ktore natychmiast ladowaly w koszu.
     """
     w = weights or DEFAULT_WEIGHTS.get(regime, DEFAULT_WEIGHTS["range"])
-    contributions = []
     total = 0.0
     conf_num = conf_den = 0.0
 
-    for name, (fn, family, label) in SIGNALS.items():
-        out = fn(features, horizon)
+    if not with_contributions:
+        for name, out in precomputed.items():
+            weight = w.get(name, 0.0)
+            total += out.score * weight * out.confidence
+            conf_num += out.confidence * weight
+            conf_den += weight
+        confidence = (conf_num / conf_den) if conf_den else 0.0
+        return _clip(total), min(1.0, confidence), []
+
+    contributions = []
+    for name, (_fn, family, label) in SIGNALS.items():
+        out = precomputed.get(name)
         if out is None:
             continue
         weight = w.get(name, 0.0)
@@ -295,3 +330,14 @@ def evaluate(features: dict, regime: str, weights: dict[str, float] | None,
 
     confidence = (conf_num / conf_den) if conf_den else 0.0
     return _clip(total), min(1.0, confidence), contributions
+
+
+def evaluate(features: dict, regime: str, weights: dict[str, float] | None,
+             horizon: Horizon) -> tuple[float, float, list[dict]]:
+    """Laczy sygnaly w jeden wynik.
+
+    Zwraca (wynik -1..1, pewnosc 0..1, rozbicie na wklady). Rozbicie jest
+    zwracane ZAWSZE, takze dla sygnalow o zerowym wkladzie - dashboard ma
+    pokazywac, co zostalo rozwazone, a nie tylko to, co zadzialalo.
+    """
+    return combine(precompute(features, horizon), regime, weights)

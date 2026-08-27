@@ -32,7 +32,7 @@ from services.engine.horizons import Horizon
 from services.engine.risk_rules import (
     DEFAULT_LIMITS, RiskState, evaluate_account, evaluate_limits, position_budget,
 )
-from services.engine.signals import classify_regime, evaluate
+from services.engine.signals import classify_regime, combine, evaluate, precompute
 
 # Parametry egzekucji - te same, ktore stosuje services/engine/loop.py.
 FEE = 0.00055
@@ -65,6 +65,29 @@ class PortfolioResult:
     base_notional: float = 0.0  # budzet na pozycje wyliczony z limitu
 
 
+def precompute_panels(panels: dict[str, list[dict]],
+                      atr_thresholds: dict[str, float | None],
+                      h: Horizon) -> dict[str, list[tuple]]:
+    """Rezim i komplet sygnalow dla kazdej swiecy - policzone RAZ.
+
+    Ani rezim, ani pojedyncze sygnaly nie zaleza od wag; zalezy od nich dopiero
+    ich zsumowanie. Trener sprawdza kilkadziesiat ukladow wag na tym samym oknie,
+    wiec bez tej pamieci podrecznej liczyl komplet sygnalow od nowa dla kazdej
+    proby - przy 24 instrumentach, 40 oknach i 60 probach to kilkaset milionow
+    zbednych wywolan.
+
+    Zwraca {symbol: [(rezim, sygnaly) na swiece]} w kolejnosci wierszy panelu.
+    """
+    cache: dict[str, list[tuple]] = {}
+    for sym, rows in panels.items():
+        atr_p80 = atr_thresholds.get(sym)
+        cache[sym] = [
+            (classify_regime(r["f"], atr_p80)[0], precompute(r["f"], h))
+            for r in rows
+        ]
+    return cache
+
+
 def _sizing(score: float, price: float, baza: float) -> tuple[float, float]:
     """Wielkosc zlecenia dokladnie jak w petli decyzyjnej."""
     notional = baza * min(1.0, abs(score) * 2)
@@ -78,7 +101,8 @@ def simulate_portfolio(panels: dict[str, list[dict]],
                        h: Horizon,
                        min_conf: float,
                        limits: dict | None = None,
-                       instrument_ids: dict[str, int] | None = None) -> PortfolioResult:
+                       instrument_ids: dict[str, int] | None = None,
+                       cache: dict[str, list[tuple]] | None = None) -> PortfolioResult:
     """Jedno konto, wszystkie instrumenty, wspolne limity.
 
     Wejscie i wyjscie po cenie NASTEPNEJ swiecy - decyzja z zamkniecia swiecy T
@@ -87,6 +111,9 @@ def simulate_portfolio(panels: dict[str, list[dict]],
     limits = limits or DEFAULT_LIMITS
     ids = instrument_ids or {s: i for i, s in enumerate(sorted(panels), start=1)}
     baza = float(position_budget(limits, len(panels)))
+    # Bez podanej pamieci podrecznej liczymy ja tutaj - wygodne przy pojedynczym
+    # wywolaniu, kosztowne przy dziesiatkach prob na tym samym oknie.
+    cache = cache if cache is not None else precompute_panels(panels, atr_thresholds, h)
 
     # Wspolna os czasu. Instrumenty moga miec rozne pokrycie, wiec bierzemy
     # sume ich znacznikow, a nie przeciecie - inaczej jeden krotszy szereg
@@ -140,9 +167,8 @@ def simulate_portfolio(panels: dict[str, list[dict]],
             rows = panels[sym]
             if nxt_idx >= len(rows):
                 continue
-            row = cur["row"]
-            regime, _ = classify_regime(row["f"], atr_thresholds.get(sym))
-            score, _conf, _ = evaluate(row["f"], regime, weights.get(regime), h)
+            regime, sygnaly = cache[sym][cur["idx"]]
+            score, _conf, _ = combine(sygnaly, regime, weights.get(regime), with_contributions=False)
             pos = positions[sym]
             enter_gate, exit_gate = gates[sym]
             same = (pos.side > 0 and score > 0) or (pos.side < 0 and score < 0)
@@ -202,9 +228,8 @@ def simulate_portfolio(panels: dict[str, list[dict]],
             rows = panels[sym]
             if cur["idx"] + 1 >= len(rows):
                 continue
-            row = cur["row"]
-            regime, _ = classify_regime(row["f"], atr_thresholds.get(sym))
-            score, conf, _ = evaluate(row["f"], regime, weights.get(regime), h)
+            regime, sygnaly = cache[sym][cur["idx"]]
+            score, conf, _ = combine(sygnaly, regime, weights.get(regime), with_contributions=False)
             enter_gate, _exit_gate = gates[sym]
             if abs(score) < enter_gate or conf < min_conf:
                 continue

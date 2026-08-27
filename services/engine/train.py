@@ -39,8 +39,12 @@ import psycopg
 from psycopg.rows import dict_row
 
 from services.engine.horizons import DEFAULT_BAR, HORIZONS, Horizon, get as get_horizon
-from services.engine.portfolio import metrics as portfolio_metrics, simulate_portfolio
-from services.engine.signals import DEFAULT_WEIGHTS, REGIMES, SIGNALS, classify_regime, evaluate
+from services.engine.portfolio import (
+    metrics as portfolio_metrics, precompute_panels, simulate_portfolio,
+)
+from services.engine.signals import (
+    DEFAULT_WEIGHTS, REGIMES, SIGNALS, classify_regime, combine, evaluate,
+)
 
 # Prog wejscia NIE jest stala. Jest percentylem rozkladu |wyniku| policzonego
 # na oknie TRENINGOWYM - a wiec dobieranym pod zadana CZESTOTLIWOSC handlu,
@@ -142,7 +146,8 @@ def atr_threshold(panel: list[dict]) -> float | None:
 
 # ------------------------------------------------------------------ symulacja
 def score_threshold(panel: list[dict], weights: dict[str, dict[str, float]],
-                    atr_p80: float | None, h: Horizon) -> tuple[float, float]:
+                    atr_p80: float | None, h: Horizon,
+                    cache: list[tuple] | None = None) -> tuple[float, float]:
     """Progi wejscia i wyjscia z rozkladu |wyniku| na TYM panelu.
 
     Wolno to policzyc wylacznie na oknie treningowym. Policzone na testowym
@@ -150,9 +155,13 @@ def score_threshold(panel: list[dict], weights: dict[str, dict[str, float]],
     w tamtym momencie nie dalo sie znac.
     """
     scores = []
-    for row in panel:
-        regime, _ = classify_regime(row["f"], atr_p80)
-        sc, conf, _ = evaluate(row["f"], regime, weights.get(regime), h)
+    for i, row in enumerate(panel):
+        if cache is not None:
+            regime, sygnaly = cache[i]
+            sc, conf, _ = combine(sygnaly, regime, weights.get(regime), with_contributions=False)
+        else:
+            regime, _ = classify_regime(row["f"], atr_p80)
+            sc, conf, _ = evaluate(row["f"], regime, weights.get(regime), h)
         if conf >= MIN_CONF:
             scores.append(abs(sc))
     if len(scores) < 50:
@@ -275,11 +284,17 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon) -> N
                        for s in aktywne}
 
         thresholds = {s: atr_threshold(train_slices[s]) for s in aktywne}
+        # Rezimy i sygnaly liczymy RAZ na okno. Bez tego kazda z prob liczyla
+        # komplet sygnalow od nowa, choc nie zaleza one od wag.
+        cache_tr = precompute_panels(train_slices, thresholds, h)
+        cache_te = precompute_panels({s: v for s, v in test_slices.items() if v},
+                                     thresholds, h)
         # Progi wyniku ustalane raz na okno, z zalozen poczatkowych i wylacznie
         # na danych treningowych. Te same progi obowiazuja wszystkie hipotezy
         # w tym oknie - inaczej kazda konfiguracja dostawalaby wlasny prog
         # dobrany pod siebie, co jest kolejnym stopniem swobody do przeuczenia.
-        gates = {s: score_threshold(train_slices[s], DEFAULT_WEIGHTS, thresholds[s], h)
+        gates = {s: score_threshold(train_slices[s], DEFAULT_WEIGHTS, thresholds[s], h,
+                                    cache_tr[s])
                  for s in aktywne}
 
         # --- dobor wag WYLACZNIE na oknie treningowym ------------------------
@@ -288,15 +303,15 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon) -> N
         # limitowi lacznej ekspozycji i kill-switchowi, wiec uklad wag, ktory
         # wygląda dobrze na kazdym instrumencie z osobna, moze byc niewykonalny,
         # gdy wszystkie chca wejsc jednoczesnie.
-        def ocen(w, sl):
+        def ocen(w, sl, c):
             res = simulate_portfolio(sl, w, thresholds, gates, h, MIN_CONF,
-                                     instrument_ids=inst_ids)
+                                     instrument_ids=inst_ids, cache=c)
             return portfolio_metrics(res, h.min_trades)
 
         best_w, best_score = DEFAULT_WEIGHTS, -1e9
         for _ in range(trials_per_window):
             cand = random_weights(rng)
-            score = ocen(cand, train_slices)["sharpe"]
+            score = ocen(cand, train_slices, cache_tr)["sharpe"]
             cfg_hash = hashlib.sha256(json.dumps(cand, sort_keys=True).encode()).digest()
             cur.execute(
                 "INSERT INTO learn.hypothesis_trial (model_id, config_hash, params, n_windows)"
@@ -307,14 +322,14 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon) -> N
 
         # Zalozenia poczatkowe tez sa kandydatem - jesli losowanie nie potrafi ich
         # pobic na oknie treningowym, to znaczy, ze nie ma czego kalibrowac.
-        base_score = ocen(DEFAULT_WEIGHTS, train_slices)["sharpe"]
+        base_score = ocen(DEFAULT_WEIGHTS, train_slices, cache_tr)["sharpe"]
         if base_score > best_score:
             best_w, best_score = DEFAULT_WEIGHTS, base_score
 
         # --- ocena OUT-OF-SAMPLE --------------------------------------------
         oos_res = simulate_portfolio(
             {s: v for s, v in test_slices.items() if v}, best_w, thresholds, gates, h,
-            MIN_CONF, instrument_ids=inst_ids)
+            MIN_CONF, instrument_ids=inst_ids, cache=cache_te)
         oos_m = portfolio_metrics(oos_res, h.min_trades)
         if not oos_res.equity_curve:
             start += timedelta(days=h.step_days)

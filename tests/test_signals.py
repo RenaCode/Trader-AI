@@ -117,3 +117,27 @@ def test_wynik_zlozony_miesci_sie_w_zakresie():
     wynik, pewnosc, _ = evaluate(skrajne, "high_vol", None, H4)
     assert -1.0 <= wynik <= 1.0
     assert 0.0 <= pewnosc <= 1.0
+
+
+def test_szybka_sciezka_daje_ten_sam_wynik():
+    """Pominiecie rozbicia na wklady nie moze zmieniac wyniku ani pewnosci.
+
+    Rozbicie jest potrzebne tylko do dziennika i interfejsu; symulacja go nie
+    czyta. Ale optymalizacja, ktora po cichu zmienia wynik, jest gorsza niz brak
+    optymalizacji - stad ten test.
+    """
+    from services.engine.signals import combine, precompute
+
+    for f in (
+        cechy(rsi=78.0, rel_strength=0.9, ret_short=12.0, ret_mid=25.0, ret_long=60.0),
+        cechy(rsi=18.0, rel_strength=-0.85, range_pos=0.03, funding_z=-3.1),
+        cechy(),                                   # wszystko neutralne
+        cechy(volume_z=4.0, ret_short=-9.0),
+    ):
+        pc = precompute(f, H4)
+        for rezim in ("trend_up", "range", "high_vol"):
+            pelne = combine(pc, rezim, None, with_contributions=True)
+            szybkie = combine(pc, rezim, None, with_contributions=False)
+            assert pelne[0] == szybkie[0], f"wynik rozjechany w reżimie {rezim}"
+            assert pelne[1] == szybkie[1], f"pewność rozjechana w reżimie {rezim}"
+            assert len(pelne[2]) == len(SIGNALS) and szybkie[2] == []

@@ -5,6 +5,8 @@ wspolna ekspozycje, wspolny kill-switch i to, ze zatrzymanie silnika naprawde
 zatrzymuje wejscia na WSZYSTKICH instrumentach, nie tylko na tym, ktory stracil.
 """
 from datetime import datetime, timedelta, timezone
+
+import pytest
 from decimal import Decimal
 
 from services.engine.horizons import get as get_horizon
@@ -205,3 +207,81 @@ def test_obsuniecie_liczone_z_krzywej_kapitalu():
     res = uruchom({"AAA": panel(40, 100.0, 60.0)}, LIMITY_LUZNE)
     m = metrics(res, min_trades=1)
     assert m["max_dd"] < 0, "spadek ceny o 40% musi zostawic slad w obsunieciu"
+
+
+def test_pamiec_podreczna_daje_identyczny_wynik():
+    """Optymalizacja nie moze zmieniac wyniku.
+
+    Bez tego testu przyspieszenie treningu bylo zmiana zachowania udajaca
+    zmiane wydajnosci - a to najgorszy rodzaj optymalizacji.
+    """
+    from services.engine.portfolio import precompute_panels
+
+    # Cechy MUSZA sie roznic miedzy swiecami, inaczej test nie wykryje blednego
+    # indeksowania pamieci podrecznej - przy identycznych swiecach kazda pozycja
+    # w cache jest wymienna z kazda inna.
+    import math
+    panele = {}
+    for i in range(4):
+        rows = []
+        for j in range(40):
+            faza = math.sin((j + i * 3) / 4.0)
+            rows.append({
+                "t": T0 + timedelta(hours=4 * j),
+                "f": cechy_kupuj() | {"rsi": 50 + 40 * faza,
+                                      "range_pos": 0.5 + 0.45 * faza,
+                                      "rel_strength": faza,
+                                      "ret_short": 20.0 * faza},
+                "price": 100.0 + 20 * faza,
+            })
+        panele[f"I{i}"] = rows
+    atr = {s: 2.0 for s in panele}
+    gates = {s: (0.05, 0.02) for s in panele}
+
+    bez = simulate_portfolio(panele, DEFAULT_WEIGHTS, atr, gates, H, 0.05, LIMITY_LUZNE)
+    cache = precompute_panels(panele, atr, H)
+    z = simulate_portfolio(panele, DEFAULT_WEIGHTS, atr, gates, H, 0.05, LIMITY_LUZNE,
+                           cache=cache)
+
+    assert len(bez.trades) == len(z.trades)
+    for a, b in zip(bez.trades, z.trades):
+        assert a["ret"] == b["ret"]
+        assert a["symbol"] == b["symbol"]
+    assert bez.max_exposure == z.max_exposure
+    assert [e for _, e in bez.equity_curve] == [e for _, e in z.equity_curve]
+
+
+def test_pamiec_podreczna_odpowiada_swiecom_po_indeksie():
+    """Sprawdza SAMA pamiec podreczna, nie zgodnosc dwoch sciezek.
+
+    Poprzedni test porownywal wywolanie z jawna pamiecia z wywolaniem bez niej -
+    ale to drugie buduje ta sama pamiec wewnetrznie, wiec oba byly jednakowo
+    bledne, gdy blad siedzial w samym budowaniu. Wykryl to dopiero kanarek
+    z odwrocona kolejnoscia, ktory przeszedl mimo wstrzyknietego bledu.
+
+    Tutaj punktem odniesienia jest evaluate() liczone wprost z cech danej swiecy.
+    """
+    import math
+
+    from services.engine.portfolio import precompute_panels
+    from services.engine.signals import combine, evaluate
+
+    rows = []
+    for j in range(30):
+        faza = math.sin(j / 3.0)
+        rows.append({
+            "t": T0 + timedelta(hours=4 * j),
+            "f": cechy_kupuj() | {"rsi": 50 + 40 * faza, "rel_strength": faza,
+                                  "range_pos": 0.5 + 0.45 * faza},
+            "price": 100.0 + j,
+        })
+    cache = precompute_panels({"AAA": rows}, {"AAA": 2.0}, H)["AAA"]
+
+    assert len(cache) == len(rows)
+    for i, r in enumerate(rows):
+        rezim, sygnaly = cache[i]
+        z_cache = combine(sygnaly, rezim, None)
+        wprost = evaluate(r["f"], rezim, None, H)
+        assert z_cache[0] == pytest.approx(wprost[0], abs=1e-12), \
+            f"świeca {i}: pamięć podręczna nie odpowiada cechom tej świecy"
+        assert z_cache[1] == pytest.approx(wprost[1], abs=1e-12)
