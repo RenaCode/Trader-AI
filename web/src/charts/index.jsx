@@ -17,31 +17,36 @@ function axisPad(ticks, fmt) {
 }
 
 /* Mierzy realna szerokosc kontenera i uzywa jej jako szerokosci viewBox.
-   Bez tego SVG z viewBox="0 0 800 H" i sztywna wysokoscia renderuje sie w skali
-   dopasowanej do WYSOKOSCI (domyslne preserveAspectRatio="xMidYMid meet"), czyli
-   na 800 px wysrodkowanych - wykres zajmowal polowe karty, a reszta byla pusta.
-   Mapowanie 1:1 daje przy okazji ostry tekst osi. */
-function useWidth(fallback = 800) {
-  const ref = useRef(null);
-  const [w, setW] = useState(fallback);
+   Bez tego SVG z viewBox o stalej szerokosci i sztywna wysokoscia renderuje sie
+   w skali dopasowanej do WYSOKOSCI, czyli na ~800 px wysrodkowanych - wykres
+   zajmowal polowe karty, a reszta byla pusta.
 
-  const measure = useCallback(() => {
-    if (ref.current) {
-      const next = ref.current.clientWidth;
+   Celowo CALLBACK ref, nie useRef + useEffect: czesc wykresow zwraca komunikat
+   "brak danych" ZANIM zamontuje wlasny kontener, wiec przy pierwszym renderze
+   nie ma czego obserwowac, a efekt z pusta lista zaleznosci juz sie nie powtorzy.
+   Callback ref uruchamia sie za kazdym razem, gdy wezel pojawia sie lub znika. */
+function useWidth(fallback = 800) {
+  const [w, setW] = useState(fallback);
+  const observer = useRef(null);
+
+  const ref = useCallback((node) => {
+    if (observer.current) {
+      observer.current.disconnect();
+      observer.current = null;
+    }
+    if (!node) return;
+
+    const measure = () => {
+      const next = node.clientWidth;
       if (next > 0) setW(next);
+    };
+    measure();
+
+    if (typeof ResizeObserver !== 'undefined') {
+      observer.current = new ResizeObserver(measure);
+      observer.current.observe(node);
     }
   }, []);
-
-  useEffect(() => {
-    measure();
-    if (typeof ResizeObserver === 'undefined') {
-      window.addEventListener('resize', measure);
-      return () => window.removeEventListener('resize', measure);
-    }
-    const ro = new ResizeObserver(measure);
-    if (ref.current) ro.observe(ref.current);
-    return () => ro.disconnect();
-  }, [measure]);
 
   return [ref, w];
 }
@@ -105,7 +110,6 @@ export function AreaChart({ data, height = 220, valueKey = 'v', labelFmt, valueF
     <div className="chart-wrap" ref={ref}>
       {!hasPts ? <div className="empty">Brak danych do wykresu</div> : (
       <svg viewBox={`0 0 ${w} ${h}`} width="100%" height={h} role="img"
-           preserveAspectRatio="none"
            onMouseMove={onMove} onMouseLeave={() => setHover(null)}>
         <defs>
           <linearGradient id={`g-${gid}`} x1="0" y1="0" x2="0" y2="1">
@@ -178,8 +182,7 @@ export function BarChart({ data, height = 200, valueKey = 'v', labelKey = 'label
 
   return (
     <div className="chart-wrap" ref={ref}>
-      <svg viewBox={`0 0 ${w} ${h}`} width="100%" height={h} role="img"
-           preserveAspectRatio="none">
+      <svg viewBox={`0 0 ${w} ${h}`} width="100%" height={h} role="img">
         {ticks.map((tv) => {
           const y = PAD.t + ih - ((tv - lo) / span) * ih;
           return (
@@ -245,8 +248,7 @@ export function CalibrationChart({ data, height = 300 }) {
 
   return (
     <div className="chart-wrap" ref={ref}>
-      <svg viewBox={`0 0 ${w} ${height}`} width="100%" height={height} role="img"
-           preserveAspectRatio="none">
+      <svg viewBox={`0 0 ${w} ${height}`} width="100%" height={height} role="img">
         {[0, 0.25, 0.5, 0.75, 1].map((g) => (
           <g key={g}>
             <line x1={sx(0)} y1={sy(g)} x2={sx(1)} y2={sy(g)} stroke="rgba(255,255,255,0.05)" />
