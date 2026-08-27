@@ -187,27 +187,44 @@ Pozostaje: kopia leży na **tym samym serwerze** co baza. Chroni przed pomyłką
 w SQL i uszkodzeniem wolumenu, nie chroni przed utratą maszyny. Zalecenie:
 odkładanie zrzutu na zasób zewnętrzny.
 
-### 3.3 Kod TOTP da się użyć dwa razy
+### 3.3 Kod TOTP da się użyć dwa razy — NAPRAWIONE
 
-`verify_totp(valid_window=1)` przyjmuje kod przez ~90 sekund i nigdzie nie
-zapisujemy, że dany kod już zużyto. Przechwycony kod działa ponownie w tym oknie.
-Standardowa naprawa: zapis ostatniego zaakceptowanego kroku czasowego.
-Priorytet obniżony, bo 2FA jest obecnie wyłączone — ale **przed** włączeniem
-trzeba to zrobić.
+`verify_totp(valid_window=1)` przyjmował kod przez ~90 sekund i nigdzie nie
+zapisywaliśmy, że kod już zużyto — przechwycony działał w tym oknie wielokrotnie.
+RFC 6238 §5.2 wymaga wprost odrzucenia drugiego użycia tego samego kroku.
 
-### 3.4 `constant_time_eq` jest kodem martwym
+Funkcja zwraca teraz numer zaakceptowanego kroku zamiast `bool`; krok ląduje
+w `app.totp_secret.last_step` (migracja 0015) i jest podawany przy następnym
+sprawdzeniu. Zapis idzie **przed** utworzeniem sesji — odwrotna kolejność
+zostawiałaby okno, w którym nieudany kolejny krok pozostawia kod ważny.
+9 testów, w tym kanarek sprawdzający, że ochrona **nie** blokuje prawidłowych
+kolejnych logowań.
 
-Funkcja napisana specjalnie do porównań kryptograficznych, nieużywana nigdzie.
-Porównanie tokenu CSRF robi zwykłe `!=`. Praktyczne ryzyko jest tu bliskie zeru
-(atakujący i tak nie odczyta ciasteczka), ale skoro funkcja istnieje, powinna być
-podpięta albo usunięta. Zostawianie nieużywanego kodu bezpieczeństwa tworzy
-złudzenie ochrony.
+### 3.4 `constant_time_eq` był kodem martwym — NAPRAWIONE
 
-### 3.5 Brak procedury rotacji `SECRETS_KEY`
+Funkcja napisana specjalnie do porównań kryptograficznych i nieużywana nigdzie.
+Podpięta do porównania kodu TOTP przy okazji §3.3.
 
-Klucz nie ma wersji. Jego zmiana czyni wszystkie zaszyfrowane wartości
-nieodczytywalnymi — bez ostrzeżenia, przy pierwszym odczycie. Zalecenie: numer
-wersji klucza w rekordzie i obsługa dwóch kluczy naraz na czas migracji.
+Zabawny epilog: przepisywanie `SecretBox` (rotacja klucza) usunęło ją godzinę
+później razem z blokiem, w którym siedziała. Moduł nadal importował się
+poprawnie, bo `NameError` wystąpiłby dopiero w czasie wywołania — wyłapał to
+dopiero import w teście. Kanarek potwierdza, że funkcja jest naprawdę używana:
+jej usunięcie łamie 8 testów TOTP.
+
+### 3.5 Rotacja `SECRETS_KEY` — WDROŻONA
+
+Klucz bez możliwości wymiany jest zobowiązaniem na zawsze: jego zmiana czyniła
+wszystkie zaszyfrowane wartości nieodczytywalnymi, bez ostrzeżenia, dopiero
+przy pierwszym odczycie.
+
+`SECRETS_KEY_OLD` (opcjonalny) trzyma poprzedni klucz — odszyfrowanie próbuje
+bieżącego, potem starego; zapis idzie zawsze bieżącym. Format szyfrogramu się
+nie zmienia, więc **nie ma migracji danych**.
+
+Procedura: ustaw stary + nowy klucz → wdrożenie → `services/rotate_secrets.py
+--wykonaj` → usunięcie starego klucza. Skrypt jest idempotentny, przepisuje
+wiersz po wierszu w osobnych transakcjach i domyślnie tylko raportuje. Osobny
+test-kanarek pokazuje, dlaczego kroku z przepisaniem nie wolno pominąć.
 
 ### 3.6 Limit wydatków na Anthropica — WDROŻONY
 
@@ -237,14 +254,18 @@ dla której istnieje.
 
 Pozostaje: `security.py` i routery API.
 
-### 3.8 Osierocone dane i redundantne agregaty
+### 3.8 Redundantne agregaty — USUNIĘTE, dane osierocone — ZOSTAWIONE
 
-- 25 920 świec 15-minutowych, nieużywanych przez żaden horyzont.
-- Agregat ciągły `market.candle_1h` liczy godzinówki z 1-minutówek, a od dziś
-  mamy też własne świece Bybita pod `timeframe='1h'`. Dwa źródła tej samej
-  prawdy to dokładnie to, przed czym ostrzega komentarz w migracji 0002.
-  **Zmierzyłem rozjazd**: średnio 0,000006%, maksymalnie 0,033%. Praktycznie
-  zgodne, ale należy wybrać jedno źródło i to zapisać.
+Agregaty ciągłe `candle_5m`, `candle_1h`, `candle_1d` nie były odczytywane przez
+żaden fragment kodu, a mimo to trzy polityki odświeżały je co 1–5 minut. Tworzyły
+przy tym drugie źródło tej samej prawdy — dokładnie to, przed czym ostrzegał
+komentarz w migracji 0002. Zgodność zmierzona przed usunięciem: średnio
+0,000006%, maksymalnie 0,033%. Usunięte migracją 0016.
+
+25 920 świec 15-minutowych **zostawiam**, choć też są nieużywane. To prawdziwe
+obserwacje rynku kosztujące ~2 MB; kasowanie realnych danych dla porządku nie
+daje nic w zamian, a odtworzyć ich może się nie dać. Korygując własne wcześniejsze
+sformułowanie: „osierocone" nie jest samo w sobie powodem do usunięcia.
 
 ---
 
@@ -272,12 +293,16 @@ Uczciwość wymaga wskazania też tego, co się broni:
 
 ## 5. Kolejność, w jakiej to bym robił
 
-1. **Ochrona TOTP przed powtórzeniem** (§3.3) — zanim włączymy 2FA.
-2. Testy `security.py` i routerów API (§3.7 — reguły ryzyka i symulacja
-   portfela mają już 23 testy).
-3. Odkładanie kopii poza serwer (§3.2).
-4. Rotacja `SECRETS_KEY` (§3.5), sprzątanie danych (§3.8), `constant_time_eq`
-   (§3.4).
+Wszystkie pozycje z pierwotnej listy są zamknięte. Zostają dwie rzeczy, które
+świadomie zostawiam do decyzji:
+
+1. **Odkładanie kopii zapasowej poza serwer** (§3.2). Kopia leży dziś na tej
+   samej maszynie co baza — chroni przed pomyłką w SQL i uszkodzeniem wolumenu,
+   nie chroni przed utratą serwera. To wymaga zewnętrznego zasobu i decyzji,
+   gdzie ma trafiać.
+2. **Testy routerów API** (§3.7). Wymagają bazy testowej, więc są innej klasy
+   niż 55 testów czystej logiki, które już są.
 
 Zrobione w trakcie tego przeglądu: §3.1 (rola bazy), §3.2 (kopie zapasowe),
-§3.6 (limit wydatków), §2.3 (kanały RSS), część §3.7 (testy reguł ryzyka).
+§3.3 (TOTP), §3.4 (`constant_time_eq`), §3.5 (rotacja klucza), §3.6 (limit
+wydatków), §3.7 (55 testów), §3.8 (agregaty), §2.3 (kanały RSS).
