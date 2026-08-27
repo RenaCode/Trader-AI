@@ -132,14 +132,32 @@ def content_hash(title: str, summary: str) -> bytes:
     return hashlib.sha256(f"{title}\n{summary}".encode()).digest()
 
 
+# Naglowek domyslny. Zawiera adres kontaktowy, bo SEC tego WYMAGA w swojej
+# polityce dostepu automatycznego i bez niego oddaje 403.
+UA_DEFAULT = "Trader-AI/0.1 (+https://trader.renacode.com; mbeczynski@gmail.com)"
+
+# Zapasowy naglowek przegladarkowy. Czesc wydawcow (np. Bitcoin Magazine za
+# Cloudflare) odrzuca kazdy niebrowserowy User-Agent. Uzywany WYLACZNIE po
+# odmowie 403 - nie udajemy przegladarki tam, gdzie uczciwy naglowek wystarcza.
+UA_FALLBACK = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+               "(KHTML, like Gecko) Chrome/120.0 Safari/537.36")
+
+
 async def fetch_feed(client: httpx.AsyncClient, url: str) -> tuple[list, str]:
     """Zwraca (wpisy, status). Blad kanalu nie moze zatrzymac calego cyklu."""
     try:
         r = await client.get(url, follow_redirects=True,
-                             headers={"User-Agent": "Trader-AI/0.1 (+https://trader.renacode.com)"})
+                             headers={"User-Agent": UA_DEFAULT})
+        if r.status_code == 403:
+            r = await client.get(url, follow_redirects=True,
+                                 headers={"User-Agent": UA_FALLBACK})
         if r.status_code != 200:
             return [], f"http_{r.status_code}"
         parsed = feedparser.parse(r.content)
+        # Kanal, ktory oddaje 200 i zero wpisow, jest rownie zepsuty co 403,
+        # tylko ciszej. Rozrozniamy go, zeby nie wygladal na zdrowy w UI.
+        if not parsed.entries:
+            return [], "pusty_kanal"
         return parsed.entries, "ok"
     except httpx.TimeoutException:
         return [], "timeout"
