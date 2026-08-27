@@ -13,7 +13,7 @@ const BASE = process.env.BASE_URL || 'http://localhost:5174';
 const LOGIN = process.env.TEST_LOGIN || 'admin';
 const PASSWORD = process.env.TEST_PASSWORD;
 
-const TABS = ['Stan', 'Stopień nauki', 'Ruchy', 'Źródła', 'Ryzyko'];
+const TABS = ['Stan', 'Stopień nauki', 'Ruchy', 'Źródła', 'Ryzyko', 'Ustawienia', 'Profil'];
 
 let failures = 0;
 const check = (ok, label, detail = '') => {
@@ -88,6 +88,14 @@ try {
   await page.locator('.engine-tab').nth(1).click();
   await page.waitForTimeout(2500);
   check((await page.locator('.glass-card').count()) > 0, 'drugi silnik sie wyrenderowal');
+
+  // --- dzwonek powiadomien -------------------------------------------------
+  await page.click('.bell-btn');
+  await page.waitForTimeout(1200);
+  check(await page.locator('.bell-panel').count() === 1, 'panel powiadomien sie otwiera');
+  await page.keyboard.press('Escape');
+  await page.waitForTimeout(400);
+  check(await page.locator('.bell-panel').count() === 0, 'panel zamyka sie klawiszem Escape');
 
   // --- wylogowanie ---------------------------------------------------------
   await page.click('button:has-text("Wyloguj")');

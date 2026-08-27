@@ -93,11 +93,16 @@ async def backfill_symbol(adapter, conn, instrument_id: int, symbol: str,
         if last <= start:      # brak postepu - zabezpieczenie przed petla
             break
         start = last + step
-        print(f"\r  {symbol:10s} {total:>7d} swiec, do {last:%Y-%m-%d %H:%M}", end="", flush=True)
+        # Postep w jednej linii tylko na terminalu. W przekierowanym logu \r nie
+        # dziala i produkuje jedna wielometrowa linie, ktorej nie da sie czytac.
+        if sys.stdout.isatty():
+            print(f"\r  {symbol:10s} {total:>7d} swiec, do {last:%Y-%m-%d %H:%M}",
+                  end="", flush=True)
         # Limit Bybit to 120 zapytan / 5 s; 50 ms przerwy trzyma nas daleko ponizej.
         await asyncio.sleep(0.05)
 
-    print(f"\r  {symbol:10s} {total:>7d} swiec{' ' * 30}")
+    print(f"\r  {symbol:10s} {total:>7d} swiec{' ' * 30}" if sys.stdout.isatty()
+          else f"  {symbol:10s} {total:>7d} swiec")
     return total
 
 

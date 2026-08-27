@@ -5,6 +5,9 @@ import Learning from './components/Learning';
 import Moves from './components/Moves';
 import Sources from './components/Sources';
 import Risk from './components/Risk';
+import Settings from './components/Settings';
+import Profile from './components/Profile';
+import Bell from './components/Bell';
 import { get, post, useApi } from './utils/api';
 
 const SECTIONS = [
@@ -13,6 +16,8 @@ const SECTIONS = [
   { key: 'moves',    label: 'Ruchy',          Component: Moves },
   { key: 'sources',  label: 'Źródła',         Component: Sources },
   { key: 'risk',     label: 'Ryzyko',         Component: Risk },
+  { key: 'settings', label: 'Ustawienia',     Component: Settings, global: true },
+  { key: 'profile',  label: 'Profil',         Component: Profile,  global: true },
 ];
 
 const ENGINE_LABEL = { crypto: 'Krypto', equity: 'Giełda' };
@@ -111,6 +116,7 @@ export default function App() {
           </div>
         )}
         <div className="user-menu">
+          <Bell />
           <span className="user-chip">
             <span className="avatar">{(user?.login || '?').slice(0, 1).toUpperCase()}</span>
             {user?.login}
@@ -147,7 +153,8 @@ export default function App() {
       </nav>
 
       {engine ? (
-        <Active key={`${engine}-${section}`} engine={engine} onUnauthorized={onUnauthorized} />
+        <Active key={`${engine}-${section}`} engine={engine} user={user}
+                onUserChanged={checkSession} onUnauthorized={onUnauthorized} />
       ) : (
         <div className="empty loading-pulse">Wczytywanie silników…</div>
       )}

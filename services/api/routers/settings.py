@@ -1,0 +1,184 @@
+"""Sekrety aplikacji (klucz Anthropic) i portfele obserwowane."""
+from __future__ import annotations
+
+import re
+
+from fastapi import APIRouter, Depends, HTTPException, Request
+from pydantic import BaseModel, Field
+
+from ..auth import audit, current_user, require_csrf
+from ..db import execute, fetch_all, fetch_one
+from ..security import SecretBox
+
+router = APIRouter(prefix="/api/settings", tags=["settings"])
+
+# Rejestr znanych sekretow. Zamkniety zbior, zeby przez to API nie dalo sie
+# wstawic dowolnego klucza do bazy.
+KNOWN_SECRETS = {
+    "anthropic_api_key": {
+        "label": "Klucz API Anthropic",
+        "description": "Używany przez skaner wiadomości do filtrowania i analizy artykułów.",
+        "pattern": r"^sk-ant-[A-Za-z0-9_\-]{20,}$",
+        "pattern_hint": "Klucz Anthropic zaczyna się od 'sk-ant-'.",
+    },
+}
+
+# Wzorce adresow. Celowo luzne - chodzi o wylapanie oczywistej pomylki
+# (np. wklejonej frazy odzyskiwania), nie o pelna walidacje kryptograficzna.
+ADDRESS_PATTERNS = {
+    "bitcoin": r"^(bc1[a-z0-9]{25,90}|[13][a-km-zA-HJ-NP-Z1-9]{25,34})$",
+    "ethereum": r"^0x[a-fA-F0-9]{40}$",
+}
+XPUB_PATTERN = r"^([xyz]pub[1-9A-HJ-NP-Za-km-z]{100,120})$"
+
+# Fraza odzyskiwania to 12-24 slowa. Jesli ktos wklei ja w pole adresu, musimy
+# to wylapac i odmowic - zapisanie jej oznaczaloby oddanie kontroli nad srodkami.
+SEED_PHRASE = re.compile(r"^(\s*[a-z]{3,8}\s+){11,23}[a-z]{3,8}\s*$", re.I)
+
+
+class SecretBody(BaseModel):
+    value: str = Field(min_length=8, max_length=512)
+
+
+class WalletBody(BaseModel):
+    chain: str = Field(pattern="^(bitcoin|ethereum)$")
+    label: str = Field(min_length=1, max_length=64)
+    identifier: str = Field(min_length=10, max_length=200)
+
+
+@router.get("/secrets")
+async def list_secrets(user: dict = Depends(current_user)):
+    rows = await fetch_all("SELECT name, hint, updated_at FROM app.secret")
+    have = {r["name"]: r for r in rows}
+    return [
+        {
+            "name": name,
+            "label": meta["label"],
+            "description": meta["description"],
+            "is_set": name in have,
+            "hint": have[name]["hint"] if name in have else None,
+            "updated_at": have[name]["updated_at"].isoformat() if name in have else None,
+        }
+        for name, meta in KNOWN_SECRETS.items()
+    ]
+
+
+@router.put("/secrets/{name}", dependencies=[Depends(require_csrf)])
+async def set_secret(name: str, body: SecretBody, request: Request,
+                     user: dict = Depends(current_user)):
+    meta = KNOWN_SECRETS.get(name)
+    if not meta:
+        raise HTTPException(404, f"Nieznany sekret: {name}")
+
+    value = body.value.strip()
+    if meta.get("pattern") and not re.match(meta["pattern"], value):
+        raise HTTPException(400, meta["pattern_hint"])
+
+    await execute(
+        """
+        INSERT INTO app.secret (name, value_enc, hint, description, updated_by)
+        VALUES (%s,%s,%s,%s,%s)
+        ON CONFLICT (name) DO UPDATE
+          SET value_enc = EXCLUDED.value_enc, hint = EXCLUDED.hint,
+              updated_at = now(), updated_by = EXCLUDED.updated_by
+        """,
+        (name, SecretBox().encrypt(value), "••••" + value[-4:], meta["description"], user["id"]),
+    )
+    # Do audytu trafia sam FAKT zmiany, nigdy wartosc.
+    await audit("secret.set", user_id=user["id"], entity="app.secret", entity_id=name,
+                request=request)
+    return {"ok": True, "hint": "••••" + value[-4:]}
+
+
+@router.delete("/secrets/{name}", dependencies=[Depends(require_csrf)])
+async def delete_secret(name: str, request: Request, user: dict = Depends(current_user)):
+    if name not in KNOWN_SECRETS:
+        raise HTTPException(404, f"Nieznany sekret: {name}")
+    await execute("DELETE FROM app.secret WHERE name = %s", (name,))
+    await audit("secret.delete", user_id=user["id"], entity="app.secret", entity_id=name,
+                request=request)
+    return {"ok": True}
+
+
+# ------------------------------------------------------------------ portfele
+@router.get("/wallets")
+async def list_wallets(user: dict = Depends(current_user)):
+    rows = await fetch_all(
+        "SELECT id, chain, label, address, xpub, balance, balance_at, last_error, created_at"
+        " FROM app.wallet WHERE user_id = %s ORDER BY chain, label",
+        (user["id"],),
+    )
+    return [
+        {
+            "id": r["id"], "chain": r["chain"], "label": r["label"],
+            # xpub pokazujemy skrocony - pelny pozwala wyliczyc wszystkie adresy,
+            # co jest problemem prywatnosci, choc nie bezpieczenstwa srodkow.
+            "identifier": r["address"] or (r["xpub"][:14] + "…" + r["xpub"][-6:] if r["xpub"] else ""),
+            "kind": "adres" if r["address"] else "xpub",
+            "balance": float(r["balance"]) if r["balance"] is not None else None,
+            "balance_at": r["balance_at"].isoformat() if r["balance_at"] else None,
+            "last_error": r["last_error"],
+            "created_at": r["created_at"].isoformat(),
+        }
+        for r in rows
+    ]
+
+
+@router.post("/wallets", dependencies=[Depends(require_csrf)])
+async def add_wallet(body: WalletBody, request: Request, user: dict = Depends(current_user)):
+    ident = body.identifier.strip()
+
+    # Najwazniejsza kontrola w tym module. Fraza odzyskiwania daje pelna kontrole
+    # nad srodkami - nie moze trafic do bazy aplikacji webowej pod zadnym pozorem.
+    if SEED_PHRASE.match(ident):
+        raise HTTPException(
+            400,
+            "To wygląda na frazę odzyskiwania. Ten system NIGDY nie przechowuje fraz "
+            "odzyskiwania ani kluczy prywatnych — wyciek bazy oznaczałby nieodwracalną "
+            "utratę środków. Podaj wyłącznie adres portfela albo klucz publiczny (xpub); "
+            "do śledzenia salda to w zupełności wystarczy.",
+        )
+    if re.match(r"^[5KL][1-9A-HJ-NP-Za-km-z]{50,51}$", ident) or re.match(r"^(0x)?[a-fA-F0-9]{64}$", ident):
+        raise HTTPException(
+            400,
+            "To wygląda na klucz prywatny. Ten system przechowuje wyłącznie dane "
+            "pozwalające OBSERWOWAĆ portfel — adres albo xpub. Klucz prywatny nie jest "
+            "potrzebny i nie zostanie zapisany.",
+        )
+
+    is_xpub = bool(re.match(XPUB_PATTERN, ident))
+    is_address = bool(re.match(ADDRESS_PATTERNS[body.chain], ident))
+    if not (is_xpub or is_address):
+        raise HTTPException(
+            400,
+            f"To nie wygląda na adres {body.chain} ani na klucz publiczny xpub. "
+            "Sprawdź, czy nie ma literówki.",
+        )
+
+    try:
+        await execute(
+            "INSERT INTO app.wallet (user_id, chain, label, address, xpub)"
+            " VALUES (%s,%s,%s,%s,%s)",
+            (user["id"], body.chain, body.label.strip(),
+             None if is_xpub else ident, ident if is_xpub else None),
+        )
+    except Exception as e:                                      # noqa: BLE001
+        if "wallet_user_id_chain_label_key" in str(e):
+            raise HTTPException(409, "Portfel o tej etykiecie już istnieje")
+        raise
+
+    await audit("wallet.add", user_id=user["id"], entity="app.wallet",
+                entity_id=body.label, request=request)
+    return {"ok": True, "kind": "xpub" if is_xpub else "adres"}
+
+
+@router.delete("/wallets/{wallet_id}", dependencies=[Depends(require_csrf)])
+async def delete_wallet(wallet_id: int, request: Request, user: dict = Depends(current_user)):
+    row = await fetch_one("SELECT label FROM app.wallet WHERE id = %s AND user_id = %s",
+                          (wallet_id, user["id"]))
+    if not row:
+        raise HTTPException(404, "Nie ma takiego portfela")
+    await execute("DELETE FROM app.wallet WHERE id = %s", (wallet_id,))
+    await audit("wallet.delete", user_id=user["id"], entity="app.wallet",
+                entity_id=row["label"], request=request)
+    return {"ok": True}

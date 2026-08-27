@@ -35,6 +35,8 @@ import psycopg
 from anthropic import AsyncAnthropic
 from psycopg.rows import dict_row
 
+from services.api.security import SecretBox
+
 ANALYSIS_MODEL = os.environ.get("ANALYSIS_MODEL", "claude-opus-5")
 TRIAGE_MODEL = os.environ.get("TRIAGE_MODEL", "claude-haiku-4-5")
 
@@ -105,6 +107,25 @@ Wypełniaj pola według tych znaczeń:
 
 Nie zawyżaj pewności. System mierzy kalibrację twoich ocen i rozjazd między
 deklarowaną a rzeczywistą trafnością obniża wagę tej cechy."""
+
+
+def anthropic_key(conn) -> str:
+    """Klucz z bazy (wpisany w interfejsie), a w razie jego braku ze srodowiska.
+
+    Kolejnosc jest celowa: klucz podany przez uzytkownika w UI ma pierwszenstwo,
+    bo to on jest wymieniany bez redeployu. Zmienna srodowiskowa zostaje jako
+    zapasowa sciezka dla CI i uruchomien lokalnych.
+    """
+    row = conn.execute("SELECT value_enc FROM app.secret WHERE name = 'anthropic_api_key'").fetchone()
+    if row:
+        return SecretBox().decrypt(bytes(row[0]))
+    env = os.environ.get("ANTHROPIC_API_KEY")
+    if env:
+        return env
+    sys.exit(
+        "Brak klucza Anthropic. Wpisz go w interfejsie (Ustawienia -> Klucz API Anthropic) "
+        "albo ustaw ANTHROPIC_API_KEY."
+    )
 
 
 def content_hash(title: str, summary: str) -> bytes:
@@ -329,12 +350,10 @@ async def main() -> int:
     url = os.environ.get("DATABASE_URL")
     if not url:
         sys.exit("DATABASE_URL nie jest ustawiony")
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        sys.exit("ANTHROPIC_API_KEY nie jest ustawiony")
 
-    ai = AsyncAnthropic()
     async with httpx.AsyncClient(timeout=20.0) as http:
         with psycopg.connect(url) as conn:
+            ai = AsyncAnthropic(api_key=anthropic_key(conn))
             while True:
                 started = datetime.now(timezone.utc)
                 try:
