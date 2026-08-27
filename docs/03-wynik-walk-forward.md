@@ -394,3 +394,64 @@ budżet trafił do żywych sygnałów zamiast zniknąć.
 
 Próg 1%, nie 0%, celowo: sygnał odzywający się rzadko to co innego niż sygnał
 martwy — i jest na to osobny test.
+
+---
+
+# Piąta iteracja: pomiar bez znanych obciążeń
+
+Po naprawie siatki cech i wykluczeniu martwych sygnałów z kalibracji.
+
+| Miara | Wartość |
+|---|---|
+| Okna informatywne | **40 z 40** |
+| Okna dodatnie OOS | **21 (52,5%)** |
+| Mediana Sharpe/transakcję | **+0,029** |
+| Najgorsze obsunięcie | **−0,84%** |
+| Błąd kalibracji (ECE) | 0,109 |
+| Przetestowanych konfiguracji | 8 700 |
+
+## Najważniejsza obserwacja z całej serii
+
+Wynik **spadał za każdym razem, gdy usuwałem jakieś obciążenie pomiaru**:
+
+| Zmiana | Dodatnie okna |
+|---|---|
+| 5 min, 3 instrumenty | 24,1% |
+| 4 h, 12 instrumentów, bez risk kernela | 60,6% |
+| + risk kernel, 24 instrumenty | 64,0% |
+| + młody instrument nie kasuje okna | 55,2% |
+| + sygnał przekrojowy | 57,9% |
+| **+ naprawiona siatka cech, martwe sygnały wykluczone** | **52,5%** |
+
+Dwie ostatnie poprawki to czysta poprawność pomiaru — nie zmieniają strategii,
+tylko przestają ją faworyzować. Obie obniżyły wynik.
+
+To jest sygnatura systemu, który sam sobie schlebiał. Teraz przestał.
+
+**52,5% dodatnich okien przy medianie Sharpe +0,029 to wynik nieodróżnialny od
+rzutu monetą.** Próg przejścia na live wynosi 70%. Strategia w obecnej postaci
+**nie wykazuje przewagi** — i to jest najbardziej wiarygodna liczba, jaką mam,
+bo policzona po usunięciu wszystkich obciążeń, które udało mi się znaleźć.
+
+## Co mówi kalibracja wag
+
+`news_shock` ma teraz jawne zero — bez klucza Anthropic sygnał nie ma z czego
+powstać i kalibracja nie przypisuje mu już przypadkowej wagi.
+
+`funding_carry`, po raz pierwszy faktycznie obecny w treningu, wylądował
+praktycznie na swoim założeniu początkowym (0,10 → 0,092 w trendzie,
+0,13 → 0,139 w konsolidacji). Kalibracja ani go nie faworyzuje, ani nie odrzuca.
+
+Największy zysk zanotował `volume_breakout` (+0,071 i +0,088), a największą
+stratę `mean_reversion_rsi` w konsolidacji (0,22 → 0,111) — powtórzenie
+obserwacji z trzeciej iteracji, tym razem na czystszych danych.
+
+## Co dalej
+
+1. **Mikrostruktura orderbooka** — jedyna nieprzetestowana hipoteza z pierwszej
+   iteracji. Wymaga uzbierania historii (dziś jeden dzień przy retencji 90 dni).
+2. **Sygnał newsowy** — czeka na klucz.
+3. **Przekrojowy powrót do średniej** — wariant odwrotny do przetestowanego.
+
+Żadna z nich nie jest obietnicą. Cztery iteracje w jeden dzień pokazały przede
+wszystkim, ile pomiar potrafi kłamać, zanim się go naprawi.
