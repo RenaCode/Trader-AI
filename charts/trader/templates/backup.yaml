@@ -1,0 +1,63 @@
+{{- if .Values.backup.enabled }}
+# Kopia zapasowa bazy.
+#
+# Cztery lata świec da się odtworzyć z giełdy w kilka minut. Dziennika decyzji
+# NIE DA SIĘ — to jedyny zapis tego, co system myślał w danym momencie i jedyna
+# podstawa oceny, czy się uczy. Tak samo nieodtwarzalne są klucze API (są
+# zaszyfrowane kluczem, którego nie ma w bazie) i historia treningu.
+#
+# Zrzut leci na dysk hosta, poza wolumen bazy — kopia na tym samym wolumenie,
+# który ma chronić, nie chroni przed niczym poza pomyłką w SQL.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "trader.fullname" . }}-backup
+  labels: {{- include "trader.labels" . | nindent 4 }}
+spec:
+  schedule: {{ .Values.backup.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 2
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: dump
+              image: "{{ .Values.db.image.repository }}:{{ .Values.db.image.tag }}"
+              env:
+                - name: PGPASSWORD
+                  valueFrom:
+                    secretKeyRef: { name: {{ .Values.secretName }}, key: POSTGRES_PASSWORD }
+                - name: RETENCJA_DNI
+                  value: {{ .Values.backup.retentionDays | quote }}
+              command:
+                - sh
+                - -c
+                - |
+                  set -eu
+                  PLIK="/backup/trader-$(date -u +%Y%m%dT%H%M%SZ).dump"
+                  echo "==> zrzut do $PLIK"
+                  pg_dump -h {{ include "trader.fullname" . }}-db \
+                          -U {{ .Values.db.username }} -d {{ .Values.db.database }} \
+                          --format=custom --compress=9 --file="$PLIK"
+
+                  # Zrzut, którego nie da się odtworzyć, jest gorszy niż jego brak,
+                  # bo daje fałszywe poczucie zabezpieczenia. pg_restore --list
+                  # czyta spis treści archiwum i zawodzi na pliku obciętym.
+                  pg_restore --list "$PLIK" > /dev/null
+                  echo "==> weryfikacja archiwum ok, rozmiar: $(du -h "$PLIK" | cut -f1)"
+
+                  find /backup -name 'trader-*.dump' -mtime "+${RETENCJA_DNI}" -delete
+                  echo "==> kopie na dysku: $(ls -1 /backup/trader-*.dump | wc -l)"
+              volumeMounts:
+                - name: backup
+                  mountPath: /backup
+          volumes:
+            - name: backup
+              hostPath:
+                path: {{ .Values.backup.hostPath | quote }}
+                type: DirectoryOrCreate
+{{- end }}

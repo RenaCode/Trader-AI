@@ -173,7 +173,8 @@ def entry_time(entry) -> datetime:
     return datetime.now(timezone.utc)
 
 
-async def triage(client: AsyncAnthropic, title: str, summary: str) -> tuple[bool, str]:
+async def triage(client: AsyncAnthropic, title: str,
+                 summary: str) -> tuple[bool, str, dict]:
     r = await client.messages.create(
         model=TRIAGE_MODEL,
         max_tokens=300,
@@ -181,10 +182,12 @@ async def triage(client: AsyncAnthropic, title: str, summary: str) -> tuple[bool
         output_config={"format": {"type": "json_schema", "schema": TRIAGE_SCHEMA}},
         messages=[{"role": "user", "content": f"Tytuł: {title}\n\nZajawka: {summary[:600]}"}],
     )
+    usage = {"input": r.usage.input_tokens, "output": r.usage.output_tokens,
+             "cache_read": getattr(r.usage, "cache_read_input_tokens", 0) or 0}
     if r.stop_reason == "refusal":
-        return False, "model odmówił oceny"
+        return False, "model odmówił oceny", usage
     data = json.loads(next(b.text for b in r.content if b.type == "text"))
-    return data["worth_analyzing"], data["reason"]
+    return data["worth_analyzing"], data["reason"], usage
 
 
 async def analyze(client: AsyncAnthropic, title: str, summary: str,
@@ -234,8 +237,38 @@ def cost_usd(model: str, usage: dict) -> float:
     return round(billed_in / 1e6 * inp + usage["output"] / 1e6 * out, 6)
 
 
+# Twardy limit dobowy. Domyslnie ostrozny - przy zmierzonych 128 artykulach
+# na dobe realne zuzycie to okolo 0,60 USD, wiec 5 USD zostawia szeroki zapas,
+# a jednoczesnie zatrzyma petle, ktora zaczela analizowac w kolko to samo
+# (np. gdy kanal zmieni identyfikatory wpisow i deduplikacja przestanie dzialac).
+DAILY_LIMIT_USD = float(os.environ.get("ANTHROPIC_DAILY_USD", "5.0"))
+
+
+def record_spend(cur, model: str, purpose: str, usage: dict, cost: float,
+                 article_id: int | None = None, ok: bool = True) -> None:
+    cur.execute(
+        "INSERT INTO news.api_spend (model, purpose, input_tokens, cache_read,"
+        " output_tokens, cost_usd, article_id, ok) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
+        (model, purpose, usage.get("input", 0), usage.get("cache_read", 0),
+         usage.get("output", 0), cost, article_id, ok))
+
+
+def spent_today(cur) -> float:
+    cur.execute("SELECT COALESCE(sum(cost_usd), 0) AS s FROM news.api_spend"
+                " WHERE event_time >= date_trunc('day', now())")
+    return float(cur.fetchone()["s"])
+
+
 async def run_cycle(conn, ai: AsyncAnthropic, http: httpx.AsyncClient, verbose: bool) -> dict:
     cur = conn.cursor(row_factory=dict_row)
+
+    wydano = spent_today(cur)
+    if wydano >= DAILY_LIMIT_USD:
+        print(f"Limit dobowy osiągnięty: ${wydano:.2f} z ${DAILY_LIMIT_USD:.2f}. "
+              f"Cykl pominięty — wznowienie po północy UTC.")
+        return {"kanaly": 0, "pobrane": 0, "nowe": 0, "przeszly_filtr": 0,
+                "przeanalizowane": 0, "bledy": 0, "koszt": 0.0, "limit": True}
+
     cur.execute("SELECT id, symbol FROM ref.instrument WHERE active")
     instruments = {r["symbol"]: r["id"] for r in cur.fetchall()}
     symbols = sorted(instruments)
@@ -279,13 +312,24 @@ async def run_cycle(conn, ai: AsyncAnthropic, http: httpx.AsyncClient, verbose: 
             if published < datetime.now(timezone.utc) - timedelta(days=1):
                 continue
 
+            if wydano >= DAILY_LIMIT_USD:
+                if verbose:
+                    print(f"    [stop] limit dobowy ${DAILY_LIMIT_USD:.2f} osiągnięty")
+                break
+
             try:
-                worth, why = await triage(ai, title, summary)
+                worth, why, tri_usage = await triage(ai, title, summary)
             except Exception as e:                            # noqa: BLE001
                 stats["bledy"] += 1
                 if verbose:
                     print(f"    filtr padl: {type(e).__name__}: {e}")
                 continue
+
+            tri_cost = cost_usd(TRIAGE_MODEL, tri_usage)
+            record_spend(cur, TRIAGE_MODEL, "triage", tri_usage, tri_cost)
+            conn.commit()
+            stats["koszt"] += tri_cost
+            wydano += tri_cost
 
             if not worth:
                 if verbose:
@@ -306,7 +350,10 @@ async def run_cycle(conn, ai: AsyncAnthropic, http: httpx.AsyncClient, verbose: 
                 continue
 
             price = cost_usd(ANALYSIS_MODEL, usage)
+            record_spend(cur, ANALYSIS_MODEL, "analysis", usage, price)
+            conn.commit()
             stats["koszt"] += price
+            wydano += price
             stats["przeanalizowane"] += 1
 
             cur.execute(

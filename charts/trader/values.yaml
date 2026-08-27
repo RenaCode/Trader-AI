@@ -132,3 +132,10 @@ workers:
     resources:
       limits:   { cpu: 1000m, memory: 512Mi }
       requests: { cpu: 50m,   memory: 128Mi }
+
+# Kopia zapasowa bazy. Zrzut trafia na dysk hosta, poza wolumen bazy danych.
+backup:
+  enabled: true
+  schedule: "17 3 * * *"        # codziennie 03:17 UTC, poza szczytem zapytań
+  retentionDays: 14
+  hostPath: /opt/trader-backups
