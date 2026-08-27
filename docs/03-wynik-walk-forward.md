@@ -319,3 +319,78 @@ o 12 punktów procentowych. To dużo. Warstwa uczenia mierzy to od dziś poprawn
 (wcześniej wykres kalibracji porównywał wynik sam ze sobą), więc jest to
 pierwszy uczciwy odczyt tej miary — i pierwsza rzecz do poprawy w kolejnej
 iteracji.
+
+---
+
+# Czwarta iteracja: sygnał przekrojowy
+
+## Hipoteza
+
+Wszystkie dotychczasowe siedem sygnałów opisuje instrument **sam ze sobą**:
+jego własny zwrot, jego własne RSI, jego własną zmienność. W rynku, w którym
+wszystko porusza się razem — a krypto jest takim rynkiem — większość tej
+informacji to wspólny czynnik, czyli po prostu „czy dziś rośnie cały rynek".
+
+Ranking zwrotów odejmuje ten czynnik z definicji: gdy wszystko rośnie o 5%,
+każdy instrument ma ten sam zwrot bezwzględny, ale ranking dalej mówi, kto
+rośnie mocniej od reszty.
+
+Kierunek wybrany **przed** zobaczeniem wyniku: momentum przekrojowe (mocniejsi
+utrzymują przewagę), bo na horyzoncie tygodniowym to ten efekt jest
+udokumentowany.
+
+**Druga hipoteza z pierwszej iteracji — mikrostruktura orderbooka — nie jest
+jeszcze testowalna.** `market.book_snapshot` ma retencję 90 dni i zbieramy go od
+niedawna: 5 686 snapshotów z jednego dnia. Wróci, gdy uzbiera się historia.
+
+## Wynik
+
+| | 7 sygnałów | **8 sygnałów** |
+|---|---|---|
+| Okna informatywne | 29 | **38** |
+| Okna dodatnie | 55,2% | **57,9%** |
+| Mediana Sharpe | +0,038 | **+0,069** |
+| Obsunięcie | −1,97% | −1,90% |
+| Błąd kalibracji (ECE) | 0,124 | **0,083** |
+
+## Czego to NIE dowodzi
+
+Kalibracja **obniżyła** wagę nowego sygnału: 0,15 → 0,085 w trendzie i
+0,14 → 0,089 w konsolidacji. W reżimie trendu jest to najniżej ważony sygnał
+z ośmiu.
+
+Walk-forward mówi więc: siła względna, tak jak ją policzyłem, **nie zasłużyła na
+swoje miejsce**. Poprawa wyniku (55,2% → 57,9%) bierze się głównie z większej
+liczby informatywnych okien, nie z wartości nowego sygnału.
+
+Wariant odwrotny — powrót do średniej przekrojowej — pozostaje osobną hipotezą.
+Nie odwracam znaku i nie liczę drugi raz: to byłoby dobieranie kierunku pod
+wynik, czyli dokładnie to, przed czym broni cały ten protokół.
+
+## Martwy sygnał zjadał 17% budżetu wag
+
+Przy okazji znalazłem coś, co psuło wszystkie dotychczasowe pomiary pewności.
+
+`news_sent` jest **stale zerowy** na całej czteroletniej historii — nie ma
+klucza Anthropic, więc skaner nie działa. Mimo to losowe przeszukiwanie
+przypisało sygnałowi `news_shock` wagę **0,169 w reżimie konsolidacji**, czyli
+najwyższą w tym reżimie. Przeszukiwanie nie miało jak tego zauważyć: martwy
+sygnał daje wkład zero niezależnie od wagi, więc żadna waga nie pogarszała
+wyniku.
+
+Konsekwencje były trzy i tylko pierwsza jest nieszkodliwa:
+
+1. Wynik złożony nie zmieniał się — wkład zerowego sygnału to zero.
+2. **Pewność była systematycznie zaniżana**, bo martwy sygnał wchodzi do
+   mianownika (`conf_den += weight`) z własną pewnością 0,1. To jest ta sama
+   pewność, której kalibrację mierzyłem i która wyszła rozjechana o 12 punktów
+   procentowych.
+3. Waga była **całkowicie przypadkowa** i w dniu wpięcia klucza nagle
+   zaczęłaby działać, nigdy nie będąc skalibrowana.
+
+Trener wyklucza teraz z kalibracji sygnały bez zmienności na oknie treningowym
+(niezerowy wynik rzadziej niż w 1% świec) i renormalizuje resztę, żeby zwolniony
+budżet trafił do żywych sygnałów zamiast zniknąć.
+
+Próg 1%, nie 0%, celowo: sygnał odzywający się rzadko to co innego niż sygnał
+martwy — i jest na to osobny test.
