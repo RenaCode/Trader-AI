@@ -18,3 +18,8 @@ artifacts/
 # nie jest odtwarzalny (kazdy przebieg moglby zaciagnac inne wersje zaleznosci).
 !package-lock.json
 !web/package-lock.json
+
+# ...oraz caly katalog `scripts` (wzorzec [Ss]cripts). Bez tej negacji `git add`
+# po cichu pomija skrypty operacyjne, a obraz Dockera nie ma czego skopiowac.
+!scripts/
+!scripts/**
