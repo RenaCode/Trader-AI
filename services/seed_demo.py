@@ -68,6 +68,18 @@ HEADLINES = {
 }
 
 
+def batched(cur, sql: str, rows: list, size: int = 2000) -> None:
+    """executemany w porcjach.
+
+    psycopg buduje caly potok zapytania w pamieci, wiec pojedyncze executemany
+    z 21 600 wierszami przekraczalo limit 1 GiB kontenera i proces byl ubijany
+    przez jadro (exit 137). Porcje po 2000 wierszy trzymaja zuzycie w ryzach
+    i nie spowalniaja zauwazalnie.
+    """
+    for i in range(0, len(rows), size):
+        cur.executemany(sql, rows[i:i + size])
+
+
 def h(*parts) -> bytes:
     return hashlib.sha256("|".join(str(p) for p in parts).encode()).digest()
 
@@ -130,7 +142,7 @@ def main(reset: bool) -> int:
                 lo = min(o, close) * (1 - abs(random.gauss(0, 0.0012)))
                 candle_rows.append((iid, "15m", t, o, hi, lo, close,
                                     abs(random.gauss(1000, 300)), random.randint(50, 400), t))
-        cur.executemany(
+        batched(cur,
             "INSERT INTO market.candle (instrument_id, timeframe, event_time, open, high, low,"
             " close, volume, trade_count, ingested_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)"
             " ON CONFLICT DO NOTHING", candle_rows)
@@ -199,13 +211,13 @@ def main(reset: bool) -> int:
                                     round(random.uniform(0.4, 0.95), 3),
                                     json.dumps({"src": name}), t + timedelta(seconds=5)))
 
-        cur.executemany(
+        batched(cur,
             "INSERT INTO feat.feature_value (feature_def_id, instrument_id, event_time, value,"
             " ingested_at) VALUES (%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING", fv_rows)
-        cur.executemany(
+        batched(cur,
             "INSERT INTO feat.regime (instrument_id, event_time, regime, confidence, ingested_at)"
             " VALUES (%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING", regime_rows)
-        cur.executemany(
+        batched(cur,
             "INSERT INTO sig.signal_value (signal_def_id, instrument_id, event_time, score,"
             " confidence, inputs, ingested_at) VALUES (%s,%s,%s,%s,%s,%s,%s)"
             " ON CONFLICT DO NOTHING", sv_rows)
@@ -238,16 +250,16 @@ def main(reset: bool) -> int:
                                 published, ingested + timedelta(seconds=random.randint(2, 25))))
                 ai_rows.append((art_id, iid, round(random.uniform(0.4, 1.0), 3)))
 
-        cur.executemany(
+        batched(cur,
             "INSERT INTO news.article (feed_id, url, title, content_hash, event_time, ingested_at)"
             " VALUES (%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING", art_rows)
-        cur.executemany(
+        batched(cur,
             "INSERT INTO news.article_analysis (article_id, model, prompt_version, direction,"
             " magnitude, horizon, confidence, novelty, reasoning, raw, input_tokens, output_tokens,"
             " cost_usd, event_time, ingested_at) VALUES (%s,'claude-opus-5','v1',%s,%s,%s,%s,%s,"
             "'Analiza wygenerowana dla danych demonstracyjnych.','{}'::jsonb,"
             "1800,220,0.014,%s,%s) ON CONFLICT DO NOTHING", an_rows)
-        cur.executemany(
+        batched(cur,
             "INSERT INTO news.article_instrument (article_id, instrument_id, relevance)"
             " VALUES (%s,%s,%s) ON CONFLICT DO NOTHING", ai_rows)
         cur.execute("""
@@ -563,7 +575,7 @@ def main(reset: bool) -> int:
                                           "potwierdzenie": "wolumen > 1,4x średniej 1h"}),
                               NOW + timedelta(hours=random.randint(4, 48)), decided_at))
 
-            cur.executemany(
+            batched(cur,
                 "INSERT INTO exec.equity_point (engine, mode, event_time, equity, cash,"
                 " unrealized, realized_cum, exposure) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)"
                 " ON CONFLICT DO NOTHING", eq_rows)
