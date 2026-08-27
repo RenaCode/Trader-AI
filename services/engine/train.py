@@ -172,6 +172,50 @@ def score_threshold(panel: list[dict], weights: dict[str, dict[str, float]],
     return enter, enter * EXIT_RATIO
 
 
+def martwe_sygnaly(cache: dict[str, list[tuple]], prog: float = 0.01) -> set[str]:
+    """Sygnaly, ktore na tym oknie NIE ZMIENIAJA sie wcale.
+
+    Przyklad z produkcji: `news_shock` bez klucza Anthropic zwraca zero przy
+    kazdej swiecy. Losowe przeszukiwanie wag przypisalo mu mimo to 0,169 w rezimie
+    konsolidacji - najwiecej ze wszystkich sygnalow w tym rezimie.
+
+    Nie bylo to obojetne. Martwy sygnal:
+      * zjada czesc budzetu wag, rozcienczajac te, ktore cos wnosza,
+      * ZANIZA PEWNOSC, bo wchodzi do mianownika (conf_den += weight) z wlasna
+        pewnoscia 0,1 - a pewnosc to wlasnie ta wielkosc, ktorej kalibracje
+        mierzymy,
+      * dostaje wage zupelnie przypadkowa, ktora w dniu wpiecia klucza nagle
+        zaczyna dzialac, nigdy nie bedac skalibrowana.
+
+    Sygnal uznajemy za martwy, gdy niezerowy wynik pojawia sie rzadziej niz
+    w `prog` czesci swiec.
+    """
+    liczniki = {name: 0 for name in SIGNALS}
+    razem = 0
+    for wpisy in cache.values():
+        for _regime, sygnaly in wpisy:
+            razem += 1
+            for name, out in sygnaly.items():
+                if abs(out.score) > 1e-9:
+                    liczniki[name] += 1
+    if razem == 0:
+        return set()
+    return {name for name, n in liczniki.items() if n / razem < prog}
+
+
+def _bez_martwych(wagi: dict[str, dict[str, float]],
+                  martwe: set[str]) -> dict[str, dict[str, float]]:
+    """Zeruje wagi martwych sygnalow i renormalizuje reszte do sumy 1."""
+    if not martwe:
+        return wagi
+    out = {}
+    for regime, w in wagi.items():
+        zywe = {k: v for k, v in w.items() if k not in martwe}
+        total = sum(zywe.values()) or 1.0
+        out[regime] = {k: (0.0 if k in martwe else round(w[k] / total, 4)) for k in w}
+    return out
+
+
 def random_weights(rng: random.Random) -> dict[str, dict[str, float]]:
     """Losowy zestaw wag per rezim, znormalizowany do sumy 1."""
     out = {}
@@ -287,6 +331,12 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon) -> N
         # Rezimy i sygnaly liczymy RAZ na okno. Bez tego kazda z prob liczyla
         # komplet sygnalow od nowa, choc nie zaleza one od wag.
         cache_tr = precompute_panels(train_slices, thresholds, h)
+        # Sygnaly stale na tym oknie wykluczamy z kalibracji - patrz
+        # komentarz przy martwe_sygnaly().
+        martwe = martwe_sygnaly(cache_tr)
+        if martwe and idx == 0:
+            print(f"  sygnały bez zmienności na danych, wyłączone z kalibracji: "
+                  f"{', '.join(sorted(martwe))}")
         cache_te = precompute_panels({s: v for s, v in test_slices.items() if v},
                                      thresholds, h)
         # Progi wyniku ustalane raz na okno, z zalozen poczatkowych i wylacznie
@@ -310,7 +360,7 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon) -> N
 
         best_w, best_score = DEFAULT_WEIGHTS, -1e9
         for _ in range(trials_per_window):
-            cand = random_weights(rng)
+            cand = _bez_martwych(random_weights(rng), martwe)
             score = ocen(cand, train_slices, cache_tr)["sharpe"]
             cfg_hash = hashlib.sha256(json.dumps(cand, sort_keys=True).encode()).digest()
             cur.execute(
@@ -322,9 +372,10 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon) -> N
 
         # Zalozenia poczatkowe tez sa kandydatem - jesli losowanie nie potrafi ich
         # pobic na oknie treningowym, to znaczy, ze nie ma czego kalibrowac.
-        base_score = ocen(DEFAULT_WEIGHTS, train_slices, cache_tr)["sharpe"]
+        bazowe = _bez_martwych(DEFAULT_WEIGHTS, martwe)
+        base_score = ocen(bazowe, train_slices, cache_tr)["sharpe"]
         if base_score > best_score:
-            best_w, best_score = DEFAULT_WEIGHTS, base_score
+            best_w, best_score = bazowe, base_score
 
         # --- ocena OUT-OF-SAMPLE --------------------------------------------
         oos_res = simulate_portfolio(
