@@ -73,3 +73,39 @@ ingress:
   basicAuth:
     enabled: false
     secretName: trader-basicauth
+
+# Procesy tla. Kazdy dziala niezaleznie - patrz templates/workers.yaml.
+workers:
+  # Dociaga swiece 1m i snapshoty orderbooka z gieldy. Nie wymaga zadnych kluczy,
+  # bo dane rynkowe sa publiczne.
+  market:
+    enabled: true
+    command: ["python", "services/ingest/market_worker.py", "--interval", "60"]
+    resources:
+      limits:   { cpu: 500m, memory: 384Mi }
+      requests: { cpu: 50m,  memory: 96Mi }
+
+  # Liczy cechy z realnych swiec. Co 5 minut, bo taka jest rozdzielczosc cech.
+  features:
+    enabled: true
+    command: ["sh", "-c", "while true; do python services/ingest/features.py --once || true; sleep 300; done"]
+    resources:
+      limits:   { cpu: 1000m, memory: 768Mi }
+      requests: { cpu: 100m,  memory: 192Mi }
+
+  # Petla decyzyjna. Odpala sie po cechach, wiec ma wlasny, przesuniety cykl.
+  engine:
+    enabled: true
+    command: ["sh", "-c", "sleep 90; while true; do python services/engine/loop.py --once --quiet || true; sleep 300; done"]
+    resources:
+      limits:   { cpu: 1000m, memory: 512Mi }
+      requests: { cpu: 100m,  memory: 128Mi }
+
+  # Skaner wiadomosci. Bez klucza Anthropic konczy sie natychmiast z komunikatem -
+  # dlatego wlaczony dopiero wtedy, gdy klucz jest w bazie.
+  news:
+    enabled: true
+    command: ["sh", "-c", "while true; do python services/ingest/news_worker.py --once --quiet || true; sleep 300; done"]
+    resources:
+      limits:   { cpu: 1000m, memory: 512Mi }
+      requests: { cpu: 50m,   memory: 128Mi }

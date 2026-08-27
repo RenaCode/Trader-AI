@@ -1,0 +1,59 @@
+{{/*
+Procesy tla. Kazdy jako osobne wdrozenie, bo maja rozne cykle zycia i rozne
+powody do restartu - padniecie skanera wiadomosci nie moze zatrzymac zbierania
+danych rynkowych ani petli decyzyjnej.
+
+Wszystkie uzywaja tego samego obrazu co API: dziela kod, konfiguracje i migracje,
+wiec nie da sie ich rozjechac wersjami.
+*/}}
+{{- range $name, $w := .Values.workers }}
+{{- if $w.enabled }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "trader.fullname" $ }}-{{ $name }}
+  labels:
+    {{- include "trader.labels" $ | nindent 4 }}
+    trader.renacode.com/component: worker
+spec:
+  replicas: 1
+  # Recreate, nie RollingUpdate: dwa egzemplarze tego samego workera pisalyby
+  # rownolegle do tych samych tabel.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: {{ include "trader.fullname" $ }}-{{ $name }}
+  template:
+    metadata:
+      labels:
+        app: {{ include "trader.fullname" $ }}-{{ $name }}
+    spec:
+      {{- with $.Values.imagePullSecrets }}
+      imagePullSecrets: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: {{ $name }}
+          image: "{{ $.Values.api.image.repository }}:{{ $.Values.api.image.tag }}"
+          imagePullPolicy: {{ $.Values.api.image.pullPolicy }}
+          command: {{ toJson $w.command }}
+          env:
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: {{ $.Values.secretName }}, key: POSTGRES_PASSWORD }
+            - name: DATABASE_URL
+              value: {{ include "trader.databaseUrl" $ | quote }}
+            - name: SECRETS_KEY
+              valueFrom:
+                secretKeyRef: { name: {{ $.Values.secretName }}, key: SECRETS_KEY }
+            # Klucz Anthropic jest czytany PRZEDE WSZYSTKIM z bazy (wpisany w UI).
+            # Ten wpis jest tylko sciezka zapasowa i celowo optional.
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef: { name: {{ $.Values.secretName }}, key: ANTHROPIC_API_KEY, optional: true }
+            - name: PYTHONUNBUFFERED
+              value: "1"
+          resources: {{- toYaml $w.resources | nindent 12 }}
+{{- end }}
+{{- end }}
