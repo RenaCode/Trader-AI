@@ -6,3 +6,6 @@ argon2-cffi>=23.1
 pyotp>=2.9
 cryptography>=43.0
 qrcode[pil]>=7.4
+httpx>=0.27
+anthropic>=0.60
+feedparser>=6.0
