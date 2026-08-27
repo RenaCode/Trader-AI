@@ -37,6 +37,10 @@ KONTROLE = [
      "UPDATE learn.learning_state SET updated_at = now() WHERE engine = 'crypto'", True),
     ("INSERT do news.api_spend",
      "INSERT INTO news.api_spend (model, purpose, cost_usd) VALUES ('test','test',0)", True),
+    # Czyta ja endpoint /api/health. Pominieta w 0013 - sonda gotowosci
+    # zwracala wtedy 500 i pod nie wchodzil do serwisu.
+    ("SELECT z public.schema_migrations",
+     "SELECT max(version) FROM public.schema_migrations", True),
     ("DELETE z app.secret", "DELETE FROM app.secret WHERE name = '__nieistnieje__'", True),
     ("DELETE z notify.channel", "DELETE FROM notify.channel WHERE id = -1", True),
 
@@ -51,6 +55,8 @@ KONTROLE = [
     ("DELETE z market.candle", "DELETE FROM market.candle WHERE false", False),
     ("DELETE z feat.feature_value", "DELETE FROM feat.feature_value WHERE false", False),
     ("DELETE z exec.fill", "DELETE FROM exec.fill WHERE false", False),
+    ("INSERT do public.schema_migrations",
+     "INSERT INTO public.schema_migrations (version, checksum) VALUES ('x', 'y')", False),
 ]
 
 

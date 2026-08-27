@@ -149,17 +149,26 @@ nagłówek przeglądarkowy **wyłącznie po odmowie 403**, oraz odróżnienie st
 
 ## 3. Otwarte — do Twojej decyzji
 
-### 3.1 Rola bazy danych aplikacji jest superużytkownikiem
+### 3.1 Rola bazy danych aplikacji — NAPRAWIONE
 
-Potwierdzone: `SELECT usesuper FROM pg_user WHERE usename = current_user` → `true`.
+Aplikacja łączyła się rolą `trader`, będącą superużytkownikiem. Mogła więc
+`DROP`, `TRUNCATE`, a co najgorsze `ALTER TABLE ... DISABLE TRIGGER` — czyli
+wyłączyć wyzwalacz, na którym opiera się niezmienność dziennika decyzji.
 
-Aplikacja wystawiona na internet łączy się do bazy rolą, która może wszystko,
-łącznie z `DROP` i `TRUNCATE` dziennika decyzji — a dziennik ma być
-niezmienialny i broni go tylko wyzwalacz, którego superużytkownik może wyłączyć.
-**To jest najpoważniejsza otwarta pozycja na tej liście.**
+Wdrożone (migracje 0013, 0014): rola `trader_app` bez własności jakiejkolwiek
+tabeli. `DELETE` nadany wybiórczo, tylko na obiektach konfiguracyjnych
+użytkownika. Migracje chodzą rolą właściciela, hasło roli aplikacji ustawiane
+poza plikiem migracji (inaczej rotacja wymagałaby edycji zastosowanego pliku).
 
-Zalecenie: osobna rola z `SELECT/INSERT/UPDATE` na tym, co potrzebne, bez
-`TRUNCATE`, bez `DROP`, bez prawa wyłączania wyzwalaczy. Migracje osobną rolą.
+`db/check_privileges.py` sprawdza **obie strony** — że rola potrafi to, czego
+potrzebuje, i że nie potrafi tego, przed czym chroni. Sam test pozytywny byłby
+bezwartościowy: przeszedłby także dla superużytkownika. 21/21 na produkcji.
+
+Wpadka po drodze warta odnotowania: pierwsza wersja pominęła
+`public.schema_migrations`, którą czyta `/api/health`. Sonda gotowości zaczęła
+zwracać 500, Kubernetes nie skierował ruchu do nowego poda i stara wersja dalej
+obsługiwała żądania. Awaria nie dotarła do użytkownika — dokładnie po to jest
+sonda.
 
 ### 3.2 Kopie zapasowe bazy — WDROŻONE
 
@@ -214,11 +223,19 @@ Pozostaje: ustaw również limit po stronie Anthropica (Console → Billing →
 Spend limits) — limit w aplikacji nie zadziała, jeśli to sama aplikacja
 zawiedzie.
 
-### 3.7 Brak testów API
+### 3.7 Testy — CZĘŚCIOWO
 
-Jest test dymny end-to-end w Playwright, który realnie chroni (przeszedł
-i wyłapał regresje). Nie ma testów jednostkowych na `security.py`, `risk.py`
-i routery. Przy module obracającym pieniędzmi to luka.
+Jest test dymny end-to-end w Playwright, który realnie chroni. Dołożone 23 testy
+jednostkowe reguł ryzyka i symulacji portfela — każdy zweryfikowany kanarkiem,
+czyli wstrzyknięciem znanego błędu i sprawdzeniem, że test go łapie. Jeden
+kanarek okazał się za słaby i przeszedł; test został przez to wzmocniony.
+
+Te testy wykryły realny defekt produkcyjny: kill-switch był oceniany wyłącznie
+przy próbie wejścia w pozycję, więc obsunięcie kapitału podczas samego trzymania
+pozycji nie uruchamiało go wcale — czyli limit nie działał w tej jednej sytuacji,
+dla której istnieje.
+
+Pozostaje: `security.py` i routery API.
 
 ### 3.8 Osierocone dane i redundantne agregaty
 
@@ -255,15 +272,12 @@ Uczciwość wymaga wskazania też tego, co się broni:
 
 ## 5. Kolejność, w jakiej to bym robił
 
-1. **Rola bazy bez superużytkownika** (§3.1) — jedyna pozycja, która dziś
-   realnie osłabia gwarancje niezmienności dziennika. Wymaga skoordynowanej
-   zmiany roli aplikacji i roli migracji, więc nie zrobiłem tego w locie przy
-   działającym treningu — to zmiana do wykonania świadomie, z oknem serwisowym.
-2. **Ochrona TOTP przed powtórzeniem** (§3.3) — zanim włączymy 2FA.
-3. Testy jednostkowe `risk.py` i `security.py` (§3.7).
-4. Odkładanie kopii poza serwer (§3.2).
-5. Rotacja `SECRETS_KEY` (§3.5), sprzątanie danych (§3.8), `constant_time_eq`
+1. **Ochrona TOTP przed powtórzeniem** (§3.3) — zanim włączymy 2FA.
+2. Testy `security.py` i routerów API (§3.7 — reguły ryzyka i symulacja
+   portfela mają już 23 testy).
+3. Odkładanie kopii poza serwer (§3.2).
+4. Rotacja `SECRETS_KEY` (§3.5), sprzątanie danych (§3.8), `constant_time_eq`
    (§3.4).
 
-Zrobione w trakcie tego przeglądu: §3.2 (kopie), §3.6 (limit wydatków),
-§2.3 (kanały RSS).
+Zrobione w trakcie tego przeglądu: §3.1 (rola bazy), §3.2 (kopie zapasowe),
+§3.6 (limit wydatków), §2.3 (kanały RSS), część §3.7 (testy reguł ryzyka).
