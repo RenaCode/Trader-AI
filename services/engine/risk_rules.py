@@ -182,3 +182,33 @@ DEFAULT_LIMITS = {
     "max_position_notional": {"value": Decimal("5000"),  "action": "downsize"},
     "max_total_exposure":    {"value": Decimal("15000"), "action": "block"},
 }
+
+
+def position_budget(limits: dict[str, dict], n_instruments: int,
+                    fallback: Decimal = Decimal("3000")) -> Decimal:
+    """Bazowa wielkosc zlecenia wyprowadzona z limitu lacznej ekspozycji.
+
+    DLACZEGO NIE STALA
+
+    Bazowa wielkosc 3000 USDT przy limicie lacznej ekspozycji 15 000 i dwunastu
+    obserwowanych instrumentach oznacza, ze system chce zaangazowac 36 000 -
+    dwa i pol raza ponad limit. W praktyce mieszcza sie cztery, piec pozycji,
+    a pozostale wejscia sa odrzucane.
+
+    Nie jest to bezpieczniejsze: laczne ryzyko wyznacza limit, a nie liczba
+    odrzuconych zlecen. Jest za to gorsze pod dwoma wzgledami. Po pierwsze
+    portfel jest skoncentrowany na kilku instrumentach zamiast rozlozony na
+    wszystkich, przy tej samej ekspozycji. Po drugie o tym, ktore wejscia
+    przejda, decyduje kolejnosc rozpatrywania, a nie sila sygnalu.
+
+    Budzet liczony z limitu daje pelna dywersyfikacje przy NIEZMIENIONYM
+    ryzyku lacznym. Nie jest to poluzowanie limitu - to jego wykorzystanie
+    zgodnie z przeznaczeniem.
+    """
+    lim = limits.get("max_total_exposure")
+    if not lim or n_instruments <= 0:
+        return fallback
+    budzet = Decimal(lim["value"]) / Decimal(n_instruments)
+    # Zlecenie mniejsze niz minimum gieldowe nie ma sensu - wtedy lepiej
+    # obserwowac mniej instrumentow niz handlowac pylem.
+    return max(budzet, Decimal("50"))

@@ -73,16 +73,79 @@ def test_spadajaca_cena_daje_ujemny_wynik():
     assert m["total_return"] < 0
 
 
-def test_limit_lacznej_ekspozycji_ogranicza_liczbe_pozycji():
-    panele = {f"I{i}": panel(30, 100.0, 130.0) for i in range(8)}
-    limity = LIMITY_LUZNE | {
-        "max_total_exposure": {"value": Decimal("6000"), "action": "block"}}
-    res = uruchom(panele, limity)
-    assert res.blocked > 0, "przy limicie 6000 i zleceniach po ~3000 czesc musi zostac odrzucona"
+def test_ekspozycja_nigdy_nie_przekracza_limitu():
+    """Wlasciwa niezmienna wlasnosc portfela.
 
-    luzny = uruchom({f"I{i}": panel(30, 100.0, 130.0) for i in range(8)}, LIMITY_LUZNE)
-    assert luzny.blocked == 0, "bez limitu nic nie powinno byc odrzucone"
-    assert len(res.trades) < len(luzny.trades)
+    Mocniejsza niz "czesc zlecen zostaje odrzucona": ta ostatnia zalezy od tego,
+    jak duze sa zlecenia, a ekspozycja ponad limit jest bledem zawsze.
+    """
+    LIMIT = Decimal("6000")
+    panele = {f"I{i}": panel(30, 100.0, 130.0) for i in range(8)}
+    limity = LIMITY_LUZNE | {"max_total_exposure": {"value": LIMIT, "action": "block"}}
+    res = uruchom(panele, limity)
+    assert res.max_exposure <= float(LIMIT) + 1e-6, \
+        f"ekspozycja {res.max_exposure:.0f} przekroczyla limit {LIMIT}"
+    assert res.trades, "przy budzecie z limitu transakcje maja powstawac, nie znikac"
+
+
+def test_budzet_na_pozycje_skaluje_sie_liczba_instrumentow():
+    """Ten sam limit rozlozony na wiecej instrumentow = mniejsze pojedyncze zlecenie.
+
+    Bez tego 12 instrumentow po 3000 chcialoby 36000 przy limicie 15000
+    i mieciloby sie tylko piec pozycji - portfel skoncentrowany zamiast
+    rozproszonego, przy tej samej ekspozycji lacznej.
+    """
+    limity = LIMITY_LUZNE | {
+        "max_total_exposure": {"value": Decimal("12000"), "action": "block"}}
+    maly = uruchom({f"I{i}": panel(20, 100.0, 130.0) for i in range(3)}, limity)
+    duzy = uruchom({f"I{i}": panel(20, 100.0, 130.0) for i in range(12)}, limity)
+    assert maly.base_notional > duzy.base_notional
+    assert abs(maly.base_notional - 12000 / 3) < 1e-6
+    assert abs(duzy.base_notional - 12000 / 12) < 1e-6
+
+
+def cechy_o_sile(x: float) -> dict:
+    """Cechy dajace sygnal momentum o zadanej sile x w (0,1).
+
+    Zwroty skalowane oczekiwanym ruchem (atr * sqrt(liczba swiec)), zeby kazda
+    z trzech skal wnosila dokladnie x. Dzieki temu sila sygnalu jest sterowalna
+    i porownywalna miedzy instrumentami.
+    """
+    atr = 1.0
+    return {"atr_pct": atr, "ema_ratio": 1.01, "rsi": 50.0, "range_pos": 0.5,
+            "ret_short": x * atr * (H.ret_short ** 0.5),
+            "ret_mid": x * atr * (H.ret_mid ** 0.5),
+            "ret_long": x * atr * (H.ret_long ** 0.5),
+            "volume_z": 0.0, "news_sent": 0.0, "funding_rate": 0.0, "funding_z": 0.0}
+
+
+def test_przy_niedoborze_kapital_dostaje_najmocniejszy_sygnal():
+    """Przy niedoborze decyduje sila sygnalu, nie nazwa instrumentu.
+
+    Wazkie zastrzezenie: po wyprowadzeniu budzetu z limitu ekspozycji
+    (limit/n na pozycje) laczna ekspozycja z definicji nie przekracza limitu,
+    wiec to NIE ON jest tu waskim gardlem. Jest nim limit liczby zlecen na
+    godzine - i wlasnie na nim widac, czy kolejnosc rozpatrywania ma znaczenie.
+
+    Instrumenty nazwane tak, ze najmocniejszy jest OSTATNI alfabetycznie.
+    Poprzednia wersja iterowala po sorted(present) i wybieralaby AAA.
+    """
+    sily = {"AAA": 0.15, "BBB": 0.25, "CCC": 0.40, "ZZZ": 0.95}
+    panele = {
+        sym: [{"t": T0 + timedelta(hours=4 * i), "f": cechy_o_sile(x),
+               "price": 100.0 + i} for i in range(12)]
+        for sym, x in sily.items()
+    }
+    limity = LIMITY_LUZNE | {"max_orders_per_hour": {"value": Decimal("1"), "action": "block"}}
+    res = simulate_portfolio(panele, DEFAULT_WEIGHTS,
+                             {s: 2.0 for s in panele},
+                             {s: (0.02, 0.01) for s in panele},
+                             H, 0.05, limity)
+    assert res.trades, "co najmniej jedna pozycja musi powstac"
+    pierwsza = min(res.trades, key=lambda t: t["opened_at"])
+    assert pierwsza["symbol"] == "ZZZ", \
+        f"kapital ma dostac najmocniejszy sygnal, dostal {pierwsza['symbol']}"
+    assert res.blocked > 0, "przy limicie 1 zlecenia na godzine reszta musi zostac odrzucona"
 
 
 def test_limit_wielkosci_pozycji_obcina():

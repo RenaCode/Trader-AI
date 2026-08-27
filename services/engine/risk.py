@@ -83,6 +83,11 @@ class RiskKernel:
             " ORDER BY triggered_at DESC LIMIT 1", (self.engine, self.mode))
         return cur.fetchone()
 
+    @property
+    def limits(self) -> dict[str, dict]:
+        """Wczytane limity - do wyliczenia budzetu na pozycje po stronie petli."""
+        return self._limits
+
     # ------------------------------------------------------------- ocena
     def check_account(self) -> RiskVerdict:
         """Limity CALEGO KONTA, sprawdzane w kazdym cyklu.

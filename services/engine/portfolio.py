@@ -30,7 +30,7 @@ from decimal import Decimal
 
 from services.engine.horizons import Horizon
 from services.engine.risk_rules import (
-    DEFAULT_LIMITS, RiskState, evaluate_account, evaluate_limits,
+    DEFAULT_LIMITS, RiskState, evaluate_account, evaluate_limits, position_budget,
 )
 from services.engine.signals import classify_regime, evaluate
 
@@ -38,7 +38,8 @@ from services.engine.signals import classify_regime, evaluate
 FEE = 0.00055
 SLIP = 0.0004
 START_EQUITY = 100_000.0
-BASE_NOTIONAL = 3000.0      # bazowa wielkosc zlecenia przed skalowaniem sila sygnalu
+# Bazowa wielkosc zlecenia wyprowadzana z limitu ekspozycji i liczby
+# instrumentow - patrz risk_rules.position_budget().
 
 MIN_SD = 1e-4
 
@@ -60,11 +61,13 @@ class PortfolioResult:
     killswitch_reason: str | None = None
     blocked: int = 0          # ile wejsc odrzucil risk kernel
     downsized: int = 0        # ile obcial
+    max_exposure: float = 0.0  # najwieksza jednoczesna ekspozycja
+    base_notional: float = 0.0  # budzet na pozycje wyliczony z limitu
 
 
-def _sizing(score: float, price: float) -> tuple[float, float]:
+def _sizing(score: float, price: float, baza: float) -> tuple[float, float]:
     """Wielkosc zlecenia dokladnie jak w petli decyzyjnej."""
-    notional = BASE_NOTIONAL * min(1.0, abs(score) * 2)
+    notional = baza * min(1.0, abs(score) * 2)
     return notional, notional / price
 
 
@@ -83,6 +86,7 @@ def simulate_portfolio(panels: dict[str, list[dict]],
     """
     limits = limits or DEFAULT_LIMITS
     ids = instrument_ids or {s: i for i, s in enumerate(sorted(panels), start=1)}
+    baza = float(position_budget(limits, len(panels)))
 
     # Wspolna os czasu. Instrumenty moga miec rozne pokrycie, wiec bierzemy
     # sume ich znacznikow, a nie przeciecie - inaczej jeden krotszy szereg
@@ -96,6 +100,7 @@ def simulate_portfolio(panels: dict[str, list[dict]],
         return PortfolioResult()
 
     positions: dict[str, Position] = {}
+    max_exposure = 0.0
     realized = 0.0
     fees_paid = 0.0
     res = PortfolioResult()
@@ -171,6 +176,8 @@ def simulate_portfolio(panels: dict[str, list[dict]],
         hour_ago = t - timedelta(hours=1)
         orders_h = sum(1 for ot in order_times if ot > hour_ago)
 
+        max_exposure = max(max_exposure, float(exposure))
+
         if killswitch is None:
             konto = evaluate_account(
                 RiskState(equity=Decimal(str(equity)), peak=Decimal(str(peak)),
@@ -183,12 +190,17 @@ def simulate_portfolio(panels: dict[str, list[dict]],
                 res.killswitch_at = t
                 res.killswitch_reason = konto.trigger_killswitch
 
-        for sym, cur in sorted(present.items()):
+        # Kandydatow sortujemy po SILE SYGNALU, nie po nazwie instrumentu.
+        # Gdy limit ekspozycji nie pozwala wejsc we wszystkie, kapital ma
+        # dostac najmocniejszy sygnal, a nie ten, ktory jest wczesniej
+        # w alfabecie. Poprzednia wersja iterowala po sorted(present) i przez
+        # to systematycznie faworyzowala ADAUSDT wzgledem XRPUSDT.
+        kandydaci = []
+        for sym, cur in present.items():
             if sym in positions:
                 continue
             rows = panels[sym]
-            nxt_idx = cur["idx"] + 1
-            if nxt_idx >= len(rows):
+            if cur["idx"] + 1 >= len(rows):
                 continue
             row = cur["row"]
             regime, _ = classify_regime(row["f"], atr_thresholds.get(sym))
@@ -196,9 +208,14 @@ def simulate_portfolio(panels: dict[str, list[dict]],
             enter_gate, _exit_gate = gates[sym]
             if abs(score) < enter_gate or conf < min_conf:
                 continue
+            kandydaci.append((abs(score), sym, cur, score, conf))
+        kandydaci.sort(key=lambda k: (-k[0], k[1]))
 
+        for _sila, sym, cur, score, conf in kandydaci:
+            rows = panels[sym]
+            nxt_idx = cur["idx"] + 1
             price = rows[nxt_idx]["price"]
-            notional, qty = _sizing(score, price)
+            notional, qty = _sizing(score, price, baza)
 
             state = RiskState(
                 equity=Decimal(str(equity)), peak=Decimal(str(peak)),
@@ -247,6 +264,8 @@ def simulate_portfolio(panels: dict[str, list[dict]],
         res.trades.append({"ret": pos.side * (exit_px / pos.entry - 1), "conf": pos.conf,
                            "symbol": sym, "opened_at": pos.opened_at, "closed_at": last_t})
     res.equity_curve.append((last_t, START_EQUITY + realized - fees_paid))
+    res.max_exposure = max_exposure
+    res.base_notional = baza
     return res
 
 

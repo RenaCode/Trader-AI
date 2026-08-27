@@ -37,6 +37,7 @@ from psycopg.rows import dict_row
 
 from services.engine.horizons import DEFAULT_BAR, HORIZONS, Horizon, get as get_horizon
 from services.engine.risk import RiskKernel
+from services.engine.risk_rules import position_budget
 from services.engine.signals import SIGNALS, classify_regime, evaluate
 
 # Progi awaryjne - obowiazuja WYLACZNIE, dopoki nie ma aktywnej wersji modelu.
@@ -339,29 +340,59 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
 
     cur.execute("SELECT id, symbol FROM ref.instrument WHERE engine=%s AND active"
                 " AND kind <> 'perp' ORDER BY symbol", (engine,))
-    for inst in cur.fetchall():
-        started = time.perf_counter()
-        iid, symbol = inst["id"], inst["symbol"]
+    instrumenty = cur.fetchall()
 
+    # Budzet na pozycje wyprowadzony z limitu lacznej ekspozycji i liczby
+    # obserwowanych instrumentow. Stala 3000 przy limicie 15 000 i dwunastu
+    # instrumentach oznaczala, ze system chce zaangazowac 36 000 - dwa i pol
+    # raza ponad limit - i realnie miescilo sie piec pozycji zamiast dwunastu.
+    baza = position_budget(risk.limits, len(instrumenty))
+
+    # PRZEBIEG PIERWSZY: ocena wszystkich instrumentow, bez podejmowania akcji.
+    #
+    # Rozdzielenie oceny od dzialania jest tu konieczne, bo przy niedoborze
+    # kapitalu kolejnosc rozpatrywania decyduje o tym, kto go dostanie.
+    # Poprzednia wersja przetwarzala instrumenty alfabetycznie i przez to
+    # systematycznie faworyzowala ADAUSDT wzgledem XRPUSDT - o przydziale
+    # decydowala nazwa, nie sila sygnalu.
+    oceny = []
+    for inst in instrumenty:
+        iid, symbol = inst["id"], inst["symbol"]
         if decided_for_bar(cur, engine, mode, iid, bar_start):
             stats["poza_swieca"] += 1
             continue
-
         features = latest_features(cur, iid, now, h, feature_ids)
         if len(features) < 4:
             if verbose:
                 print(f"  {symbol:10s} pominięty — za mało cech ({len(features)})")
             continue
-
-        stats["rozwazone"] += 1
         price = mark_price(cur, iid, now)
         if price is None:
             continue
-
+        stats["rozwazone"] += 1
         regime, regime_conf = classify_regime(features, atr_percentile_80(cur, iid, now, h))
         weights = (model["weights"] or {}).get(regime)
         score, confidence, contributions = evaluate(features, regime, weights, h)
-        position = open_position(cur, engine, mode, iid)
+        oceny.append({"iid": iid, "symbol": symbol, "features": features, "price": price,
+                      "regime": regime, "regime_conf": regime_conf, "score": score,
+                      "confidence": confidence, "contributions": contributions,
+                      "position": open_position(cur, engine, mode, iid)})
+
+    # PRZEBIEG DRUGI: najpierw wyjscia (nie konkuruja o kapital i zwalniaja go),
+    # potem wejscia w kolejnosci malejacej sily sygnalu.
+    def priorytet(o):
+        wychodzi = o["position"] is not None
+        return (0 if wychodzi else 1, -abs(o["score"]), o["symbol"])
+
+    for ocena in sorted(oceny, key=priorytet):
+        started = time.perf_counter()
+        iid, symbol = ocena["iid"], ocena["symbol"]
+        features, price = ocena["features"], ocena["price"]
+        regime, regime_conf = ocena["regime"], ocena["regime_conf"]
+        score, confidence = ocena["score"], ocena["confidence"]
+        contributions = ocena["contributions"]
+
+        position = ocena["position"]
 
         # --- wybor akcji ----------------------------------------------------
         if position:
@@ -381,7 +412,7 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
         qty = Decimal(0)
         notional = Decimal(0)
         if action in ("enter_long", "enter_short"):
-            notional = (Decimal(3000) * Decimal(str(min(1.0, abs(score) * 2)))).quantize(Decimal("0.01"))
+            notional = (baza * Decimal(str(min(1.0, abs(score) * 2)))).quantize(Decimal("0.01"))
             qty = (notional / price).quantize(Decimal("0.000001"))
 
         if action.startswith("enter") and wejscia_wstrzymane:
