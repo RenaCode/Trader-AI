@@ -40,6 +40,22 @@ z osobnymi modelami, osobnym ryzykiem i osobnymi zakładkami w UI.
 - [ ] Egzekucja na koncie demo Bybit — **czeka na klucze giełdy**
 - [ ] Adapter IBKR + silnik equity
 
+## Kontrola po zmianach w silniku
+
+```bash
+# Wykonuje wszystkie zapytania pętli decyzyjnej BEZ ZAPISU i kończy kodem 1,
+# gdy którekolwiek zawiedzie. Wyłapuje rozjazd między kodem a schematem bazy,
+# którego przenośne testy nie widzą.
+kubectl exec deploy/trader-api -c api -- python services/engine/loop.py --sprawdz
+
+# Uprawnienia roli aplikacji: sprawdza obie strony — że rola potrafi to, czego
+# potrzebuje, i że NIE potrafi tego, przed czym chroni.
+kubectl exec deploy/trader-api -c api -- python db/check_privileges.py
+```
+
+Kontrola pętli działa też automatycznie: proces silnika uruchamia ją przed
+wejściem w pętlę i nie startuje, gdy zawiedzie.
+
 ## Architektura w skrócie
 
 ```

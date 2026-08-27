@@ -307,6 +307,74 @@ def close_paper(cur, position: dict, price: Decimal, as_of: datetime,
     return pnl
 
 
+async def sprawdz(conn, engine: str = "crypto", h: Horizon | None = None) -> int:
+    """Przebieg KONTROLNY: wykonuje wszystkie odczyty, nie zapisuje niczego.
+
+    DLACZEGO ISTNIEJE
+
+    Test dymny sprawdza warstwe webowa. Petla decyzyjna nie miala zadnego testu
+    i blad w nazwie kolumny (`event_time` zamiast `decided_at`) wywracal ja przy
+    kazdym przebiegu przez kilkanascie minut - jedynym sladem byl wpis w logu
+    poda, ktorego nikt nie czytal.
+
+    Ten tryb wykonuje dokladnie te same zapytania co produkcja, w tej samej
+    kolejnosci, i konczy sie kodem niezerowym, gdy ktorekolwiek zawiedzie. Nie
+    zastepuje testu jednostkowego - wylapuje inna klase bledow: rozjazd miedzy
+    kodem a schematem bazy, ktorego zadne przenosne testy nie widza.
+
+    Uzycie:  DATABASE_URL=... python services/engine/loop.py --sprawdz
+    """
+    h = h or get_horizon(DEFAULT_BAR)
+    cur = conn.cursor()
+    now = datetime.now(timezone.utc)
+    bar_start = current_bar(now, h)
+    bledy: list[str] = []
+
+    def probuj(nazwa, fn):
+        try:
+            wynik = fn()
+            print(f"  [ok  ] {nazwa}")
+            return wynik
+        except Exception as e:                                # noqa: BLE001
+            print(f"  [BŁĄD] {nazwa}: {type(e).__name__}: {e}")
+            bledy.append(nazwa)
+            conn.rollback()
+            return None
+
+    print(f"Kontrola pętli decyzyjnej — silnik {engine}, świeca {h.bar}\n")
+    risk = RiskKernel(conn, engine, "demo")
+    probuj("limity ryzyka konta", risk.check_account)
+    ids = probuj("identyfikatory cech horyzontu", lambda: horizon_feature_ids(cur, h))
+    model = probuj("aktywna wersja modelu", lambda: active_model(cur, engine, h))
+
+    cur.execute("SELECT id, symbol FROM ref.instrument WHERE engine=%s AND active"
+                " AND kind <> 'perp' ORDER BY symbol LIMIT 3", (engine,))
+    for inst in cur.fetchall():
+        iid, sym = inst["id"], inst["symbol"]
+        probuj(f"{sym}: decyzja w tej świecy?",
+               lambda i=iid: decided_for_bar(cur, engine, "demo", i, bar_start))
+        f = probuj(f"{sym}: odczyt cech point-in-time",
+                   lambda i=iid: latest_features(cur, i, now, h, ids or []))
+        probuj(f"{sym}: cena odniesienia", lambda i=iid: mark_price(cur, i, now))
+        probuj(f"{sym}: próg zmienności", lambda i=iid: atr_percentile_80(cur, i, now, h))
+        probuj(f"{sym}: otwarta pozycja", lambda i=iid: open_position(cur, engine, "demo", i))
+        if f:
+            regime, _ = classify_regime(f, None)
+            probuj(f"{sym}: ocena sygnałów ({len(f)} cech, reżim {regime})",
+                   lambda ff=f, r=regime: evaluate(
+                       ff, r, (model or {}).get("weights", {}).get(r), h))
+
+    conn.rollback()
+    print()
+    if bledy:
+        print(f"NIEPOWODZENIE: {len(bledy)} zapytań zawiodło")
+        for b in bledy:
+            print(f"  - {b}")
+        return 1
+    print("Wszystkie zapytania pętli decyzyjnej wykonały się poprawnie.")
+    return 0
+
+
 async def run_once(conn, engine: str = "crypto", mode: str = "demo",
                    verbose: bool = True, h: Horizon | None = None) -> dict:
     h = h or get_horizon(DEFAULT_BAR)
@@ -483,6 +551,8 @@ async def main() -> int:
     ap.add_argument("--engine", default="crypto")
     ap.add_argument("--quiet", action="store_true")
     ap.add_argument("--bar", default=DEFAULT_BAR, choices=sorted(HORIZONS))
+    ap.add_argument("--sprawdz", action="store_true",
+                    help="wykonaj wszystkie odczyty bez zapisu i zakończ")
     args = ap.parse_args()
 
     url = os.environ.get("DATABASE_URL")
@@ -490,6 +560,11 @@ async def main() -> int:
         sys.exit("DATABASE_URL nie jest ustawiony")
 
     h = get_horizon(args.bar)
+
+    if args.sprawdz:
+        with psycopg.connect(url, row_factory=dict_row) as conn:
+            return await sprawdz(conn, args.engine, h)
+
     print(f"Silnik {args.engine}, świeca {h.bar} — jedna decyzja na świecę.\n")
 
     with psycopg.connect(url, row_factory=dict_row) as conn:

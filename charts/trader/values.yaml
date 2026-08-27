@@ -110,7 +110,12 @@ workers:
   # Petla decyzyjna. Odpala sie po cechach, wiec ma wlasny, przesuniety cykl.
   engine:
     enabled: true
-    command: ["sh", "-c", "sleep 90; while true; do python services/engine/loop.py --bar 4h --once --quiet || true; sleep 300; done"]
+    # Przed wejsciem w petle silnik wykonuje KONTROLE: te same zapytania co
+    # produkcja, bez zapisu. Blad w nazwie kolumny wywracal petle przy kazdym
+    # przebiegu, a jedynym sladem byl wpis w logu, ktorego nikt nie czytal.
+    # Teraz taki blad zatrzymuje pod od razu - widac go w `kubectl get pods`,
+    # nie trzeba go szukac.
+    command: ["sh", "-c", "sleep 90; python services/engine/loop.py --bar 4h --sprawdz || exit 1; while true; do python services/engine/loop.py --bar 4h --once --quiet || true; sleep 300; done"]
     resources:
       limits:   { cpu: 1000m, memory: 512Mi }
       requests: { cpu: 100m,  memory: 128Mi }
