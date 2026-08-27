@@ -117,8 +117,11 @@ workers:
   # okna przesuwaja sie o 30 dni, wiec czestsze przeliczanie nic nie wnosi, a
   # kusiloby do zagladania w wyniki i dobierania parametrow, czyli dokladnie tego,
   # przed czym ma chronic walk-forward.
+  # WYLACZONY: zastapiony zadaniem cyklicznym (templates/trainer-cron.yaml).
+  # Petla w Deploymencie ginela przy kazdym wdrozeniu, takze takim, ktore
+  # trenera nie dotyczylo - patrz komentarz w tamtym pliku.
   trainer:
-    enabled: true
+    enabled: false
     command: ["sh", "-c", "sleep 300; while true; do python services/engine/train.py --bar 4h --days 1400 --trials 60 || true; sleep 86400; done"]
     resources:
       limits:   { cpu: 2000m, memory: 2Gi }
@@ -139,3 +142,15 @@ backup:
   schedule: "17 3 * * *"        # codziennie 03:17 UTC, poza szczytem zapytań
   retentionDays: 14
   hostPath: /opt/trader-backups
+
+# Trener walk-forward. Zadanie cykliczne, nie proces w Deploymencie - dlugie
+# obliczenia nie moga ginac przy wdrozeniach.
+trainerCron:
+  enabled: true
+  schedule: "40 4 * * *"        # codziennie 04:40 UTC, po kopii zapasowej
+  bar: "4h"
+  days: 1400
+  trials: 60
+  resources:
+    limits:   { cpu: 3000m, memory: 3Gi }
+    requests: { cpu: 200m,  memory: 512Mi }

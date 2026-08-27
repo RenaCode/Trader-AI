@@ -1,0 +1,53 @@
+{{- if .Values.trainerCron.enabled }}
+# Trener walk-forward jako zadanie cykliczne, nie jako proces w Deploymencie.
+#
+# Poprzednia wersja była pętlą `while true; do train; sleep 86400; done` wewnątrz
+# Deploymentu. Każde wdrożenie — także takie, które trenera w ogóle nie dotyczyło —
+# restartowało pod i zabijało trwające obliczenia w połowie. Zdarzyło się to
+# trzykrotnie i za każdym razem kosztowało kilkadziesiąt minut, przy czym pierwsze
+# dwa razy zdiagnozowałem to jako "trening nie kończy się", a nie jako "wdrożenie
+# go zabiło".
+#
+# Zadanie cykliczne jest odporne: raz uruchomione dobiega końca niezależnie od
+# tego, co dzieje się z Deploymentami. `concurrencyPolicy: Forbid` gwarantuje,
+# że dwa treningi nie policzą się równolegle na tej samej wersji modelu.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "trader.fullname" . }}-trainer
+  labels: {{- include "trader.labels" . | nindent 4 }}
+spec:
+  schedule: {{ .Values.trainerCron.schedule | quote }}
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 3600
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: trainer
+              image: "{{ .Values.api.image.repository }}:{{ .Values.api.image.tag }}"
+              imagePullPolicy: {{ .Values.api.image.pullPolicy }}
+              command:
+                - python
+                - services/engine/train.py
+                - --bar
+                - {{ .Values.trainerCron.bar | quote }}
+                - --days
+                - {{ .Values.trainerCron.days | quote }}
+                - --trials
+                - {{ .Values.trainerCron.trials | quote }}
+              env:
+                - name: POSTGRES_PASSWORD
+                  valueFrom:
+                    secretKeyRef: { name: {{ .Values.secretName }}, key: POSTGRES_PASSWORD }
+                - name: DATABASE_URL
+                  value: "postgresql://{{ .Values.db.username }}:$(POSTGRES_PASSWORD)@{{ include "trader.fullname" . }}-db:5432/{{ .Values.db.database }}"
+                - name: PYTHONUNBUFFERED
+                  value: "1"
+              resources: {{- toYaml .Values.trainerCron.resources | nindent 16 }}
+{{- end }}
