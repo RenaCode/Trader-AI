@@ -35,6 +35,7 @@ import json
 import math
 import os
 import sys
+from collections import deque
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -306,6 +307,12 @@ def compute_funding(cur, instrument_id: int, h: Horizon, feat_ids: dict[str, int
     Kazda swieca dostaje OSTATNIA stawke ogloszona przed jej zamknieciem -
     nigdy nadchodzaca. Stawka publikowana o 08:00 nie moze wplywac na decyzje
     z 04:00, choc opisuje to samo osmiogodzinne okno.
+
+    Wypelnianie w przod robimy jednym przejsciem po dwoch posortowanych listach,
+    a nie skorelowanym podzapytaniem per punkt siatki. Wersja z podzapytaniem
+    wykonywala 8 400 osobnych wyszukiwan na instrument po hipertabeli i zajmowala
+    ponad dwie minuty na instrument; to samo przejsciem scalajacym trwa ulamek
+    sekundy.
     """
     cur.execute("SELECT (meta->>'funding_from')::int AS src FROM ref.instrument WHERE id=%s",
                 (instrument_id,))
@@ -314,36 +321,44 @@ def compute_funding(cur, instrument_id: int, h: Horizon, feat_ids: dict[str, int
     if not src:
         return 0
 
+    # Zapas przed poczatkiem okresu, zeby pierwsza swieca tez miala czym byc
+    # wypelniona (stawka ogloszona jeszcze przed `since`).
     cur.execute(
-        """
-        WITH grid AS (SELECT generate_series(%s, %s, %s::interval) AS t),
-        joined AS (
-            SELECT g.t,
-                   (SELECT f.rate FROM market.funding_rate f
-                     WHERE f.instrument_id = %s AND f.event_time <= g.t
-                     ORDER BY f.event_time DESC LIMIT 1) AS rate
-            FROM grid g
-        )
-        SELECT t, rate,
-               (rate - avg(rate)  OVER w) /
-               NULLIF(stddev_pop(rate) OVER w, 0) AS z
-        FROM joined
-        WINDOW w AS (ORDER BY t ROWS BETWEEN %s PRECEDING AND CURRENT ROW)
-        ORDER BY t
-        """,
-        (since, until, f"{h.bar_minutes} minutes", src,
-         max(20, 30 * 1440 // h.bar_minutes)),
+        "SELECT event_time, rate FROM market.funding_rate"
+        " WHERE instrument_id = %s AND event_time >= %s AND event_time <= %s"
+        " ORDER BY event_time",
+        (src, since - timedelta(days=2), until),
     )
+    rates = [(r["event_time"], float(r["rate"])) for r in cur.fetchall()]
+    if not rates:
+        return 0
+
+    step = timedelta(minutes=h.bar_minutes)
+    # Okno z-score: 30 dni wyrazone w swiecach tego horyzontu.
+    win = max(20, 30 * 1440 // h.bar_minutes)
+
     rows: list[tuple] = []
-    for r in cur.fetchall():
-        if r["rate"] is None:
-            continue
-        ingested = r["t"] + COMPUTE_LAG
-        rows.append((feat_ids["funding_rate"], instrument_id, r["t"],
-                     float(r["rate"]) * 100, ingested))
-        if r["z"] is not None and math.isfinite(float(r["z"])):
-            rows.append((feat_ids["funding_z"], instrument_id, r["t"],
-                         float(r["z"]), ingested))
+    hist: deque[float] = deque(maxlen=win)
+    j = 0
+    last: float | None = None
+    t = since
+    while t <= until:
+        while j < len(rates) and rates[j][0] <= t:
+            last = rates[j][1]
+            j += 1
+        if last is not None:
+            ingested = t + COMPUTE_LAG
+            hist.append(last)
+            rows.append((feat_ids["funding_rate"], instrument_id, t, last * 100, ingested))
+            if len(hist) >= 20:
+                mean = sum(hist) / len(hist)
+                sd = math.sqrt(sum((v - mean) ** 2 for v in hist) / len(hist))
+                if sd > 1e-12:
+                    z = (last - mean) / sd
+                    if math.isfinite(z):
+                        rows.append((feat_ids["funding_z"], instrument_id, t, z, ingested))
+        t += step
+
     return insert_values(cur, rows)
 
 
