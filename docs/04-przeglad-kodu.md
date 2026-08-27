@@ -161,11 +161,22 @@ niezmienialny i broni go tylko wyzwalacz, którego superużytkownik może wyłą
 Zalecenie: osobna rola z `SELECT/INSERT/UPDATE` na tym, co potrzebne, bez
 `TRUNCATE`, bez `DROP`, bez prawa wyłączania wyzwalaczy. Migracje osobną rolą.
 
-### 3.2 Brak kopii zapasowych bazy
+### 3.2 Kopie zapasowe bazy — WDROŻONE
 
 Cztery lata świec da się odtworzyć z giełdy. **Dziennika decyzji nie da się** —
 to jedyny zapis tego, co system myślał w danym momencie, i cała podstawa oceny,
-czy się uczy. Zalecenie: `pg_dump` na zewnętrzny zasób, codziennie.
+czy się uczy.
+
+Wdrożone: `CronJob` codziennie o 03:17 UTC, zrzut na dysk hosta (poza wolumen
+bazy), weryfikacja każdego archiwum przez `pg_restore --list`, retencja 14 dni.
+Pierwsze uruchomienie **padło** na braku prawa zapisu (kubelet tworzy katalog
+jako `root:root`, obraz bazy działa jako uid 1000) — naprawione kontenerem
+inicjującym. Bez próbnego uruchomienia zadanie padałoby co noc, a jedynym
+śladem byłby status `Failed` w historii.
+
+Pozostaje: kopia leży na **tym samym serwerze** co baza. Chroni przed pomyłką
+w SQL i uszkodzeniem wolumenu, nie chroni przed utratą maszyny. Zalecenie:
+odkładanie zrzutu na zasób zewnętrzny.
 
 ### 3.3 Kod TOTP da się użyć dwa razy
 
@@ -189,12 +200,19 @@ Klucz nie ma wersji. Jego zmiana czyni wszystkie zaszyfrowane wartości
 nieodczytywalnymi — bez ostrzeżenia, przy pierwszym odczycie. Zalecenie: numer
 wersji klucza w rekordzie i obsługa dwóch kluczy naraz na czas migracji.
 
-### 3.6 Brak limitu wydatków na Anthropica
+### 3.6 Limit wydatków na Anthropica — WDROŻONY
 
-Pętla wiadomości nie ma górnego ograniczenia kosztu. Przy awarii deduplikacji
-(np. kanał zmienia identyfikatory wpisów) system przeanalizowałby te same
-artykuły w kółko. Zalecenie: dzienny limit w bazie, twardy stop po
-przekroczeniu. Osobno: ustaw limit po stronie Anthropica — patrz §5.
+Pętla wiadomości nie miała górnego ograniczenia kosztu. Przy awarii deduplikacji
+system analizowałby te same artykuły w kółko.
+
+Wdrożone: tabela `news.api_spend` (migracja 0012) rejestruje **każde** wywołanie
+modelu wraz z kosztem, plus twardy limit dobowy (`ANTHROPIC_DAILY_USD`, domyślnie
+5 USD przy zmierzonym zużyciu ~0,60 USD/dobę). Przy okazji: koszt triażu nie był
+liczony w ogóle, więc raportowana kwota była systematycznie zaniżona.
+
+Pozostaje: ustaw również limit po stronie Anthropica (Console → Billing →
+Spend limits) — limit w aplikacji nie zadziała, jeśli to sama aplikacja
+zawiedzie.
 
 ### 3.7 Brak testów API
 
@@ -238,10 +256,14 @@ Uczciwość wymaga wskazania też tego, co się broni:
 ## 5. Kolejność, w jakiej to bym robił
 
 1. **Rola bazy bez superużytkownika** (§3.1) — jedyna pozycja, która dziś
-   realnie osłabia gwarancje niezmienności dziennika.
-2. **Kopie zapasowe** (§3.2) — dziennika decyzji nie da się odtworzyć.
-3. **Limit wydatków na API** (§3.6) — zanim wpięty zostanie klucz.
-4. **Ochrona TOTP przed powtórzeniem** (§3.3) — zanim włączymy 2FA.
-5. Testy jednostkowe `risk.py` i `security.py` (§3.7).
-6. Rotacja `SECRETS_KEY` (§3.5), sprzątanie danych (§3.8), `constant_time_eq`
+   realnie osłabia gwarancje niezmienności dziennika. Wymaga skoordynowanej
+   zmiany roli aplikacji i roli migracji, więc nie zrobiłem tego w locie przy
+   działającym treningu — to zmiana do wykonania świadomie, z oknem serwisowym.
+2. **Ochrona TOTP przed powtórzeniem** (§3.3) — zanim włączymy 2FA.
+3. Testy jednostkowe `risk.py` i `security.py` (§3.7).
+4. Odkładanie kopii poza serwer (§3.2).
+5. Rotacja `SECRETS_KEY` (§3.5), sprzątanie danych (§3.8), `constant_time_eq`
    (§3.4).
+
+Zrobione w trakcie tego przeglądu: §3.2 (kopie), §3.6 (limit wydatków),
+§2.3 (kanały RSS).

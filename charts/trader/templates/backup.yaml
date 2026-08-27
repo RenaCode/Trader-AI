@@ -63,6 +63,17 @@ spec:
                   pg_restore --list "$PLIK" > /dev/null
                   echo "==> weryfikacja archiwum ok, rozmiar: $(du -h "$PLIK" | cut -f1)"
 
+                  # UWAGA DO ODTWARZANIA: pg_restore --list dowodzi, ze archiwum jest
+                  # czytelne - nie dowodzi, ze wgra sie do dzialajacej bazy. Baza z
+                  # TimescaleDB wymaga procedury z dokumentacji, inaczej odtworzenie
+                  # rozjedzie katalogi rozszerzenia:
+                  #
+                  #   psql -c "SELECT timescaledb_pre_restore();"
+                  #   pg_restore -d trader --no-owner <plik>
+                  #   psql -c "SELECT timescaledb_post_restore();"
+                  #
+                  # Ostrzezenie pg_dump o cyklicznym kluczu obcym na 'continuous_agg'
+                  # dotyczy katalogu TimescaleDB, nie naszych danych, i jest oczekiwane.
                   find /backup -name 'trader-*.dump' -mtime "+${RETENCJA_DNI}" -delete
                   echo "==> kopie na dysku: $(ls -1 /backup/trader-*.dump | wc -l)"
               volumeMounts:
