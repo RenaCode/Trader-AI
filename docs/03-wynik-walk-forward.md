@@ -173,3 +173,91 @@ nie łapie, bo liczy konfiguracje wag, nie decyzje projektowe.
    przekrojowość (siła względna zamiast kierunku), sygnał newsowy.
 3. Dopiero potem — kolejny walk-forward, z pełną świadomością, że licznik
    hipotez urósł do 2 400 i każdy następny wynik trzeba o to dyskontować.
+
+---
+
+# Trzecia iteracja: risk kernel w symulacji, 24 instrumenty
+
+Data: 2026-08-27, tego samego dnia co dwie poprzednie.
+
+## Co się zmieniło i dlaczego
+
+Druga iteracja raportowała obsunięcie −37% przy skonfigurowanym kill-switchu na
+10%. Opisywała więc strategię, której ten system **nie wykonałby** — a to jest
+gorsze niż brak backtestu, bo wygląda na wynik.
+
+Przyczyna była strukturalna: symulacja liczyła każdy instrument osobno. Limit
+łącznej ekspozycji, limit częstotliwości zleceń i kill-switch są własnościami
+**konta**, więc dwanaście niezależnych symulacji nigdy ich nie naruszy. Strata
+na SOL nie wstrzymywała handlu na BTC, choć w produkcji wstrzymałaby.
+
+Symulacja jest teraz portfelowa i przechodzi przez **tę samą funkcję limitów**
+co produkcja (`services/engine/risk_rules.py`). Napisanie drugiej implementacji
+„na potrzeby backtestu" byłoby gwarancją rozjazdu przy pierwszej zmianie reguł.
+
+## Skutek: −37% było artefaktem
+
+| | Bez risk kernela | Z risk kernelem |
+|---|---|---|
+| Najgorsze obsunięcie | −37,07% | **−1,21%** |
+
+Limit łącznej ekspozycji to 15 000 na 100 000 kapitału, więc nawet całkowita
+strata wszystkich pozycji daje −15%. Poprzednia liczba brała się z tego, że
+symulacja per instrument angażowała cały kapitał na każdym z osobna.
+
+To działa w obie strony i trzeba to powiedzieć wprost: **zyski są równie
+ograniczone**. System ryzykuje najwyżej 15% kapitału naraz, więc i zarabia
+proporcjonalnie mniej, niż sugerowały wcześniejsze liczby.
+
+## Trzy błędy w rozdziale kapitału, znalezione przy okazji
+
+1. **Przesubskrybowanie.** Bazowa wielkość zlecenia 3 000 przy limicie 15 000
+   i dwunastu instrumentach to chęć zaangażowania 36 000 — dwa i pół raza ponad
+   limit. Mieściło się pięć pozycji z dwunastu. Nie było to bezpieczniejsze
+   (ryzyko wyznacza limit, nie liczba odrzuconych zleceń), tylko bardziej
+   skoncentrowane. Budżet liczony jako `limit / liczba_instrumentów` daje pełną
+   dywersyfikację przy **niezmienionym** ryzyku łącznym.
+
+2. **Przydział alfabetyczny.** Przy niedoborze kapitału o tym, które wejścia
+   przejdą, decydowała kolejność rozpatrywania — a instrumenty szły
+   `ORDER BY symbol`. ADAUSDT był systematycznie faworyzowany względem XRPUSDT.
+   Pętla rozdzielona na dwa przebiegi: najpierw ocena wszystkich, potem
+   działanie w kolejności malejącej siły sygnału.
+
+3. **Młody instrument kasował całe okno.** Warunek dopuszczenia okna sprawdzał
+   `min(długość_szeregu)` po **wszystkich** instrumentach. SUI, TIA i SEI weszły
+   na giełdę w 2023, więc we wcześniejszych oknach ich szereg jest pusty i `min()`
+   wynosiło zero. Kosztowało to dziewięć okien z czterdziestu — prawie czwartą
+   część dowodów, bez żadnego komunikatu.
+
+## Błąd produkcyjny znaleziony przez testy
+
+Test symulacji nie potrafił doprowadzić do uruchomienia kill-switcha mimo straty
+przekraczającej próg. Przyczyna okazała się produkcyjna:
+
+```python
+verdict = risk.check(...) if action.startswith("enter") else <allow>
+```
+
+Limity były oceniane **wyłącznie przy próbie wejścia w pozycję**. Jeśli silnik
+trzymał otwarte pozycje i nie próbował wchodzić w nowe — a właśnie tak zachowuje
+się podczas gwałtownego spadku, bo sygnały są wtedy niespójne — obsunięcie
+kapitału nie było przez nikogo oceniane. **Kill-switch na 10% nie miał szans
+zadziałać dokładnie w tej sytuacji, dla której istnieje.**
+
+Naprawa: `evaluate_account()` wołane raz na cykl, niezależnie od tego, czy
+silnik chce w cokolwiek wejść.
+
+## Uczciwie o liczbie decyzji projektowych
+
+W ciągu jednego dnia zmieniłem: horyzont (5 min → 4 h), liczbę instrumentów
+(3 → 12 → 24), sposób liczenia progu wejścia (stała → percentyl), jednostkę
+oceny (per instrument → portfel) i regułę dopuszczania okna. Każda z tych zmian
+ma uzasadnienie **niezależne od wyniku** — koszt względem amplitudy, moc
+statystyczna, zgodność z produkcją, poprawność.
+
+Ale wszystkie zapadły **po zobaczeniu, że poprzednia wersja zawodzi**, i licznik
+hipotez (2 400) tego nie łapie, bo liczy konfiguracje wag, nie decyzje
+projektowe. Przy czytaniu każdego wyniku z tej serii trzeba to trzymać w głowie.
+Prawdziwym testem będzie zachowanie na danych, których jeszcze nie ma — czyli
+najbliższe miesiące fazy demo.
