@@ -151,3 +151,66 @@ Wnioski, które zmieniły sposób pracy:
 - **Globalny `.gitignore` użytkownika po cichu wykluczał** `package-lock.json`
   i cały katalog `scripts` — dwa commity twierdziły, że dodają pliki, których
   `git add` nigdy nie objął. Build wywalał się dopiero na VPS.
+
+---
+
+## 7. Etap silnika decyzyjnego (27.08, wieczorem)
+
+### Co działa na realnych danych
+
+| Warstwa | Stan |
+|---|---|
+| Świece 1 m z Bybita | 414 tys., 90 dni, zero luk w szeregu |
+| Cechy z realnych świec | 697 tys. wartości, 9 cech × 3 instrumenty |
+| Sygnały i reżim | 6 sygnałów, 5 reżimów, wagi jako jawne założenia początkowe |
+| Risk kernel | limity egzekwowane przed każdym zleceniem |
+| Dziennik decyzji | realne decyzje z pełnym rozbiciem na wkłady |
+| Trener walk-forward | 38 okien, trening 14 dni / test 2 dni, krok 2 dni |
+
+### Trzy błędy złapane w tym etapie
+
+**1. Sharpe rzędu 40 milionów.** Przy dwóch niemal identycznych transakcjach
+w oknie odchylenie standardowe schodziło niemal do zera, a iloraz `mean/sd`
+eksplodował. Do tego anualizacja z okna dwudniowego mnożyła szum przez ~50.
+Naprawione trzema rzeczami: minimum 5 transakcji (poniżej okno jest oznaczone
+jako *bez informacji* i nie liczy się ani na plus, ani na minus), podłoga na
+odchyleniu, oraz rezygnacja z anualizacji na rzecz Sharpe'a **na transakcję**.
+
+To jest przykład liczby, która *wyglądała* jak wynik. Gdyby przeszła, zakładka
+„Stopień nauki" pokazywałaby imponujące wartości bez żadnego znaczenia.
+
+**2. `hash()` jako identyfikator cechy.** Wbudowany `hash()` w Pythonie jest
+losowany przy każdym starcie interpretera (`PYTHONHASHSEED`), więc ta sama cecha
+dostawałaby inne `ref_id` po restarcie, a `ON CONFLICT` przestałby działać.
+Zamienione na `crc32`.
+
+**3. Długie zadanie w podzie API.** Trening uruchomiony przez `kubectl exec`
+ginął przy każdym wdrożeniu razem z podem — dwa razy straciłem kilkadziesiąt
+minut obliczeń. Trener jest teraz osobnym procesem z własnym cyklem.
+
+### Decyzje projektowe warte zapamiętania
+
+**Datowanie wstecz cech.** Cecha liczona wyłącznie z zamkniętych świec dostaje
+`ingested_at = event_time + 3 s`, bo gdyby system działał wtedy, policzyłby ją
+wtedy — jej wejścia były dostępne. Cecha newsowa **nie może** być datowana wstecz:
+dziedziczy opóźnienie analizy artykułu (`an.ingested_at <= T` w zapytaniu).
+To rozróżnienie jest granicą między poprawnym backtestem a takim, który cicho
+uczy się z przyszłości.
+
+**Wejście po cenie następnej świecy.** Decyzja podjęta na zamknięciu świecy T
+jest wykonywana po cenie świecy T+1. Wykonanie po cenie tej samej świecy to
+jeden z najczęstszych i najbardziej optymistycznych błędów w backtestach.
+
+**Wagi sygnałów to jawne założenia, nie wynik dopasowania.** Do czasu, aż
+walk-forward je zastąpi, każda decyzja systemu jest decyzją tych założeń — i tak
+należy ją czytać. Założenia startują jako jeden z kandydatów w każdym oknie:
+jeśli losowanie nie potrafi ich pobić na treningu, zostają.
+
+### Subskrypcja Claude.ai a dostęp do API
+
+Osobna sprawa, która często myli: plan Pro/Max na claude.ai **nie obejmuje**
+wywołań API. To odrębny produkt z odrębnym rozliczeniem i nie istnieje mechanizm
+„zaloguj się subskrypcją" dla aplikacji zewnętrznej. Klucz powstaje w Claude
+Console (`platform.claude.com`) po doładowaniu konta. Interfejs mówi to wprost
+i pozwala sprawdzić klucz prawdziwym wywołaniem — poprawny format nie dowodzi
+niczego, bo klucz może być odwołany albo bez środków.

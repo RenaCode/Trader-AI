@@ -26,10 +26,12 @@ z osobnymi modelami, osobnym ryzykiem i osobnymi zakładkami w UI.
 - [x] Uwierzytelnianie: hasło Argon2id + TOTP + kody zapasowe, sesje serwerowe, CSRF
 - [x] Test dymny całej aplikacji w CI
 - [ ] Szyfrowane klucze API giełd w UI
-- [ ] Adapter Bybit demo + ingest danych rynkowych
-- [ ] Worker RSS + analiza newsów przez Claude
-- [ ] Silnik sygnałów i risk kernel
-- [ ] Warstwa uczenia: walk-forward, detekcja reżimu
+- [x] Adapter Bybit + backfill 90 dni realnych świec (388 tys. świec 1-minutowych)
+- [x] Silnik cech, sygnałów i risk kernel — pętla decyzyjna na realnych danych
+- [x] Trener walk-forward z licznikiem przetestowanych hipotez
+- [x] Ustawienia, powiadomienia (w aplikacji / Telegram / webhook), profil konta
+- [ ] Skaner RSS + analiza Claude — **czeka na klucz API Anthropic**
+- [ ] Egzekucja na koncie demo Bybit — **czeka na klucze giełdy**
 - [ ] Adapter IBKR + silnik equity
 
 ## Architektura w skrócie
@@ -71,8 +73,19 @@ set -a; . ./.env; set +a
 cd web && npm install && npm run dev      # http://localhost:5174
 ```
 
-`seed_demo.py` generuje atrapę o właściwym *kształcie* — nie jest backtestem ani
-symulacją strategii. Liczby nie znaczą nic poza tym, że wykresy mają co rysować.
+**Dane demonstracyjne zostały usunięte** — system pracuje wyłącznie na realnych
+świecach z giełdy. `seed_demo.py` pozostaje do rozwoju lokalnego; `purge_demo.py`
+kasuje wszystko, co wygenerował, zostawiając realne dane rynkowe.
+
+## Procesy tła
+
+| Proces | Co robi | Zależność |
+|---|---|---|
+| `market` | świece 1 m i snapshoty orderbooka, co 60 s | — |
+| `features` | cechy z realnych świec, co 5 min | — |
+| `engine` | pętla decyzyjna: reżim → sygnały → risk kernel → dziennik | cechy |
+| `trainer` | walk-forward, raz na dobę | cechy |
+| `news` | RSS → filtr → analiza, co 5 min | klucz Anthropic |
 
 ## Baza danych
 
