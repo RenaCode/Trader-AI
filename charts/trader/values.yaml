@@ -1,5 +1,9 @@
 replicaCount: 1
-imagePullSecrets: []
+# Repo jest prywatne, wiec obrazy w ghcr.io tez. Sekret tworzony raz, recznie:
+#   kubectl create secret docker-registry ghcr-pull \
+#     --docker-server=ghcr.io --docker-username=<login> --docker-password=<PAT z read:packages>
+imagePullSecrets:
+  - name: ghcr-pull
 
 api:
   image:
