@@ -38,9 +38,13 @@ kind: Ingress
 metadata:
   name: {{ include "trader.fullname" . }}
   labels: {{- include "trader.labels" . | nindent 4 }}
-  {{- with .Values.ingress.annotations }}
-  annotations: {{- toYaml . | nindent 4 }}
-  {{- end }}
+  annotations:
+    {{- with .Values.ingress.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+    {{- if .Values.ingress.basicAuth.enabled }}
+    traefik.ingress.kubernetes.io/router.middlewares: {{ .Release.Namespace }}-{{ include "trader.fullname" . }}-basicauth@kubernetescrd
+    {{- end }}
 spec:
   ingressClassName: {{ .Values.ingress.className }}
   tls:

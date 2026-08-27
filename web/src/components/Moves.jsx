@@ -3,7 +3,7 @@ import React, { useState } from 'react';
 import { useApi, get } from '../utils/api';
 import { ContributionBars } from '../charts';
 import {
-  fmtMoney, fmtNum, fmtTime, fmtAgo, ACTION_PL, REGIME_PL, VERDICT_PL, DIRECTION_PL,
+  fmtMoney, fmtNum, fmtTime, ACTION_PL, REGIME_PL, VERDICT_PL, DIRECTION_PL,
 } from '../utils/format';
 
 function DecisionDetail({ engine, id, onClose }) {

@@ -4,7 +4,7 @@
 import React from 'react';
 import { useApi } from '../utils/api';
 import { BarChart, CalibrationChart } from '../charts';
-import { fmtNum, fmtPct, fmtTime, fmtDate, STATE_PL, STATE_TONE, REGIME_PL } from '../utils/format';
+import { fmtNum, fmtTime, fmtDate, STATE_PL, REGIME_PL } from '../utils/format';
 
 const THRESHOLD_PCT = 70; // Prog wyjscia z demo na live.
 

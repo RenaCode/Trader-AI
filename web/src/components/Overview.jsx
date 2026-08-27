@@ -3,7 +3,7 @@ import React from 'react';
 import { useApi } from '../utils/api';
 import { AreaChart } from '../charts';
 import {
-  fmtMoney, fmtPct, fmtTime, fmtAgo, fmtDate, fmtNum,
+  fmtMoney, fmtPct, fmtTime, fmtAgo, fmtNum,
   STATE_PL, STATE_TONE, ACTION_PL,
 } from '../utils/format';
 

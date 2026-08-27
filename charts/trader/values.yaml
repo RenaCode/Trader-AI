@@ -61,3 +61,9 @@ ingress:
     traefik.ingress.kubernetes.io/router.entrypoints: websecure
   host: trader.renacode.com
   tlsSecret: trader-tls-cert
+  # Bramka tymczasowa do czasu wdrozenia logowania z 2FA - patrz
+  # templates/basicauth.yaml. Sekret tworzony recznie:
+  #   htpasswd -nbB <user> <haslo> | kubectl create secret generic trader-basicauth --from-file=users=/dev/stdin
+  basicAuth:
+    enabled: true
+    secretName: trader-basicauth

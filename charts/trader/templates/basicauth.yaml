@@ -1,0 +1,20 @@
+{{- if .Values.ingress.basicAuth.enabled -}}
+# BRAMKA TYMCZASOWA.
+#
+# API nie ma jeszcze wlasnego uwierzytelniania (haslo + TOTP dochodza w fazie 1),
+# a wszystkie endpointy sa czytelne bez logowania. Bez tej warstwy dashboard z
+# pozycjami, decyzjami i stanem konta bylby publicznie dostepny pod
+# trader.renacode.com.
+#
+# To NIE zastepuje docelowego logowania - ma tylko zamknac okno miedzy wdrozeniem
+# a dodaniem wlasciwej autoryzacji. Usunac po wdrozeniu 2FA.
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: {{ include "trader.fullname" . }}-basicauth
+  labels: {{- include "trader.labels" . | nindent 4 }}
+spec:
+  basicAuth:
+    secret: {{ .Values.ingress.basicAuth.secretName }}
+    realm: "Trader AI (dostep tymczasowy)"
+{{- end }}
