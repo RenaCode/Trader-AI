@@ -12,7 +12,9 @@ zderzenie z prawdziwą giełdą.
 | Redis | **działa** | PVC 1 Gi |
 | Certyfikat TLS | **działa** | Let's Encrypt, ważny do 2026-11-25, HTTP→HTTPS 301 |
 | Ingress Traefik | **działa** | `trader.renacode.com` |
-| `trader-api`, `trader-web` | **blokada** | `ImagePullBackOff` — prywatne pakiety GHCR bez poświadczeń |
+| `trader-api`, `trader-web` | **działa** | obrazy budowane na VPS (prywatne GHCR bez tokenu) |
+| Logowanie (Argon2id + TOTP) | **działa** | zweryfikowane end-to-end przez publiczny URL |
+| Test dymny w CI | **działa** | blokuje build obrazów przy niepowodzeniu |
 
 Baza po 45 dniach danych demo: **25 MB**. Ekstrapolacja: ~200 MB/rok przy 5 instrumentach.
 PVC 20 Gi wystarcza z bardzo dużym zapasem — potwierdza, że wybór Postgresa zamiast
@@ -20,7 +22,7 @@ QuestDB/ClickHouse był trafny dla tej skali.
 
 ## 2. Znalezione defekty
 
-### 2.1 Brak jakiegokolwiek uwierzytelniania — naprawione doraźnie
+### 2.1 Brak jakiegokolwiek uwierzytelniania — naprawione
 
 Żaden endpoint API nie był chroniony. Po wdrożeniu pod publiczną domeną cały dashboard —
 pozycje, decyzje, stan konta — byłby czytelny dla każdego.
@@ -121,3 +123,31 @@ Kolejność odzwierciedla zależności, nie ważność.
 | Backup bazy | PVC bez snapshotów. Dziennik decyzji jest nieodtwarzalny — to nie są dane, które można przeliczyć ponownie |
 | Limit `max_tokens`/koszt Anthropic | Worker newsów będzie wołał API w pętli; brak twardego budżetu |
 | `sig.signal_value` bez polityki kompresji | Pozostałe hypertables ją mają |
+
+---
+
+## 6. Uzupełnienie po wdrożeniu logowania (27.08, wieczorem)
+
+Cztery kolejne defekty, wszystkie znalezione dopiero przez oglądanie działającej
+aplikacji — żadnego nie zgłosił build ani lint.
+
+| # | Defekt | Skutek | Dlaczego umknął |
+|---|---|---|---|
+| 1 | Pula połączeń bez `autocommit` | Zapisy sesji i audytu byłyby cofane przy zwrocie połączenia | Testy odczytu przechodziły; problem dotyczył wyłącznie zapisu |
+| 2 | Brak `SECRETS_KEY` wywalał się dopiero przy pierwszym użyciu 2FA | Aplikacja startowała „zdrowa" z niedziałającą funkcją | Health check nie dotykał szyfrowania |
+| 3 | `viewBox` o stałej szerokości przy sztywnej wysokości | Wykresy renderowały się na ~1/3 karty | Build kompiluje się poprawnie |
+| 4 | Ścieżka SVG liczona przed sprawdzeniem pustych danych | **Biały ekran po każdym zalogowaniu** | j.w. |
+| 5 | `executemany` z 21 600 wierszami | Seeder ubijany przez jądro na limicie 1 GiB, dane wgrane w połowie | Lokalnie limitu nie ma |
+
+Wnioski, które zmieniły sposób pracy:
+
+- **Cisza narzędzia nie jest dowodem.** Pierwszy detektor nieużywanych importów
+  zgłosił „brak" i nie wykrywał niczego — nie obsługiwał importów wieloliniowych,
+  a wszystkie cztery znalezione takie były. Wyszło dopiero po wstrzyknięciu
+  znanego-złego symbolu.
+- **Ten sam test zastosowany do testu dymnego.** Zanim uznałem go za działający,
+  wstrzyknąłem obie naprawione usterki z powrotem: regresja wykresów daje dwa
+  jawne błędy, biały ekran przerywa test. Dopiero wtedy trafił do CI.
+- **Globalny `.gitignore` użytkownika po cichu wykluczał** `package-lock.json`
+  i cały katalog `scripts` — dwa commity twierdziły, że dodają pliki, których
+  `git add` nigdy nie objął. Build wywalał się dopiero na VPS.

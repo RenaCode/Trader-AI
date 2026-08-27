@@ -22,7 +22,10 @@ z osobnymi modelami, osobnym ryzykiem i osobnymi zakładkami w UI.
 - [x] Schemat bazy (10 schematów, 8 migracji, hypertables + pgvector)
 - [x] API odczytu (FastAPI) i dashboard (React + Vite)
 - [x] Chart Helm, obrazy Docker, CI
-- [ ] Uwierzytelnianie: hasło + TOTP, szyfrowane klucze API giełd
+- [x] Wdrożenie na `trader.renacode.com` (TLS, Traefik, ArgoCD)
+- [x] Uwierzytelnianie: hasło Argon2id + TOTP + kody zapasowe, sesje serwerowe, CSRF
+- [x] Test dymny całej aplikacji w CI
+- [ ] Szyfrowane klucze API giełd w UI
 - [ ] Adapter Bybit demo + ingest danych rynkowych
 - [ ] Worker RSS + analiza newsów przez Claude
 - [ ] Silnik sygnałów i risk kernel
@@ -105,3 +108,38 @@ kubectl create secret generic trader-secret \
 
 TLS: cert-manager (`letsencrypt-prod`) + Traefik, tak jak reszta usług na VPS.
 Kontener nginx serwuje czysty HTTP — certyfikat żyje wyłącznie na krawędzi.
+
+> **Obrazy budowane są obecnie na VPS**, nie pobierane z ghcr.io — repozytorium
+> jest prywatne, więc pakiety też, a klaster nie ma tokenu z `read:packages`.
+> Patrz `scripts/build-on-vps.sh`; ścieżka powrotu do pełnego GitOps-a jest
+> opisana w `charts/trader/values.yaml`.
+
+## Uwierzytelnianie
+
+| Warstwa | Rozwiązanie |
+|---|---|
+| Hasło | Argon2id, 64 MiB / t=3 / p=4 (OWASP wymaga minimum 19 MiB / t=2 / p=1) |
+| Drugi składnik | TOTP (RFC 6238) + 10 jednorazowych kodów zapasowych |
+| Sesja | 256 bitów z CSPRNG; w bazie wyłącznie SHA-256; cookie `HttpOnly` + `Secure` + `SameSite=Strict` |
+| Session fixation | Nowa sesja przy logowaniu i po potwierdzeniu drugiego składnika |
+| CSRF | Double-submit cookie na metodach zmieniających stan |
+| Blokada | 15 minut po pięciu nieudanych próbach; stała odpowiedź i stałe opóźnienie dla nieistniejącego loginu |
+| Audyt | Każda próba logowania, zmiana hasła i operacja na 2FA w `app.audit_log` |
+
+Konto zakładane poza repozytorium:
+
+```bash
+kubectl exec <pod-api> -- sh -c 'printf %s "<hasło>" | python scripts/create_admin.py admin --stdin'
+```
+
+## Testy
+
+```bash
+BASE_URL=https://trader.renacode.com TEST_PASSWORD=... node tests/smoke.spec.mjs
+```
+
+Test dymny przechodzi pełny przepływ (odmowa bez sesji → logowanie → każda
+zakładka → oba silniki → wylogowanie) i pilnuje, że każdy wykres renderuje się
+w skali 1:1 względem swojego `viewBox`. Powstał, bo trzy regresje interfejsu
+przeszły przez `npm run build` bez ostrzeżenia — build sprawdza kompilację,
+nie to, czy cokolwiek widać.
