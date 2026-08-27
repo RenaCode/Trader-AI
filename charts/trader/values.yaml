@@ -1,0 +1,59 @@
+replicaCount: 1
+imagePullSecrets: []
+
+api:
+  image:
+    repository: ghcr.io/renacode/trader-ai-api
+    tag: "latest"
+    pullPolicy: Always
+  resources:
+    limits:   { cpu: 1000m, memory: 1Gi }
+    requests: { cpu: 100m,  memory: 256Mi }
+
+web:
+  image:
+    repository: ghcr.io/renacode/trader-ai-web
+    tag: "latest"
+    pullPolicy: Always
+  resources:
+    limits:   { cpu: 200m, memory: 256Mi }
+    requests: { cpu: 50m,  memory: 64Mi }
+
+db:
+  # timescaledb-ha zawiera TimescaleDB i pgvector w jednym obrazie.
+  image:
+    repository: timescale/timescaledb-ha
+    tag: "pg17"
+    pullPolicy: IfNotPresent
+  database: trader
+  username: trader
+  resources:
+    limits:   { cpu: 2000m, memory: 3Gi }
+    requests: { cpu: 250m,  memory: 512Mi }
+  persistence:
+    size: 20Gi
+    storageClass: local-path
+
+redis:
+  image:
+    repository: redis
+    tag: "7-alpine"
+  persistence:
+    size: 1Gi
+    storageClass: local-path
+
+# Sekrety NIE trafiaja do gita. Utworz raz recznie:
+#   kubectl create secret generic trader-secret \
+#     --from-literal=POSTGRES_PASSWORD=... \
+#     --from-literal=SECRETS_KEY=... \
+#     --from-literal=ANTHROPIC_API_KEY=...
+secretName: trader-secret
+
+ingress:
+  enabled: true
+  className: traefik
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+  host: trader.renacode.com
+  tlsSecret: trader-tls-cert

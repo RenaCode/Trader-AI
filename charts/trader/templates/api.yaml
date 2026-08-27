@@ -1,0 +1,77 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "trader.fullname" . }}-api
+  labels: {{- include "trader.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      app: {{ include "trader.fullname" . }}-api
+  template:
+    metadata:
+      labels:
+        app: {{ include "trader.fullname" . }}-api
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      # Migracje ida jako initContainer, nie jako Job: dzieki temu API nigdy nie
+      # wystartuje na schemacie starszym niz jego kod, a ArgoCD nie musi
+      # koordynowac kolejnosci Job -> Deployment.
+      initContainers:
+        - name: migrate
+          image: "{{ .Values.api.image.repository }}:{{ .Values.api.image.tag }}"
+          imagePullPolicy: {{ .Values.api.image.pullPolicy }}
+          command: ["python", "db/migrate.py"]
+          env:
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: {{ .Values.secretName }}, key: POSTGRES_PASSWORD }
+            - name: DATABASE_URL
+              value: {{ include "trader.databaseUrl" . | quote }}
+      containers:
+        - name: api
+          image: "{{ .Values.api.image.repository }}:{{ .Values.api.image.tag }}"
+          imagePullPolicy: {{ .Values.api.image.pullPolicy }}
+          env:
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: {{ .Values.secretName }}, key: POSTGRES_PASSWORD }
+            - name: DATABASE_URL
+              value: {{ include "trader.databaseUrl" . | quote }}
+            - name: REDIS_URL
+              value: "redis://{{ include "trader.fullname" . }}-redis:6379/0"
+            # Klucz do szyfrowania kluczy API gield i sekretow TOTP w bazie.
+            - name: SECRETS_KEY
+              valueFrom:
+                secretKeyRef: { name: {{ .Values.secretName }}, key: SECRETS_KEY }
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef: { name: {{ .Values.secretName }}, key: ANTHROPIC_API_KEY, optional: true }
+            - name: CORS_ORIGINS
+              value: "https://{{ .Values.ingress.host }}"
+          ports:
+            - containerPort: 8000
+          readinessProbe:
+            httpGet: { path: /api/health, port: 8000 }
+            initialDelaySeconds: 8
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /api/health, port: 8000 }
+            initialDelaySeconds: 25
+            periodSeconds: 20
+          resources: {{- toYaml .Values.api.resources | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  # Nazwa musi byc dokladnie 'trader-api' - taki host jest wpisany w docker/nginx.conf.
+  name: {{ include "trader.fullname" . }}-api
+  labels: {{- include "trader.labels" . | nindent 4 }}
+spec:
+  selector:
+    app: {{ include "trader.fullname" . }}-api
+  ports:
+    - port: 8000
+      targetPort: 8000

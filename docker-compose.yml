@@ -1,0 +1,40 @@
+services:
+  db:
+    # timescaledb-ha zawiera TimescaleDB ORAZ pgvector w jednym obrazie -
+    # dzieki temu embeddingi newsow i szeregi czasowe zyja w tej samej bazie.
+    image: timescale/timescaledb-ha:pg17
+    container_name: trader-db
+    environment:
+      POSTGRES_DB: trader
+      POSTGRES_USER: trader
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-trader_dev}
+      TS_TUNE_MAX_CONNS: "50"
+    ports:
+      - "${DB_PORT:-5433}:5432"
+    volumes:
+      - trader-db-data:/home/postgres/pgdata/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U trader -d trader"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: trader-redis
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "${REDIS_PORT:-6380}:6379"
+    volumes:
+      - trader-redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+volumes:
+  trader-db-data:
+  trader-redis-data:

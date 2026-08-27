@@ -1,0 +1,183 @@
+name: Build and publish Docker images
+
+# Buduje obrazy api i web, wypycha do ghcr.io, a nastepnie aktualizuje tagi w
+# charts/trader/values.yaml. ArgoCD na VPS obserwuje ten plik i sam synchronizuje
+# klaster - nie ma tu kroku SSH ani deployu, bo to GitOps.
+#
+# Filtr sciezek sprawia, ze zmiana wylacznie we froncie nie przebudowuje API i odwrotnie.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_OWNER: ${{ github.repository_owner }}
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      api: ${{ steps.filter.outputs.api }}
+      web: ${{ steps.filter.outputs.web }}
+    steps:
+      - uses: actions/checkout@v5
+      - id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            api:
+              - 'services/**'
+              - 'db/**'
+              - 'docker/api.Dockerfile'
+            web:
+              - 'web/**'
+              - 'docker/web.Dockerfile'
+              - 'docker/nginx.conf'
+
+  # Migracje sa niemutowalne z zalozenia (runner sprawdza sumy kontrolne).
+  # Ten job wykrywa edycje zastosowanego pliku ZANIM trafi na produkcje, gdzie
+  # initContainer i tak by sie wywalil i zablokowal deploy.
+  verify-migrations:
+    name: Weryfikacja migracji
+    needs: changes
+    if: needs.changes.outputs.api == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    services:
+      db:
+        image: timescale/timescaledb-ha:pg17
+        env:
+          POSTGRES_DB: trader
+          POSTGRES_USER: trader
+          POSTGRES_PASSWORD: ci_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U trader -d trader"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - run: pip install "psycopg[binary]>=3.2"
+      - name: Zastosuj migracje od zera
+        env:
+          DATABASE_URL: postgresql://trader:ci_test@localhost:5432/trader
+        run: python db/migrate.py
+      - name: Ponowny przebieg musi byc no-opem (idempotencja)
+        env:
+          DATABASE_URL: postgresql://trader:ci_test@localhost:5432/trader
+        run: |
+          out=$(python db/migrate.py)
+          echo "$out"
+          echo "$out" | grep -q "Baza aktualna" || { echo "::error::Drugi przebieg nie byl no-opem"; exit 1; }
+
+  build:
+    name: Build ${{ matrix.name }}
+    needs: [changes, verify-migrations]
+    if: |
+      always() &&
+      (needs.verify-migrations.result == 'success' || needs.verify-migrations.result == 'skipped') &&
+      (needs.changes.outputs.api == 'true' || needs.changes.outputs.web == 'true' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: api
+            dockerfile: docker/api.Dockerfile
+            image: trader-ai-api
+          - name: web
+            dockerfile: docker/web.Dockerfile
+            image: trader-ai-web
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Czy ten obraz wymaga przebudowy
+        id: need
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then echo "go=true" >> $GITHUB_OUTPUT
+          elif [ "${{ matrix.name }}" = "api" ]; then echo "go=${{ needs.changes.outputs.api }}" >> $GITHUB_OUTPUT
+          else echo "go=${{ needs.changes.outputs.web }}" >> $GITHUB_OUTPUT; fi
+
+      - if: steps.need.outputs.go == 'true'
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - if: steps.need.outputs.go == 'true'
+        uses: docker/setup-buildx-action@v4
+
+      - if: steps.need.outputs.go == 'true'
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/${{ matrix.image }}
+          tags: |
+            type=raw,value=latest
+            type=sha,format=short
+
+      # Build i push rozdzielone: blad kompilacji nie dociera do rejestru.
+      - if: steps.need.outputs.go == 'true'
+        name: Build (bez push)
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          push: false
+          load: true
+          tags: ${{ steps.meta.outputs.tags }}
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.name }}
+
+      - if: steps.need.outputs.go == 'true'
+        name: Push do ghcr.io
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          cache-from: type=gha,scope=${{ matrix.name }}
+
+  update-git:
+    name: Aktualizacja tagow w values.yaml
+    needs: [changes, build]
+    if: always() && needs.build.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          token: ${{ secrets.DEPLOY_PAT || secrets.GITHUB_TOKEN }}
+      - id: vars
+        run: echo "sha_short=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+      - name: Podbij tagi obrazow
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Retry z fetch+reset: rownolegly bieg tego samego workflow moze przesunac
+          # main w miedzyczasie, a zmiana jest idempotentna.
+          for attempt in 1 2 3 4 5; do
+            git fetch origin main && git reset --hard origin/main
+
+            if [ "${{ needs.changes.outputs.api }}" = "true" ] || [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+              sed -i '/^api:/,/tag:/ { s|tag: .*|tag: "sha-${{ steps.vars.outputs.sha_short }}"| }' charts/trader/values.yaml
+            fi
+            if [ "${{ needs.changes.outputs.web }}" = "true" ] || [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+              sed -i '/^web:/,/tag:/ { s|tag: .*|tag: "sha-${{ steps.vars.outputs.sha_short }}"| }' charts/trader/values.yaml
+            fi
+
+            git add charts/trader/values.yaml
+            if git diff --cached --quiet; then echo "Tagi juz aktualne."; break; fi
+            git commit -m "chore: obrazy sha-${{ steps.vars.outputs.sha_short }} [skip ci]"
+            if git push; then echo "Wypchnieto (proba $attempt/5)."; break; fi
+            [ "$attempt" = "5" ] && { echo "::error::Push nieudany po 5 probach"; exit 1; }
+            sleep $(( (RANDOM % 5) + 1 ))
+          done

@@ -1,0 +1,71 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "trader.fullname" . }}-db-data
+  labels: {{- include "trader.labels" . | nindent 4 }}
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: {{ .Values.db.persistence.storageClass }}
+  resources:
+    requests:
+      storage: {{ .Values.db.persistence.size }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "trader.fullname" . }}-db
+  labels: {{- include "trader.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  # Recreate, nie RollingUpdate: dwa Postgresy nie moga trzymac tego samego PVC.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: {{ include "trader.fullname" . }}-db
+  template:
+    metadata:
+      labels:
+        app: {{ include "trader.fullname" . }}-db
+        {{- include "trader.labels" . | nindent 8 }}
+    spec:
+      containers:
+        - name: db
+          image: "{{ .Values.db.image.repository }}:{{ .Values.db.image.tag }}"
+          imagePullPolicy: {{ .Values.db.image.pullPolicy }}
+          env:
+            - name: POSTGRES_DB
+              value: {{ .Values.db.database | quote }}
+            - name: POSTGRES_USER
+              value: {{ .Values.db.username | quote }}
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: {{ .Values.secretName }}, key: POSTGRES_PASSWORD }
+            - name: PGDATA
+              value: /home/postgres/pgdata/data
+          ports:
+            - containerPort: 5432
+          volumeMounts:
+            - name: data
+              mountPath: /home/postgres/pgdata
+          readinessProbe:
+            exec: { command: ["pg_isready", "-U", "{{ .Values.db.username }}", "-d", "{{ .Values.db.database }}"] }
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          resources: {{- toYaml .Values.db.resources | nindent 12 }}
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ include "trader.fullname" . }}-db-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "trader.fullname" . }}-db
+  labels: {{- include "trader.labels" . | nindent 4 }}
+spec:
+  selector:
+    app: {{ include "trader.fullname" . }}-db
+  ports:
+    - port: 5432
+      targetPort: 5432

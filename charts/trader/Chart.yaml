@@ -1,0 +1,6 @@
+apiVersion: v2
+name: trader
+description: Trader-AI - autonomiczny system tradingowy (krypto + gielda), faza demo
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
