@@ -1,6 +1,8 @@
 """Zakladka ZRODLA: z jakich stron system korzysta, co z nich wyciagnal."""
 from __future__ import annotations
 
+import os
+
 from fastapi import APIRouter, Query
 
 from ..db import fetch_all
@@ -37,6 +39,57 @@ async def feeds(engine: str | None = None):
         }
         for r in rows
     ]
+
+
+@router.get("/api-spend")
+async def api_spend(dni: int = Query(30, le=365)):
+    """Wydatki na model - z podzialem na przepustki i z limitem dobowym.
+
+    Koszt jest tu widoczny nie dla ciekawostki. Analiza newsow to jedyny element
+    systemu, ktory wydaje pieniadze poza gielda, i jedyny, ktory moze zaczac je
+    wydawac w petli (np. gdy kanal zmieni identyfikatory wpisow i deduplikacja
+    przestanie dzialac). Kwota widoczna w interfejsie jest tansza niz kwota
+    odkryta na rachunku.
+    """
+    dobowe = await fetch_all(
+        """
+        SELECT date_trunc('day', event_time)::date AS dzien,
+               purpose,
+               count(*)                 AS wywolania,
+               sum(input_tokens)        AS tokeny_wej,
+               sum(output_tokens)       AS tokeny_wyj,
+               round(sum(cost_usd), 4)  AS koszt
+        FROM news.api_spend
+        WHERE event_time >= now() - make_interval(days => %s)
+        GROUP BY 1, 2 ORDER BY 1 DESC, 2
+        """,
+        (dni,),
+    )
+    dzis = await fetch_all(
+        "SELECT COALESCE(sum(cost_usd), 0) AS koszt, count(*) AS wywolania"
+        " FROM news.api_spend WHERE event_time >= date_trunc('day', now())")
+    laczne = await fetch_all(
+        "SELECT COALESCE(sum(cost_usd), 0) AS koszt FROM news.api_spend"
+        " WHERE event_time >= now() - make_interval(days => %s)", (dni,))
+
+    limit = float(os.environ.get("ANTHROPIC_DAILY_USD", "5.0"))
+    wydano_dzis = float(dzis[0]["koszt"]) if dzis else 0.0
+    return {
+        "limit_dobowy_usd": limit,
+        "dzis": {
+            "koszt_usd": round(wydano_dzis, 4),
+            "wywolania": dzis[0]["wywolania"] if dzis else 0,
+            "wykorzystanie": round(wydano_dzis / limit, 4) if limit else None,
+        },
+        "okres_dni": dni,
+        "koszt_okresu_usd": round(float(laczne[0]["koszt"]), 4) if laczne else 0.0,
+        "dobowe": [
+            {"dzien": r["dzien"].isoformat(), "przepustka": r["purpose"],
+             "wywolania": r["wywolania"], "tokeny_wej": int(r["tokeny_wej"] or 0),
+             "tokeny_wyj": int(r["tokeny_wyj"] or 0), "koszt_usd": float(r["koszt"])}
+            for r in dobowe
+        ],
+    }
 
 
 @router.get("/news")

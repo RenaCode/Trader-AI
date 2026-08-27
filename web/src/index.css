@@ -464,3 +464,34 @@ select.input-field option { background: var(--bg-dark); color: var(--text-main);
 .chip.on {
   background: rgba(124,58,237,0.16); border-color: rgba(124,58,237,0.45); color: #c084fc;
 }
+
+/* --- koszt analizy AI (zakladka Zrodla) --- */
+.spend-bars {
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
+  height: 96px;
+  margin-top: 16px;
+  padding-top: 8px;
+}
+.spend-bar {
+  flex: 1 1 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  align-items: center;
+  height: 100%;
+  min-width: 0;
+}
+.spend-fill {
+  width: 100%;
+  min-height: 2px;
+  border-radius: 4px 4px 0 0;
+  background: linear-gradient(180deg, var(--accent) 0%, rgba(99, 102, 241, 0.35) 100%);
+}
+.spend-day {
+  font-size: 0.62rem;
+  color: var(--text-dim);
+  margin-top: 4px;
+  white-space: nowrap;
+}

@@ -6,9 +6,71 @@ import { fmtTime, fmtAgo, fmtLag, DIRECTION_PL } from '../utils/format';
 export default function Sources({ engine }) {
   const feeds = useApi(`/api/feeds?engine=${engine}`, [engine], { refreshMs: 60000 });
   const news = useApi(`/api/news?engine=${engine}&limit=40`, [engine], { refreshMs: 60000 });
+  const spend = useApi('/api/api-spend?dni=30', [], { refreshMs: 60000 });
+
+  const s = spend.data;
+  const wykorzystanie = s ? Math.min(1, s.dzis.wykorzystanie || 0) : 0;
+  const perDzien = {};
+  (s?.dobowe || []).forEach((d) => {
+    perDzien[d.dzien] = (perDzien[d.dzien] || 0) + d.koszt_usd;
+  });
+  const dni = Object.entries(perDzien).sort((a, b) => (a[0] < b[0] ? 1 : -1)).slice(0, 14);
+  const maxDzien = Math.max(0.0001, ...dni.map(([, v]) => v));
 
   return (
     <div className="grid" style={{ gap: 16 }}>
+      <div className="glass-card">
+        <div className="card-title">
+          Koszt analizy AI
+          <span className="hint">
+            {s ? `${s.koszt_okresu_usd.toFixed(2)} USD przez ${s.okres_dni} dni` : '—'}
+          </span>
+        </div>
+        {!s || s.dzis.wywolania === 0 ? (
+          <div className="empty">
+            Brak wywołań modelu. Skaner wiadomości rusza po wpisaniu klucza Anthropic
+            w Ustawieniach.
+          </div>
+        ) : (
+          <>
+            <div className="kpi-row">
+              <div className="kpi">
+                <div className="kpi-label">Dziś</div>
+                <div className="kpi-value">{s.dzis.koszt_usd.toFixed(3)} USD</div>
+                <div className="kpi-sub">{s.dzis.wywolania} wywołań</div>
+              </div>
+              <div className="kpi">
+                <div className="kpi-label">Limit dobowy</div>
+                <div className="kpi-value">{s.limit_dobowy_usd.toFixed(2)} USD</div>
+                <div className="kpi-sub">twardy stop po przekroczeniu</div>
+              </div>
+              <div className="kpi">
+                <div className="kpi-label">Wykorzystanie</div>
+                <div className={`kpi-value ${wykorzystanie > 0.8 ? 'neg' : ''}`}>
+                  {(wykorzystanie * 100).toFixed(0)}%
+                </div>
+                <div className="kpi-sub">
+                  {wykorzystanie >= 1 ? 'analiza wstrzymana do północy UTC' : 'w normie'}
+                </div>
+              </div>
+            </div>
+            {dni.length > 1 && (
+              <div className="spend-bars">
+                {dni.slice().reverse().map(([dzien, koszt]) => (
+                  <div className="spend-bar" key={dzien} title={`${dzien}: ${koszt.toFixed(4)} USD`}>
+                    <div className="spend-fill" style={{ height: `${(koszt / maxDzien) * 100}%` }} />
+                    <div className="spend-day">{dzien.slice(5)}</div>
+                  </div>
+                ))}
+              </div>
+            )}
+            <div className="hint" style={{ marginTop: 10 }}>
+              Tani model odsiewa większość artykułów, drogi analizuje resztę — dlatego
+              liczba wywołań jest znacznie większa niż liczba analiz.
+            </div>
+          </>
+        )}
+      </div>
       <div className="glass-card">
         <div className="card-title">
           Źródła danych
