@@ -206,23 +206,57 @@ def martwe_sygnaly(cache: dict[str, list[tuple]], prog: float = 0.01) -> set[str
 
 def _bez_martwych(wagi: dict[str, dict[str, float]],
                   martwe: set[str]) -> dict[str, dict[str, float]]:
-    """Zeruje wagi martwych sygnalow i renormalizuje reszte do sumy 1."""
+    """Zeruje wagi martwych sygnalow i renormalizuje reszte.
+
+    Normalizacja po sumie WARTOSCI BEZWZGLEDNYCH, bo wagi moga byc ujemne -
+    suma zwykla moglaby wyjsc bliska zeru i rozdmuchac pozostale wagi.
+    """
     if not martwe:
         return wagi
     out = {}
     for regime, w in wagi.items():
-        zywe = {k: v for k, v in w.items() if k not in martwe}
-        total = sum(zywe.values()) or 1.0
+        total = sum(abs(v) for k, v in w.items() if k not in martwe) or 1.0
         out[regime] = {k: (0.0 if k in martwe else round(w[k] / total, 4)) for k in w}
     return out
 
 
 def random_weights(rng: random.Random) -> dict[str, dict[str, float]]:
-    """Losowy zestaw wag per rezim, znormalizowany do sumy 1."""
+    """Losowy zestaw wag per rezim, znormalizowany do sumy WARTOSCI BEZWZGLEDNYCH.
+
+    WAGI MOGA BYC UJEMNE - i to jest zmiana, nie drobiazg.
+
+    Poprzednia wersja losowala z przedzialu [0,1), wiec kalibracja mogla sygnal
+    najwyzej WYCISZYC, nigdy ODWROCIC. Przy nieujemnych wagach zdanie "ten
+    sygnal trafnie porzadkuje sytuacje, tylko w druga strone" bylo niewyrazalne.
+
+    Pomiar wspolczynnika informacji (services/engine/diagnose_signals.py) pokazal,
+    ze to ograniczenie kosztuje. Na czterech latach i 24 instrumentach:
+
+        mean_reversion_rsi  IC = +0,036     powrot do sredniej
+        range_extreme       IC = +0,019     powrot do sredniej
+        cross_section       IC = -0,015     momentum
+        momentum_multi      IC = -0,019     momentum
+        trend_follow        IC = -0,022     momentum
+        volume_breakout     IC = -0,039     momentum
+
+    Wzor jest jednoznaczny: KAZDY sygnal powrotu do sredniej ma IC dodatnie,
+    KAZDY sygnal momentum - ujemne. Skladniki niosa informacje; cztery z nich
+    niosa ja z odwroconym znakiem. Nieujemne wagi pozwalaly tylko zblizyc te
+    cztery do zera, przez co dodatnie i ujemne wklady sie znosily - i stad
+    wynik dokladnie 50% dodatnich okien.
+
+    CENA: przestrzen hipotez rosnie dwukrotnie, bo doszedl wybor znaku przy
+    kazdym sygnale. Walk-forward placi za to uczciwie - znak wybierany jest
+    WYLACZNIE na oknie treningowym, a oceniany poza nim. Licznik hipotez rosnie
+    odpowiednio i przy kazdym przyszlym wyniku trzeba go czytac razem z nim.
+
+    Normalizacja idzie po sumie wartosci bezwzglednych, wiec laczny "budzet"
+    wagi pozostaje taki sam jak przy wagach nieujemnych.
+    """
     out = {}
     for regime in REGIMES:
-        raw = {name: rng.random() for name in SIGNALS}
-        total = sum(raw.values()) or 1.0
+        raw = {name: rng.uniform(-1.0, 1.0) for name in SIGNALS}
+        total = sum(abs(v) for v in raw.values()) or 1.0
         out[regime] = {k: round(v / total, 4) for k, v in raw.items()}
     return out
 
@@ -545,7 +579,8 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon) -> N
                 name: statistics.median([w[regime].get(name, 0.0) for w in weight_history])
                 for name in SIGNALS
             }
-            total_w = sum(per_signal.values()) or 1.0
+            # Suma wartosci bezwzglednych - wagi moga byc ujemne.
+            total_w = sum(abs(v) for v in per_signal.values()) or 1.0
             prod_weights[regime] = {k: round(v / total_w, 4) for k, v in per_signal.items()}
 
     cur.execute(

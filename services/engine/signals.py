@@ -306,8 +306,8 @@ def combine(precomputed: dict[str, SignalOutput], regime: str,
         for name, out in precomputed.items():
             weight = w.get(name, 0.0)
             total += out.score * weight * out.confidence
-            conf_num += out.confidence * weight
-            conf_den += weight
+            conf_num += out.confidence * abs(weight)
+            conf_den += abs(weight)
         confidence = (conf_num / conf_den) if conf_den else 0.0
         return _clip(total), min(1.0, confidence), []
 
@@ -319,8 +319,10 @@ def combine(precomputed: dict[str, SignalOutput], regime: str,
         weight = w.get(name, 0.0)
         contribution = out.score * weight * out.confidence
         total += contribution
-        conf_num += out.confidence * weight
-        conf_den += weight
+        # Wartosc bezwzgledna: sygnal uzyty ODWROTNIE nadal wnosi tyle samo
+        # pewnosci co uzyty wprost - odwrocenie zmienia kierunek, nie sile.
+        conf_num += out.confidence * abs(weight)
+        conf_den += abs(weight)
         contributions.append({
             "name": name, "family": family, "label": label,
             "score": round(out.score, 4), "confidence": round(out.confidence, 4),
