@@ -98,6 +98,10 @@ BATCH = 4000
 # niesie informacji o zbiorze - mowi tylko, ktory z trzech rosnie najmocniej.
 MIN_UNIVERSE = 8
 
+# Ponizej tylu snapshotow w swiecy srednia mowi wiecej o momencie pomiaru
+# niz o rynku. Przy tempie ~45 snapshotow na godzine swieca 4h ma ich ~180.
+MIN_SNAPSHOTS = 20
+
 # rola -> (code_ref, szablon opisu). {okno} podstawia sie z etykiet horyzontu.
 ROLES = {
     "rsi":         ("features.momentum:rsi",
@@ -123,6 +127,12 @@ ROLES = {
                      "czyli rynek jest wychylony na wzrost."),
     "funding_z":   ("features.derivatives:funding_z",
                     "Odchylenie stawki finansowania od średniej z 30 dni, w odchyleniach standardowych."),
+    "book_imbalance": ("features.microstructure:imbalance",
+                       "Nierównowaga arkusza zleceń uśredniona po świecy {bar}: "
+                       "+1 = sama strona kupna, −1 = sama strona sprzedaży."),
+    "book_spread_bps": ("features.microstructure:spread",
+                        "Spread arkusza jako część ceny, w punktach bazowych, "
+                        "uśredniony po świecy {bar}. Miara płynności."),
     "rel_strength": ("features.crosssection:relative_strength",
                      "Siła względna wobec pozostałych obserwowanych rynków: −1 = najsłabszy, "
                      "+1 = najmocniejszy w tej chwili. Liczona ze zwrotu z {okno}."),
@@ -415,6 +425,57 @@ def compute_cross_section(cur, h: Horizon, feat_ids: dict[str, int],
     return insert_values(cur, rows)
 
 
+def compute_orderbook(cur, instrument_id: int, h: Horizon, feat_ids: dict[str, int],
+                      since: datetime, until: datetime) -> int:
+    """Cechy z arkusza zlecen, usrednione po swiecy.
+
+    DLACZEGO LICZYMY JE, ZANIM DA SIE JE PRZETESTOWAC
+
+    `market.book_snapshot` ma retencje 90 dni - surowe snapshoty starsze niz
+    trzy miesiace sa kasowane. Zbieramy je dopiero od wczoraj, wiec hipotezy
+    o mikrostrukturze nie da sie dzis zbadac walk-forwardem na czterech latach.
+
+    Ale bez wyliczania cech TERAZ nie da sie jej zbadac NIGDY: za trzy miesiace
+    surowe dane sprzed trzech miesiecy juz nie beda istniec. Tabela cech nie ma
+    retencji, wiec kazda swieca policzona dzisiaj zostaje na zawsze.
+
+    Sygnal korzystajacy z tych cech celowo jeszcze NIE ISTNIEJE. Kalibrowanie go
+    na jednym dniu danych nie powiedzialoby nic o rynku, a dodaloby stopien
+    swobody. Dodamy go, gdy historia bedzie miala sens - kilka miesiecy.
+    """
+    if "book_imbalance" not in feat_ids:
+        return 0
+    since = na_siatce(since, h)
+    until = na_siatce(until, h) - timedelta(minutes=h.bar_minutes)
+    cur.execute(
+        """
+        SELECT time_bucket(%s::interval, event_time) AS t,
+               avg(imbalance)                              AS imbalance,
+               avg(spread / NULLIF(mid, 0)) * 10000        AS spread_bps,
+               count(*)                                    AS n
+        FROM market.book_snapshot
+        WHERE instrument_id = %s AND event_time >= %s AND event_time < %s
+        GROUP BY 1 ORDER BY 1
+        """,
+        (f"{h.bar_minutes} minutes", instrument_id, since,
+         until + timedelta(minutes=h.bar_minutes)),
+    )
+    rows: list[tuple] = []
+    for r in cur.fetchall():
+        # Swieca z garstka snapshotow daje srednia, ktora mowi wiecej o momencie
+        # pomiaru niz o rynku.
+        if r["n"] < MIN_SNAPSHOTS or r["t"] > until:
+            continue
+        ingested = znane_od(r["t"], h)
+        if r["imbalance"] is not None:
+            rows.append((feat_ids["book_imbalance"], instrument_id, r["t"],
+                         float(r["imbalance"]), ingested))
+        if r["spread_bps"] is not None and math.isfinite(float(r["spread_bps"])):
+            rows.append((feat_ids["book_spread_bps"], instrument_id, r["t"],
+                         float(r["spread_bps"]), ingested))
+    return insert_values(cur, rows)
+
+
 def compute_funding(cur, instrument_id: int, h: Horizon, feat_ids: dict[str, int],
                     since: datetime, until: datetime) -> int:
     """Stawka finansowania perpetuala, przeniesiona na siatke swiec.
@@ -530,8 +591,11 @@ def main() -> int:
             conn.commit()
             f = compute_funding(cur, inst["id"], h, feat_ids, since, now)
             conn.commit()
-            total += n + m + f
-            print(f"  {inst['symbol']:10s} {n:>9,} cen  {m:>7,} news  {f:>7,} funding")
+            b = compute_orderbook(cur, inst["id"], h, feat_ids, since, now)
+            conn.commit()
+            total += n + m + f + b
+            print(f"  {inst['symbol']:10s} {n:>9,} cen  {m:>7,} news  {f:>7,} funding"
+                  f"  {b:>5,} arkusz")
 
         # Przekrojowosc liczymy RAZ dla calego zbioru, po policzeniu zwrotow -
         # z natury potrzebuje wszystkich instrumentow naraz.
