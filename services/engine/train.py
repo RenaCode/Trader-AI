@@ -84,17 +84,18 @@ def load_panel(cur, instrument_id: int, h: Horizon,
     zobaczy cech policzonych na swiecy 5-minutowej. Klucze slownika to ROLE,
     dzieki czemu sygnaly nie musza znac horyzontu.
 
-    STRAZNIK BITEMPORALNY - `fv.ingested_at <= fv.event_time + jedna swieca`:
+    STRAZNIK BITEMPORALNY - `fv.ingested_at <= fv.event_time + DWIE swiece`:
 
-    Warunek nie brzmi `ingested_at <= event_time`, bo cechy sa datowane wstecz
-    z trzysekundowym opoznieniem obliczeniowym i taki warunek odrzucilby
-    wszystko. Brzmi "najpozniej jedna swieca po zdarzeniu", bo tyle realnie
-    trwa domkniecie swiecy i policzenie z niej cechy. Cecha, ktora trafila do
-    bazy pozniej, w tamtym momencie NIE byla dostepna i nie wolno na niej
-    trenowac. Wczesniejsza wersja tego zapytania nie filtrowala po
-    `ingested_at` w ogole - polegala na tym, ze potok datuje poprawnie, zamiast
-    to sprawdzac. Roznica ujawnia sie dokladnie wtedy, gdy potok przestanie
-    datowac poprawnie, czyli wtedy, gdy jest za pozno.
+    Znacznik `event_time` cechy to POCZATEK swiecy, a wartosc liczy sie z jej
+    ZAMKNIECIA - czyli jest znana dopiero po jednej swiecy. Druga swieca to
+    zapas na policzenie i zapis. Cecha, ktora trafila do bazy pozniej, w tamtym
+    momencie NIE byla dostepna i nie wolno na niej trenowac.
+
+    Wczesniejsza wersja tego zapytania nie filtrowala po `ingested_at` w ogole,
+    a potok datowal cechy na `poczatek_swiecy + 3 sekundy` - twierdzil wiec, ze
+    wartosc byla znana trzy sekundy po OTWARCIU swiecy, choc pochodzila z jej
+    zamkniecia cztery godziny pozniej. Straznik przepuszczal to bez mrugniecia,
+    bo sam byl dobrany pod te bledna date.
     """
     if h.aggregate:
         price_cte = """
@@ -122,7 +123,7 @@ def load_panel(cur, instrument_id: int, h: Horizon,
             WHERE fv.instrument_id = %(iid)s
               AND fv.event_time BETWEEN %(since)s AND %(until)s
               AND fd.params->>'bar' = %(bar_name)s
-              AND fv.ingested_at <= fv.event_time + %(bar)s::interval
+              AND fv.ingested_at <= fv.event_time + 2 * %(bar)s::interval
         ),
         p AS ({price_cte})
         SELECT f.event_time AS t, jsonb_object_agg(f.role, f.value) AS feats, p.close

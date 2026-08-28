@@ -395,6 +395,50 @@ async def sprawdz(conn, engine: str = "crypto", h: Horizon | None = None) -> int
 
     probuj("cechy leżą na siatce świec", kontrola_siatki)
 
+    # KONTROLA STRUKTURALNA: czy nie liczymy cech z jeszcze OTWARTEJ swiecy.
+    # time_bucket() zwraca biezaca swiece z niepelnymi danymi, a przez
+    # ON CONFLICT DO NOTHING taka czastkowa wartosc zostaje w bazie na zawsze -
+    # pozniejszy przebieg nie nadpisze istniejacego wiersza.
+    def kontrola_otwartej_swiecy():
+        biezaca = current_bar(datetime.now(timezone.utc), h) + timedelta(
+            minutes=h.bar_minutes)
+        cur.execute(
+            """
+            SELECT count(*) AS n FROM feat.feature_value fv
+            JOIN feat.feature_def fd ON fd.id = fv.feature_def_id
+            WHERE fd.params->>'bar' = %s AND fv.event_time >= %s
+            """,
+            (h.bar, biezaca),
+        )
+        n = cur.fetchone()["n"]
+        if n:
+            raise RuntimeError(
+                f"{n} cech policzonych dla świecy {biezaca:%H:%M}, która jeszcze trwa")
+        return True
+
+    probuj("brak cech z niezamkniętej świecy", kontrola_otwartej_swiecy)
+
+    # KONTROLA STRUKTURALNA: czy datowanie nie twierdzi wczesniejszej wiedzy,
+    # niz bylo mozliwe. Cecha swiecy 04:00-08:00 nie mogla byc znana o 04:00.
+    def kontrola_datowania():
+        cur.execute(
+            """
+            SELECT count(*) AS n FROM feat.feature_value fv
+            JOIN feat.feature_def fd ON fd.id = fv.feature_def_id
+            WHERE fd.params->>'bar' = %s
+              AND fv.event_time > now() - interval '7 days'
+              AND fv.ingested_at < fv.event_time + %s::interval
+            """,
+            (h.bar, f"{h.bar_minutes} minutes"),
+        )
+        n = cur.fetchone()["n"]
+        if n:
+            raise RuntimeError(
+                f"{n} cech datowanych PRZED zamknięciem własnej świecy")
+        return True
+
+    probuj("datowanie nie wyprzedza zamknięcia świecy", kontrola_datowania)
+
     conn.rollback()
     print()
     if bledy:

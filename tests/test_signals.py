@@ -183,3 +183,35 @@ def test_wyrownanie_zalezy_od_horyzontu():
     t = datetime.fromisoformat("2026-08-27T16:19:49+00:00")
     assert na_siatce(t, H4).hour == 16
     assert na_siatce(t, H5).minute == 15      # świeca 5-minutowa
+
+
+# ------------------------------------------------------ datowanie cech
+def test_cecha_jest_znana_dopiero_po_zamknieciu_swiecy():
+    """Znacznik cechy to POCZATEK swiecy, ale wartosc pochodzi z jej ZAMKNIECIA.
+
+    Wczesniejsza wersja datowala cechy na `poczatek + 3 sekundy`, twierdzac,
+    ze wartosc byla znana trzy sekundy po OTWARCIU swiecy - choc pochodzila
+    z zamkniecia cztery godziny pozniej. To unieważniało straznik bitemporalny:
+    feat.as_of() przepuszczalo wartosc, ktorej w tamtej chwili nie dalo sie
+    policzyc.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from services.ingest.features import znane_od
+
+    t = datetime(2026, 8, 28, 4, 0, tzinfo=timezone.utc)
+    znane = znane_od(t, H4)
+    assert znane >= t + timedelta(hours=4), \
+        "cecha nie może być znana przed zamknięciem swojej świecy"
+    assert znane < t + timedelta(hours=5), "opóźnienie ma być małe, nie dowolne"
+
+
+def test_datowanie_skaluje_sie_z_horyzontem():
+    from datetime import datetime, timedelta, timezone
+
+    from services.ingest.features import znane_od
+
+    t = datetime(2026, 8, 28, 4, 0, tzinfo=timezone.utc)
+    assert znane_od(t, H4) - t >= timedelta(hours=4)
+    assert znane_od(t, H5) - t >= timedelta(minutes=5)
+    assert znane_od(t, H5) - t < timedelta(minutes=6)

@@ -50,6 +50,23 @@ from services.engine.horizons import DEFAULT_BAR, HORIZONS, Horizon, get as get_
 COMPUTE_LAG = timedelta(seconds=3)
 
 
+def znane_od(t: datetime, h: Horizon) -> datetime:
+    """Kiedy cecha opisujaca swiece zaczynajaca sie o `t` byla NAPRAWDE znana.
+
+    Znacznik `event_time` cechy to POCZATEK swiecy - taka jest konwencja
+    time_bucket(). Ale wartosc liczy sie z ZAMKNIECIA tej swiecy, ktore nastepuje
+    dopiero po `bar_minutes` minutach. Cecha swiecy 04:00-08:00 jest wiec znana
+    najwczesniej o 08:00, a nie o 04:00.
+
+    Wczesniejsza wersja zapisywala `ingested_at = t + 3 sekundy`, czyli twierdzila,
+    ze wartosc byla dostepna trzy sekundy po OTWARCIU swiecy. To unieważniało
+    caly straznik bitemporalny: feat.as_of() przepuszczalo o 04:00:05 wartosc,
+    ktorej w tamtej chwili nie dalo sie policzyc, bo swieca trwala jeszcze cztery
+    godziny.
+    """
+    return t + timedelta(minutes=h.bar_minutes) + COMPUTE_LAG
+
+
 def na_siatce(t: datetime, h: Horizon) -> datetime:
     """Zaokragla czas W DOL do poczatku swiecy tego horyzontu.
 
@@ -273,11 +290,17 @@ def compute_prices(cur, instrument_id: int, h: Horizon, feat_ids: dict[str, int]
     ema_buf = h.ema_slow * 4
     rows: list[tuple] = []
 
-    for i in range(lookback, len(bars)):
+    # Ostatnia swieca panelu jest JESZCZE OTWARTA - time_bucket zwraca ja
+    # z niepelnymi danymi. Policzona z niej cecha opisuje kawalek swiecy, a przez
+    # ON CONFLICT DO NOTHING zostaje w bazie na zawsze, bo pozniejszy przebieg
+    # nie nadpisze istniejacego wiersza. Pomijamy ja.
+    ostatnia_zamknieta = len(bars) - 1
+
+    for i in range(lookback, ostatnia_zamknieta):
         t = bars[i]["t"]
         if t < since:
             continue
-        ingested = t + COMPUTE_LAG
+        ingested = znane_od(t, h)
         win_c, win_b = closes[: i + 1], bars[: i + 1]
 
         vals: dict[str, float | None] = {
@@ -314,7 +337,8 @@ def compute_news(cur, instrument_id: int, h: Horizon, feat_id: int,
     z newsow, ktorych wtedy jeszcze nie znal.
     """
     since = na_siatce(since, h)
-    until = na_siatce(until, h)
+    # `until` cofamy o jedna swiece: ostatnia swieca jest jeszcze otwarta.
+    until = na_siatce(until, h) - timedelta(minutes=h.bar_minutes)
     cur.execute(
         """
         SELECT b.t,
@@ -333,7 +357,7 @@ def compute_news(cur, instrument_id: int, h: Horizon, feat_id: int,
         """,
         (since, until, f"{h.bar_minutes} minutes", instrument_id),
     )
-    rows = [(feat_id, instrument_id, r["t"], float(r["score"]), r["t"] + COMPUTE_LAG)
+    rows = [(feat_id, instrument_id, r["t"], float(r["score"]), znane_od(r["t"], h))
             for r in cur.fetchall()]
     return insert_values(cur, rows)
 
@@ -385,7 +409,7 @@ def compute_cross_section(cur, h: Horizon, feat_ids: dict[str, int],
     )
     rows = [
         (feat_ids["rel_strength"], r["instrument_id"], r["event_time"],
-         (float(r["pr"]) - 0.5) * 2, r["event_time"] + COMPUTE_LAG)
+         (float(r["pr"]) - 0.5) * 2, znane_od(r["event_time"], h))
         for r in cur.fetchall()
     ]
     return insert_values(cur, rows)
@@ -430,7 +454,7 @@ def compute_funding(cur, instrument_id: int, h: Horizon, feat_ids: dict[str, int
 
     # Siatka MUSI byc ta sama co dla cech cenowych - patrz na_siatce().
     since = na_siatce(since, h)
-    until = na_siatce(until, h)
+    until = na_siatce(until, h) - timedelta(minutes=h.bar_minutes)
 
     step = timedelta(minutes=h.bar_minutes)
     # Okno z-score: 30 dni wyrazone w swiecach tego horyzontu.
@@ -446,7 +470,7 @@ def compute_funding(cur, instrument_id: int, h: Horizon, feat_ids: dict[str, int
             last = rates[j][1]
             j += 1
         if last is not None:
-            ingested = t + COMPUTE_LAG
+            ingested = znane_od(t, h)
             hist.append(last)
             rows.append((feat_ids["funding_rate"], instrument_id, t, last * 100, ingested))
             if len(hist) >= 20:
