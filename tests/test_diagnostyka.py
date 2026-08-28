@@ -8,7 +8,7 @@ import random
 
 import pytest
 
-from services.engine.diagnose_signals import rangi, spearman
+from services.engine.statystyka import rangi, spearman
 
 
 def test_rangi_usredniaja_remisy():

@@ -132,3 +132,131 @@ def test_zerowanie_martwych_normalizuje_po_module():
     out = _bez_martwych(wagi, {"news_shock"})
     assert sum(abs(v) for v in out["range"].values()) == pytest.approx(1.0, abs=2e-3)
     assert out["range"]["news_shock"] == 0.0
+
+
+# ------------------------------------------------------ wagi liczone z IC
+def _scena(n: int = 400):
+    """Panel i pamiec podreczna, w ktorych z gory wiadomo, ktory sygnal trafia.
+
+    `prorok`  - wynik zgodny z przyszlym zwrotem  -> IC dodatnie
+    `odwrotny`- wynik przeciwny do przyszlego zwrotu -> IC ujemne
+    `szum`    - wynik niezalezny od zwrotu -> IC okolo zera
+    """
+    import math
+    import random
+
+    from services.engine.signals import SignalOutput
+
+    rng = random.Random(4)
+    ceny = [100.0]
+    for i in range(n):
+        ceny.append(ceny[-1] * (1 + math.sin(i / 5.0) * 0.01))
+    panel = [{"t": i, "price": c} for i, c in enumerate(ceny)]
+
+    cache = []
+    for i in range(len(ceny)):
+        j = i + 1 + 3
+        przyszly = (ceny[j] / ceny[i + 1] - 1) if j < len(ceny) and i + 1 < len(ceny) else 0.0
+        znak = 1.0 if przyszly > 0 else -1.0
+        cache.append(("range", {
+            "mean_reversion_rsi": SignalOutput(znak, 0.7, {}),          # prorok
+            "momentum_multi": SignalOutput(-znak, 0.7, {}),             # odwrotny
+            "volume_breakout": SignalOutput(rng.choice([-1.0, 1.0]), 0.7, {}),  # szum
+        }))
+    return {"AAA": panel}, {"AAA": cache}
+
+
+def test_sygnal_trafny_dostaje_wage_dodatnia():
+    from services.engine.train import ic_weights
+
+    panels, cache = _scena()
+    w = ic_weights(panels, cache, martwe=set())
+    assert w["range"]["mean_reversion_rsi"] > 0.2
+
+
+def test_sygnal_trafny_ODWROTNIE_dostaje_wage_ujemna():
+    """SEDNO poprawki.
+
+    Losowe przeszukiwanie nie potrafilo tego znalezc: po dopuszczeniu wag
+    ujemnych tylko 48% znakow zgadzalo sie ze zmierzonym IC, czyli tyle,
+    ile daja znaki losowe.
+    """
+    from services.engine.train import ic_weights
+
+    panels, cache = _scena()
+    w = ic_weights(panels, cache, martwe=set())
+    assert w["range"]["momentum_multi"] < -0.2, \
+        "sygnał o ujemnym IC musi zostać odwrócony, nie tylko wyciszony"
+
+
+def test_sygnal_bez_informacji_dostaje_wage_bliska_zeru():
+    """Kanarek: gdyby funkcja rozdawala wagi po rowno, ten test przejdzie
+    tylko przypadkiem."""
+    from services.engine.train import ic_weights
+
+    panels, cache = _scena()
+    w = ic_weights(panels, cache, martwe=set())
+    assert abs(w["range"]["volume_breakout"]) < abs(w["range"]["mean_reversion_rsi"]) / 2
+
+
+def test_martwy_sygnal_dostaje_zero_takze_w_wagach_z_ic():
+    from services.engine.train import ic_weights
+
+    panels, cache = _scena()
+    w = ic_weights(panels, cache, martwe={"mean_reversion_rsi"})
+    assert w["range"]["mean_reversion_rsi"] == 0.0
+
+
+def test_wagi_z_ic_sumuja_sie_do_jednosci_po_module():
+    from services.engine.train import ic_weights
+
+    panels, cache = _scena()
+    w = ic_weights(panels, cache, martwe=set())
+    for wagi in w.values():
+        assert sum(abs(v) for v in wagi.values()) == pytest.approx(1.0, abs=2e-3)
+
+
+def test_sygnal_znajacy_ruch_niewykonalny_dostaje_zero():
+    """KANAREK NA ZAGLADANIE W PRZYSZLOSC.
+
+    Decyzja zapada na zamknieciu swiecy i, a wejscie nastepuje po cenie swiecy
+    i+1. Ruch i -> i+1 jest wiec NIEWYKONALNY: w chwili decyzji jeszcze nie
+    zaszedl, a gdy zajdzie, jest juz w cenie wejscia.
+
+    Sygnal, ktory zna dokladnie ten ruch, musi dostac wage bliska zeru. Gdyby
+    ic_weights liczylo zwrot od ceny biezacej zamiast od nastepnej, taki sygnal
+    dostalby wage maksymalna - i caly backtest opieralby sie na ruchu, ktorego
+    nie da sie zlapac.
+
+    Ceny sa bladzeniem losowym, wiec przeszlosc i przyszlosc sa niezalezne -
+    bez tego sygnal "historyczny" korelowalby z przyszloscia przypadkiem.
+    """
+    import random
+
+    from services.engine.signals import SignalOutput
+    from services.engine.train import ic_weights
+
+    rng = random.Random(11)
+    ceny = [100.0]
+    for _ in range(600):
+        ceny.append(ceny[-1] * (1 + rng.gauss(0, 0.01)))
+    panel = [{"t": i, "price": c} for i, c in enumerate(ceny)]
+
+    cache = []
+    for i in range(len(ceny)):
+        # Ruch niewykonalny: i -> i+1.
+        niewykonalny = (1.0 if i + 1 < len(ceny) and ceny[i + 1] > ceny[i] else -1.0)
+        # Ruch wykonalny: i+1 -> i+4, czyli ten, na ktorym naprawde zarabiamy.
+        wykonalny = (1.0 if i + 4 < len(ceny) and i + 1 < len(ceny)
+                     and ceny[i + 4] > ceny[i + 1] else -1.0)
+        cache.append(("range", {
+            "momentum_multi": SignalOutput(niewykonalny, 0.7, {}),
+            "mean_reversion_rsi": SignalOutput(wykonalny, 0.7, {}),
+        }))
+
+    w = ic_weights({"AAA": panel}, {"AAA": cache}, martwe=set(),
+                   horyzont_swiec=3)["range"]
+    assert w["mean_reversion_rsi"] > 0.5, "sygnał wykonalny musi dostać dużą wagę"
+    assert abs(w["momentum_multi"]) < 0.25, (
+        "sygnał znający wyłącznie ruch niewykonalny musi dostać wagę bliską zeru; "
+        f"dostał {w['momentum_multi']:+.3f}")

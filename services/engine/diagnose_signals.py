@@ -30,9 +30,7 @@ Uzycie:
 from __future__ import annotations
 
 import argparse
-import math
 import os
-import statistics
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -43,6 +41,7 @@ import psycopg
 from psycopg.rows import dict_row
 
 from services.engine.horizons import DEFAULT_BAR, HORIZONS, get as get_horizon
+from services.engine.statystyka import spearman
 from services.engine.portfolio import precompute_panels
 from services.engine.train import atr_threshold, load_panel
 
@@ -50,33 +49,6 @@ from services.engine.train import atr_threshold, load_panel
 # swiecy, wiec zwrot liczymy od niej - inaczej mierzylibysmy ruch, ktorego
 # nie dalo sie zlapac.
 HORYZONTY = (1, 3, 6, 12)
-
-
-def rangi(xs: list[float]) -> list[float]:
-    """Rangi z usrednianiem remisow."""
-    posortowane = sorted(range(len(xs)), key=lambda i: xs[i])
-    out = [0.0] * len(xs)
-    i = 0
-    while i < len(posortowane):
-        j = i
-        while j + 1 < len(posortowane) and xs[posortowane[j + 1]] == xs[posortowane[i]]:
-            j += 1
-        srednia = (i + j) / 2 + 1
-        for k in range(i, j + 1):
-            out[posortowane[k]] = srednia
-        i = j + 1
-    return out
-
-
-def spearman(xs: list[float], ys: list[float]) -> float | None:
-    if len(xs) < 30:
-        return None
-    rx, ry = rangi(xs), rangi(ys)
-    mx, my = statistics.fmean(rx), statistics.fmean(ry)
-    licz = sum((a - mx) * (b - my) for a, b in zip(rx, ry))
-    sx = math.sqrt(sum((a - mx) ** 2 for a in rx))
-    sy = math.sqrt(sum((b - my) ** 2 for b in ry))
-    return licz / (sx * sy) if sx > 0 and sy > 0 else None
 
 
 def main() -> int:

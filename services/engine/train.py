@@ -42,6 +42,7 @@ from services.engine.horizons import DEFAULT_BAR, HORIZONS, Horizon, get as get_
 from services.engine.portfolio import (
     metrics as portfolio_metrics, precompute_panels, simulate_portfolio,
 )
+from services.engine.statystyka import spearman
 from services.engine.signals import (
     DEFAULT_WEIGHTS, REGIMES, SIGNALS, classify_regime, combine, evaluate,
 )
@@ -220,6 +221,80 @@ def _bez_martwych(wagi: dict[str, dict[str, float]],
     return out
 
 
+def ic_weights(panels: dict[str, list[dict]], cache: dict[str, list[tuple]],
+               martwe: set[str], horyzont_swiec: int = 3) -> dict[str, dict[str, float]]:
+    """Wagi WYLICZONE ze zdolnosci predykcyjnej sygnalow, nie wylosowane.
+
+    DLACZEGO LOSOWE PRZESZUKIWANIE NIE DZIALALO
+
+    Przestrzen wag ma 40 wymiarow (8 sygnalow x 5 rezimow). Szescdziesiat
+    losowych prob to w takiej przestrzeni nic - "uczenie" sprowadzalo sie do
+    wybrania najlepszego z 60 losowych punktow.
+
+    Widac to bylo wprost: po dopuszczeniu wag ujemnych tylko 48% znakow wag
+    zgadzalo sie ze zmierzonym wspolczynnikiem informacji, czyli dokladnie tyle,
+    ile daja znaki losowe. Sygnal volume_breakout ma IC -0,039 - najmocniejsze
+    w calym zestawie - a losowanie przypisalo mu +0,395 w rezimie trendu, czyli
+    odwrotnie.
+
+    ZAMIAST SZUKAC PO OMACKU - POLICZYC
+
+    Waga sygnalu proporcjonalna do jego korelacji rangowej z przyszlym zwrotem,
+    zmierzonej NA OKNIE TRENINGOWYM. To estymator o niskiej wariancji, ktory
+    uzywa wszystkich obserwacji z okna, zamiast probkowac 60 punktow
+    z czterdziestowymiarowej kostki.
+
+    Znak wychodzi sam: sygnal o ujemnym IC dostaje ujemna wage, czyli zostaje
+    odwrocony - bez zgadywania.
+
+    NADAL OUT-OF-SAMPLE: IC liczy sie wylacznie z okna treningowego, a wynik
+    ocenia sie na testowym, ktorego ta funkcja nigdy nie oglada.
+    """
+    # {rezim: {sygnal: ([wyniki], [zwroty])}}
+    zebrane: dict[str, dict[str, tuple[list, list]]] = {}
+    for sym, rows in panels.items():
+        ceny = [r["price"] for r in rows]
+        for i, (regime, sygnaly) in enumerate(cache[sym]):
+            j = i + 1 + horyzont_swiec
+            if j >= len(ceny) or ceny[i + 1] == 0:
+                continue
+            zwrot = ceny[j] / ceny[i + 1] - 1
+            for name, out in sygnaly.items():
+                if name in martwe or out.score == 0.0:
+                    continue
+                w = zebrane.setdefault(regime, {}).setdefault(name, ([], []))
+                w[0].append(out.score)
+                w[1].append(zwrot)
+
+    # IC liczone na calym oknie - zapas dla rezimow o malej liczbie swiec.
+    ogolne: dict[str, tuple[list, list]] = {}
+    for per_sig in zebrane.values():
+        for name, (xs, ys) in per_sig.items():
+            w = ogolne.setdefault(name, ([], []))
+            w[0].extend(xs)
+            w[1].extend(ys)
+
+    out: dict[str, dict[str, float]] = {}
+    for regime in REGIMES:
+        surowe = {}
+        for name in SIGNALS:
+            if name in martwe:
+                surowe[name] = 0.0
+                continue
+            xs, ys = zebrane.get(regime, {}).get(name, ([], []))
+            ic = spearman(xs, ys)
+            if ic is None:
+                xs, ys = ogolne.get(name, ([], []))
+                ic = spearman(xs, ys)
+            surowe[name] = ic or 0.0
+        total = sum(abs(v) for v in surowe.values())
+        if total < 1e-9:
+            out[regime] = dict(DEFAULT_WEIGHTS[regime])
+        else:
+            out[regime] = {k: round(v / total, 4) for k, v in surowe.items()}
+    return out
+
+
 def random_weights(rng: random.Random) -> dict[str, dict[str, float]]:
     """Losowy zestaw wag per rezim, znormalizowany do sumy WARTOSCI BEZWZGLEDNYCH.
 
@@ -328,6 +403,7 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon) -> N
     positive = 0
     gate_history: list[float] = []
     weight_history: list[dict] = []
+    wybrane_ic = 0
     all_sharpes: list[float] = []
     worst_dd = 0.0
     predictions: list[tuple[float, bool]] = []
@@ -418,6 +494,19 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon) -> N
         base_score = ocen(bazowe, train_slices, cache_tr)["sharpe"]
         if base_score > best_score:
             best_w, best_score = bazowe, base_score
+
+        # Kandydat WYLICZONY, nie wylosowany: wagi proporcjonalne do zdolnosci
+        # predykcyjnej sygnalow na tym oknie. Patrz komentarz przy ic_weights().
+        ic_w = ic_weights(train_slices, cache_tr, martwe)
+        ic_score = ocen(ic_w, train_slices, cache_tr)["sharpe"]
+        cfg_hash = hashlib.sha256(json.dumps(ic_w, sort_keys=True).encode()).digest()
+        cur.execute(
+            "INSERT INTO learn.hypothesis_trial (model_id, config_hash, params, n_windows)"
+            " VALUES (%s,%s,%s,1) ON CONFLICT (model_id, config_hash) DO NOTHING",
+            (model_id, cfg_hash, json.dumps(ic_w)))
+        if ic_score > best_score:
+            best_w, best_score = ic_w, ic_score
+            wybrane_ic += 1
 
         # --- ocena OUT-OF-SAMPLE --------------------------------------------
         oos_res = simulate_portfolio(
@@ -622,7 +711,9 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon) -> N
          round(max_psi, 4), trials, reason))
     conn.commit()
 
-    print(f"\nOkna: {total}, dodatnie: {positive} ({pct:.1f}%)")
+    print(f"\nWagi z IC wybrane w {wybrane_ic}/{idx} okien "
+          f"(reszta: losowanie albo założenia początkowe)")
+    print(f"Okna: {total}, dodatnie: {positive} ({pct:.1f}%)")
     print(f"Mediana Sharpe (OOS): {median:+.3f}" if median is not None else "Mediana Sharpe: —")
     print(f"Najgorsze obsunięcie: {worst_dd:.2f}%")
     print(f"Przetestowanych konfiguracji: {trials}")
