@@ -455,3 +455,81 @@ obserwacji z trzeciej iteracji, tym razem na czystszych danych.
 
 Żadna z nich nie jest obietnicą. Cztery iteracje w jeden dzień pokazały przede
 wszystkim, ile pomiar potrafi kłamać, zanim się go naprawi.
+
+---
+
+# Szósta iteracja: dlaczego to nie działa — odpowiedź ilościowa
+
+Po naprawie datowania cech, dopuszczeniu wag ujemnych i wyliczaniu wag ze
+zdolności predykcyjnej zamiast losowania.
+
+## Wyniki kolejnych prób
+
+| Metoda doboru wag | Dodatnie okna | Mediana Sharpe |
+|---|---|---|
+| Losowanie, wagi nieujemne | 50,0% | +0,016 |
+| Losowanie, wagi ze znakiem | 55,0% | +0,022 |
+| + kandydat z wag liczonych z IC | 52,5% | +0,020 |
+
+Wynik trzyma się w przedziale 50–55% **niezależnie od tego, co robię
+z ważeniem**. To jest przedział, jaki daje przypadek.
+
+Wagi z IC wygrały tylko w **7 z 40 okien** — na oknie treningowym przegrywały
+z najlepszym losowaniem. To samo w sobie jest informacją: selekcja po Sharpie
+okna treningowego wybiera to, co najlepiej dopasowało się do szumu tego okna,
+a nie to, co uogólnia.
+
+## Dlaczego żadne ważenie nie pomoże
+
+Zmierzona siła sygnałów (IC) przełożona na przewagę w procentach, przy
+odchyleniu zwrotu 3,224% na horyzoncie 12 godzin i koszcie rundy 0,190%:
+
+| Sygnał | \|IC\| | Przewaga / transakcję | Pokrycie kosztu |
+|---|---|---|---|
+| volume_breakout | 0,039 | 0,1257% | **66%** |
+| mean_reversion_rsi | 0,036 | 0,1161% | 61% |
+| trend_follow | 0,022 | 0,0709% | 37% |
+| range_extreme | 0,019 | 0,0613% | 32% |
+| momentum_multi | 0,019 | 0,0613% | 32% |
+| cross_section | 0,015 | 0,0484% | 25% |
+| funding_carry | 0,009 | 0,0290% | 15% |
+
+**Żaden pojedynczy sygnał nie pokrywa własnych kosztów.** Najmocniejszy dochodzi
+do 66%; brakuje mu 0,064 punktu procentowego na transakcję.
+
+Górna granica dla złożenia wszystkich ośmiu, przy **założeniu ich niezależności**:
+IC = 0,066, przewaga 0,212%, czyli **112% kosztu**. To jest granica nieosiągalna,
+bo sygnały liczone z tej samej ceny są ze sobą silnie skorelowane — a i tak
+oznaczałaby ledwie wyjście na zero.
+
+To wyjaśnia wszystkie dotychczasowe wyniki naraz. Strategia nie „nie znalazła
+jeszcze przewagi" — ona **strukturalnie nie ma z czego jej wziąć** przy tych
+sygnałach i tych kosztach.
+
+## Co realnie mogłoby to zmienić
+
+W kolejności dźwigni, nie łatwości:
+
+1. **Zlecenia z limitem zamiast rynkowych.** Symulacja zakłada prowizję taker
+   (0,055%). Bybit liczy maker zwykle 0,02%, a przy wyższych progach mniej.
+   Koszt rundy spadłby z 0,190% do ~0,120%, a najmocniejszy sygnał pokrywałby
+   **105% zamiast 66%**. To jedyna dźwignia, która sama z siebie przestawia
+   bilans — reszta wymaga znalezienia lepszych sygnałów.
+
+   Cena: zlecenie z limitem nie zawsze się wypełnia. Trzeba wymodelować
+   prawdopodobieństwo wypełnienia, inaczej backtest znowu zacznie kłamać —
+   tym razem w drugą stronę.
+
+2. **Sygnały o wyższym IC.** Mikrostruktura orderbooka (zbieramy od wczoraj,
+   testowalna za kilka miesięcy) i news (czeka na klucz) to jedyne dwa źródła
+   w projekcie, które nie są przetworzoną ceną.
+
+3. **Rzadszy handel.** Koszt amortyzuje się na większym ruchu, ale świeca
+   dobowa daje 1 460 obserwacji przez 4 lata — za mało na uczciwy walk-forward.
+
+## Czego NIE zrobię
+
+Nie będę dalej dobierał wag. Pomiar mówi, że wąskim gardłem nie jest sposób
+ważenia — jest nim to, że **suma dostępnej informacji nie pokrywa kosztów
+transakcyjnych**. Kolejne metody optymalizacji będą tylko coraz sprytniej
+dopasowywać się do szumu.
