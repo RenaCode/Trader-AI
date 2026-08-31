@@ -414,3 +414,31 @@ def metrics(res: PortfolioResult, min_trades: int) -> dict:
         "avg_r": round(mean * 100, 4),
         "profit_factor": round(gains / losses, 4) if losses > 0 else 0.0,
     }
+
+
+def kup_i_trzymaj(panels: dict[str, list[dict]], kind: str = "spot") -> float:
+    """Zwrot z prostego kupienia i trzymania calego zbioru, rowna waga.
+
+    PUNKT ODNIESIENIA, KTOREGO BRAKOWALO.
+
+    Odsetek dodatnich okien nie mowi nic o tym, czy strategia jest LEPSZA od
+    nierobienia niczego. Strategia wylacznie dluga na rosnacym rynku bedzie
+    miala duzo dodatnich okien z samego faktu, ze rynek rosl - i wyglada to
+    identycznie jak umiejetnosc.
+
+    Krypto miedzy 2022 a 2026 mocno wzroslo, wiec bez tego porownania kazdy
+    wynik dlugiej strony jest nie do zinterpretowania.
+
+    Koszt liczymy raz: jedno wejscie i jedno wyjscie na instrument, po cenie
+    rynkowej - bo tyle wlasnie kosztuje kupic i trzymac.
+    """
+    k = koszty(kind)
+    zwroty = []
+    for rows in panels.values():
+        if len(rows) < 2:
+            continue
+        wejscie = rows[0]["price"] * (1 + POSLIZG_TAKER)
+        wyjscie = rows[-1]["price"] * (1 - POSLIZG_TAKER)
+        brutto = wyjscie / wejscie - 1
+        zwroty.append(brutto - 2 * k.taker)
+    return sum(zwroty) / len(zwroty) * 100 if zwroty else 0.0

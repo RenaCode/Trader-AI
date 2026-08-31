@@ -40,7 +40,8 @@ from psycopg.rows import dict_row
 
 from services.engine.horizons import DEFAULT_BAR, HORIZONS, Horizon, get as get_horizon
 from services.engine.portfolio import (
-    Egzekucja, metrics as portfolio_metrics, precompute_panels, simulate_portfolio,
+    Egzekucja, kup_i_trzymaj, metrics as portfolio_metrics, precompute_panels,
+    simulate_portfolio,
 )
 from services.engine.statystyka import spearman, wilson
 from services.engine.signals import (
@@ -409,6 +410,11 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
     gate_history: list[float] = []
     weight_history: list[dict] = []
     wybrane_ic = 0
+    # Porownanie z nierobieniem niczego. Bez tego odsetek dodatnich okien nie
+    # mowi, czy strategia jest LEPSZA od kupienia i trzymania - a strategia
+    # wylacznie dluga na rosnacym rynku ma duzo dodatnich okien z samej bety.
+    pokonane_odniesienie = 0
+    porownywalne = 0
     all_sharpes: list[float] = []
     worst_dd = 0.0
     predictions: list[tuple[float, bool]] = []
@@ -571,8 +577,17 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
 
         gate_history.extend(g[0] for g in gates.values())
         weight_history.append(best_w)
+
+        odniesienie = kup_i_trzymaj({s: v for s, v in test_slices.items() if v}, kind)
+        if informative:
+            porownywalne += 1
+            if oos_m["total_return"] > odniesienie:
+                pokonane_odniesienie += 1
         mark = "" if informative else (f"  (poniżej {h.min_trades} transakcji — "
                                        "pominięte w ocenie)")
+        if informative:
+            mark += (f"  [strategia {oos_m['total_return']:+.2f}% vs "
+                     f"kup-i-trzymaj {odniesienie:+.2f}%]")
         if oos_res.killswitch_at:
             mark += f"  [KILL-SWITCH {oos_res.killswitch_at:%m-%d %H:%M}]"
         if oos_m["blocked"]:
@@ -732,6 +747,11 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
 
     print(f"\nWagi z IC wybrane w {wybrane_ic}/{idx} okien "
           f"(reszta: losowanie albo założenia początkowe)")
+    if porownywalne:
+        pct_odn = pokonane_odniesienie / porownywalne * 100
+        lo_o, hi_o = wilson(pokonane_odniesienie, porownywalne)
+        print(f"Pokonano kup-i-trzymaj w {pokonane_odniesienie}/{porownywalne} oknach "
+              f"({pct_odn:.1f}%)   przedział 95%: {lo_o:.1%}–{hi_o:.1%}")
     print(f"Okna: {total}, dodatnie: {positive} ({pct:.1f}%)"
           f"   przedział ufności 95%: {ci_lo:.1%}–{ci_hi:.1%}")
     print(f"Mediana Sharpe (OOS): {median:+.3f}" if median is not None else "Mediana Sharpe: —")

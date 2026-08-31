@@ -456,3 +456,54 @@ def test_na_spocie_nie_otwieramy_krotkich_pozycji():
     assert spot.pominiete_shorty > 0, "na spocie krótkie pozycje muszą być pomijane"
     assert perp.pominiete_shorty == 0, "na perpetualu krótkie pozycje są dozwolone"
     assert len(perp.trades) > len(spot.trades)
+
+
+# ------------------------------------------------------ punkt odniesienia
+def test_kup_i_trzymaj_na_rosnacym_rynku_jest_dodatni():
+    from services.engine.portfolio import kup_i_trzymaj
+
+    rows = [_swieca(T0 + timedelta(hours=4 * i), 100.0 * (1.01 ** i),
+                    0.01, 0.01, cechy_kupuj()) for i in range(50)]
+    assert kup_i_trzymaj({"AAA": rows}, "perp") > 0
+
+
+def test_kup_i_trzymaj_na_spadajacym_jest_ujemny():
+    from services.engine.portfolio import kup_i_trzymaj
+
+    rows = [_swieca(T0 + timedelta(hours=4 * i), 100.0 * (0.99 ** i),
+                    0.01, 0.01, cechy_kupuj()) for i in range(50)]
+    assert kup_i_trzymaj({"AAA": rows}, "perp") < 0
+
+
+def test_kup_i_trzymaj_odejmuje_koszty():
+    """Kupienie i trzymanie tez kosztuje - jedno wejscie i jedno wyjscie.
+
+    Bez tego porownanie bylo by nieuczciwe na korzysc odniesienia.
+    """
+    from services.engine.portfolio import kup_i_trzymaj
+
+    plaski = [_swieca(T0 + timedelta(hours=4 * i), 100.0, 0.0, 0.0, cechy_kupuj())
+              for i in range(20)]
+    assert kup_i_trzymaj({"AAA": plaski}, "perp") < 0, \
+        "na płaskim rynku kup-i-trzymaj musi wyjść na minus przez koszty"
+
+
+def test_kup_i_trzymaj_drozszy_na_spocie_niz_na_perpetualu():
+    from services.engine.portfolio import kup_i_trzymaj
+
+    plaski = [_swieca(T0 + timedelta(hours=4 * i), 100.0, 0.0, 0.0, cechy_kupuj())
+              for i in range(20)]
+    assert kup_i_trzymaj({"AAA": plaski}, "spot") < kup_i_trzymaj({"AAA": plaski}, "perp")
+
+
+def test_kup_i_trzymaj_usrednia_po_instrumentach():
+    """Rowna waga: jeden instrument mocno rosnacy nie moze przeslonic reszty."""
+    from services.engine.portfolio import kup_i_trzymaj
+
+    rosnie = [_swieca(T0 + timedelta(hours=4 * i), 100.0 * (1.02 ** i),
+                      0.01, 0.01, cechy_kupuj()) for i in range(30)]
+    spada = [_swieca(T0 + timedelta(hours=4 * i), 100.0 * (0.98 ** i),
+                     0.01, 0.01, cechy_kupuj()) for i in range(30)]
+    tylko_rosnie = kup_i_trzymaj({"A": rosnie}, "perp")
+    oba = kup_i_trzymaj({"A": rosnie, "B": spada}, "perp")
+    assert oba < tylko_rosnie
