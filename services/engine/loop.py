@@ -37,6 +37,7 @@ from psycopg.rows import dict_row
 
 from services.engine.horizons import DEFAULT_BAR, HORIZONS, Horizon, get as get_horizon
 from services.engine.risk import RiskKernel
+from services.engine.koszty import koszty
 from services.engine.risk_rules import position_budget
 from services.engine.signals import SIGNALS, classify_regime, evaluate
 
@@ -481,7 +482,7 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
     stats = {"rozwazone": 0, "wejscia": 0, "wyjscia": 0, "wstrzymane": 0,
              "zablokowane": 0, "poza_swieca": 0}
 
-    cur.execute("SELECT id, symbol FROM ref.instrument WHERE engine=%s AND active"
+    cur.execute("SELECT id, symbol, kind FROM ref.instrument WHERE engine=%s AND active"
                 " AND kind <> 'perp' ORDER BY symbol", (engine,))
     instrumenty = cur.fetchall()
 
@@ -516,7 +517,8 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
         regime, regime_conf = classify_regime(features, atr_percentile_80(cur, iid, now, h))
         weights = (model["weights"] or {}).get(regime)
         score, confidence, contributions = evaluate(features, regime, weights, h)
-        oceny.append({"iid": iid, "symbol": symbol, "features": features, "price": price,
+        oceny.append({"iid": iid, "symbol": symbol, "kind": inst["kind"],
+                      "features": features, "price": price,
                       "regime": regime, "regime_conf": regime_conf, "score": score,
                       "confidence": confidence, "contributions": contributions,
                       "position": open_position(cur, engine, mode, iid)})
@@ -547,6 +549,12 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
                 action = "hold"
         elif abs(score) >= model["enter"] and confidence >= model["min_conf"]:
             action = "enter_long" if score > 0 else "enter_short"
+            # Krotkiej pozycji na spocie nie da sie zajac bez pozyczki marzowej.
+            # Silnik podejmowal je swobodnie - 8 z 12 pozycji w dzienniku to byly
+            # shorty na instrumentach spotowych, czyli transakcje niewykonalne.
+            if action == "enter_short" and not koszty(ocena["kind"]).krotka_pozycja:
+                action = "hold"
+                stats["short_niewykonalny"] = stats.get("short_niewykonalny", 0) + 1
         else:
             action = "hold"
 

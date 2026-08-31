@@ -430,3 +430,29 @@ def test_stawki_spotowe_sa_wyzsze_niz_perpetuala():
     spot = simulate_portfolio(*wspolne, kind="spot", egzekucja=Egzekucja(limit=False))
     perp = simulate_portfolio(*wspolne, kind="perp", egzekucja=Egzekucja(limit=False))
     assert spot.prowizja > perp.prowizja
+
+
+def test_na_spocie_nie_otwieramy_krotkich_pozycji():
+    """Krotkiej pozycji na spocie nie da sie zajac bez pozyczki marzowej.
+
+    W dzienniku produkcyjnym 8 z 12 pozycji to byly shorty na instrumentach
+    spotowych - dwie trzecie transakcji strategii nie bylo wykonalnych.
+    """
+    from services.engine.portfolio import Egzekucja
+
+    # Cechy dajace sygnal SPRZEDAZY: wszystko skrajnie w dol.
+    sprzedaj = cechy_kupuj() | {"ret_short": -20.0, "ret_mid": -40.0,
+                                "ret_long": -80.0, "ema_ratio": 0.99,
+                                "rel_strength": -0.9}
+    rows = [_swieca(T0 + timedelta(hours=4 * i), 100.0 - i * 0.5,
+                    lo_pct=0.03, hi_pct=0.03, cechy=sprzedaj)
+            for i in range(30)]
+    wspolne = ({"AAA": rows}, DEFAULT_WEIGHTS, {"AAA": 2.0},
+               {"AAA": (0.05, 0.02)}, H, 0.05, LIMITY_LUZNE)
+
+    spot = simulate_portfolio(*wspolne, kind="spot", egzekucja=Egzekucja())
+    perp = simulate_portfolio(*wspolne, kind="perp", egzekucja=Egzekucja())
+
+    assert spot.pominiete_shorty > 0, "na spocie krótkie pozycje muszą być pomijane"
+    assert perp.pominiete_shorty == 0, "na perpetualu krótkie pozycje są dozwolone"
+    assert len(perp.trades) > len(spot.trades)

@@ -45,10 +45,6 @@ START_EQUITY = 100_000.0
 
 MIN_SD = 1e-4
 
-# Zeby ostrzezenie o niewykonalnych krotkich pozycjach padlo raz, nie przy
-# kazdym z tysiecy wywolan symulacji.
-_OSTRZEZONO: dict[str, bool] = {}
-
 
 @dataclass
 class Position:
@@ -97,6 +93,7 @@ class PortfolioResult:
     base_notional: float = 0.0  # budzet na pozycje wyliczony z limitu
     niewypelnione_wejscia: int = 0
     niewypelnione_wyjscia: int = 0
+    pominiete_shorty: int = 0
     # Stawki faktycznie zastosowane - do sprawdzenia z zewnatrz, ze symulacja
     # policzyla te koszty, ktore deklaruje.
     prowizja: float = 0.0
@@ -168,8 +165,11 @@ def simulate_portfolio(panels: dict[str, list[dict]],
     k = koszty(kind)
     fee = k.maker if egz.limit else k.taker
     slip = POSLIZG_MAKER if egz.limit else POSLIZG_TAKER
-    if not k.krotka_pozycja and not _OSTRZEZONO.get(kind):
-        _OSTRZEZONO[kind] = True
+    # Na instrumencie, ktorego nie da sie shortowac (spot bez pozyczki marzowej),
+    # symulacja NIE MOZE otwierac krotkich pozycji - inaczej mierzy strategie,
+    # ktorej nie da sie wykonac. W dzienniku produkcyjnym 8 z 12 pozycji to byly
+    # wlasnie krotkie sprzedaze na spocie.
+    wolno_short = k.krotka_pozycja
     ids = instrument_ids or {s: i for i, s in enumerate(sorted(panels), start=1)}
     baza = float(position_budget(limits, len(panels)))
     # Bez podanej pamieci podrecznej liczymy ja tutaj - wygodne przy pojedynczym
@@ -308,6 +308,9 @@ def simulate_portfolio(panels: dict[str, list[dict]],
         kandydaci.sort(key=lambda k: (-k[0], k[1]))
 
         for _sila, sym, cur, score, conf in kandydaci:
+            if score < 0 and not wolno_short:
+                res.pominiete_shorty += 1
+                continue
             rows = panels[sym]
             nxt_idx = cur["idx"] + 1
             price = rows[nxt_idx]["price"]
@@ -393,7 +396,8 @@ def metrics(res: PortfolioResult, min_trades: int) -> dict:
             "total_return": round(total_return, 4), "trades": res.trades,
             "blocked": res.blocked, "downsized": res.downsized,
             "killswitch": res.killswitch_reason,
-            "niewypelnione": res.niewypelnione_wejscia + res.niewypelnione_wyjscia}
+            "niewypelnione": res.niewypelnione_wejscia + res.niewypelnione_wyjscia,
+            "pominiete_shorty": res.pominiete_shorty}
     if len(rets) < min_trades:
         return base | {"sharpe": 0.0, "sortino": 0.0, "hit_rate": 0.0, "avg_r": 0.0,
                        "profit_factor": 0.0, "insufficient": True}
