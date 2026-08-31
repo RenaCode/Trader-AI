@@ -402,3 +402,52 @@ zamiast cicho unieważnić trening.
 To najlepszy argument za tym, że kontrola wykonująca prawdziwe zapytania jest
 warta więcej niż kolejny test jednostkowy: żaden przenośny test nie miałby jak
 tego zobaczyć, bo nie ma bazy.
+
+### 6.4 Model kosztów opisywał inny produkt niż ten, którym handlujemy
+
+W symulacji siedziała stała `FEE = 0,00055`, czyli 0,055%. To jest stawka
+**taker dla kontraktów wieczystych** Bybita. Handlujemy instrumentami **spot**,
+gdzie Bybit liczy **0,1% i makerowi, i takerowi**
+([cennik Bybit](https://www.bybit.com/en/announcement-info/fee-rate/)).
+
+Koszt rundy na spocie wynosi więc 0,280%, nie 0,190% — symulacja zaniżała
+prowizje niemal dwukrotnie. Przy przewadze rzędu 0,12% na transakcję to nie
+jest zaokrąglenie: pokrycie kosztu przez najmocniejszy sygnał spada z 66% do
+**45%**.
+
+### 6.5 Dwie trzecie transakcji było niewykonalnych
+
+Na Bybit spot **nie da się zająć krótkiej pozycji** bez pożyczki marżowej.
+Symulacja i silnik otwierały je swobodnie.
+
+W dzienniku produkcyjnym: **8 z 12 pozycji to krótkie sprzedaże na instrumentach
+spotowych.** Handel demonstracyjny mierzył więc strategię, której nie dałoby się
+przenieść na żywo — a to jest gorsze niż brak handlu demonstracyjnego, bo
+wygląda na dowód.
+
+Naprawione: flaga `krotka_pozycja` w cenniku decyduje, czy wolno grać na spadek.
+Ta sama reguła obowiązuje symulację i produkcję, więc nie ma jak się rozjechać.
+Silnik i symulacja raportują, ile okazji z tego powodu odpada — żeby nie znikały
+po cichu.
+
+### 6.6 Co z tego wynika dla projektu
+
+| Wariant | Koszt rundy | Krótkie pozycje | Pokrycie kosztu |
+|---|---|---|---|
+| spot, zlecenia rynkowe (**stan dotychczasowy**) | 0,280% | **nie** | 45% |
+| perp, zlecenia rynkowe | 0,190% | tak | 66% |
+| **perp, zlecenia z limitem** | **0,040%** | tak | **314%** |
+
+Strategia dwustronna **wymaga kontraktów wieczystych** — na spocie połowa jej
+sygnałów jest nie do wykonania, a prowizje są pięć razy wyższe niż maker na
+perpetualu.
+
+Model zleceń z limitem jest zaimplementowany i **uczciwy**: wypełnienie
+następuje tylko wtedy, gdy następna świeca dotknęła naszej ceny. Selekcja
+negatywna jest w nim zawarta z definicji — wypełniamy się, gdy cena przyszła
+do nas, czyli często wtedy, gdy rynek idzie przeciwko nam. Ruchy, które uciekają
+natychmiast, są stracone.
+
+To jest decyzja projektowa dla właściciela, nie techniczna: przejście na
+perpetuale oznacza inne uprawnienia klucza API, dźwignię (używalibyśmy 1×)
+i koszt finansowania płacony co osiem godzin.
