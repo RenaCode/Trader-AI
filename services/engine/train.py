@@ -487,11 +487,13 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
         for _ in range(trials_per_window):
             cand = _bez_martwych(random_weights(rng), martwe)
             score = ocen(cand, train_slices, cache_tr)["sharpe"]
-            cfg_hash = hashlib.sha256(json.dumps(cand, sort_keys=True).encode()).digest()
-            cur.execute(
-                "INSERT INTO learn.hypothesis_trial (model_id, config_hash, params, n_windows)"
-                " VALUES (%s,%s,%s,1) ON CONFLICT (model_id, config_hash) DO NOTHING",
-                (model_id, cfg_hash, json.dumps(cand)))
+            if not sucho:
+                cfg_hash = hashlib.sha256(json.dumps(cand, sort_keys=True).encode()).digest()
+                cur.execute(
+                    "INSERT INTO learn.hypothesis_trial (model_id, config_hash, params,"
+                    " n_windows) VALUES (%s,%s,%s,1)"
+                    " ON CONFLICT (model_id, config_hash) DO NOTHING",
+                    (model_id, cfg_hash, json.dumps(cand)))
             if score > best_score:
                 best_w, best_score = cand, score
 
@@ -505,11 +507,13 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
         # predykcyjnej sygnalow na tym oknie. Patrz komentarz przy ic_weights().
         ic_w = ic_weights(train_slices, cache_tr, martwe)
         ic_score = ocen(ic_w, train_slices, cache_tr)["sharpe"]
-        cfg_hash = hashlib.sha256(json.dumps(ic_w, sort_keys=True).encode()).digest()
-        cur.execute(
-            "INSERT INTO learn.hypothesis_trial (model_id, config_hash, params, n_windows)"
-            " VALUES (%s,%s,%s,1) ON CONFLICT (model_id, config_hash) DO NOTHING",
-            (model_id, cfg_hash, json.dumps(ic_w)))
+        if not sucho:
+            cfg_hash = hashlib.sha256(json.dumps(ic_w, sort_keys=True).encode()).digest()
+            cur.execute(
+                "INSERT INTO learn.hypothesis_trial (model_id, config_hash, params,"
+                " n_windows) VALUES (%s,%s,%s,1)"
+                " ON CONFLICT (model_id, config_hash) DO NOTHING",
+                (model_id, cfg_hash, json.dumps(ic_w)))
         if ic_score > best_score:
             best_w, best_score = ic_w, ic_score
             wybrane_ic += 1
@@ -553,16 +557,17 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
                    for s in aktywne for r in test_slices[s][::step]]
         dominant = max(set(regimes), key=regimes.count) if regimes else None
 
-        cur.execute(
-            "INSERT INTO learn.wf_window (training_run_id, idx, train_from, train_to,"
-            " test_from, test_to, n_trades, dominant_regime) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)"
-            " RETURNING id",
-            (run_id, idx, train_from, train_to, test_from, test_to, n_trades, dominant))
-        w_id = cur.fetchone()["id"]
-        cur.executemany(
-            "INSERT INTO learn.wf_metric (wf_window_id, metric, value) VALUES (%s,%s,%s)",
-            [(w_id, k, round(v, 4)) for k, v in agg.items()])
-        conn.commit()
+        if not sucho:
+            cur.execute(
+                "INSERT INTO learn.wf_window (training_run_id, idx, train_from, train_to,"
+                " test_from, test_to, n_trades, dominant_regime)"
+                " VALUES (%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",
+                (run_id, idx, train_from, train_to, test_from, test_to, n_trades, dominant))
+            w_id = cur.fetchone()["id"]
+            cur.executemany(
+                "INSERT INTO learn.wf_metric (wf_window_id, metric, value) VALUES (%s,%s,%s)",
+                [(w_id, k, round(v, 4)) for k, v in agg.items()])
+            conn.commit()
 
         gate_history.extend(g[0] for g in gates.values())
         weight_history.append(best_w)
@@ -665,15 +670,10 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
 
     # WAGI DLA PRODUKCJI.
     #
-    # Do tej pory `best_w` bylo liczone w kazdym oknie, uzywane do oceny
-    # out-of-sample i WYRZUCANE. Nigdzie nie trafialo, a petla decyzyjna nie
-    # czytala zadnych wag - dzialala wiecznie na zalozeniach poczatkowych.
-    # Warstwa uczenia mierzyla wiec, czy kalibracja POMOGLABY, nie mogac jej
-    # nigdy zastosowac.
-    #
     # Bierzemy MEDIANE wag po oknach, nie wagi z ostatniego okna. Pojedyncze
     # okno to jedno losowanie; mediana po kilkudziesieciu jest odporna na to,
-    # ze akurat ostatnie wypadlo nietypowo.
+    # ze akurat ostatnie wypadlo nietypowo. Suma po wartosciach bezwzglednych,
+    # bo wagi moga byc ujemne.
     prod_weights = {}
     if weight_history:
         for regime in REGIMES:
@@ -681,54 +681,53 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
                 name: statistics.median([w[regime].get(name, 0.0) for w in weight_history])
                 for name in SIGNALS
             }
-            # Suma wartosci bezwzglednych - wagi moga byc ujemne.
             total_w = sum(abs(v) for v in per_signal.values()) or 1.0
             prod_weights[regime] = {k: round(v / total_w, 4) for k, v in per_signal.items()}
 
-    cur.execute(
-        "UPDATE learn.model_version SET params = params || %s::jsonb WHERE id = %s",
-        (json.dumps({"enter_threshold": prod_enter,
-                     "exit_threshold": round(prod_enter * EXIT_RATIO, 6),
-                     "min_confidence": MIN_CONF,
-                     "weights": prod_weights}), mv_id))
+    # W trybie SUCHYM nie dotykamy bazy w ogole: porownanie wariantow nie moze
+    # promowac wersji modelu ani nadpisywac stanu nauki. Podsumowanie i tak
+    # sie wypisuje - po to ten tryb istnieje.
+    if not sucho:
+        cur.execute(
+            "UPDATE learn.model_version SET params = params || %s::jsonb WHERE id = %s",
+            (json.dumps({"enter_threshold": prod_enter,
+                         "exit_threshold": round(prod_enter * EXIT_RATIO, 6),
+                         "min_confidence": MIN_CONF,
+                         "weights": prod_weights}), mv_id))
 
-    # KOLEJNOSC MA ZNACZENIE: najpierw wycofujemy poprzednia wersje, dopiero
-    # potem promujemy nowa. Odwrotna kolejnosc lamie unikalny indeks
-    # "jedna aktywna wersja na model" i wywraca caly przebieg NA SAMYM KONCU -
-    # a co gorsza tylko wtedy, gdy wynik byl DOBRY, bo zly konczy sie statusem
-    # 'candidate' i konfliktu nie ma. Blad ujawnial sie wiec dokladnie w tym
-    # jednym przypadku, na ktorym najbardziej zalezy.
-    cur.execute("UPDATE learn.model_version SET status='retired', retired_at=now()"
-                " WHERE model_id=%s AND id<>%s AND status='active'", (model_id, mv_id))
-    cur.execute(
-        "UPDATE learn.model_version SET status = (CASE WHEN %s = 'degraded' THEN 'candidate'"
-        " ELSE 'active' END)::learn.mv_status, promoted_at = now() WHERE id = %s", (status, mv_id))
-    cur.execute("UPDATE learn.training_run SET status='done', finished_at=now(), n_windows=%s"
-                " WHERE id=%s", (total, run_id))
-    if sucho:
-        print("\n[tryb suchy] wynik NIE zapisany do bazy - to porównanie wariantów,")
-        print("nie przebieg produkcyjny.")
-        return
-
-    cur.execute(
-        """
-        INSERT INTO learn.learning_state (engine, status, model_version_id, windows_total,
-            windows_positive, median_oos_sharpe, max_drawdown, calibration_error, max_psi,
-            trials_run, reason, positive_ci_low, positive_ci_high, updated_at)
-        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s, now())
-        ON CONFLICT (engine) DO UPDATE SET status=EXCLUDED.status,
-            model_version_id=EXCLUDED.model_version_id, windows_total=EXCLUDED.windows_total,
-            windows_positive=EXCLUDED.windows_positive,
-            median_oos_sharpe=EXCLUDED.median_oos_sharpe, max_drawdown=EXCLUDED.max_drawdown,
-            calibration_error=EXCLUDED.calibration_error, max_psi=EXCLUDED.max_psi,
-            trials_run=EXCLUDED.trials_run, reason=EXCLUDED.reason,
-            positive_ci_low=EXCLUDED.positive_ci_low,
-            positive_ci_high=EXCLUDED.positive_ci_high, updated_at=now()
-        """,
-        (engine, status, mv_id, total, positive,
-         round(median, 4) if median is not None else None,
-         round(worst_dd, 4), round(ece, 4) if ece is not None else None,
-         round(max_psi, 4), trials, reason, round(ci_lo, 4), round(ci_hi, 4)))
+        # KOLEJNOSC MA ZNACZENIE: najpierw wycofujemy poprzednia wersje, dopiero
+        # potem promujemy nowa. Odwrotna kolejnosc lamie unikalny indeks
+        # "jedna aktywna wersja na model".
+        cur.execute("UPDATE learn.model_version SET status='retired', retired_at=now()"
+                    " WHERE model_id=%s AND id<>%s AND status='active'", (model_id, mv_id))
+        cur.execute(
+            "UPDATE learn.model_version SET status = (CASE WHEN %s = 'degraded'"
+            " THEN 'candidate' ELSE 'active' END)::learn.mv_status,"
+            " promoted_at = now() WHERE id = %s", (status, mv_id))
+        cur.execute("UPDATE learn.training_run SET status='done', finished_at=now(),"
+                    " n_windows=%s WHERE id=%s", (total, run_id))
+        cur.execute(
+            """
+            INSERT INTO learn.learning_state (engine, status, model_version_id, windows_total,
+                windows_positive, median_oos_sharpe, max_drawdown, calibration_error, max_psi,
+                trials_run, reason, positive_ci_low, positive_ci_high, updated_at)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s, now())
+            ON CONFLICT (engine) DO UPDATE SET status=EXCLUDED.status,
+                model_version_id=EXCLUDED.model_version_id, windows_total=EXCLUDED.windows_total,
+                windows_positive=EXCLUDED.windows_positive,
+                median_oos_sharpe=EXCLUDED.median_oos_sharpe, max_drawdown=EXCLUDED.max_drawdown,
+                calibration_error=EXCLUDED.calibration_error, max_psi=EXCLUDED.max_psi,
+                trials_run=EXCLUDED.trials_run, reason=EXCLUDED.reason,
+                positive_ci_low=EXCLUDED.positive_ci_low,
+                positive_ci_high=EXCLUDED.positive_ci_high, updated_at=now()
+            """,
+            (engine, status, mv_id, total, positive,
+             round(median, 4) if median is not None else None,
+             round(worst_dd, 4), round(ece, 4) if ece is not None else None,
+             round(max_psi, 4), trials, reason, round(ci_lo, 4), round(ci_hi, 4)))
+    else:
+        cur.execute("UPDATE learn.training_run SET status='done', finished_at=now(),"
+                    " error='tryb suchy - porownanie wariantow' WHERE id=%s", (run_id,))
     conn.commit()
 
     print(f"\nWagi z IC wybrane w {wybrane_ic}/{idx} okien "
