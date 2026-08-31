@@ -29,6 +29,7 @@ export default function Learning({ engine }) {
 
   const s = st.data;
   const pct = s?.windows_positive_pct ?? 0;
+  const ci = s?.windows_positive_ci;
   const passes = pct >= THRESHOLD_PCT;
 
   const bars = (wf.data || []).map((w) => ({
@@ -49,12 +50,30 @@ export default function Learning({ engine }) {
         <Metric label="Stan" value={STATE_PL[s?.status] || '—'} tone={s?.status === 'validated' ? 'profit' : ''}
                 hint={s?.model || 'brak aktywnego modelu'} />
         <Metric label="Okna dodatnie (OOS)" value={s ? `${s.windows_positive}/${s.windows_total}` : '—'}
-                tone={passes ? 'profit' : 'loss'} hint={`${fmtNum(pct, 1)}% · próg ${THRESHOLD_PCT}%`} />
+                tone={passes ? 'profit' : 'loss'}
+                hint={ci
+                  ? `${fmtNum(pct, 1)}% (95%: ${fmtNum(ci[0], 0)}–${fmtNum(ci[1], 0)}%) · próg ${THRESHOLD_PCT}%`
+                  : `${fmtNum(pct, 1)}% · próg ${THRESHOLD_PCT}%`} />
         <Metric label="Mediana Sharpe / transakcję" value={fmtNum(s?.median_oos_sharpe, 3)}
                 tone={(s?.median_oos_sharpe ?? 0) > 0 ? 'profit' : 'loss'} hint="out-of-sample, bez anualizacji" />
         <Metric label="Najgorszy drawdown" value={s?.max_drawdown != null ? `${fmtNum(s.max_drawdown, 2)}%` : '—'}
                 tone="loss" hint="w oknie testowym" />
       </div>
+
+      {ci && ci[1] - ci[0] > 20 && (
+        <div className="verdict">
+          <div className="verdict-line">
+            Przedział ufności ma szerokość {fmtNum(ci[1] - ci[0], 0)} punktów procentowych.
+            Przy {s.windows_total} oknach różnica kilku punktów między kolejnymi przebiegami
+            jest <strong>szumem, nie poprawą</strong> — cztery kolejne dobowe przeliczenia
+            na tym samym kodzie dały 52,5%, 57,5%, 60,0% i 62,5%.
+          </div>
+          <div className="hint" style={{ marginTop: 6 }}>
+            Żeby zawęzić przedział, potrzeba więcej okien testowych — a tych jest tyle,
+            ile pozwala historia. Cztery lata danych to twardy limit 40 okien.
+          </div>
+        </div>
+      )}
 
       <div className="glass-card">
         <div className="card-title">

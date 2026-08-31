@@ -18,6 +18,7 @@ async def state(engine: str):
     row = await fetch_one(
         """
         SELECT ls.status, ls.windows_total, ls.windows_positive, ls.median_oos_sharpe,
+               ls.positive_ci_low, ls.positive_ci_high,
                ls.max_drawdown, ls.calibration_error, ls.max_psi, ls.trials_run,
                ls.reason, ls.updated_at,
                m.name AS model_name, mv.version AS model_version, mv.trained_from, mv.trained_to
@@ -45,6 +46,12 @@ async def state(engine: str):
         # To jest glowna liczba "jak dobrze sie uczy": odsetek okien walk-forward
         # z dodatnim wynikiem OUT-OF-SAMPLE. Prog wyjscia z demo: >= 70%.
         "windows_positive_pct": (positive / total * 100) if total else 0.0,
+        # Przedzial ufnosci 95% podawany ZAWSZE razem z odsetkiem. Przy 40 oknach
+        # ma szerokosc okolo 30 punktow procentowych, wiec sam odsetek zacheca
+        # do czytania roznicy kilku punktow jako sygnalu - a to szum.
+        "windows_positive_ci": (
+            [row["positive_ci_low"] * 100, row["positive_ci_high"] * 100]
+            if row["positive_ci_low"] is not None else None),
         "median_oos_sharpe": row["median_oos_sharpe"],
         "max_drawdown": row["max_drawdown"],
         "calibration_error": row["calibration_error"],

@@ -42,7 +42,7 @@ from services.engine.horizons import DEFAULT_BAR, HORIZONS, Horizon, get as get_
 from services.engine.portfolio import (
     metrics as portfolio_metrics, precompute_panels, simulate_portfolio,
 )
-from services.engine.statystyka import spearman
+from services.engine.statystyka import spearman, wilson
 from services.engine.signals import (
     DEFAULT_WEIGHTS, REGIMES, SIGNALS, classify_regime, combine, evaluate,
 )
@@ -632,6 +632,8 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon) -> N
     # przebieg, w ktorym 39 okien pominieto z braku transakcji, a jedno wyszlo
     # dodatnio, dawal 100% skutecznosci i status "kryteria spelnione" - czyli
     # zielone swiatlo do handlu prawdziwymi pieniedzmi na podstawie jednego okna.
+    ci_lo, ci_hi = wilson(positive, total)
+
     if total < MIN_WINDOWS_FOR_VALIDATION:
         status = "learning"
         reason = (f"Za mało informatywnych okien: {total} z wymaganych "
@@ -640,10 +642,14 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon) -> N
     else:
         status = ("validated" if pct >= 70 and median and median > 0.05
                   else "degraded" if pct < 40 else "learning")
+        # Przedzial podajemy ZAWSZE razem z odsetkiem. Sam odsetek zacheca do
+        # czytania roznicy dwoch punktow jako sygnalu, a przy 40 oknach
+        # przedzial ma szerokosc okolo 30 punktow procentowych.
+        ci = f" Przedział ufności 95%: {ci_lo:.0%}–{ci_hi:.0%}."
         reason = {
-            "validated": f"Dodatnie {positive}/{total} okien out-of-sample ({pct:.0f}%). Kryteria spełnione.",
-            "learning": f"Dodatnie {positive}/{total} okien out-of-sample ({pct:.0f}%). Próg przejścia na live: 70%.",
-            "degraded": f"Dodatnie tylko {positive}/{total} okien ({pct:.0f}%) — strategia nie wykazuje przewagi.",
+            "validated": f"Dodatnie {positive}/{total} okien out-of-sample ({pct:.0f}%).{ci} Kryteria spełnione.",
+            "learning": f"Dodatnie {positive}/{total} okien out-of-sample ({pct:.0f}%).{ci} Próg przejścia na live: 70%.",
+            "degraded": f"Dodatnie tylko {positive}/{total} okien ({pct:.0f}%).{ci} Strategia nie wykazuje przewagi.",
         }[status]
 
     # Progi obowiazujace produkcje - mediana z okien. Petla decyzyjna czyta je
@@ -696,24 +702,27 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon) -> N
         """
         INSERT INTO learn.learning_state (engine, status, model_version_id, windows_total,
             windows_positive, median_oos_sharpe, max_drawdown, calibration_error, max_psi,
-            trials_run, reason, updated_at)
-        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s, now())
+            trials_run, reason, positive_ci_low, positive_ci_high, updated_at)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s, now())
         ON CONFLICT (engine) DO UPDATE SET status=EXCLUDED.status,
             model_version_id=EXCLUDED.model_version_id, windows_total=EXCLUDED.windows_total,
             windows_positive=EXCLUDED.windows_positive,
             median_oos_sharpe=EXCLUDED.median_oos_sharpe, max_drawdown=EXCLUDED.max_drawdown,
             calibration_error=EXCLUDED.calibration_error, max_psi=EXCLUDED.max_psi,
-            trials_run=EXCLUDED.trials_run, reason=EXCLUDED.reason, updated_at=now()
+            trials_run=EXCLUDED.trials_run, reason=EXCLUDED.reason,
+            positive_ci_low=EXCLUDED.positive_ci_low,
+            positive_ci_high=EXCLUDED.positive_ci_high, updated_at=now()
         """,
         (engine, status, mv_id, total, positive,
          round(median, 4) if median is not None else None,
          round(worst_dd, 4), round(ece, 4) if ece is not None else None,
-         round(max_psi, 4), trials, reason))
+         round(max_psi, 4), trials, reason, round(ci_lo, 4), round(ci_hi, 4)))
     conn.commit()
 
     print(f"\nWagi z IC wybrane w {wybrane_ic}/{idx} okien "
           f"(reszta: losowanie albo założenia początkowe)")
-    print(f"Okna: {total}, dodatnie: {positive} ({pct:.1f}%)")
+    print(f"Okna: {total}, dodatnie: {positive} ({pct:.1f}%)"
+          f"   przedział ufności 95%: {ci_lo:.1%}–{ci_hi:.1%}")
     print(f"Mediana Sharpe (OOS): {median:+.3f}" if median is not None else "Mediana Sharpe: —")
     print(f"Najgorsze obsunięcie: {worst_dd:.2f}%")
     print(f"Przetestowanych konfiguracji: {trials}")

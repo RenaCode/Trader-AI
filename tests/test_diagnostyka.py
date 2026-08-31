@@ -56,3 +56,50 @@ def test_stala_kolumna_zwraca_none():
     xs = [1.0] * 100
     ys = [float(i) for i in range(100)]
     assert spearman(xs, ys) is None
+
+
+# ------------------------------------------------------ przedzial ufnosci
+def test_przedzial_zawiera_zmierzony_odsetek():
+    from services.engine.statystyka import wilson
+
+    for k, n in ((20, 40), (25, 40), (28, 40), (1, 10)):
+        lo, hi = wilson(k, n)
+        assert lo <= k / n <= hi
+
+
+def test_przedzial_przy_40_oknach_ma_okolo_30_punktow():
+    """Sedno sprawy: przy tej probie roznica kilku punktow to szum.
+
+    Gdyby ktos podmienil Wilsona na zwykly przedzial normalny, ten test
+    przejdzie - ale nastepny nie.
+    """
+    from services.engine.statystyka import wilson
+
+    lo, hi = wilson(21, 40)
+    assert 0.25 < (hi - lo) < 0.35
+
+
+def test_przedzial_nie_wychodzi_poza_zakres():
+    """Zwykly przedzial normalny przy krancach daje granice ujemne albo >1.
+
+    KANAREK na podmiane metody: Wilson nie ma tej wady, przedzial normalny ma.
+    """
+    from services.engine.statystyka import wilson
+
+    for k, n in ((0, 40), (40, 40), (0, 5), (5, 5), (1, 3)):
+        lo, hi = wilson(k, n)
+        assert 0.0 <= lo <= hi <= 1.0, f"k={k} n={n} dało [{lo}, {hi}]"
+
+
+def test_wieksza_proba_zawezа_przedzial():
+    from services.engine.statystyka import wilson
+
+    waski = wilson(200, 400)
+    szeroki = wilson(20, 40)
+    assert (waski[1] - waski[0]) < (szeroki[1] - szeroki[0])
+
+
+def test_pusta_proba_daje_pelen_zakres():
+    from services.engine.statystyka import wilson
+
+    assert wilson(0, 0) == (0.0, 1.0)

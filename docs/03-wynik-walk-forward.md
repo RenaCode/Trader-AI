@@ -533,3 +533,69 @@ Nie będę dalej dobierał wag. Pomiar mówi, że wąskim gardłem nie jest spos
 ważenia — jest nim to, że **suma dostępnej informacji nie pokrywa kosztów
 transakcyjnych**. Kolejne metody optymalizacji będą tylko coraz sprytniej
 dopasowywać się do szumu.
+
+---
+
+# Sprostowanie: porównywałem liczby nierozróżnialne
+
+Cztery kolejne dobowe przebiegi trenera — **ten sam kod, to samo ziarno losowe**,
+różniące się wyłącznie przesunięciem okna o jeden dzień:
+
+| Data | Wynik |
+|---|---|
+| 2026-08-28 | 52,5% |
+| 2026-08-29 | 57,5% |
+| 2026-08-30 | 60,0% |
+| 2026-08-31 | 62,5% |
+
+Dziesięć punktów w trzy dni, bez żadnej zmiany w kodzie.
+
+## Przedział ufności
+
+Przy 40 oknach przedział ufności 95% (Wilson) dla odsetka dodatnich okien ma
+szerokość **około 30 punktów procentowych**:
+
+| Wynik | Przedział 95% |
+|---|---|
+| 50,0% | 35,2% – 64,8% |
+| 52,5% | 37,5% – 67,1% |
+| 57,5% | 42,2% – 71,5% |
+| 62,5% | 47,0% – 75,8% |
+
+Te przedziały niemal całkowicie się pokrywają.
+
+## Co to znaczy dla wszystkiego, co raportowałem wcześniej
+
+Porównania między iteracjami — 55,2% wobec 57,9%, 52,5% wobec 55,0%, 50,0%
+wobec 52,5% — **były porównaniami liczb statystycznie nierozróżnialnych**.
+Przedstawiałem je jako poprawę albo pogorszenie. To było nadinterpretowanie.
+
+Jedno stwierdzenie z tamtej serii się broni, ale słabiej, niż je podałem:
+wynik spadał po **każdej** z czterech niezależnych poprawek poprawności. Każdy
+pojedynczy spadek mieści się w szumie; konsekwentny kierunek czterech
+niezależnych zmian jest słabą przesłanką, nie dowodem. Powinienem był tak to
+napisać od razu.
+
+Nie unieważnia to wniosku ilościowego z poprzedniej sekcji — ten opiera się na
+pomiarze IC i kosztów, nie na odsetku okien, i pozostaje w mocy: żaden sygnał
+nie pokrywa własnych kosztów.
+
+## Ile okien trzeba
+
+Żeby odróżnić 70% od 50% z pewnością 95%, przy wyniku 70% wystarczy n = 40
+(dolna granica wypada na 54,6%). Próg jest więc osiągalny — ale **tylko wtedy,
+gdy wynik naprawdę wyjdzie w okolicach 70%**. Przy wynikach 50–62% przedział
+zawiera i 50%, i 70%, więc nie rozstrzyga niczego.
+
+Zawężenie przedziału wymaga więcej okien, a tych jest tyle, ile pozwala
+historia: 4 lata danych to twardy limit 40 okien niezachodzących na siebie.
+
+## Wdrożone
+
+Przedział ufności jest liczony przy każdym treningu, zapisywany
+(migracja 0017) i pokazywany **wszędzie tam, gdzie pokazywany jest odsetek** —
+w komunikacie trenera, w API i w zakładce „Stopień nauki", razem z jawnym
+ostrzeżeniem, gdy przedział jest szerszy niż 20 punktów.
+
+Sam odsetek, podany bez przedziału, zachęca do czytania różnicy dwóch punktów
+jako sygnału.

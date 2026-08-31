@@ -43,3 +43,30 @@ def spearman(xs: list[float], ys: list[float]) -> float | None:
     sx = math.sqrt(sum((a - mx) ** 2 for a in rx))
     sy = math.sqrt(sum((b - my) ** 2 for b in ry))
     return licz / (sx * sy) if sx > 0 and sy > 0 else None
+
+
+def wilson(k: int, n: int, z: float = 1.96) -> tuple[float, float]:
+    """Przedzial ufnosci dla odsetka - metoda Wilsona.
+
+    Nie zwykly przedzial normalny, bo ten przy malych probach i odsetkach
+    blisko krancow potrafi wyjsc poza [0,1] i podaje falszywie waskie granice.
+    Wilson nie ma tej wady i jest standardem przy n rzedu kilkudziesieciu.
+
+    DLACZEGO TO JEST TU POTRZEBNE
+
+    Przy 40 oknach przedzial ma szerokosc okolo 30 punktow procentowych. Wynik
+    52,5% to [37,5%, 67,1%], a 62,5% to [47,0%, 75,8%] - przedzialy niemal sie
+    pokrywaja. Bez tej informacji roznica dziesieciu punktow wyglada jak
+    poprawa, a jest szumem.
+
+    Cztery kolejne dobowe przebiegi, roznce sie wylacznie przesunieciem okna
+    o jeden dzien, daly 52,5%, 57,5%, 60,0% i 62,5%. To jest skala wahania
+    samej miary, nie zmiany strategii.
+    """
+    if n <= 0:
+        return (0.0, 1.0)
+    p = k / n
+    d = 1 + z * z / n
+    srodek = (p + z * z / (2 * n)) / d
+    polowa = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / d
+    return (max(0.0, srodek - polowa), min(1.0, srodek + polowa))
