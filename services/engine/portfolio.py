@@ -29,19 +29,25 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 
 from services.engine.horizons import Horizon
+from services.engine.koszty import POSLIZG_MAKER, POSLIZG_TAKER, koszty
 from services.engine.risk_rules import (
     DEFAULT_LIMITS, RiskState, evaluate_account, evaluate_limits, position_budget,
 )
 from services.engine.signals import classify_regime, combine, evaluate, precompute
 
-# Parametry egzekucji - te same, ktore stosuje services/engine/loop.py.
-FEE = 0.00055
-SLIP = 0.0004
+# Parametry egzekucji. Prowizja i poslizg pochodza z services/engine/koszty.py,
+# bo zaleza od RODZAJU instrumentu i typu zlecenia - wczesniej byla tu jedna
+# stala 0,055%, czyli stawka taker kontraktow wieczystych, stosowana takze do
+# instrumentow spotowych, gdzie Bybit liczy 0,1%.
 START_EQUITY = 100_000.0
 # Bazowa wielkosc zlecenia wyprowadzana z limitu ekspozycji i liczby
 # instrumentow - patrz risk_rules.position_budget().
 
 MIN_SD = 1e-4
+
+# Zeby ostrzezenie o niewykonalnych krotkich pozycjach padlo raz, nie przy
+# kazdym z tysiecy wywolan symulacji.
+_OSTRZEZONO: dict[str, bool] = {}
 
 
 @dataclass
@@ -54,6 +60,32 @@ class Position:
 
 
 @dataclass
+class Egzekucja:
+    """Jak skladamy zlecenia - i co za to placimy.
+
+    RYNKOWA: przechodzimy przez spread, placimy prowizje taker i poslizg,
+    ale wypelnienie jest pewne.
+
+    Z LIMITEM: skladamy zlecenie po cenie zamkniecia swiecy decyzyjnej. Nie ma
+    poslizgu i placimy tansza prowizje maker, ale wypelnienie NIE JEST PEWNE -
+    zachodzi tylko wtedy, gdy nastepna swieca dotknie naszej ceny.
+
+    To rozroznienie decyduje o wszystkim. Na kontrakcie wieczystym koszt rundy
+    wynosi 0,190% przy zleceniu rynkowym i 0,040% przy limicie - siedmiokrotna
+    roznica przy przewadze rzedu 0,12% na transakcje.
+
+    Ale model wypelnien musi byc UCZCIWY, inaczej backtest zaklamie w druga
+    strone niz dotad. Zlecenie z limitem wypelnia sie wtedy, gdy cena przyszla
+    do nas - czyli czesto wtedy, gdy rynek idzie PRZECIWKO nam. Ruchy, ktore
+    uciekaja natychmiast, sa dla nas stracone, a to wlasnie one bywaja
+    najbardziej zyskowne. Ta selekcja jest w modelu zawarta z definicji: nie
+    zgadujemy prawdopodobienstwa wypelnienia, tylko sprawdzamy, czy nastepna
+    swieca faktycznie dotknela naszej ceny.
+    """
+    limit: bool = False
+
+
+@dataclass
 class PortfolioResult:
     trades: list[dict] = field(default_factory=list)
     equity_curve: list[tuple[datetime, float]] = field(default_factory=list)
@@ -63,6 +95,12 @@ class PortfolioResult:
     downsized: int = 0        # ile obcial
     max_exposure: float = 0.0  # najwieksza jednoczesna ekspozycja
     base_notional: float = 0.0  # budzet na pozycje wyliczony z limitu
+    niewypelnione_wejscia: int = 0
+    niewypelnione_wyjscia: int = 0
+    # Stawki faktycznie zastosowane - do sprawdzenia z zewnatrz, ze symulacja
+    # policzyla te koszty, ktore deklaruje.
+    prowizja: float = 0.0
+    poslizg: float = 0.0
 
 
 def precompute_panels(panels: dict[str, list[dict]],
@@ -88,6 +126,21 @@ def precompute_panels(panels: dict[str, list[dict]],
     return cache
 
 
+def _wypelnione(limit: float, swieca: dict, kupno: bool) -> bool:
+    """Czy zlecenie z limitem doczekalo sie wypelnienia w tej swiecy.
+
+    Kupno po cenie L wypelnia sie, gdy rynek zszedl do L (low <= L).
+    Sprzedaz po L - gdy rynek doszedl do L (high >= L).
+
+    To jest caly model selekcji negatywnej i jest w nim zawarty z definicji:
+    wypelniamy sie wtedy, gdy cena PRZYSZLA DO NAS, czyli czesto wtedy, gdy
+    rynek idzie przeciwko nam. Ruchy, ktore uciekaja natychmiast, sa dla nas
+    stracone - a to wlasnie one bywaja najbardziej zyskowne. Nie zgadujemy tu
+    zadnego prawdopodobienstwa; sprawdzamy fakt z danych swiecy.
+    """
+    return swieca["low"] <= limit if kupno else swieca["high"] >= limit
+
+
 def _sizing(score: float, price: float, baza: float) -> tuple[float, float]:
     """Wielkosc zlecenia dokladnie jak w petli decyzyjnej."""
     notional = baza * min(1.0, abs(score) * 2)
@@ -102,13 +155,21 @@ def simulate_portfolio(panels: dict[str, list[dict]],
                        min_conf: float,
                        limits: dict | None = None,
                        instrument_ids: dict[str, int] | None = None,
-                       cache: dict[str, list[tuple]] | None = None) -> PortfolioResult:
+                       cache: dict[str, list[tuple]] | None = None,
+                       kind: str = "spot",
+                       egzekucja: Egzekucja | None = None) -> PortfolioResult:
     """Jedno konto, wszystkie instrumenty, wspolne limity.
 
     Wejscie i wyjscie po cenie NASTEPNEJ swiecy - decyzja z zamkniecia swiecy T
     nie moze zostac wykonana po cenie tej samej swiecy.
     """
     limits = limits or DEFAULT_LIMITS
+    egz = egzekucja or Egzekucja()
+    k = koszty(kind)
+    fee = k.maker if egz.limit else k.taker
+    slip = POSLIZG_MAKER if egz.limit else POSLIZG_TAKER
+    if not k.krotka_pozycja and not _OSTRZEZONO.get(kind):
+        _OSTRZEZONO[kind] = True
     ids = instrument_ids or {s: i for i, s in enumerate(sorted(panels), start=1)}
     baza = float(position_budget(limits, len(panels)))
     # Bez podanej pamieci podrecznej liczymy ja tutaj - wygodne przy pojedynczym
@@ -174,10 +235,20 @@ def simulate_portfolio(panels: dict[str, list[dict]],
             same = (pos.side > 0 and score > 0) or (pos.side < 0 and score < 0)
             if same and abs(score) >= exit_gate:
                 continue
-            exit_px = rows[nxt_idx]["price"] * (1 - SLIP * pos.side)
+            if egz.limit:
+                # Wyjscie po cenie zamkniecia swiecy decyzyjnej. Gdy sie nie
+                # wypelni, POZYCJA ZOSTAJE OTWARTA - nieudane wyjscie
+                # w spadajacym rynku kosztuje najwiecej i musi byc w modelu.
+                limit_px = cur["row"]["price"]
+                if not _wypelnione(limit_px, rows[nxt_idx], kupno=pos.side < 0):
+                    res.niewypelnione_wyjscia += 1
+                    continue
+                exit_px = limit_px
+            else:
+                exit_px = rows[nxt_idx]["price"] * (1 - slip * pos.side)
             pnl = pos.side * (exit_px - pos.entry) * pos.qty
             realized += pnl
-            fees_paid += pos.qty * exit_px * FEE
+            fees_paid += pos.qty * exit_px * fee
             res.trades.append({
                 "ret": pos.side * (exit_px / pos.entry - 1),
                 "conf": pos.conf, "symbol": sym,
@@ -268,9 +339,16 @@ def simulate_portfolio(panels: dict[str, list[dict]],
                 notional = qty * price
 
             side = 1 if score > 0 else -1
-            entry = price * (1 + SLIP * side)
+            if egz.limit:
+                limit_px = cur["row"]["price"]
+                if not _wypelnione(limit_px, rows[nxt_idx], kupno=side > 0):
+                    res.niewypelnione_wejscia += 1
+                    continue
+                entry = limit_px
+            else:
+                entry = price * (1 + slip * side)
             positions[sym] = Position(side=side, qty=qty, entry=entry, conf=conf, opened_at=t)
-            fees_paid += qty * entry * FEE
+            fees_paid += qty * entry * fee
             order_times.append(t)
 
             per_inst[ids[sym]] = per_inst.get(ids[sym], Decimal(0)) + Decimal(str(qty * entry))
@@ -283,14 +361,18 @@ def simulate_portfolio(panels: dict[str, list[dict]],
     for sym, pos in list(positions.items()):
         cur = by_time[last_t].get(sym)
         px = cur["row"]["price"] if cur else pos.entry
-        exit_px = px * (1 - SLIP * pos.side)
+        # Domkniecie po ostatniej swiecy idzie ZAWSZE po cenie rynkowej -
+        # koniec okna nie czeka na wypelnienie limitu.
+        exit_px = px * (1 - POSLIZG_TAKER * pos.side)
         realized += pos.side * (exit_px - pos.entry) * pos.qty
-        fees_paid += pos.qty * exit_px * FEE
+        fees_paid += pos.qty * exit_px * k.taker
         res.trades.append({"ret": pos.side * (exit_px / pos.entry - 1), "conf": pos.conf,
                            "symbol": sym, "opened_at": pos.opened_at, "closed_at": last_t})
     res.equity_curve.append((last_t, START_EQUITY + realized - fees_paid))
     res.max_exposure = max_exposure
     res.base_notional = baza
+    res.prowizja = fee
+    res.poslizg = slip
     return res
 
 
@@ -310,7 +392,8 @@ def metrics(res: PortfolioResult, min_trades: int) -> dict:
     base = {"max_dd": round(max_dd, 4), "n_trades": len(rets),
             "total_return": round(total_return, 4), "trades": res.trades,
             "blocked": res.blocked, "downsized": res.downsized,
-            "killswitch": res.killswitch_reason}
+            "killswitch": res.killswitch_reason,
+            "niewypelnione": res.niewypelnione_wejscia + res.niewypelnione_wyjscia}
     if len(rets) < min_trades:
         return base | {"sharpe": 0.0, "sortino": 0.0, "hit_rate": 0.0, "avg_r": 0.0,
                        "profit_factor": 0.0, "insufficient": True}

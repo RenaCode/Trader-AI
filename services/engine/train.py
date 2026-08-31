@@ -40,7 +40,7 @@ from psycopg.rows import dict_row
 
 from services.engine.horizons import DEFAULT_BAR, HORIZONS, Horizon, get as get_horizon
 from services.engine.portfolio import (
-    metrics as portfolio_metrics, precompute_panels, simulate_portfolio,
+    Egzekucja, metrics as portfolio_metrics, precompute_panels, simulate_portfolio,
 )
 from services.engine.statystyka import spearman, wilson
 from services.engine.signals import (
@@ -101,7 +101,8 @@ def load_panel(cur, instrument_id: int, h: Horizon,
     if h.aggregate:
         price_cte = """
             SELECT time_bucket(%(bar)s::interval, event_time) AS t,
-                   (array_agg(close ORDER BY event_time DESC))[1] AS close
+                   (array_agg(close ORDER BY event_time DESC))[1] AS close,
+                   max(high) AS high, min(low) AS low
             FROM market.candle
             WHERE instrument_id = %(iid)s AND timeframe = %(tf)s
               AND event_time BETWEEN %(since)s AND %(until)s
@@ -109,7 +110,7 @@ def load_panel(cur, instrument_id: int, h: Horizon,
         """
     else:
         price_cte = """
-            SELECT event_time AS t, close
+            SELECT event_time AS t, close, high, low
             FROM market.candle
             WHERE instrument_id = %(iid)s AND timeframe = %(tf)s
               AND event_time BETWEEN %(since)s AND %(until)s
@@ -127,15 +128,17 @@ def load_panel(cur, instrument_id: int, h: Horizon,
               AND fv.ingested_at <= fv.event_time + 2 * %(bar)s::interval
         ),
         p AS ({price_cte})
-        SELECT f.event_time AS t, jsonb_object_agg(f.role, f.value) AS feats, p.close
+        SELECT f.event_time AS t, jsonb_object_agg(f.role, f.value) AS feats,
+               p.close, p.high, p.low
         FROM f JOIN p ON p.t = f.event_time
-        GROUP BY f.event_time, p.close ORDER BY f.event_time
+        GROUP BY f.event_time, p.close, p.high, p.low ORDER BY f.event_time
         """,
         {"iid": instrument_id, "since": since, "until": until, "tf": h.source_timeframe,
          "bar": f"{h.bar_minutes} minutes", "bar_name": h.bar},
     )
     return [{"t": r["t"], "f": {k: float(v) for k, v in r["feats"].items()},
-             "price": float(r["close"])} for r in cur.fetchall()]
+             "price": float(r["close"]), "high": float(r["high"]),
+             "low": float(r["low"])} for r in cur.fetchall()]
 
 
 def atr_threshold(panel: list[dict]) -> float | None:
@@ -337,7 +340,9 @@ def random_weights(rng: random.Random) -> dict[str, dict[str, float]]:
 
 
 # ------------------------------------------------------------------ trening
-def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon) -> None:
+def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
+          kind: str = "spot", egzekucja: Egzekucja | None = None,
+          sucho: bool = False) -> None:
     cur = conn.cursor()
     rng = random.Random(SEED)
     now = datetime.now(timezone.utc)
@@ -474,7 +479,8 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon) -> N
         # gdy wszystkie chca wejsc jednoczesnie.
         def ocen(w, sl, c):
             res = simulate_portfolio(sl, w, thresholds, gates, h, MIN_CONF,
-                                     instrument_ids=inst_ids, cache=c)
+                                     instrument_ids=inst_ids, cache=c,
+                                     kind=kind, egzekucja=egzekucja)
             return portfolio_metrics(res, h.min_trades)
 
         best_w, best_score = DEFAULT_WEIGHTS, -1e9
@@ -511,7 +517,8 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon) -> N
         # --- ocena OUT-OF-SAMPLE --------------------------------------------
         oos_res = simulate_portfolio(
             {s: v for s, v in test_slices.items() if v}, best_w, thresholds, gates, h,
-            MIN_CONF, instrument_ids=inst_ids, cache=cache_te)
+            MIN_CONF, instrument_ids=inst_ids, cache=cache_te,
+            kind=kind, egzekucja=egzekucja)
         oos_m = portfolio_metrics(oos_res, h.min_trades)
         if not oos_res.equity_curve:
             start += timedelta(days=h.step_days)
@@ -698,6 +705,11 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon) -> N
         " ELSE 'active' END)::learn.mv_status, promoted_at = now() WHERE id = %s", (status, mv_id))
     cur.execute("UPDATE learn.training_run SET status='done', finished_at=now(), n_windows=%s"
                 " WHERE id=%s", (total, run_id))
+    if sucho:
+        print("\n[tryb suchy] wynik NIE zapisany do bazy - to porównanie wariantów,")
+        print("nie przebieg produkcyjny.")
+        return
+
     cur.execute(
         """
         INSERT INTO learn.learning_state (engine, status, model_version_id, windows_total,
@@ -735,6 +747,12 @@ def main() -> int:
     ap.add_argument("--trials", type=int, default=40)
     ap.add_argument("--engine", default="crypto")
     ap.add_argument("--bar", default=DEFAULT_BAR, choices=sorted(HORIZONS))
+    ap.add_argument("--kind", default="spot", choices=("spot", "perp"),
+                    help="rodzaj instrumentu - wyznacza stawki prowizji")
+    ap.add_argument("--limit", action="store_true",
+                    help="zlecenia z limitem zamiast rynkowych")
+    ap.add_argument("--sucho", action="store_true",
+                    help="nie zapisuj wyniku do bazy (do porownywania wariantow)")
     args = ap.parse_args()
 
     url = os.environ.get("DATABASE_URL")
@@ -743,9 +761,15 @@ def main() -> int:
 
     with psycopg.connect(url, row_factory=dict_row) as conn:
         h = get_horizon(args.bar)
+        from services.engine.koszty import runda
+        egz = Egzekucja(limit=args.limit)
         print(f"Walk-forward: świeca {h.bar}, trening {h.train_days} dni / "
-              f"test {h.test_days} dni, krok {h.step_days} dni\n")
-        train(conn, args.engine, args.days, args.trials, h)
+              f"test {h.test_days} dni, krok {h.step_days} dni")
+        print(f"Egzekucja: {args.kind}, zlecenia "
+              f"{'z limitem' if args.limit else 'rynkowe'}, "
+              f"koszt rundy {runda(args.kind, args.limit) * 100:.3f}%\n")
+        train(conn, args.engine, args.days, args.trials, h, args.kind, egz,
+              sucho=args.sucho)
     return 0
 
 

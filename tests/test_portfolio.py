@@ -39,10 +39,18 @@ def panel(n: int, cena_od: float, cena_do: float, okres: int = 5) -> list[dict]:
     nowych wejsc" przechodzi dlatego, ze nowych wejsc nie ma NIGDY, a nie
     dlatego, ze kill-switch zadzialal.
     """
-    return [{"t": T0 + timedelta(hours=4 * i),
-             "f": cechy_kupuj() if (i // okres) % 2 == 0 else cechy_neutralne(),
-             "price": cena_od + (cena_do - cena_od) * i / max(1, n - 1)}
-            for i in range(n)]
+    out = []
+    for i in range(n):
+        cena = cena_od + (cena_do - cena_od) * i / max(1, n - 1)
+        out.append({
+            "t": T0 + timedelta(hours=4 * i),
+            "f": cechy_kupuj() if (i // okres) % 2 == 0 else cechy_neutralne(),
+            "price": cena,
+            # Zakres swiecy potrzebny do modelu wypelnien zlecen z limitem.
+            "high": cena * 1.004,
+            "low": cena * 0.996,
+        })
+    return out
 
 
 LIMITY_LUZNE = {
@@ -285,3 +293,140 @@ def test_pamiec_podreczna_odpowiada_swiecom_po_indeksie():
         assert z_cache[0] == pytest.approx(wprost[0], abs=1e-12), \
             f"świeca {i}: pamięć podręczna nie odpowiada cechom tej świecy"
         assert z_cache[1] == pytest.approx(wprost[1], abs=1e-12)
+
+
+# ------------------------------------------------------ egzekucja z limitem
+def _swieca(t, cena, lo_pct, hi_pct, cechy):
+    return {"t": t, "f": cechy, "price": cena,
+            "low": cena * (1 - lo_pct), "high": cena * (1 + hi_pct)}
+
+
+def test_limit_wypelnia_sie_gdy_cena_przyszla_do_nas():
+    from services.engine.portfolio import Egzekucja
+
+    # Cena rosnie, ale kazda swieca schodzi 1% ponizej poprzedniego zamkniecia -
+    # zlecenie kupna po cenie zamkniecia zawsze sie wypelnia.
+    rows = [_swieca(T0 + timedelta(hours=4 * i), 100.0 + i,
+                    lo_pct=0.02, hi_pct=0.02, cechy=cechy_kupuj())
+            for i in range(30)]
+    res = simulate_portfolio({"AAA": rows}, DEFAULT_WEIGHTS, {"AAA": 2.0},
+                             {"AAA": (0.05, 0.02)}, H, 0.05, LIMITY_LUZNE,
+                             kind="perp", egzekucja=Egzekucja(limit=True))
+    assert res.trades, "przy szerokim zakresie świec limit musi się wypełniać"
+    assert res.niewypelnione_wejscia == 0
+
+
+def test_limit_NIE_wypelnia_sie_gdy_cena_ucieka():
+    """SEDNO uczciwego modelu.
+
+    Swieca, ktora otwiera sie luka w gore i nigdy nie wraca, nie wypelni
+    zlecenia kupna zlozonego nizej. Gdyby model tego nie sprawdzal, backtest
+    dostawalby najlepsza cene przy kazdym ruchu, ktory uciekl - czyli
+    dokladnie tam, gdzie w rzeczywistosci zostajemy poza rynkiem.
+    """
+    from services.engine.portfolio import Egzekucja
+
+    rows = []
+    for i in range(30):
+        cena = 100.0 * (1.03 ** i)          # gwaltowny wzrost
+        rows.append({"t": T0 + timedelta(hours=4 * i), "f": cechy_kupuj(),
+                     "price": cena,
+                     "low": cena * 0.9999,   # swieca nigdy nie schodzi nizej
+                     "high": cena * 1.02})
+    res = simulate_portfolio({"AAA": rows}, DEFAULT_WEIGHTS, {"AAA": 2.0},
+                             {"AAA": (0.05, 0.02)}, H, 0.05, LIMITY_LUZNE,
+                             kind="perp", egzekucja=Egzekucja(limit=True))
+    assert res.niewypelnione_wejscia > 0, \
+        "przy uciekającej cenie zlecenie z limitem musi zostać niewypełnione"
+
+
+def test_egzekucja_rynkowa_wypelnia_zawsze():
+    """Kanarek do poprzedniego testu: ten sam uciekajacy rynek, ale zlecenie
+    rynkowe - wypelnienie ma byc pewne."""
+    from services.engine.portfolio import Egzekucja
+
+    rows = []
+    for i in range(30):
+        cena = 100.0 * (1.03 ** i)
+        rows.append({"t": T0 + timedelta(hours=4 * i), "f": cechy_kupuj(),
+                     "price": cena, "low": cena * 0.9999, "high": cena * 1.02})
+    res = simulate_portfolio({"AAA": rows}, DEFAULT_WEIGHTS, {"AAA": 2.0},
+                             {"AAA": (0.05, 0.02)}, H, 0.05, LIMITY_LUZNE,
+                             kind="perp", egzekucja=Egzekucja(limit=False))
+    assert res.niewypelnione_wejscia == 0
+    assert res.trades
+
+
+def test_limit_jest_tanszy_niz_rynkowe_przy_tych_samych_wypelnieniach():
+    """Przy szerokich swiecach oba tryby wypelniaja tyle samo, wiec roznica
+    w wyniku pochodzi WYLACZNIE z prowizji i poslizgu."""
+    from services.engine.portfolio import Egzekucja, metrics
+
+    rows = [_swieca(T0 + timedelta(hours=4 * i), 100.0 + i * 0.5,
+                    lo_pct=0.03, hi_pct=0.03, cechy=cechy_kupuj())
+            for i in range(40)]
+    wspolne = ({"AAA": rows}, DEFAULT_WEIGHTS, {"AAA": 2.0},
+               {"AAA": (0.05, 0.02)}, H, 0.05, LIMITY_LUZNE)
+    rynek = simulate_portfolio(*wspolne, kind="perp", egzekucja=Egzekucja(limit=False))
+    limit = simulate_portfolio(*wspolne, kind="perp", egzekucja=Egzekucja(limit=True))
+    assert len(rynek.trades) == len(limit.trades)
+    assert metrics(limit, 1)["total_return"] > metrics(rynek, 1)["total_return"]
+
+
+def test_koszty_zaleza_od_rodzaju_instrumentu():
+    """Spot placi 0,1% od strony, perpetual 0,055% taker - piecio- i dwukrotna
+    roznica. Wczesniej w symulacji siedziala jedna stala dla obu."""
+    from services.engine.koszty import runda
+
+    assert runda("spot") > runda("perp")
+    assert runda("perp", maker=True) < runda("perp") / 3
+    # Na spocie zlecenie z limitem nie daje rabatu prowizyjnego - tylko brak poślizgu.
+    from services.engine.koszty import koszty
+    assert koszty("spot").maker == koszty("spot").taker
+
+
+def test_spot_nie_pozwala_na_krotka_pozycje():
+    """Fakt rynkowy, ktory musi byc w modelu: 8 z 12 pozycji w dzienniku
+    produkcyjnym to byly krotkie sprzedaze na instrumentach spotowych."""
+    from services.engine.koszty import koszty
+
+    assert not koszty("spot").krotka_pozycja
+    assert koszty("perp").krotka_pozycja
+
+
+def test_limit_placi_prowizje_maker_a_rynkowe_taker():
+    """KANAREK NA PODMIANE STAWKI.
+
+    Poprzednia wersja tego testu porownywala tylko wynik limitu z rynkowym -
+    a ten jest lepszy juz przez sam brak poslizgu, niezaleznie od prowizji.
+    Test przechodzil wiec takze wtedy, gdy limit placil stawke taker.
+    """
+    from services.engine.koszty import koszty
+    from services.engine.portfolio import Egzekucja
+
+    rows = [_swieca(T0 + timedelta(hours=4 * i), 100.0 + i * 0.5,
+                    lo_pct=0.03, hi_pct=0.03, cechy=cechy_kupuj())
+            for i in range(20)]
+    wspolne = ({"AAA": rows}, DEFAULT_WEIGHTS, {"AAA": 2.0},
+               {"AAA": (0.05, 0.02)}, H, 0.05, LIMITY_LUZNE)
+
+    limit = simulate_portfolio(*wspolne, kind="perp", egzekucja=Egzekucja(limit=True))
+    rynek = simulate_portfolio(*wspolne, kind="perp", egzekucja=Egzekucja(limit=False))
+
+    assert limit.prowizja == koszty("perp").maker
+    assert rynek.prowizja == koszty("perp").taker
+    assert limit.poslizg == 0.0
+    assert rynek.poslizg > 0.0
+
+
+def test_stawki_spotowe_sa_wyzsze_niz_perpetuala():
+    from services.engine.portfolio import Egzekucja
+
+    rows = [_swieca(T0 + timedelta(hours=4 * i), 100.0 + i * 0.5,
+                    lo_pct=0.03, hi_pct=0.03, cechy=cechy_kupuj())
+            for i in range(20)]
+    wspolne = ({"AAA": rows}, DEFAULT_WEIGHTS, {"AAA": 2.0},
+               {"AAA": (0.05, 0.02)}, H, 0.05, LIMITY_LUZNE)
+    spot = simulate_portfolio(*wspolne, kind="spot", egzekucja=Egzekucja(limit=False))
+    perp = simulate_portfolio(*wspolne, kind="perp", egzekucja=Egzekucja(limit=False))
+    assert spot.prowizja > perp.prowizja
