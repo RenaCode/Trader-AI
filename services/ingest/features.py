@@ -373,7 +373,8 @@ def compute_news(cur, instrument_id: int, h: Horizon, feat_id: int,
 
 
 def compute_cross_section(cur, h: Horizon, feat_ids: dict[str, int],
-                         since: datetime, until: datetime) -> int:
+                         since: datetime, until: datetime,
+                         instrument_ids: list[int] | None = None) -> int:
     """Siła względna: pozycja instrumentu w rankingu zwrotów CAŁEGO zbioru.
 
     DLACZEGO TO JEST INNA INFORMACJA NIŻ POZOSTAŁE SYGNALY
@@ -409,7 +410,11 @@ def compute_cross_section(cur, h: Horizon, feat_ids: dict[str, int],
             -- wszystkim liczylby wtedy BTC podwojnie i przekrecal sile wzgledna
             -- calego zbioru.
             JOIN ref.instrument i ON i.id = fv.instrument_id
-                 AND i.active AND i.tradeable
+                 AND i.active
+                 -- Nawiasy jawnie: bez podanej listy obowiazuje uniwersum
+                 -- decyzyjne, z lista - dokladnie ona.
+                 AND ((%s::int[] IS NULL AND i.tradeable)
+                      OR fv.instrument_id = ANY(%s))
             WHERE fv.feature_def_id = %s
               AND fv.event_time >= %s AND fv.event_time < %s
         ),
@@ -422,7 +427,7 @@ def compute_cross_section(cur, h: Horizon, feat_ids: dict[str, int],
         -- Ranking z garstki instrumentow nie niesie informacji o zbiorze.
         WHERE l.n >= %s
         """,
-        (feat_ids["ret_mid"], since, until, MIN_UNIVERSE),
+        (instrument_ids, instrument_ids, feat_ids["ret_mid"], since, until, MIN_UNIVERSE),
     )
     rows = [
         (feat_ids["rel_strength"], r["instrument_id"], r["event_time"],
@@ -569,7 +574,11 @@ def main() -> int:
     ap.add_argument("--days", type=int, default=90)
     ap.add_argument("--once", action="store_true", help="tylko ostatnia doba")
     ap.add_argument("--engine", default="crypto")
-    ap.add_argument("--symbol", help="tylko ten instrument (jak w backfill.py)")
+    ap.add_argument("--instrumenty", default="",
+                    help="lista symboli po przecinku - liczy cechy WYLACZNIE dla nich, "
+                         "a sile wzgledna w obrebie dokladnie tego zbioru. Sluzy "
+                         "przygotowaniu uniwersum kandydujacego przed jego wlaczeniem. "
+                         "Puste = uniwersum z bazy")
     args = ap.parse_args()
 
     url = os.environ.get("DATABASE_URL")
@@ -586,13 +595,17 @@ def main() -> int:
         feat_ids = ensure_definitions(cur, h)
         conn.commit()
 
+        tylko = [s.strip().upper() for s in args.instrumenty.split(",") if s.strip()]
         cur.execute(
             "SELECT id, symbol FROM ref.instrument WHERE engine = %s AND active"
-            " AND kind <> 'perp' AND (%s::text IS NULL OR symbol = %s)"
-            " ORDER BY symbol", (args.engine, args.symbol, args.symbol))
+            " AND kind <> 'perp' AND (%s::text[] IS NULL OR symbol = ANY(%s))"
+            " ORDER BY symbol", (args.engine, tylko or None, tylko or None))
         instruments = cur.fetchall()
         if not instruments:
-            sys.exit(f"brak instrumentu: {args.symbol}")
+            sys.exit(f"brak instrumentów: {args.instrumenty}")
+        brak = sorted(set(tylko) - {i["symbol"] for i in instruments})
+        if brak:
+            sys.exit(f"nie ma w bazie albo nieaktywne: {', '.join(brak)}")
 
         total = 0
         for inst in instruments:
@@ -608,17 +621,24 @@ def main() -> int:
             print(f"  {inst['symbol']:10s} {n:>9,} cen  {m:>7,} news  {f:>7,} funding"
                   f"  {b:>5,} arkusz")
 
-        # Przekrojowosc liczymy RAZ dla calego zbioru, po policzeniu zwrotow -
-        # z natury potrzebuje wszystkich instrumentow naraz. Przy --symbol
-        # POMIJAMY ja swiadomie: ranking policzony z jednego instrumentu nie jest
-        # sila wzgledna, tylko stala.
-        if args.symbol:
-            print("\n  siła względna: pominięta (--symbol zawęża zbiór)")
+        # Przekrojowosc liczymy RAZ, po policzeniu zwrotow - z natury potrzebuje
+        # wszystkich instrumentow zbioru naraz.
+        #
+        # Zbiorem jest UNIWERSUM DECYZYJNE albo, przy --instrumenty, dokladnie
+        # podana lista. To drugie jest konieczne, zeby przygotowac uniwersum
+        # kandydujace PRZED jego wlaczeniem: bez sily wzglednej porownanie
+        # szloby na siedmiu sygnalach zamiast osmiu, czyli mierzyloby inna
+        # strategie, a nie inne uniwersum.
+        if len(instruments) < MIN_UNIVERSE:
+            print(f"\n  siła względna: pominięta, {len(instruments)} instrumentów "
+                  f"przy progu {MIN_UNIVERSE}")
         else:
-            x = compute_cross_section(cur, h, feat_ids, since, now)
+            x = compute_cross_section(cur, h, feat_ids, since, now,
+                                      [i["id"] for i in instruments] if tylko else None)
             conn.commit()
             total += x
-            print(f"\n  siła względna (uniwersum decyzyjne): {x:>9,}")
+            zbior = "podany zbiór" if tylko else "uniwersum decyzyjne"
+            print(f"\n  siła względna ({zbior}): {x:>9,}")
 
         print(f"\nRazem {total:,} wartości cech")
     return 0
