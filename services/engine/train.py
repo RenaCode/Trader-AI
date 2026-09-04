@@ -358,10 +358,20 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
     cur.execute("SELECT id, symbol FROM ref.instrument WHERE engine=%s AND active"
                 " AND tradeable AND kind <> 'perp' ORDER BY symbol", (engine,))
     instruments = cur.fetchall()
-    # Zawezenie uniwersum. Gielda, na ktorej stoi konto, nie oferuje wszystkiego,
-    # co mamy w historii - a kalibracja na instrumentach, ktorych nie da sie
-    # kupic, mierzy strategie niewykonalna. Patrz docs/03.
+    # NADPISANIE uniwersum na potrzeby eksperymentu.
+    #
+    # Bez tej flagi trener bierze uniwersum decyzyjne z bazy (`tradeable`) - to
+    # samo, ktore obstawia petla. Z flaga wybiera sposrod WSZYSTKICH aktywnych,
+    # takze niehandlowalnych, bo inaczej nie dalo by sie porownac uniwersum
+    # kandydujacego z obowiazujacym PRZED jego wlaczeniem. Porownanie ma
+    # poprzedzac przelaczenie, nie odwrotnie.
+    #
+    # Dlatego flaga wymaga --sucho: przebieg na uniwersum, ktorego produkcja nie
+    # obstawia, nie moze promowac wersji modelu.
     if tylko:
+        cur.execute("SELECT id, symbol FROM ref.instrument WHERE engine=%s AND active"
+                    " AND kind <> 'perp' ORDER BY symbol", (engine,))
+        instruments = cur.fetchall()
         znane = {i["symbol"] for i in instruments}
         brakujace = sorted(set(tylko) - znane)
         if brakujace:
@@ -835,8 +845,10 @@ def main() -> int:
     ap.add_argument("--sucho", action="store_true",
                     help="nie zapisuj wyniku do bazy (do porownywania wariantow)")
     ap.add_argument("--instrumenty", default="",
-                    help="lista symboli po przecinku - zawezenie uniwersum do tego, "
-                         "co gielda faktycznie oferuje. Puste = wszystkie aktywne")
+                    help="lista symboli po przecinku - NADPISUJE uniwersum decyzyjne "
+                         "z bazy, takze o instrumenty jeszcze niehandlowalne. "
+                         "Do porownywania uniwersum kandydujacego z obowiazujacym; "
+                         "wymaga --sucho. Puste = uniwersum z bazy")
     ap.add_argument("--wybor", default="ic", choices=("argmax", "ic", "bazowe"),
                     help="jak wybierany jest kandydat na oknie treningowym: "
                          "argmax = najlepszy z losowan + zalozenia + IC (do 2026-09-04 produkcja), "
@@ -855,6 +867,9 @@ def main() -> int:
     domyslny = ap.get_default("wybor")
     if args.wybor != domyslny and not args.sucho:
         sys.exit(f"--wybor inny niz {domyslny} wymaga --sucho")
+    # Ten sam powod: uniwersum produkcyjne zmienia sie migracja, nie flaga.
+    if args.instrumenty and not args.sucho:
+        sys.exit("--instrumenty nadpisuje uniwersum decyzyjne i wymaga --sucho")
 
     url = os.environ.get("DATABASE_URL")
     if not url:

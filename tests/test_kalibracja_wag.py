@@ -291,3 +291,18 @@ def test_wariant_domyslny_nie_wymaga_trybu_suchego(monkeypatch):
         modul.main()
     # Przebieg zatrzymuje sie dopiero na braku bazy, a nie na wariancie.
     assert "DATABASE_URL" in str(e.value)
+
+
+def test_nadpisanie_uniwersum_wymaga_trybu_suchego(monkeypatch):
+    """Uniwersum decyzyjne zmienia sie migracja, nie flaga w wierszu polecen.
+
+    --instrumenty siega po instrumenty NIEHANDLOWALNE, zeby dalo sie porownac
+    uniwersum kandydujace z obowiazujacym przed przelaczeniem. Przebieg na
+    zbiorze, ktorego produkcja nie obstawia, nie moze promowac wersji modelu.
+    """
+    from services.engine import train as modul
+
+    monkeypatch.setattr("sys.argv", ["train.py", "--instrumenty", "BTCUSDC,ETHUSDC"])
+    with pytest.raises(SystemExit) as e:
+        modul.main()
+    assert "--sucho" in str(e.value)

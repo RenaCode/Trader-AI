@@ -403,6 +403,13 @@ def compute_cross_section(cur, h: Horizon, feat_ids: dict[str, int],
         WITH r AS (
             SELECT fv.instrument_id, fv.event_time, fv.value
             FROM feat.feature_value fv
+            -- WYLACZNIE uniwersum decyzyjne. Baza trzyma historie szerzej, niz
+            -- handlujemy (0020), a od czasu rejestracji par USDC ten sam aktyw
+            -- wystepuje w niej DWA RAZY - jako *USDT i jako *USDC. Ranking po
+            -- wszystkim liczylby wtedy BTC podwojnie i przekrecal sile wzgledna
+            -- calego zbioru.
+            JOIN ref.instrument i ON i.id = fv.instrument_id
+                 AND i.active AND i.tradeable
             WHERE fv.feature_def_id = %s
               AND fv.event_time >= %s AND fv.event_time < %s
         ),
@@ -562,6 +569,7 @@ def main() -> int:
     ap.add_argument("--days", type=int, default=90)
     ap.add_argument("--once", action="store_true", help="tylko ostatnia doba")
     ap.add_argument("--engine", default="crypto")
+    ap.add_argument("--symbol", help="tylko ten instrument (jak w backfill.py)")
     args = ap.parse_args()
 
     url = os.environ.get("DATABASE_URL")
@@ -580,8 +588,11 @@ def main() -> int:
 
         cur.execute(
             "SELECT id, symbol FROM ref.instrument WHERE engine = %s AND active"
-            " AND kind <> 'perp' ORDER BY symbol", (args.engine,))
+            " AND kind <> 'perp' AND (%s::text IS NULL OR symbol = %s)"
+            " ORDER BY symbol", (args.engine, args.symbol, args.symbol))
         instruments = cur.fetchall()
+        if not instruments:
+            sys.exit(f"brak instrumentu: {args.symbol}")
 
         total = 0
         for inst in instruments:
@@ -598,11 +609,16 @@ def main() -> int:
                   f"  {b:>5,} arkusz")
 
         # Przekrojowosc liczymy RAZ dla calego zbioru, po policzeniu zwrotow -
-        # z natury potrzebuje wszystkich instrumentow naraz.
-        x = compute_cross_section(cur, h, feat_ids, since, now)
-        conn.commit()
-        total += x
-        print(f"\n  siła względna (cały zbiór): {x:>9,}")
+        # z natury potrzebuje wszystkich instrumentow naraz. Przy --symbol
+        # POMIJAMY ja swiadomie: ranking policzony z jednego instrumentu nie jest
+        # sila wzgledna, tylko stala.
+        if args.symbol:
+            print("\n  siła względna: pominięta (--symbol zawęża zbiór)")
+        else:
+            x = compute_cross_section(cur, h, feat_ids, since, now)
+            conn.commit()
+            total += x
+            print(f"\n  siła względna (uniwersum decyzyjne): {x:>9,}")
 
         print(f"\nRazem {total:,} wartości cech")
     return 0
