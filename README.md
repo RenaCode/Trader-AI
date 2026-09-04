@@ -81,6 +81,19 @@ projekt wpisaną wprost w instrukcje:
 | `analityk` | audyt pomiaru: czy mierzymy to, co się wydaje | nie proponuje sygnałów |
 | `koordynator` | kolejność, decyzja o wdrożeniu, raport | nie mierzy i nie proponuje |
 
+Definicje żyją w repozytorium. Claude Code szuka ich w `.claude/agents/`
+**katalogu sesji**, więc jeśli uruchamiasz sesję piętro wyżej:
+
+```bash
+scripts/sync-agents.sh            # kopiuje do ~/workspace/.claude/agents
+scripts/sync-agents.sh --sprawdz  # wykrywa rozjazd, kod wyjścia 1
+```
+
+Sesja uruchomiona z katalogu projektu nie potrzebuje niczego. Dowiązanie
+symboliczne zostało odrzucone: nie wiadomo, czy skaner za nim podąża, a
+„prawdopodobnie działa" to zła podstawa dla czegoś, czego awaria objawia się
+ciszą.
+
 Kolejność nie jest dowolna: **analityk idzie PO trenerze**. Najgroźniejszy błąd
 w historii projektu — prowizja liczona poza miarą, wynik zawyżony o 74% — był
 widoczny dopiero w liczbach: dwa przebiegi o dwukrotnie różnym koszcie dały
@@ -151,8 +164,31 @@ kasuje wszystko, co wygenerował, zostawiając realne dane rynkowe.
 | `market` | świece 1 m i snapshoty orderbooka, co 60 s | — |
 | `features` | cechy z realnych świec, co 5 min | — |
 | `engine` | pętla decyzyjna: reżim → sygnały → risk kernel → dziennik | cechy |
-| `trainer` | walk-forward, raz na dobę | cechy |
+| `trainer` | walk-forward, raz na dobę, po nim **dozór** | cechy |
 | `news` | RSS → filtr → analiza, co 5 min | klucz Anthropic |
+
+## Dozór stanu nauki
+
+Po każdym nocnym treningu uruchamia się `services/engine/dozor.py`. Odzywa się
+**wyłącznie wtedy, gdy coś się zmieniło** — powiadomienie, które przychodzi
+zawsze, przestaje cokolwiek znaczyć.
+
+Próg jest wzięty z pomiaru, nie z przeczucia. Cztery przebiegi tego samego kodu,
+różniące się przesunięciem okna o dzień, dały 52,5% → 62,5%: dobowa różnica
+odsetka **nie jest zdarzeniem**. Zdarzeniem jest wyjście poza przedział ufności
+poprzedniego przebiegu.
+
+Przechodzi: zmiana statusu · odsetek poza przedziałem (w obie strony — poprawa
+też bywa błędem) · ubytek okien informatywnych o ćwierć · zmiana znaku mediany
+Sharpe · rosnący dryf powyżej progu · **awaria trenera**.
+
+Ten ostatni warunek jest osobny, bo przebieg zakończony błędem nie dopisuje
+wiersza do dziennika: bez niego dozór porównałby dwa stare wpisy, nie zobaczył
+różnicy i zamilkł — awaria wyglądałaby jak spokój.
+
+```bash
+kubectl exec deploy/trader-api -c api -- python services/engine/dozor.py --sucho
+```
 
 ## Baza danych
 
