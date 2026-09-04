@@ -75,6 +75,37 @@ CRYPTO = [
     ("SEIUSDT", "SEI"), ("TIAUSDT", "TIA"), ("UNIUSDT", "UNI"),
 ]
 
+# PARY USDC - to, co gielda z kontem faktycznie oferuje.
+#
+# Podmiot unijny ma 4 pary *USDT i 113 par *USDC; cala jego plynnosc siedzi na
+# USDC (patrz migracja 0018). Handel idzie wiec parami USDC, a historia, na
+# ktorej model byl trenowany, jest w parach USDT.
+#
+# DLACZEGO NIE WYSTARCZY MAPOWANIE SYMBOLI
+#
+# Kusi, zeby trenowac na glebszym szeregu USDT i podmieniac symbol dopiero przy
+# skladaniu zlecenia. Korelacja zwrotow 4h miedzy para USDT i USDC tego samego
+# aktywa wynosi 0,973-0,9997, wiec wyglada to na to samo. Nie jest.
+#
+# Zmierzona MEDIANA BAZY miedzy tymi szeregami (2026-09-04, 1000 swiec 4h):
+#
+#     BTC 0,053%   ETH 0,054%   SOL 0,058%   XRP 0,053%   ADA 0,061%
+#     DOGE 0,064%  SUI 0,065%   ARB 0,078%   LINK 0,096%  NEAR 0,163%
+#
+# Runda kosztowa z limitem to 0,200%. Baza jest wiec rzedu jednej czwartej
+# calego budzetu kosztowego - czyli tego samego rzedu co przewaga, ktorej
+# szukamy. Trenowanie na jednym szeregu i handlowanie drugim wstrzykuje szum
+# wielkosci mierzonego efektu.
+#
+# Pary USDT ZOSTAJA aktywne: maja glebsza historie i to na nich stoi dotychczasowy
+# pomiar. Rozstrzygnie porownanie na tych samych oknach, nie deklaracja.
+CRYPTO_USDC = [
+    ("BTCUSDC", "BTC"), ("ETHUSDC", "ETH"), ("SOLUSDC", "SOL"),
+    ("XRPUSDC", "XRP"), ("ADAUSDC", "ADA"), ("DOGEUSDC", "DOGE"),
+    ("LINKUSDC", "LINK"), ("ARBUSDC", "ARB"), ("SUIUSDC", "SUI"),
+    ("NEARUSDC", "NEAR"),
+]
+
 
 def main() -> int:
     url = os.environ.get("DATABASE_URL")
@@ -90,21 +121,34 @@ def main() -> int:
         venue_id = row["id"]
 
         added = 0
-        for symbol, base in CRYPTO:
+        # `tradeable` ustawiamy WYLACZNIE przy wstawianiu i nigdy przy konflikcie:
+        # uniwersum decyzyjne zmienia sie migracja albo swiadoma decyzja, a nie
+        # przy okazji ponownego uruchomienia rejestracji instrumentow (0020).
+        #
+        # Pary USDC wchodza jako NIEHANDLOWALNE. Kolejnosc jest tu istotna:
+        # najpierw historia i cechy, dopiero potem wejscie do uniwersum. Odwrotna
+        # dalaby silnikowi instrumenty bez danych, czyli okna bez transakcji.
+        for symbol, base, quote, tradeable in (
+            [(s, b, "USDT", True) for s, b in CRYPTO]
+            + [(s, b, "USDC", False) for s, b in CRYPTO_USDC]
+        ):
             cur.execute(
                 "INSERT INTO ref.instrument (venue_id, symbol, engine, base_ccy, quote_ccy,"
-                " kind, active) VALUES (%s,%s,'crypto',%s,'USDT','spot',true)"
+                " kind, active, tradeable) VALUES (%s,%s,'crypto',%s,%s,'spot',true,%s)"
                 " ON CONFLICT (venue_id, symbol) DO UPDATE SET active = true"
                 " RETURNING (xmax = 0) AS inserted",
-                (venue_id, symbol, base),
+                (venue_id, symbol, base, quote, tradeable),
             )
             if cur.fetchone()["inserted"]:
                 added += 1
         conn.commit()
 
-        cur.execute("SELECT count(*) AS n FROM ref.instrument"
-                    " WHERE engine='crypto' AND active AND kind='spot'")
-        print(f"Dodano {added} nowych, aktywnych instrumentów krypto: {cur.fetchone()['n']}")
+        cur.execute("SELECT count(*) FILTER (WHERE active) AS akt,"
+                    " count(*) FILTER (WHERE active AND tradeable) AS handl"
+                    " FROM ref.instrument WHERE engine='crypto' AND kind='spot'")
+        r = cur.fetchone()
+        print(f"Dodano {added} nowych. Aktywnych (zbieramy historię): {r['akt']}, "
+              f"w uniwersum decyzyjnym: {r['handl']}")
     return 0
 
 
