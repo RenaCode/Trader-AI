@@ -346,7 +346,8 @@ def random_weights(rng: random.Random) -> dict[str, dict[str, float]]:
 # ------------------------------------------------------------------ trening
 def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
           kind: str = "spot", egzekucja: Egzekucja | None = None,
-          sucho: bool = False, wybor: str = "argmax") -> None:
+          sucho: bool = False, wybor: str = "argmax",
+          tylko: set[str] | None = None) -> None:
     cur = conn.cursor()
     rng = random.Random(SEED)
     now = datetime.now(timezone.utc)
@@ -354,9 +355,21 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
     cur.execute("SELECT id, symbol FROM ref.instrument WHERE engine=%s AND active"
                 " AND kind <> 'perp' ORDER BY symbol", (engine,))
     instruments = cur.fetchall()
+    # Zawezenie uniwersum. Gielda, na ktorej stoi konto, nie oferuje wszystkiego,
+    # co mamy w historii - a kalibracja na instrumentach, ktorych nie da sie
+    # kupic, mierzy strategie niewykonalna. Patrz docs/03.
+    if tylko:
+        znane = {i["symbol"] for i in instruments}
+        brakujace = sorted(set(tylko) - znane)
+        if brakujace:
+            print(f"  pominięte, brak w bazie: {', '.join(brakujace)}")
+        instruments = [i for i in instruments if i["symbol"] in tylko]
     if not instruments:
         print("brak instrumentow")
         return
+    if tylko:
+        print(f"  uniwersum zawężone do {len(instruments)}: "
+              f"{', '.join(i['symbol'] for i in instruments)}")
 
     cur.execute(
         "INSERT INTO learn.model (name, engine, kind, description) VALUES (%s,%s,%s,%s)"
@@ -818,6 +831,9 @@ def main() -> int:
                     help="zlecenia z limitem zamiast rynkowych")
     ap.add_argument("--sucho", action="store_true",
                     help="nie zapisuj wyniku do bazy (do porownywania wariantow)")
+    ap.add_argument("--instrumenty", default="",
+                    help="lista symboli po przecinku - zawezenie uniwersum do tego, "
+                         "co gielda faktycznie oferuje. Puste = wszystkie aktywne")
     ap.add_argument("--wybor", default="ic", choices=("argmax", "ic", "bazowe"),
                     help="jak wybierany jest kandydat na oknie treningowym: "
                          "argmax = najlepszy z losowan + zalozenia + IC (do 2026-09-04 produkcja), "
@@ -852,8 +868,9 @@ def main() -> int:
               f"koszt rundy {runda(args.kind, args.limit) * 100:.3f}%")
         print(f"Wybór wag na oknie treningowym: {args.wybor}"
               f"{f' ({args.trials} losowań + założenia + IC)' if args.wybor == 'argmax' else ' (bez losowania)'}\n")
+        tylko = {s.strip().upper() for s in args.instrumenty.split(",") if s.strip()}
         train(conn, args.engine, args.days, args.trials, h, args.kind, egz,
-              sucho=args.sucho, wybor=args.wybor)
+              sucho=args.sucho, wybor=args.wybor, tylko=tylko or None)
     return 0
 
 

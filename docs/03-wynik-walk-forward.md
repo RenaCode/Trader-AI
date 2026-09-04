@@ -803,3 +803,79 @@ ograniczeniem**, nie prognozą.
 
 Żaden z trzech scenariuszy nie pokonuje kup-i-trzymaj: **21/40, czyli 52,5%,
 przedział 37,5–67,1%** — identycznie we wszystkich trzech.
+
+---
+
+# Perpetuały nie pomagają — a `koszty.py` twierdził, że są konieczne
+
+Dokument `koszty.py` zawiera zdanie przyjmowane od tygodnia za pewnik:
+
+> Strategia dwustronna wymaga więc kontraktów wieczystych. Tam krótka pozycja
+> jest naturalna, a prowizja maker pięć razy niższa niż na spocie.
+
+Rozumowanie było takie: na spocie nie da się grać na spadek bez pożyczki
+marżowej, a 8 z 12 pozycji w dzienniku produkcyjnym to były shorty — czyli
+transakcje niewykonalne. Perpetuały rozwiązują jedno i drugie: pozwalają
+shortować i kosztują 0,040% rundy zamiast 0,200%.
+
+Ponieważ podmiot unijny nie oferuje perpetuałów, wniosek brzmiał: albo strategia
+zostaje kaleka, albo krypto przenosi się gdzie indziej. **To założenie nie
+przeszło pomiaru.**
+
+## Pomiar
+
+Uniwersum zawężone do 10 par, które Bybit EU faktycznie oferuje. Cztery
+przesunięcia okien, obie egzekucje z limitem, ta sama historia cen:
+
+| przesunięcie | spot długi | perp z shortami | spot mediana | perp mediana |
+|---|---|---|---|---|
+| 1400 dni | **28/39 (71,8%)** | 26/40 (65,0%) | **+0,094** | +0,061 |
+| 1397 dni | **26/39 (66,7%)** | 26/40 (65,0%) | **+0,153** | +0,032 |
+| 1394 dni | **27/40 (67,5%)** | 25/40 (62,5%) | **+0,111** | +0,049 |
+| 1391 dni | 28/40 (70,0%) | **30/40 (75,0%)** | +0,056 | **+0,068** |
+
+Kierunek sprzyja spotowi w **3 z 4** przesunięć na obu miarach. Przedziały
+ufności zachodzą na siebie prawie całkowicie, więc uczciwe zdanie brzmi:
+**zakładana przewaga perpetuałów nie pojawia się w pomiarze** — a nie „spot
+jest lepszy".
+
+## Dlaczego to jest mocniejsze, niż wygląda
+
+Wariant perp jest w tej symulacji **zawyżony na własną korzyść**: perpetuały
+pobierają finansowanie co osiem godzin, a `simulate_portfolio` nalicza wyłącznie
+prowizję (`fees_paid`). Finansowanie jest w projekcie mierzone jako *cecha*,
+nie jako *koszt pozycji*.
+
+Perp dostaje więc pięciokrotnie tańszą prowizję, prawo do shortowania i zerowy
+koszt finansowania — i mimo tego przegrywa w trzech przesunięciach na cztery.
+Oznacza to, że **krótka noga sygnału traci więcej, niż wynosi oszczędność na
+prowizji**. Prawdziwy perp, płacący finansowanie, wypadłby jeszcze gorzej.
+
+To luka w modelu, którą trzeba domknąć, zanim ktokolwiek wróci do tematu
+perpetuałów — stawki finansowania są w bazie (39 tys. wierszy w `market`),
+więc naliczanie ich jest wykonalne, a nie hipotetyczne.
+
+## Zawężenie uniwersum do tego, co da się kupić
+
+Przy okazji zmierzone: kalibracja na 24 instrumentach, z których 14 nie istnieje
+na giełdzie, gdzie stoi konto, wobec kalibracji na 10 dostępnych.
+
+| uniwersum | okna | dodatnie | mediana Sharpe |
+|---|---|---|---|
+| 24 pary (dotychczas) | 40 | 25 (62,5%) | +0,090 |
+| **10 par dostępnych na EU** | 39 | **28 (71,8%)** | +0,094 |
+
+Zawężenie nie szkodzi — pomaga, bo odpadają instrumenty najcieńsze. Trening idzie
+więc od teraz po tym, co realnie da się kupić; kalibracja na instrumentach
+niedostępnych mierzyła strategię niewykonalną, czyli dokładnie ten sam rodzaj
+rozjazdu trening–produkcja, który ten dokument opisuje już trzeci raz.
+
+## Co z tego wynika dla planu
+
+**Pozostanie na Bybit EU ze spotem długim nie jest gałęzią kaleką.** Główny
+argument za przeniesieniem krypta gdzie indziej — „tylko perpetuały dają tej
+strategii szansę" — nie ma poparcia w pomiarze.
+
+Nie zmienia się natomiast to, co blokuje naprawdę: **żaden wariant nie pokonuje
+kup-i-trzymaj.** Spot 48,7 / 43,6 / 47,5 / 47,5%, perp 50,0 / 42,5 / 47,5 /
+47,5%. Cztery przesunięcia, dwie egzekucje, osiem liczb, wszystkie poniżej 50%.

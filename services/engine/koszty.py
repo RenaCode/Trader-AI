@@ -26,6 +26,22 @@ sprzedaze na instrumentach spotowych, czyli transakcje niewykonalne.
 Strategia dwustronna wymaga wiec kontraktow wieczystych. Tam krotka pozycja jest
 naturalna, a prowizja maker piec razy nizsza niz na spocie - kosztem finansowania
 placonego co osiem godzin, ktore juz mierzymy jako ceche.
+
+SPROSTOWANIE (2026-09-04): OSTATNI AKAPIT NIE PRZESZEDL POMIARU
+
+Zdanie "strategia dwustronna wymaga kontraktow wieczystych" bylo rozumowaniem,
+nie wynikiem. Zmierzone na czterech przesunieciach okien, uniwersum 10 par:
+wariant perp - z shortami, z prowizja maker 0,020% i BEZ naliczonego
+finansowania - przegrywa ze spotem dlugim w 3 przesunieciach na 4, na obu
+miarach.
+
+Krotka noga sygnalu traci wiec wiecej, niz wynosi oszczednosc na prowizji.
+Prawdziwy perpetual, placacy finansowanie, wypadlby jeszcze gorzej - a tego
+kosztu symulacja NIE NALICZA (fees_paid zbiera wylacznie prowizje). To luka
+do domkniecia, zanim ktokolwiek wroci do tematu; stawki sa w schemacie `market`.
+
+Praktyczny skutek: brak perpetualow na podmiocie unijnym nie jest wada, ktora
+trzeba obchodzic zmiana gieldy. Pomiar w docs/03.
 """
 from __future__ import annotations
 

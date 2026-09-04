@@ -167,6 +167,17 @@ trainerCron:
   # w docs/03.
   kind: "spot_eu"
   limit: true
+  # Uniwersum zawezone do par, ktore giełda z kontem faktycznie oferuje.
+  # Kalibracja na 14 instrumentach, ktorych nie da sie tam kupic, mierzyla
+  # strategie niewykonalna - a zawezenie do 10 dostepnych nie tylko nie
+  # zaszkodzilo, ale podnioslo odsetek dodatnich okien z 62,5% do 71,8%,
+  # bo odpadly instrumenty najcienszne. Pomiar w docs/03.
+  #
+  # UWAGA: to sa symbole *USDT, a handel na EU idzie parami *USDC. Mediana bazy
+  # miedzy tymi szeregami to 0,05-0,16%, czyli jedna czwarta rundy kosztowej,
+  # wiec docelowo trzeba wlasnych swiec USDC. Do tego czasu szereg USDT jest
+  # przyblizeniem - swiadomym i zapisanym, nie przeoczonym.
+  instrumenty: "BTCUSDT,ETHUSDT,SOLUSDT,XRPUSDT,ARBUSDT,SUIUSDT,LINKUSDT,ADAUSDT,DOGEUSDT,NEARUSDT"
   # Limity dobrane do ZMIERZONEGO zuzycia (388 MB przy pelnym przebiegu na
   # 24 instrumentach), nie do zapasu "na wszelki wypadek". Wezel ma 7,8 GB
   # i dzieli je z trzema innymi projektami; limit 3 GB dla zadania, ktore
