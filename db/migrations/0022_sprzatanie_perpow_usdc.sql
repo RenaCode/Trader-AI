@@ -19,11 +19,16 @@
 -- stawki finansowania i pod które nikt się nie podpina. Wiersz z danymi
 -- albo z odwołaniem zostaje — wtedy zniknięcie byłoby cichą utratą, a nie
 -- sprzątaniem.
+--
+-- Pierwsza wersja tej migracji odwoływała się do `market.funding`; tabela
+-- nazywa się `funding_rate`. Runner odmówił wdrożenia i wycofał transakcję,
+-- więc wersja z błędem nigdy nie trafiła do rejestru — dlatego poprawka idzie
+-- w tym samym pliku, a nie w nowym.
 
 DELETE FROM ref.instrument i
  WHERE i.kind = 'perp'
    AND i.quote_ccy = 'USDC'
-   AND NOT EXISTS (SELECT 1 FROM market.funding f WHERE f.instrument_id = i.id)
+   AND NOT EXISTS (SELECT 1 FROM market.funding_rate f WHERE f.instrument_id = i.id)
    AND NOT EXISTS (SELECT 1 FROM market.candle  c WHERE c.instrument_id = i.id)
    AND NOT EXISTS (
         SELECT 1 FROM ref.instrument s
