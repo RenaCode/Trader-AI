@@ -879,3 +879,67 @@ strategii szansę" — nie ma poparcia w pomiarze.
 Nie zmienia się natomiast to, co blokuje naprawdę: **żaden wariant nie pokonuje
 kup-i-trzymaj.** Spot 48,7 / 43,6 / 47,5 / 47,5%, perp 50,0 / 42,5 / 47,5 /
 47,5%. Cztery przesunięcia, dwie egzekucje, osiem liczb, wszystkie poniżej 50%.
+
+
+---
+
+# Uniwersum przechodzi na pary USDC
+
+Egzekucja pójdzie parami USDC, bo tam jest cała płynność podmiotu unijnego.
+Kalibracja szła po parach USDT. Pytanie brzmiało, czy to formalność.
+
+## Nie jest formalnością
+
+Korelacja zwrotów 4 h między parą USDT i USDC tego samego aktywa wynosi
+0,973–0,9997, więc szeregi wyglądają na ten sam. Zmierzona **mediana bazy**
+mówi co innego:
+
+| BTC | ETH | SOL | XRP | ADA | DOGE | SUI | ARB | LINK | NEAR |
+|---|---|---|---|---|---|---|---|---|---|
+| 0,053% | 0,054% | 0,058% | 0,053% | 0,061% | 0,064% | 0,065% | 0,078% | 0,096% | 0,163% |
+
+Runda kosztowa z limitem to 0,200%. Baza jest więc rzędu **jednej czwartej
+całego budżetu kosztowego** — tego samego rzędu co przewaga, której szukamy.
+Trenowanie na jednym szeregu i handlowanie drugim wstrzykuje szum wielkości
+mierzonego efektu.
+
+## Pomiar
+
+Zaciągnięte 351 tys. świec godzinowych i policzone ponad milion wartości cech
+dla 10 par USDC. Te same aktywa, te same okna, ten sam cennik i egzekucja:
+
+| przesunięcie | USDT | USDC | USDT mediana | USDC mediana |
+|---|---|---|---|---|
+| 1400 dni | 28/39 (71,8%) | **30/39 (76,9%)** | +0,094 | **+0,160** |
+| 1397 dni | 26/39 (66,7%) | **30/39 (76,9%)** | **+0,153** | +0,111 |
+| 1394 dni | 27/40 (67,5%) | **28/40 (70,0%)** | +0,111 | **+0,131** |
+| 1391 dni | 28/40 (70,0%) | **30/40 (75,0%)** | +0,056 | **+0,129** |
+
+Odsetek wyżej w 4 przesunięciach na 4, mediana w 3 na 4. Przedziały ufności
+zachodzą na siebie, więc uczciwy wniosek brzmi: **uniwersum USDC nie jest
+gorsze** — a jest tym, którym da się handlować. Sama wykonalność wystarczyłaby
+za uzasadnienie; pomiar był po to, żeby nie zapłacić za nią wynikiem.
+
+## Dwie rzeczy, które trzeba było naprawić po drodze
+
+**Siła względna liczyła BTC dwa razy.** Po zarejestrowaniu par USDC ten sam
+aktyw występował w bazie dwukrotnie, a ranking przekrojowy szedł po wszystkim,
+co ma cechę `ret_mid`. Dziesięć z dwudziestu czterech aktywów liczyło się
+podwójnie — także dla par USDT, czyli błąd dotykał wyniku, który już mieliśmy.
+Przekrojowość liczy się teraz wyłącznie w obrębie uniwersum.
+
+**Finansowanie byłoby po cichu urwane.** `funding_carry` to jeden z ośmiu
+sygnałów i wymaga podpięcia pod perpetuał. Pary USDC go nie miały, więc trener
+wykluczyłby cały sygnał jako martwy — utrata jednego z ośmiu sygnałów przemycona
+jako zmiana waluty kwotowanej. Finansowanie jest własnością aktywa, nie waluty
+kwotowanej, więc pary USDC dziedziczą je po perpetuale USDT tego samego aktywa.
+
+Przy okazji wyszło, że proces `funding` **wywracał się od momentu rejestracji
+par USDC**: wskazywał perpetuał doklejając `.P` do symbolu spotowego, więc pytał
+o nieistniejący `BTCUSDC.P`, a wyjątek szedł w górę pętli i zatrzymywał
+pobieranie stawek dla wszystkich pozostałych rynków. Widać to było wyłącznie
+w logu, bo wywołanie jest osłonięte przez `|| true`.
+
+## Czego to nie zmienia
+
+Kolumna „pokonał kup-i-trzymaj": 48,7% / 43,6% / 50,0% / 47,5%. Bez zmian.
