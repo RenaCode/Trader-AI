@@ -352,8 +352,11 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
     rng = random.Random(SEED)
     now = datetime.now(timezone.utc)
 
+    # `tradeable` decyduje o uniwersum produkcyjnym - ta sama flaga, ktora czyta
+    # petla decyzyjna (0020). Flaga --instrumenty sluzy WYLACZNIE eksperymentom
+    # i zaweza to, co juz z bazy wyszlo; nie potrafi dodac niczego z powrotem.
     cur.execute("SELECT id, symbol FROM ref.instrument WHERE engine=%s AND active"
-                " AND kind <> 'perp' ORDER BY symbol", (engine,))
+                " AND tradeable AND kind <> 'perp' ORDER BY symbol", (engine,))
     instruments = cur.fetchall()
     # Zawezenie uniwersum. Gielda, na ktorej stoi konto, nie oferuje wszystkiego,
     # co mamy w historii - a kalibracja na instrumentach, ktorych nie da sie

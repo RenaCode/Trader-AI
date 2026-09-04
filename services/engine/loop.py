@@ -349,7 +349,7 @@ async def sprawdz(conn, engine: str = "crypto", h: Horizon | None = None) -> int
     model = probuj("aktywna wersja modelu", lambda: active_model(cur, engine, h))
 
     cur.execute("SELECT id, symbol FROM ref.instrument WHERE engine=%s AND active"
-                " AND kind <> 'perp' ORDER BY symbol LIMIT 3", (engine,))
+                " AND tradeable AND kind <> 'perp' ORDER BY symbol LIMIT 3", (engine,))
     for inst in cur.fetchall():
         iid, sym = inst["id"], inst["symbol"]
         probuj(f"{sym}: decyzja w tej świecy?",
@@ -482,8 +482,11 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
     stats = {"rozwazone": 0, "wejscia": 0, "wyjscia": 0, "wstrzymane": 0,
              "zablokowane": 0, "poza_swieca": 0}
 
+    # `tradeable`, nie `active`: historię zbieramy szerzej, niż handlujemy.
+    # Obstawianie instrumentu, którego giełda z kontem nie oferuje, to decyzja
+    # niewykonalna - a trener kalibruje wagi na tym samym zbiorze (0020).
     cur.execute("SELECT id, symbol, kind FROM ref.instrument WHERE engine=%s AND active"
-                " AND kind <> 'perp' ORDER BY symbol", (engine,))
+                " AND tradeable AND kind <> 'perp' ORDER BY symbol", (engine,))
     instrumenty = cur.fetchall()
 
     # Budzet na pozycje wyprowadzony z limitu lacznej ekspozycji i liczby

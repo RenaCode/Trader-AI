@@ -46,10 +46,6 @@ spec:
                 {{- if .Values.trainerCron.limit }}
                 - --limit
                 {{- end }}
-                {{- with .Values.trainerCron.instrumenty }}
-                - --instrumenty
-                - {{ . | quote }}
-                {{- end }}
               env:
                 {{- include "trader.appDbPasswordEnv" . | nindent 16 }}
                 - name: DATABASE_URL
