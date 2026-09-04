@@ -507,3 +507,48 @@ def test_kup_i_trzymaj_usrednia_po_instrumentach():
     tylko_rosnie = kup_i_trzymaj({"A": rosnie}, "perp")
     oba = kup_i_trzymaj({"A": rosnie, "B": spada}, "perp")
     assert oba < tylko_rosnie
+
+
+# --- prowizja MUSI siedziec w zwrocie z transakcji, nie tylko w kapitale -----
+def test_wyzsza_prowizja_obniza_sharpe():
+    """Kanarek na blad, ktory przeszedl przez caly zestaw testow.
+
+    Sharpe liczy sie ze zwrotow z transakcji i to ON decyduje, czy okno jest
+    dodatnie - czyli o odsetku dodatnich okien i o statusie modelu. Wczesniejsza
+    wersja odejmowala prowizje WYLACZNIE od krzywej kapitalu, wiec dwa przebiegi
+    rozniace sie stawka taker dwuipolkrotnie (spot 0,100% wobec spot_eu 0,250%)
+    dawaly identyczny Sharpe i identyczny odsetek dodatnich okien. Roznil sie
+    tylko wykres kapitalu, ktorego nikt nie uzywa do werdyktu.
+    """
+    panele = {"AAA": panel(60, 100.0, 130.0)}
+    gates = {s: (0.05, 0.05 * 0.45) for s in panele}
+    atr = {s: 2.0 for s in panele}
+
+    def przebieg(kind):
+        res = simulate_portfolio(panele, DEFAULT_WEIGHTS, atr, gates, H, 0.05,
+                                 LIMITY_LUZNE, kind=kind)
+        return metrics(res, min_trades=1)
+
+    tanio, drogo = przebieg("spot"), przebieg("spot_eu")
+    assert tanio["n_trades"] == drogo["n_trades"] > 0, "porownujemy te same transakcje"
+    assert drogo["sharpe"] < tanio["sharpe"], (
+        f"wyzsza prowizja musi obnizyc Sharpe, jest {drogo['sharpe']} wobec {tanio['sharpe']}")
+    assert drogo["avg_r"] < tanio["avg_r"]
+
+
+def test_zwrot_z_transakcji_jest_po_prowizji_a_nie_przed():
+    """Przy zerowym ruchu ceny transakcja musi byc STRATNA o dwie nogi prowizji."""
+    from services.engine.koszty import koszty
+
+    panele = {"AAA": panel(60, 100.0, 100.0)}
+    gates = {s: (0.0, 0.0) for s in panele}
+    atr = {s: 2.0 for s in panele}
+    res = simulate_portfolio(panele, DEFAULT_WEIGHTS, atr, gates, H, 0.0,
+                             LIMITY_LUZNE, kind="spot")
+    if not res.trades:
+        pytest.skip("brak transakcji na plaskiej cenie - nie ma czego mierzyc")
+    k = koszty("spot")
+    for t in res.trades:
+        assert t["ret"] < 0, "transakcja bez ruchu ceny nie moze byc zyskowna"
+        assert t["ret"] <= -1.5 * k.taker, (
+            f"zwrot {t['ret']} nie zawiera obu nog prowizji ({k.taker} kazda)")

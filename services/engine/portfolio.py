@@ -250,7 +250,15 @@ def simulate_portfolio(panels: dict[str, list[dict]],
             realized += pnl
             fees_paid += pos.qty * exit_px * fee
             res.trades.append({
-                "ret": pos.side * (exit_px / pos.entry - 1),
+                # ZWROT PO PROWIZJI. Prowizja jest placona dwa razy - przy wejsciu
+                # od notionalu wejscia, przy wyjsciu od notionalu wyjscia - i musi
+                # siedziec W ZWROCIE Z TRANSAKCJI, nie tylko w krzywej kapitalu.
+                # Sharpe liczy sie wlasnie z tych zwrotow i to on decyduje, czy
+                # okno jest dodatnie; poprzednia wersja odejmowala prowizje
+                # wylacznie od krzywej, wiec miara, na ktorej opiera sie caly
+                # werdykt, byla liczona PRZED kosztami.
+                "ret": (pos.side * (exit_px / pos.entry - 1)
+                        - fee * (1 + exit_px / pos.entry)),
                 "conf": pos.conf, "symbol": sym,
                 "opened_at": pos.opened_at, "closed_at": rows[nxt_idx]["t"],
             })
@@ -369,7 +377,11 @@ def simulate_portfolio(panels: dict[str, list[dict]],
         exit_px = px * (1 - POSLIZG_TAKER * pos.side)
         realized += pos.side * (exit_px - pos.entry) * pos.qty
         fees_paid += pos.qty * exit_px * k.taker
-        res.trades.append({"ret": pos.side * (exit_px / pos.entry - 1), "conf": pos.conf,
+        # Domkniecie na koncu okna idzie po cenie rynkowej, wiec wyjscie placi
+        # stawke TAKER niezaleznie od trybu egzekucji - tak jak w krzywej kapitalu.
+        res.trades.append({"ret": (pos.side * (exit_px / pos.entry - 1)
+                                   - fee - k.taker * exit_px / pos.entry),
+                           "conf": pos.conf,
                            "symbol": sym, "opened_at": pos.opened_at, "closed_at": last_t})
     res.equity_curve.append((last_t, START_EQUITY + realized - fees_paid))
     res.max_exposure = max_exposure
