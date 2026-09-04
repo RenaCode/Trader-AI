@@ -139,7 +139,17 @@ workers:
   # dlatego wlaczony dopiero wtedy, gdy klucz jest w bazie.
   news:
     enabled: true
-    command: ["sh", "-c", "while true; do python services/ingest/news_worker.py --once --quiet || true; sleep 300; done"]
+    # --auto: z kluczem analizuje, bez klucza SAM POBIERA artykuly.
+    #
+    # Bez tego proces konczyl sie komunikatem o braku klucza, zanim zdazyl
+    # dotknac RSS-a. Dziesiec kanalow bylo skonfigurowanych od poczatku projektu
+    # i ani razu nieodpytanych, a artykul zapisuje sie dopiero PO analizie - wiec
+    # kazda doba bez klucza to newsy bezpowrotnie stracone. Kanal RSS nie odda
+    # jutro tego, czego dzis nie pobralismy.
+    #
+    # Tryb wybierany jest przy KAZDYM cyklu, nie raz przy starcie: klucz pojawia
+    # sie wtedy, gdy uzytkownik wpisze go w UI, a nie gdy restartujemy poda.
+    command: ["sh", "-c", "while true; do python services/ingest/news_worker.py --once --auto --quiet || true; sleep 300; done"]
     resources:
       limits:   { cpu: 1000m, memory: 512Mi }
       requests: { cpu: 50m,   memory: 128Mi }

@@ -109,12 +109,17 @@ Nie zawyżaj pewności. System mierzy kalibrację twoich ocen i rozjazd między
 deklarowaną a rzeczywistą trafnością obniża wagę tej cechy."""
 
 
-def anthropic_key(conn) -> str:
+def anthropic_key(conn, wymagany: bool = True) -> str | None:
     """Klucz z bazy (wpisany w interfejsie), a w razie jego braku ze srodowiska.
 
     Kolejnosc jest celowa: klucz podany przez uzytkownika w UI ma pierwszenstwo,
     bo to on jest wymieniany bez redeployu. Zmienna srodowiskowa zostaje jako
     zapasowa sciezka dla CI i uruchomien lokalnych.
+
+    `wymagany=False` zwraca None zamiast konczyc proces - dla trybu, ktory potrafi
+    pracowac bez klucza (pobieranie artykulow bez analizy). Czytamy przy KAZDYM
+    cyklu, bo klucz pojawia sie wtedy, gdy uzytkownik wpisze go w UI, a nie wtedy,
+    gdy restartujemy poda.
     """
     row = conn.execute("SELECT value_enc FROM app.secret WHERE name = 'anthropic_api_key'").fetchone()
     if row:
@@ -122,6 +127,8 @@ def anthropic_key(conn) -> str:
     env = os.environ.get("ANTHROPIC_API_KEY")
     if env:
         return env
+    if not wymagany:
+        return None
     sys.exit(
         "Brak klucza Anthropic. Wpisz go w interfejsie (Ustawienia -> Klucz API Anthropic) "
         "albo ustaw ANTHROPIC_API_KEY."
@@ -259,11 +266,27 @@ def spent_today(cur) -> float:
     return float(cur.fetchone()["s"])
 
 
-async def run_cycle(conn, ai: AsyncAnthropic, http: httpx.AsyncClient, verbose: bool) -> dict:
+async def run_cycle(conn, ai: AsyncAnthropic | None, http: httpx.AsyncClient,
+                    verbose: bool, analizuj: bool = True) -> dict:
+    """Jeden cykl: pobierz kanaly, odsiej, przeanalizuj, zapisz.
+
+    TRYB BEZ ANALIZY istnieje, bo bez klucza Anthropic ten proces nie robil
+    NICZEGO - konczyl sie komunikatem, zanim zdazyl dotknac RSS-a. Skutki byly
+    dwa i oba niewidoczne:
+
+      1. artykul zapisuje sie dopiero PO udanej analizie, wiec kazda doba bez
+         klucza to newsy bezpowrotnie stracone - kanaly RSS oddaja tylko swieze
+         wpisy, archiwum nie da sie odtworzyc,
+      2. nikt nie wiedzial, czy te dziesiec kanalow w ogole odpowiada. Byly
+         skonfigurowane od poczatku projektu i ANI RAZU nieodpytane.
+
+    W tym trybie pobieramy i zapisujemy artykuly, nie dotykajac Anthropica.
+    Analiza dolaczy do nich pozniej.
+    """
     cur = conn.cursor(row_factory=dict_row)
 
     wydano = spent_today(cur)
-    if wydano >= DAILY_LIMIT_USD:
+    if analizuj and wydano >= DAILY_LIMIT_USD:
         print(f"Limit dobowy osiągnięty: ${wydano:.2f} z ${DAILY_LIMIT_USD:.2f}. "
               f"Cykl pominięty — wznowienie po północy UTC.")
         return {"kanaly": 0, "pobrane": 0, "nowe": 0, "przeszly_filtr": 0,
@@ -284,7 +307,7 @@ async def run_cycle(conn, ai: AsyncAnthropic, http: httpx.AsyncClient, verbose: 
     feeds = cur.fetchall()
 
     stats = {"kanaly": len(feeds), "pobrane": 0, "nowe": 0, "przeszly_filtr": 0,
-             "przeanalizowane": 0, "koszt": 0.0, "bledy": 0}
+             "przeanalizowane": 0, "zapisane": 0, "koszt": 0.0, "bledy": 0}
 
     for feed in feeds:
         entries, status = await fetch_feed(http, feed["url"])
@@ -309,7 +332,26 @@ async def run_cycle(conn, ai: AsyncAnthropic, http: httpx.AsyncClient, verbose: 
             published = entry_time(entry)
             # Artykuly starsze niz doba nie maja wartosci sygnalowej, a kosztuja
             # tyle samo - przy pierwszym uruchomieniu kanal potrafi zwrocic archiwum.
-            if published < datetime.now(timezone.utc) - timedelta(days=1):
+            #
+            # Prog dotyczy WYLACZNIE analizy. Samo zapisanie artykulu nic nie
+            # kosztuje, a material, ktorego dzis nie zapiszemy, przepadnie:
+            # kanal RSS nie odda go jutro.
+            if analizuj and published < datetime.now(timezone.utc) - timedelta(days=1):
+                continue
+
+            if not analizuj:
+                cur.execute(
+                    "INSERT INTO news.article (feed_id, url, title, summary, content_hash,"
+                    " event_time, ingested_at) VALUES (%s,%s,%s,%s,%s,%s, now())"
+                    " ON CONFLICT (content_hash) DO NOTHING",
+                    (feed["id"], getattr(entry, "link", "") or feed["url"], title,
+                     summary[:4000], h, published),
+                )
+                conn.commit()
+                kept += 1
+                stats["zapisane"] += 1
+                if verbose:
+                    print(f"    [zapisany] {title[:70]}")
                 continue
 
             if wydano >= DAILY_LIMIT_USD:
@@ -355,6 +397,7 @@ async def run_cycle(conn, ai: AsyncAnthropic, http: httpx.AsyncClient, verbose: 
             stats["koszt"] += price
             wydano += price
             stats["przeanalizowane"] += 1
+            stats["zapisane"] += 1
 
             cur.execute(
                 "INSERT INTO news.article (feed_id, url, title, summary, content_hash,"
@@ -410,6 +453,12 @@ async def main() -> int:
     ap.add_argument("--once", action="store_true", help="jeden cykl zamiast petli")
     ap.add_argument("--interval", type=int, default=120, help="przerwa miedzy cyklami (s)")
     ap.add_argument("--quiet", action="store_true")
+    ap.add_argument("--bez-analizy", action="store_true", dest="bez_analizy",
+                    help="pobieraj i zapisuj artykuly, nie wywoluj Anthropica. "
+                         "Do pracy przed pojawieniem sie klucza: material, ktorego "
+                         "dzis nie zapiszemy, przepadnie - RSS nie odda go jutro")
+    ap.add_argument("--auto", action="store_true",
+                    help="wybierz tryb sam: z kluczem analizuj, bez klucza pobieraj")
     args = ap.parse_args()
 
     url = os.environ.get("DATABASE_URL")
@@ -418,15 +467,42 @@ async def main() -> int:
 
     async with httpx.AsyncClient(timeout=20.0) as http:
         with psycopg.connect(url) as conn:
-            ai = AsyncAnthropic(api_key=anthropic_key(conn))
+            # TRYB WYBIERANY PRZY KAZDYM CYKLU, nie raz przy starcie.
+            #
+            # Klucz pojawia sie w bazie wtedy, gdy uzytkownik wpisze go w UI -
+            # a nie wtedy, gdy restartujemy poda. Sprawdzanie raz na starcie
+            # oznaczaloby, ze proces pobiera artykuly jeszcze dobe po tym, jak
+            # klucz juz jest.
+            def tryb() -> tuple[AsyncAnthropic | None, bool]:
+                if args.bez_analizy:
+                    return None, False
+                klucz = anthropic_key(conn, wymagany=not args.auto)
+                if not klucz:
+                    return None, False
+                return AsyncAnthropic(api_key=klucz), True
+
+            poprzedni_tryb: bool | None = None
             while True:
                 started = datetime.now(timezone.utc)
                 try:
-                    s = await run_cycle(conn, ai, http, verbose=not args.quiet)
+                    ai, analizuj = tryb()
+                    if analizuj != poprzedni_tryb:
+                        print("Tryb: " + ("pobieranie i ANALIZA" if analizuj else
+                                          "wylacznie pobieranie (brak klucza Anthropic)"))
+                        poprzedni_tryb = analizuj
+                    s = await run_cycle(conn, ai, http, verbose=not args.quiet,
+                                        analizuj=analizuj)
                     took = (datetime.now(timezone.utc) - started).total_seconds()
+                    # Podsumowanie musi rozrozniac ZAPISANE od PRZEANALIZOWANYCH.
+                    # Pierwsza wersja liczyla zapisane jako przeanalizowane, wiec
+                    # cykl bez klucza raportowal "zapisanych 0" po zapisaniu 234
+                    # artykulow - log gorszy niz zaden, bo wygladal na awarie.
+                    analiza = (f"przez filtr {s['przeszly_filtr']}, "
+                               f"przeanalizowanych {s['przeanalizowane']}, "
+                               f"koszt ${s['koszt']:.4f}"
+                               if analizuj else "bez analizy (brak klucza)")
                     print(f"[{started:%H:%M:%S}] kanałów {s['kanaly']}, wpisów {s['pobrane']}, "
-                          f"nowych {s['nowe']}, przez filtr {s['przeszly_filtr']}, "
-                          f"zapisanych {s['przeanalizowane']}, koszt ${s['koszt']:.4f}, "
+                          f"nowych {s['nowe']}, zapisanych {s['zapisane']}, {analiza}, "
                           f"błędów {s['bledy']}, {took:.0f} s")
                 except Exception as e:                        # noqa: BLE001
                     print(f"[{started:%H:%M:%S}] cykl przerwany: {type(e).__name__}: {e}")
