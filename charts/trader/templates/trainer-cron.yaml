@@ -32,20 +32,19 @@ spec:
             - name: trainer
               image: "{{ .Values.api.image.repository }}:{{ .Values.api.image.tag }}"
               imagePullPolicy: {{ .Values.api.image.pullPolicy }}
+              # Trener, a po nim dozor - ZAWSZE, takze gdy trener zawiodl.
+              # Kod wyjscia idzie do dozoru, bo przebieg zakonczony bledem nie
+              # dopisuje wiersza do dziennika stanu: bez tej informacji dozor
+              # porownalby dwa stare wpisy, nie zobaczyl roznicy i zamilkl,
+              # a awaria wygladalaby jak spokoj.
               command:
-                - python
-                - services/engine/train.py
-                - --bar
-                - {{ .Values.trainerCron.bar | quote }}
-                - --days
-                - {{ .Values.trainerCron.days | quote }}
-                - --trials
-                - {{ .Values.trainerCron.trials | quote }}
-                - --kind
-                - {{ .Values.trainerCron.kind | default "spot" | quote }}
-                {{- if .Values.trainerCron.limit }}
-                - --limit
-                {{- end }}
+                - sh
+                - -c
+                - |
+                  python services/engine/train.py                     --bar {{ .Values.trainerCron.bar | quote }}                     --days {{ .Values.trainerCron.days | quote }}                     --trials {{ .Values.trainerCron.trials | quote }}                     --kind {{ .Values.trainerCron.kind | default "spot" | quote }}                     {{- if .Values.trainerCron.limit }} --limit{{ end }}
+                  RC=$?
+                  python services/engine/dozor.py --kod-trenera $RC
+                  exit $RC
               env:
                 {{- include "trader.appDbPasswordEnv" . | nindent 16 }}
                 - name: DATABASE_URL
