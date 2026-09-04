@@ -38,22 +38,41 @@ INTERVAL_H = 8
 PAGE = 200
 
 
-def ensure_perp(cur, spot: dict) -> int:
-    """Tworzy (lub odnajduje) instrument perpetualowy i podpina go pod spot."""
-    perp_symbol = f"{spot['symbol']}.P"
+def ensure_perp(cur, spot: dict) -> tuple[int, str]:
+    """Odnajduje perpetual, z ktorego bierzemy finansowanie dla tego aktywa.
+
+    FINANSOWANIE JEST WLASNOSCIA AKTYWA, NIE WALUTY KWOTOWANEJ
+
+    Poprzednia wersja doklejala `.P` do symbolu spotowego, wiec dla BTCUSDT
+    wychodzil BTCUSDT.P - poprawnie - ale dla BTCUSDC wychodzil BTCUSDC.P,
+    ktorego na gieldzie nie ma. Zapytanie konczylo sie bledem "Symbol Invalid"
+    i WYWRACALO CALY PRZEBIEG, bo wyjatek szedl w gore petli: jeden nowy
+    instrument zatrzymywal pobieranie stawek dla wszystkich pozostalych.
+
+    Perpetual wskazujemy wiec po AKTYWIE i kwotujemy w USDT - tam ta stawka
+    powstaje i tam mamy jej historie. Wszystkie instrumenty spotowe tego samego
+    aktywa, niezaleznie od waluty kwotowanej, dziedzicza to samo zrodlo
+    (patrz migracja 0021).
+    """
+    perp_symbol = f"{spot['base_ccy']}USDT.P"
     cur.execute(
         "INSERT INTO ref.instrument (venue_id, symbol, engine, base_ccy, quote_ccy, kind, active)"
-        " VALUES (%s,%s,%s,%s,%s,'perp',false)"
+        " VALUES (%s,%s,%s,%s,'USDT','perp',false)"
         " ON CONFLICT (venue_id, symbol) DO UPDATE SET kind='perp'"
         " RETURNING id",
-        (spot["venue_id"], perp_symbol, spot["engine"], spot["base_ccy"], spot["quote_ccy"]),
+        (spot["venue_id"], perp_symbol, spot["engine"], spot["base_ccy"]),
     )
     perp_id = cur.fetchone()["id"]
+    meta = {"funding_from": perp_id}
+    if spot["quote_ccy"] != "USDT":
+        # Zapisane wprost, bo to PRZYBLIZENIE: stawka pochodzi z perpetuala
+        # kwotowanego inaczej niz instrument, ktorym handlujemy.
+        meta["funding_proxy"] = perp_symbol
     cur.execute(
         "UPDATE ref.instrument SET meta = meta || %s::jsonb WHERE id = %s",
-        (json.dumps({"funding_from": perp_id}), spot["id"]),
+        (json.dumps(meta), spot["id"]),
     )
-    return perp_id
+    return perp_id, perp_symbol[:-2]
 
 
 def missing_ranges(lo: datetime | None, hi: datetime | None, since: datetime,
@@ -151,15 +170,31 @@ async def main() -> int:
 
         adapter = BybitAdapter(api_key="", api_secret="", mode="demo", category="linear")
         grand = 0
+        bledy: list[str] = []
+        # Po aktywie, nie po instrumencie: BTCUSDT i BTCUSDC dziela jedno zrodlo
+        # finansowania, wiec pobieranie go dwa razy byloby ta sama praca dwukrotnie
+        # i drugim zapisem tej samej prawdy.
+        zrobione: set[str] = set()
         try:
             for spot in spots:
-                perp_id = ensure_perp(cur, spot)
+                perp_id, rynek = ensure_perp(cur, spot)
                 conn.commit()
-                grand += await backfill(adapter, conn, perp_id, spot["symbol"], since)
+                if rynek in zrobione:
+                    continue
+                zrobione.add(rynek)
+                # Blad JEDNEGO rynku nie moze zatrzymac pozostalych. Poprzednia
+                # wersja przepuszczala wyjatek w gore i jeden nowy instrument
+                # kasowal caly przebieg.
+                try:
+                    grand += await backfill(adapter, conn, perp_id, rynek, since)
+                except ExchangeError as e:
+                    bledy.append(f"{rynek}: {e}")
         finally:
             await adapter.close()
 
-    print(f"\nRazem: {grand:,} stawek")
+    print(f"\nRazem: {grand:,} stawek z {len(zrobione)} rynków")
+    if bledy:
+        print(f"Nieudane ({len(bledy)}): " + "; ".join(bledy))
     return 0
 
 
