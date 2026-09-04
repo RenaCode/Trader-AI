@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Query
 
+from services.engine.horizons import DEFAULT_BAR
 from ..db import fetch_all, fetch_one
 
 router = APIRouter(prefix="/api/engines/{engine}/learning", tags=["learning"])
@@ -25,9 +26,12 @@ async def state(engine: str):
         FROM learn.learning_state ls
         LEFT JOIN learn.model_version mv ON mv.id = ls.model_version_id
         LEFT JOIN learn.model         m  ON m.id  = mv.model_id
-        WHERE ls.engine = %s
+        -- Jawny filtr po horyzoncie: od migracji 0025 jeden silnik ma wiele
+        -- stanow nauki, po jednym na trenowana swiece. Zakladka pokazuje ten,
+        -- ktorym silnik faktycznie handluje - pozostale sa torami porownawczymi.
+        WHERE ls.engine = %s AND ls.bar = %s
         """,
-        (engine,),
+        (engine, DEFAULT_BAR),
     )
     if not row:
         return {"status": "warmup", "reason": "Brak stanu dla tego silnika"}

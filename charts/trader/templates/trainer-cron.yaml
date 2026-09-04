@@ -41,9 +41,17 @@ spec:
                 - sh
                 - -c
                 - |
-                  python services/engine/train.py                     --bar {{ .Values.trainerCron.bar | quote }}                     --days {{ .Values.trainerCron.days | quote }}                     --trials {{ .Values.trainerCron.trials | quote }}                     --kind {{ .Values.trainerCron.kind | default "spot" | quote }}                     {{- if .Values.trainerCron.limit }} --limit{{ end }}
-                  RC=$?
-                  python services/engine/dozor.py --kod-trenera $RC
+                  RC=0
+                  {{- range $h := .Values.trainerCron.horyzonty | default (list .Values.trainerCron.bar) }}
+                  echo "===== horyzont {{ $h }} ====="
+                  python services/engine/train.py                     --bar {{ $h | quote }}                     --days {{ $.Values.trainerCron.days | quote }}                     --trials {{ $.Values.trainerCron.trials | quote }}                     --kind {{ $.Values.trainerCron.kind | default "spot" | quote }}                     {{- if $.Values.trainerCron.limit }} --limit{{ end }}
+                  K=$?
+                  [ "$K" = 0 ] || RC=$K
+                  {{- end }}
+                  # Dozor WYLACZNIE dla horyzontu produkcyjnego: tory porownawcze
+                  # maja wlasny stan, ale alarm o modelu, ktorym nikt nie handluje,
+                  # bylby halasem.
+                  python services/engine/dozor.py --bar {{ .Values.trainerCron.bar | quote }} --kod-trenera $RC
                   exit $RC
               env:
                 {{- include "trader.appDbPasswordEnv" . | nindent 16 }}

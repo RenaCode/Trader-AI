@@ -92,6 +92,10 @@ def zmiany(poprzedni: dict | None, biezacy: dict) -> list[str]:
 async def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--engine", default="crypto")
+    # Domyslnie horyzont, ktorym handluje silnik. Tory porownawcze (np. 1h) maja
+    # wlasny stan, ale NIE podnosza alarmu - inaczej powiadomienie mowiloby
+    # o modelu, ktorym nikt nie handluje.
+    ap.add_argument("--bar", default="4h")
     ap.add_argument("--sucho", action="store_true",
                     help="wypisz werdykt, nie wysylaj powiadomienia")
     ap.add_argument("--kod-trenera", type=int, default=0, dest="kod_trenera",
@@ -110,10 +114,11 @@ async def main() -> int:
         wiersze = await fetch_all(
             "SELECT status, windows_total, windows_positive, positive_ci_low,"
             " positive_ci_high, median_oos_sharpe, max_psi, trials_run, run_at"
-            " FROM learn.learning_state_log WHERE engine = %s"
-            " ORDER BY run_at DESC LIMIT 2", (args.engine,))
+            " FROM learn.learning_state_log WHERE engine = %s AND bar = %s"
+            " ORDER BY run_at DESC LIMIT 2", (args.engine, args.bar))
         if not wiersze:
-            print("brak zapisanych przebiegow — dozor nie ma czego porownac")
+            print(f"brak zapisanych przebiegow dla {args.engine}/{args.bar}"
+                  " — dozor nie ma czego porownac")
             return 0
 
         biezacy = wiersze[0]
@@ -156,8 +161,8 @@ async def main() -> int:
             print("Brak odbiorcow — powiadomienie nie ma do kogo pojsc.")
             return 0
 
-        tytul = (f"Trener zawiódł ({args.engine})" if args.kod_trenera
-                 else f"Stan nauki ({args.engine}): {biezacy['status']}")
+        tytul = (f"Trener zawiódł ({args.engine}/{args.bar})" if args.kod_trenera
+                 else f"Stan nauki ({args.engine}/{args.bar}): {biezacy['status']}")
         tresc = (f"{biezacy['windows_positive']}/{biezacy['windows_total']} okien "
                  f"dodatnich ({odsetek:.0%}), mediana Sharpe "
                  f"{biezacy['median_oos_sharpe']:+.3f}.\n\n"

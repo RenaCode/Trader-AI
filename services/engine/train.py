@@ -791,11 +791,11 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
                     " n_windows=%s WHERE id=%s", (total, run_id))
         cur.execute(
             """
-            INSERT INTO learn.learning_state (engine, status, model_version_id, windows_total,
+            INSERT INTO learn.learning_state (engine, bar, status, model_version_id, windows_total,
                 windows_positive, median_oos_sharpe, max_drawdown, calibration_error, max_psi,
                 trials_run, reason, positive_ci_low, positive_ci_high, updated_at)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s, now())
-            ON CONFLICT (engine) DO UPDATE SET status=EXCLUDED.status,
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s, now())
+            ON CONFLICT (engine, bar) DO UPDATE SET status=EXCLUDED.status,
                 model_version_id=EXCLUDED.model_version_id, windows_total=EXCLUDED.windows_total,
                 windows_positive=EXCLUDED.windows_positive,
                 median_oos_sharpe=EXCLUDED.median_oos_sharpe, max_drawdown=EXCLUDED.max_drawdown,
@@ -804,7 +804,7 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
                 positive_ci_low=EXCLUDED.positive_ci_low,
                 positive_ci_high=EXCLUDED.positive_ci_high, updated_at=now()
             """,
-            (engine, status, mv_id, total, positive,
+            (engine, h.bar, status, mv_id, total, positive,
              round(median, 4) if median is not None else None,
              round(worst_dd, 4), round(ece, 4) if ece is not None else None,
              round(max_psi, 4), trials, reason, round(ci_lo, 4), round(ci_hi, 4)))
@@ -815,11 +815,11 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
         # codziennie. Bez tych wierszy dozor musialby albo milczec, albo odzywac
         # sie zawsze (patrz services/engine/dozor.py, migracja 0024).
         cur.execute(
-            "INSERT INTO learn.learning_state_log (engine, status, windows_total,"
+            "INSERT INTO learn.learning_state_log (engine, bar, status, windows_total,"
             " windows_positive, positive_ci_low, positive_ci_high, median_oos_sharpe,"
             " max_drawdown, max_psi, trials_run, model_version_id)"
-            " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
-            (engine, status, total, positive, round(ci_lo, 4), round(ci_hi, 4),
+            " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            (engine, h.bar, status, total, positive, round(ci_lo, 4), round(ci_hi, 4),
              round(median, 4) if median is not None else None,
              round(worst_dd, 4), round(max_psi, 4), trials, mv_id))
     else:

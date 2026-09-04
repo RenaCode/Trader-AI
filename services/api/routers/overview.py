@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Query
 
+from services.engine.horizons import DEFAULT_BAR
 from ..db import fetch_all, fetch_one
 
 router = APIRouter(prefix="/api/engines/{engine}", tags=["overview"])
@@ -45,8 +46,11 @@ async def overview(engine: str, mode: str = Query("demo")):
     )
 
     state = await fetch_one(
-        "SELECT status, reason, updated_at FROM learn.learning_state WHERE engine = %s",
-        (engine,),
+        # Jawny filtr po horyzoncie: od migracji 0025 stanow jest wiecej niz jeden
+        # na silnik, a dashboard pokazuje ten, ktorym silnik handluje.
+        "SELECT status, reason, updated_at FROM learn.learning_state"
+        " WHERE engine = %s AND bar = %s",
+        (engine, DEFAULT_BAR),
     )
 
     equity = float(latest["equity"]) if latest else 0.0

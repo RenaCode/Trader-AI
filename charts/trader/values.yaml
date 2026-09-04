@@ -167,6 +167,21 @@ trainerCron:
   # w docs/03.
   kind: "spot_eu"
   limit: true
+  # DWA TORY, NIE JEDEN PRZEBIEG POWTARZANY CZESCIEJ.
+  #
+  # Czestszy trening tego samego horyzontu nie dodaje informacji: okna przesuwaja
+  # sie o 30 dni, a szesc nowych swiec to 3,3% ostatniego okna i ~0,08% wplywu na
+  # mediane z 39 okien - przy zmierzonym szumie dobowym rzedu 10 punktow
+  # procentowych. Dodaje za to konfiguracji do licznika hipotez, ktory wchodzi do
+  # deflated Sharpe.
+  #
+  # Drugi HORYZONT to co innego: liczy inna informacje, ma wlasny model, wlasny
+  # licznik hipotez i wlasny stan nauki (0025). Okna 1h przesuwaja sie o 14 dni,
+  # wiec ten tor zyskuje nowe okno testowe dwa razy czesciej niz 4h.
+  #
+  # Silnik handluje wylacznie horyzontem domyslnym; 1h jest torem porownawczym
+  # i nie podnosi alarmu.
+  horyzonty: ["4h", "1h"]
   # Limity dobrane do ZMIERZONEGO zuzycia (388 MB przy pelnym przebiegu na
   # 24 instrumentach), nie do zapasu "na wszelki wypadek". Wezel ma 7,8 GB
   # i dzieli je z trzema innymi projektami; limit 3 GB dla zadania, ktore

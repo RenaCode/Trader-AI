@@ -943,3 +943,63 @@ w logu, bo wywołanie jest osłonięte przez `|| true`.
 ## Czego to nie zmienia
 
 Kolumna „pokonał kup-i-trzymaj": 48,7% / 43,6% / 50,0% / 47,5%. Bez zmian.
+
+
+---
+
+# Dwa horyzonty odpowiadają inaczej — i to jest wynik
+
+Cechy istniały wyłącznie dla świecy 4-godzinnej: 3,4 mln wartości, pełne cztery
+lata. Horyzont 1h nie miał ich wcale. Policzone (4,17 mln wartości) i po raz
+pierwszy przepuszczone przez walk-forward — na kodzie **po** naprawie prowizji,
+bo poprzedni wybór horyzontu zapadał, gdy miara nie zawierała kosztów.
+
+| przesunięcie | dodatnie 4h | dodatnie 1h | mediana 4h | mediana 1h | kup-i-trzymaj 4h | kup-i-trzymaj 1h |
+|---|---|---|---|---|---|---|
+| 1400 dni | 29/39 (74,4%) | 38/87 (43,7%) | +0,176 | −0,027 | 48,7% | **56,3%** |
+| 1397 dni | 30/39 (76,9%) | 42/88 (47,7%) | +0,121 | −0,032 | 41,0% | **51,1%** |
+| 1394 dni | 28/40 (70,0%) | 45/88 (51,1%) | +0,125 | +0,012 | 47,5% | **50,0%** |
+| 1391 dni | 29/40 (72,5%) | 44/87 (50,6%) | +0,133 | +0,001 | 50,0% | **52,9%** |
+
+## Dwie miary wskazują dwa różne horyzonty
+
+Świeca 4-godzinna wygrywa **odsetkiem dodatnich okien** (70–77% wobec 44–51%)
+i **medianą Sharpe** (+0,12…+0,18 wobec −0,03…+0,01), i to bezdyskusyjnie.
+
+Świeca godzinowa wygrywa **pokonaniem kup-i-trzymaj** — w czterech przesunięciach
+na cztery, 50,0–56,3% wobec 41,0–50,0%. To jedyna miara, która przez cały dzień
+pomiarów nie ruszyła się z okolic 50%, i jedyna, która mówi o przewadze.
+
+## Dlaczego to nie jest sprzeczność
+
+Odsetek dodatnich okien **nagradza nieuczestniczenie**. Strategia na świecy 4h
+trzyma małą ekspozycję: rzadko traci, więc ma dużo okien dodatnich — i rzadko
+wyprzedza rynek. Strategia na świecy 1h handluje częściej, więc mocniej podąża
+za rynkiem: w okresie spadków daje mniej okien dodatnich, ale częściej wypada
+lepiej niż trzymanie.
+
+Ten dokument ostrzegał przed tym rozróżnieniem od kilku sekcji. To jest pierwszy
+przypadek, w którym obie miary wskazują **przeciwne** rozstrzygnięcia — czyli
+pierwszy, w którym ostrzeżenie ma konsekwencję, a nie tylko rację.
+
+## Czego to NIE dowodzi
+
+Przedziały ufności dla pokonania kup-i-trzymaj na świecy 1h — 45,9–66,3%,
+40,9–61,3%, 39,8–60,2%, 42,5–63,0% — **wszystkie zawierają 50%**. Przewagi nie
+ma. Jest natomiast dwukrotnie więcej dowodów: 87–88 okien zamiast 39–40, czyli
+przedział węższy o jedną trzecią. Gdyby przewaga istniała, ten horyzont ma
+szansę ją pokazać; świeca 4h przy 40 oknach nie ma.
+
+Mediana Sharpe na świecy 1h jest przy tym zerowa albo ujemna, co jest dokładnie
+tym, co przewidywała tabela kosztów w `horizons.py`: przy świecy godzinowej
+koszt zjada 45–97% typowego ruchu wobec 22–48% przy czterogodzinnej.
+
+## Wdrożone
+
+Oba horyzonty są trenowane co noc, każdy z własnym modelem, własnym licznikiem
+hipotez i własnym stanem nauki (migracja 0025). Silnik handluje wyłącznie
+horyzontem domyślnym; 1h jest torem porównawczym i nie podnosi alarmu.
+
+Okna 1h przesuwają się o 14 dni zamiast 30, więc ten tor zyskuje nowe okno
+testowe dwa razy częściej — jest w tym sensie „szybszy" i to on pierwszy pokaże
+zmianę, jeśli jakaś nadejdzie.
