@@ -260,3 +260,34 @@ def test_sygnal_znajacy_ruch_niewykonalny_dostaje_zero():
     assert abs(w["momentum_multi"]) < 0.25, (
         "sygnał znający wyłącznie ruch niewykonalny musi dostać wagę bliską zeru; "
         f"dostał {w['momentum_multi']:+.3f}")
+
+
+# --- wariant doboru wag nie moze po cichu wejsc do produkcji -----------------
+def test_wariant_inny_niz_argmax_wymaga_trybu_suchego(monkeypatch):
+    """Bez tej blokady jeden przebieg porownawczy promowalby wersje modelu.
+
+    Warianty `ic` i `bazowe` istnieja po to, zeby MIERZYC, czy losowe
+    przeszukiwanie cokolwiek wnosi. Gdyby taki przebieg zapisywal wynik,
+    zmienialby to, czym handluje silnik, przy okazji pomiaru.
+    """
+    from services.engine import train as modul
+
+    # `argmax` przestal byc domyslny 2026-09-04 - patrz docs/03. Test celowo
+    # uzywa nazwy wariantu, a nie stalej: gdyby domyslny znow sie zmienil,
+    # ten test ma zaczac pilnowac nowego niedomyslnego.
+    monkeypatch.setattr("sys.argv", ["train.py", "--wybor", "argmax"])
+    with pytest.raises(SystemExit) as e:
+        modul.main()
+    assert "--sucho" in str(e.value)
+
+
+def test_wariant_domyslny_nie_wymaga_trybu_suchego(monkeypatch):
+    """Kanarek: blokada nie moze zatrzymac zwyklego, produkcyjnego przebiegu."""
+    from services.engine import train as modul
+
+    monkeypatch.setattr("sys.argv", ["train.py"])
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    with pytest.raises(SystemExit) as e:
+        modul.main()
+    # Przebieg zatrzymuje sie dopiero na braku bazy, a nie na wariancie.
+    assert "DATABASE_URL" in str(e.value)

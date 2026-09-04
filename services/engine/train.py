@@ -19,6 +19,9 @@ sie oszukac samego siebie selekcja.
 
 Uzycie:
     DATABASE_URL=... python services/engine/train.py --days 90 --trials 40
+
+    # porownanie wariantow doboru wag, bez dotykania bazy:
+    ... python services/engine/train.py --sucho --wybor ic
 """
 from __future__ import annotations
 
@@ -343,7 +346,7 @@ def random_weights(rng: random.Random) -> dict[str, dict[str, float]]:
 # ------------------------------------------------------------------ trening
 def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
           kind: str = "spot", egzekucja: Egzekucja | None = None,
-          sucho: bool = False) -> None:
+          sucho: bool = False, wybor: str = "argmax") -> None:
     cur = conn.cursor()
     rng = random.Random(SEED)
     now = datetime.now(timezone.utc)
@@ -379,7 +382,8 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
         (model_id, version,
          json.dumps({"bar": h.bar, "train_days": h.train_days, "test_days": h.test_days,
                      "step_days": h.step_days, "min_trades": h.min_trades,
-                     "trials_per_window": trials_per_window, "seed": SEED}),
+                     "trials_per_window": trials_per_window, "seed": SEED,
+                     "wybor": wybor}),
          feature_ids, signal_ids, now - timedelta(days=days), now))
     mv_id = cur.fetchone()["id"]
 
@@ -489,40 +493,55 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
                                      kind=kind, egzekucja=egzekucja)
             return portfolio_metrics(res, h.min_trades)
 
-        best_w, best_score = DEFAULT_WEIGHTS, -1e9
-        for _ in range(trials_per_window):
-            cand = _bez_martwych(random_weights(rng), martwe)
-            score = ocen(cand, train_slices, cache_tr)["sharpe"]
-            if not sucho:
-                cfg_hash = hashlib.sha256(json.dumps(cand, sort_keys=True).encode()).digest()
-                cur.execute(
-                    "INSERT INTO learn.hypothesis_trial (model_id, config_hash, params,"
-                    " n_windows) VALUES (%s,%s,%s,1)"
-                    " ON CONFLICT (model_id, config_hash) DO NOTHING",
-                    (model_id, cfg_hash, json.dumps(cand)))
-            if score > best_score:
-                best_w, best_score = cand, score
-
-        # Zalozenia poczatkowe tez sa kandydatem - jesli losowanie nie potrafi ich
-        # pobic na oknie treningowym, to znaczy, ze nie ma czego kalibrowac.
-        base_score = ocen(bazowe, train_slices, cache_tr)["sharpe"]
-        if base_score > best_score:
-            best_w, best_score = bazowe, base_score
-
-        # Kandydat WYLICZONY, nie wylosowany: wagi proporcjonalne do zdolnosci
-        # predykcyjnej sygnalow na tym oknie. Patrz komentarz przy ic_weights().
-        ic_w = ic_weights(train_slices, cache_tr, martwe)
-        ic_score = ocen(ic_w, train_slices, cache_tr)["sharpe"]
-        if not sucho:
-            cfg_hash = hashlib.sha256(json.dumps(ic_w, sort_keys=True).encode()).digest()
+        def zapisz_hipoteze(cand):
+            if sucho:
+                return
+            cfg_hash = hashlib.sha256(json.dumps(cand, sort_keys=True).encode()).digest()
             cur.execute(
                 "INSERT INTO learn.hypothesis_trial (model_id, config_hash, params,"
                 " n_windows) VALUES (%s,%s,%s,1)"
                 " ON CONFLICT (model_id, config_hash) DO NOTHING",
-                (model_id, cfg_hash, json.dumps(ic_w)))
-        if ic_score > best_score:
-            best_w, best_score = ic_w, ic_score
+                (model_id, cfg_hash, json.dumps(cand)))
+
+        # WARIANT WYBORU. Domyslny `argmax` bierze najlepszego z trials_per_window
+        # losowan, zalozen poczatkowych i wag z IC - czyli MAKSIMUM Z PROBKI.
+        # Maksimum z probki jest na oknie treningowym zawyzone o klatwe zwyciezcy
+        # i tym bardziej, im wiecej losowan; poza oknem to zawyzenie znika, wiec
+        # samo "wygral kandydat X" nic nie mowi o jego wartosci.
+        #
+        # `ic` i `bazowe` nie wybieraja niczego - biora jeden kandydat wyliczony
+        # albo ustalony z gory - wiec nie maja czego zawyzac. Roznica OOS miedzy
+        # wariantami na TYCH SAMYCH oknach, progach i bramkach jest jedynym
+        # uczciwym pomiarem tego, czy losowe przeszukiwanie cokolwiek wnosi.
+        if wybor == "bazowe":
+            best_w = bazowe
+        elif wybor == "ic":
+            best_w = ic_weights(train_slices, cache_tr, martwe)
+            zapisz_hipoteze(best_w)
             wybrane_ic += 1
+        else:
+            best_w, best_score = DEFAULT_WEIGHTS, -1e9
+            for _ in range(trials_per_window):
+                cand = _bez_martwych(random_weights(rng), martwe)
+                score = ocen(cand, train_slices, cache_tr)["sharpe"]
+                zapisz_hipoteze(cand)
+                if score > best_score:
+                    best_w, best_score = cand, score
+
+            # Zalozenia poczatkowe tez sa kandydatem - jesli losowanie nie potrafi ich
+            # pobic na oknie treningowym, to znaczy, ze nie ma czego kalibrowac.
+            base_score = ocen(bazowe, train_slices, cache_tr)["sharpe"]
+            if base_score > best_score:
+                best_w, best_score = bazowe, base_score
+
+            # Kandydat WYLICZONY, nie wylosowany: wagi proporcjonalne do zdolnosci
+            # predykcyjnej sygnalow na tym oknie. Patrz komentarz przy ic_weights().
+            ic_w = ic_weights(train_slices, cache_tr, martwe)
+            ic_score = ocen(ic_w, train_slices, cache_tr)["sharpe"]
+            zapisz_hipoteze(ic_w)
+            if ic_score > best_score:
+                best_w, best_score = ic_w, ic_score
+                wybrane_ic += 1
 
         # --- ocena OUT-OF-SAMPLE --------------------------------------------
         oos_res = simulate_portfolio(
@@ -661,6 +680,20 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
     # zielone swiatlo do handlu prawdziwymi pieniedzmi na podstawie jednego okna.
     ci_lo, ci_hi = wilson(positive, total)
 
+    # PRZEWAGA NAD NIEROBIENIEM NICZEGO jest osobnym warunkiem, nie ozdoba.
+    #
+    # Odsetek dodatnich okien mierzy, jak czesto okno wychodzi na plus - a nie
+    # czy warto bylo cokolwiek robic. Strategia o malej ekspozycji na spadajacym
+    # rynku ma duzo dodatnich okien z samego nietrzymania pozycji. Pomiar
+    # z 2026-09-04: wariant `ic` mial 75% dodatnich okien i 52,5% okien lepszych
+    # od kupienia i trzymania, czyli rzut moneta wobec odniesienia.
+    #
+    # Prog stawiamy na DOLNEJ granicy przedzialu ufnosci, nie na samym odsetku,
+    # z tego samego powodu, dla ktorego odsetek podajemy zawsze z przedzialem:
+    # przy 26-40 oknach roznica kilku punktow nie jest sygnalem.
+    odn_lo, odn_hi = wilson(pokonane_odniesienie, porownywalne) if porownywalne else (0.0, 1.0)
+    bije_odniesienie = porownywalne >= MIN_WINDOWS_FOR_VALIDATION and odn_lo > 0.5
+
     if total < MIN_WINDOWS_FOR_VALIDATION:
         status = "learning"
         reason = (f"Za mało informatywnych okien: {total} z wymaganych "
@@ -668,14 +701,23 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
                   f"żeby cokolwiek orzec — to nie jest wynik ujemny, to brak wyniku.")
     else:
         status = ("validated" if pct >= 70 and median and median > 0.05
+                  and bije_odniesienie
                   else "degraded" if pct < 40 else "learning")
         # Przedzial podajemy ZAWSZE razem z odsetkiem. Sam odsetek zacheca do
         # czytania roznicy dwoch punktow jako sygnalu, a przy 40 oknach
         # przedzial ma szerokosc okolo 30 punktow procentowych.
         ci = f" Przedział ufności 95%: {ci_lo:.0%}–{ci_hi:.0%}."
+        # Gdy jedyna niespelniona rzecza jest przewaga nad odniesieniem, trzeba
+        # to powiedziec wprost. Sam odsetek powyzej progu wyglada jak sukces.
+        brak_przewagi = ""
+        if pct >= 70 and median and median > 0.05 and not bije_odniesienie:
+            brak_przewagi = (f" Kup-i-trzymaj pokonane w {pokonane_odniesienie}/{porownywalne} "
+                             f"okien ({odn_lo:.0%}–{odn_hi:.0%}) — to nie jest przewaga, "
+                             f"więc kryteria NIE są spełnione mimo odsetka powyżej progu.")
         reason = {
             "validated": f"Dodatnie {positive}/{total} okien out-of-sample ({pct:.0f}%).{ci} Kryteria spełnione.",
-            "learning": f"Dodatnie {positive}/{total} okien out-of-sample ({pct:.0f}%).{ci} Próg przejścia na live: 70%.",
+            "learning": f"Dodatnie {positive}/{total} okien out-of-sample ({pct:.0f}%).{ci}"
+                        + (brak_przewagi or " Próg przejścia na live: 70%."),
             "degraded": f"Dodatnie tylko {positive}/{total} okien ({pct:.0f}%).{ci} Strategia nie wykazuje przewagi.",
         }[status]
 
@@ -745,13 +787,16 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
                     " error='tryb suchy - porownanie wariantow' WHERE id=%s", (run_id,))
     conn.commit()
 
-    print(f"\nWagi z IC wybrane w {wybrane_ic}/{idx} okien "
-          f"(reszta: losowanie albo założenia początkowe)")
+    if wybor == "argmax":
+        print(f"\nWagi z IC wybrane w {wybrane_ic}/{idx} okien "
+              f"(reszta: losowanie albo założenia początkowe)")
+    else:
+        print(f"\nWariant wyboru: {wybor} — bez losowania, "
+              f"jeden kandydat na każde z {idx} okien")
     if porownywalne:
         pct_odn = pokonane_odniesienie / porownywalne * 100
-        lo_o, hi_o = wilson(pokonane_odniesienie, porownywalne)
         print(f"Pokonano kup-i-trzymaj w {pokonane_odniesienie}/{porownywalne} oknach "
-              f"({pct_odn:.1f}%)   przedział 95%: {lo_o:.1%}–{hi_o:.1%}")
+              f"({pct_odn:.1f}%)   przedział 95%: {odn_lo:.1%}–{odn_hi:.1%}")
     print(f"Okna: {total}, dodatnie: {positive} ({pct:.1f}%)"
           f"   przedział ufności 95%: {ci_lo:.1%}–{ci_hi:.1%}")
     print(f"Mediana Sharpe (OOS): {median:+.3f}" if median is not None else "Mediana Sharpe: —")
@@ -766,13 +811,31 @@ def main() -> int:
     ap.add_argument("--trials", type=int, default=40)
     ap.add_argument("--engine", default="crypto")
     ap.add_argument("--bar", default=DEFAULT_BAR, choices=sorted(HORIZONS))
-    ap.add_argument("--kind", default="spot", choices=("spot", "perp"),
-                    help="rodzaj instrumentu - wyznacza stawki prowizji")
+    ap.add_argument("--kind", default="spot", choices=("spot", "spot_eu", "perp"),
+                    help="rodzaj instrumentu - wyznacza stawki prowizji; "
+                         "spot_eu to cennik podmiotu unijnego (taker 0,250%%)")
     ap.add_argument("--limit", action="store_true",
                     help="zlecenia z limitem zamiast rynkowych")
     ap.add_argument("--sucho", action="store_true",
                     help="nie zapisuj wyniku do bazy (do porownywania wariantow)")
+    ap.add_argument("--wybor", default="ic", choices=("argmax", "ic", "bazowe"),
+                    help="jak wybierany jest kandydat na oknie treningowym: "
+                         "argmax = najlepszy z losowan + zalozenia + IC (do 2026-09-04 produkcja), "
+                         "ic = wylacznie wagi wyliczone z IC, "
+                         "bazowe = wylacznie zalozenia poczatkowe. "
+                         "Warianty inne niz domyslny wymagaja --sucho")
     args = ap.parse_args()
+
+    # Wariant eksperymentalny NIE MOZE promowac wersji modelu ani nadpisywac
+    # stanu nauki - inaczej jeden przebieg porownawczy po cichu zmienialby to,
+    # czym handluje produkcja.
+    #
+    # Porownanie idzie z DOMYSLNA wartoscia, nie z nazwa wpisana na sztywno:
+    # gdy pomiar wskaze inny wariant i domyslny sie zmieni, blokada przesuwa
+    # sie razem z nim, zamiast zaczac blokowac wlasna produkcje.
+    domyslny = ap.get_default("wybor")
+    if args.wybor != domyslny and not args.sucho:
+        sys.exit(f"--wybor inny niz {domyslny} wymaga --sucho")
 
     url = os.environ.get("DATABASE_URL")
     if not url:
@@ -786,9 +849,11 @@ def main() -> int:
               f"test {h.test_days} dni, krok {h.step_days} dni")
         print(f"Egzekucja: {args.kind}, zlecenia "
               f"{'z limitem' if args.limit else 'rynkowe'}, "
-              f"koszt rundy {runda(args.kind, args.limit) * 100:.3f}%\n")
+              f"koszt rundy {runda(args.kind, args.limit) * 100:.3f}%")
+        print(f"Wybór wag na oknie treningowym: {args.wybor}"
+              f"{f' ({args.trials} losowań + założenia + IC)' if args.wybor == 'argmax' else ' (bez losowania)'}\n")
         train(conn, args.engine, args.days, args.trials, h, args.kind, egz,
-              sucho=args.sucho)
+              sucho=args.sucho, wybor=args.wybor)
     return 0
 
 
