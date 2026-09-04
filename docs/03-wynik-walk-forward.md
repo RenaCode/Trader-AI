@@ -599,3 +599,207 @@ ostrzeżeniem, gdy przedział jest szerszy niż 20 punktów.
 
 Sam odsetek, podany bez przedziału, zachęca do czytania różnicy dwóch punktów
 jako sygnału.
+
+---
+
+# Losowe przeszukiwanie było gorsze od nierobienia go
+
+Poprzednia sekcja kończy się zdaniem „nie będę dalej dobierał wag". Zostało
+w mocy — ale okazało się, że problemem nie był *sposób* ważenia, tylko sam fakt,
+że wagi są **wybierane**.
+
+## Co pokazał licznik, którego nie czytałem
+
+Trener wypisywał przy każdym przebiegu jedną linijkę, którą przez tydzień
+traktowałem jak ciekawostkę:
+
+```
+Wagi z IC wybrane w 2/40 okien (reszta: losowanie albo założenia początkowe)
+```
+
+Wagi wyliczone ze współczynnika informacji — ten sam kandydat, który został
+dodany jako „koniec szukania po omacku" — przegrywały na oknie treningowym
+w **38 z 40 okien**. Przegrywały z najlepszym z sześćdziesięciu losowań.
+
+To nie jest dowód, że losowania są lepsze. To definicja klątwy zwycięzcy:
+maksimum z 60 próbek jest zawyżone o tyle, o ile próbek się wzięło, i całe
+to zawyżenie znika poza oknem treningowym. Trener wybierał kandydata po
+wielkości, na którą składał się głównie szum.
+
+## Pomiar
+
+Do trenera doszedł przełącznik `--wybor`, który zmienia wyłącznie to, **jak
+powstaje kandydat**, a nie sposób jego oceny. Okna, progi wejścia, bramki,
+koszty, filtr martwych sygnałów i ocena out-of-sample są identyczne we
+wszystkich wariantach:
+
+| wariant | kandydat na okno |
+|---|---|
+| `argmax` | najlepszy z 60 losowań, założeń początkowych i wag z IC — produkcja |
+| `ic` | wyłącznie wagi wyliczone ze współczynnika informacji |
+| `bazowe` | wyłącznie założenia początkowe |
+
+Trzy przebiegi, świeca 4 h, 1400 dni, te same dane, tego samego dnia
+(`--sucho`, więc żaden nie dotknął stanu nauki):
+
+| wariant | okna | dodatnie | przedział 95% | mediana Sharpe | obsunięcie | pokonał kup-i-trzymaj |
+|---|---|---|---|---|---|---|
+| `bazowe` | 40 | 20 (50,0%) | 35,2%–64,8% | +0,008 | −0,89% | 21/40 (52,5%) |
+| **`ic`** | **40** | **30 (75,0%)** | **59,8%–85,8%** | **+0,117** | −2,49% | 21/40 (52,5%) |
+| `argmax` | 26 | 15 (57,7%) | 38,9%–74,5% | +0,066 | −1,60% | 14/26 (53,8%) |
+
+## Drugi efekt: znikające okna
+
+Warianty bez losowania dały **40 okien informatywnych, produkcja 26**. Różnica
+nie jest kosmetyczna — to jedna trzecia dowodów.
+
+Mechanizm jest konkretny i wynika wprost z tego, co maksymalizujemy. Miarą jest
+Sharpe **na transakcję**. Układ wag, który prawie nie handluje, płaci mniej
+prowizji i ma mniejszy mianownik, więc na oknie treningowym wypada świetnie
+przy garstce transakcji. Losowanie systematycznie takie układy znajduje —
+a poza oknem ta garstka to już tylko szum i okno wypada poniżej progu
+12 transakcji, czyli wypada z oceny w ogóle.
+
+Losowe przeszukiwanie nie tylko wybierało gorzej. **Wybierało tak, żeby wyniku
+nie dało się zmierzyć.**
+
+## Czego ten wynik NIE mówi
+
+Przedział przy `ic` (59,8%–85,8%) leży powyżej rzutu monetą, ale kolumna
+„pokonał kup-i-trzymaj" ani drgnęła: **21/40, czyli 52,5%, przedział
+37,5%–67,1%**. Strategia jest częściej dodatnia, bo trzyma małą ekspozycję na
+rynku, który przez większość okresu spadał — to nie to samo co przewaga.
+Wniosek ilościowy z poprzedniej sekcji, że żaden pojedynczy sygnał nie pokrywa
+własnych kosztów, pozostaje w mocy; zmieniło się to, że przestaliśmy do tych
+sygnałów dokładać szum z losowania.
+
+## Uboczna korzyść: licznik hipotez przestaje puchnąć
+
+`argmax` dokładał 61 konfiguracji na okno, czyli ~2440 na przebieg, każdej doby.
+Licznik doszedł do 11 460 i każdy przyszły wynik trzeba było czytać razem z nim.
+`ic` dokłada jedną na okno — 40 na przebieg, sześćdziesiąt razy mniej.
+
+## Test odporności: cztery przesunięcia okien
+
+Poprzednia sekcja tego dokumentu obaliła serię porównań, bo różnice mieściły
+się w szumie samego przesunięcia okna. Ten sam test zastosowany tutaj — cztery
+przebiegi różniące się wyłącznie długością historii, czyli przesuwające
+wszystkie granice okien:
+
+| przesunięcie | `ic` — dodatnie | `argmax` — dodatnie | `ic` mediana Sharpe | `argmax` mediana Sharpe |
+|---|---|---|---|---|
+| 1400 dni | **30/40 (75,0%)** | 15/26 (57,7%) | +0,117 | +0,066 |
+| 1397 dni | **28/40 (70,0%)** | 16/26 (61,5%) | +0,106 | +0,095 |
+| 1394 dni | **27/40 (67,5%)** | 16/25 (64,0%) | +0,149 | +0,079 |
+| 1391 dni | **29/40 (72,5%)** | 18/27 (66,7%) | +0,118 | **+0,163** |
+
+Co z tego wynika i czego nie:
+
+- **Liczba okien informatywnych: 40 wobec 25–27 w każdym z czterech przebiegów.**
+  To jest najmocniejsza część wyniku, bo nie jest różnicą wielkości losowej —
+  jest różnicą tego, ile dowodów w ogóle powstaje.
+- **Odsetek dodatnich okien wyższy przy `ic` we wszystkich czterech przebiegach.**
+  Rozrzut `ic` to 67,5–75,0%, `argmax` 57,7–66,7%. Przedziały ufności nadal się
+  częściowo pokrywają, więc pojedyncze porównanie nic by nie znaczyło; znaczy
+  konsekwencja kierunku przy czterech niezależnych przesunięciach.
+- **Mediana Sharpe nie jest jednoznaczna: przy 1391 dniach `argmax` wypadł
+  wyżej (+0,163 wobec +0,118).** Trzy na cztery to nie jest wynik, na którym
+  można się oprzeć — i nie opieram się na nim.
+- **Żaden wariant nie pokonuje kup-i-trzymaj.** `ic`: 52,5%, 50,0%, 52,5%,
+  47,5%. `argmax`: 53,8%, 53,8%, 56,0%, 51,9%. Oba są rzutem monetą wobec
+  odniesienia i to jest najważniejsze zdanie w całej tej sekcji.
+
+## Wniosek
+
+Zmiana jest uzasadniona jako **usunięcie szkodliwego kroku**, nie jako
+znalezienie przewagi. Losowe przeszukiwanie kosztowało jedną trzecią okien
+i sześćdziesiąt razy powiększało licznik hipotez, nie dając w zamian nic
+mierzalnego. Strategia po tej zmianie nadal nie ma przewagi nad kupieniem
+i trzymaniem — ma tylko o jedno źródło szumu mniej.
+
+## Zastrzeżenie do statusu „validated"
+
+Przy wariancie `ic` odsetek dodatnich okien przekracza próg 70% i trener
+wystawia status **`validated` — „Kryteria spełnione"**. Czytanie tego jako
+zielonego światła do handlu byłoby błędem, przed którym cały ten dokument
+ostrzega: kryterium mierzy, jak często okno wychodzi na plus, a nie czy
+strategia bije nierobienie niczego. Kolumna „pokonał kup-i-trzymaj" siedzi
+na 50%.
+
+Kryterium wymaga uzupełnienia o warunek przewagi nad odniesieniem, zanim
+`validated` zacznie cokolwiek znaczyć. Do tego czasu tryb live pozostaje
+zablokowany w API (`credentials.py:79`) niezależnie od statusu.
+
+---
+
+# Sprostowanie: miara, na której stoi cały ten dokument, była liczona przed prowizją
+
+Powyższe sekcje porównują warianty doboru wag liczbami, które **nie zawierały
+prowizji**. Wykrył to przypadek: dwa przebiegi różniące się wyłącznie stawką
+taker — 0,100% wobec 0,250% — dały **identyczny odsetek dodatnich okien
+i identyczną medianę Sharpe**, co przy dwukrotnej różnicy kosztu jest niemożliwe.
+
+## Gdzie siedział błąd
+
+`simulate_portfolio` liczyła prowizję poprawnie i odejmowała ją od **krzywej
+kapitału**. Ale zwrot z pojedynczej transakcji zapisywany do `res.trades` był
+liczony wyłącznie z cen:
+
+```python
+"ret": pos.side * (exit_px / pos.entry - 1)     # poślizg tak, prowizja NIE
+```
+
+A `metrics()` liczy Sharpe właśnie z tych zwrotów — i to Sharpe decyduje, czy
+okno jest dodatnie, czyli o odsetku dodatnich okien, medianie i statusie modelu.
+Prowizja wpływała więc wyłącznie na `max_dd` i `total_return`, czyli na dwie
+liczby, których werdykt nie używa.
+
+Kanarek jest prosty: na **płaskiej cenie** transakcja wychodziła na −0,080%,
+czyli dokładnie dwa poślizgi po 0,04%. Ani jednej nogi prowizji.
+
+Cały zestaw 121 testów przechodził. Żaden nie sprawdzał, czy koszt dociera do
+miary — doszły dwa, które to pilnują, i oba padają na kodzie sprzed poprawki.
+
+## Co się zmienia w liczbach
+
+Ten sam wariant `ic`, te same okna, świeca 4 h, 1400 dni:
+
+| | odsetek dodatnich | mediana Sharpe |
+|---|---|---|
+| przed poprawką (bez prowizji) | 30/40 = **75,0%** | +0,117 |
+| po poprawce (z prowizją) | 26/40 = **65,0%** | +0,067 |
+
+Dziesięć punktów procentowych i mediana zawyżona o 74%. Wniosek jakościowy
+z porównania wariantów zostaje — `ic` nadal bije `argmax` i nadal daje 40 okien
+zamiast 26 — ale **każda bezwzględna liczba z sekcji powyżej jest zawyżona**
+i trzeba ją czytać przez tę tabelę.
+
+## Trzy scenariusze kosztowe na giełdzie, na której faktycznie staniemy
+
+Prowizje odczytane z konta przez `/v5/account/fee-rate` na `api-demo.bybit.eu`
+(2026-09-04, jednakowe dla wszystkich 140 par): **maker 0,100%, taker 0,250%**.
+Taker jest dwuipółkrotnie droższy niż na podmiocie globalnym.
+
+| scenariusz | koszt rundy | dodatnie | przedział 95% | mediana Sharpe |
+|---|---|---|---|---|
+| spot globalny, zlecenia rynkowe | 0,280% | 26/40 (65,0%) | 49,5–77,9% | +0,067 |
+| **spot unijny, zlecenia rynkowe** | **0,580%** | **17/40 (42,5%)** | 28,5–57,8% | **−0,011** |
+| spot unijny, zlecenia z limitem | 0,200% | 26/40 (65,0%) | 49,5–77,9% | +0,098 |
+
+Wniosek jest jednoznaczny i wykonalny: **na podmiocie unijnym zlecenia rynkowe
+są wykluczone.** Przy 0,580% mediana Sharpe schodzi poniżej zera — strategia
+przestaje istnieć. Stawka maker jest natomiast identyczna jak globalnie (0,100%),
+więc egzekucja z limitem daje ten sam wynik co dotychczasowe założenie, a nawet
+nieco wyższą medianę.
+
+## Zastrzeżenie do scenariusza z limitem
+
+Symulacja sprawdza wypełnienie limitu przez porównanie z zasięgiem następnej
+świecy — świecy z **podmiotu globalnego**. Księga unijna jest dla BTCUSDC około
+sześciokrotnie płytsza, a dla mniejszych par nieporównywalnie bardziej. Realny
+odsetek wypełnień będzie tam niższy, a niewypełnione wyjście w spadającym rynku
+kosztuje najwięcej. Liczba 65,0% z ostatniego wiersza jest więc **górnym
+ograniczeniem**, nie prognozą.
+
+Żaden z trzech scenariuszy nie pokonuje kup-i-trzymaj: **21/40, czyli 52,5%,
+przedział 37,5–67,1%** — identycznie we wszystkich trzech.

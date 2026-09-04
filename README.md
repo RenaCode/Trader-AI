@@ -1,7 +1,7 @@
 # Trader-AI
 
 Autonomiczny system tradingowy z własnym dashboardem, uruchamiany na VPS RenaCode.
-**Dwa niezależne silniki** — krypto (Bybit) i giełda tradycyjna (Interactive Brokers) —
+**Dwa niezależne silniki** — krypto (Bybit EU) i giełda tradycyjna (Interactive Brokers) —
 z osobnymi modelami, osobnym ryzykiem i osobnymi zakładkami w UI.
 
 > **Faza demo.** System handluje wyłącznie na kontach demonstracyjnych. Przejście na
@@ -19,7 +19,7 @@ z osobnymi modelami, osobnym ryzykiem i osobnymi zakładkami w UI.
 ## Stan projektu
 
 - [x] Research i architektura
-- [x] Schemat bazy (11 schematów, 16 migracji, hypertables + pgvector)
+- [x] Schemat bazy (11 schematów, 18 migracji, hypertables + pgvector)
 - [x] API odczytu (FastAPI) i dashboard (React + Vite)
 - [x] Chart Helm, obrazy Docker, CI
 - [x] Wdrożenie na `trader.renacode.com` (TLS, Traefik, ArgoCD)
@@ -34,11 +34,40 @@ z osobnymi modelami, osobnym ryzykiem i osobnymi zakładkami w UI.
 - [x] Symulacja **portfelowa** przez ten sam risk kernel co produkcja
 - [x] Rola bazy bez uprawnień superużytkownika + kontrola uprawnień
 - [x] Kopie zapasowe (weryfikowane), rotacja `SECRETS_KEY`, limit wydatków na API
-- [x] 55 testów jednostkowych (reguły ryzyka, portfel, TOTP, kryptografia)
+- [x] 123 testy jednostkowe (reguły ryzyka, portfel, koszty, TOTP, kryptografia)
 - [x] Ustawienia, powiadomienia (w aplikacji / Telegram / webhook), profil konta
+- [x] Prowizja w mierze, a nie tylko w krzywej kapitału — odsetek dodatnich
+      okien i mediana Sharpe były liczone **przed kosztami** (patrz `docs/03`)
+- [x] Konto demo Bybit **EU** zweryfikowane; cennik odczytany z giełdy
 - [ ] Skaner RSS + analiza Claude — **czeka na klucz API Anthropic**
-- [ ] Egzekucja na koncie demo Bybit — **czeka na klucze giełdy**
+- [ ] Egzekucja zleceń — **zablokowana wąskim gardłem podmiotu unijnego**
+      (patrz niżej), nie brakiem klucza
 - [ ] Adapter IBKR + silnik equity
+
+## Ograniczenia podmiotu unijnego
+
+Po MiCA konto stoi na `bybit.eu` — to **inna giełda niż bybit.com**, nie inna
+domena tej samej. Zmierzone 2026-09-04:
+
+| | bybit.com | bybit.eu |
+|---|---|---|
+| pary spot / w tym `*USDT` | 541 / 399 | 140 / **4** |
+| kontrakty wieczyste | 859 | **0** |
+| prowizja spot maker / taker | 0,100% / 0,100% | 0,100% / **0,250%** |
+
+Trzy konsekwencje, każda twarda:
+
+1. **Zlecenia rynkowe są wykluczone.** Runda kosztuje tam 0,580% zamiast 0,280%,
+   przy czym mediana Sharpe schodzi poniżej zera. Trener modeluje więc
+   `--kind spot_eu --limit` (stawka maker jest identyczna jak globalnie).
+2. **Strategia dwustronna jest niewykonalna.** Wymaga kontraktów wieczystych
+   (`services/engine/koszty.py`), a podmiot unijny ich nie oferuje.
+3. **Uniwersum wymaga przebazowania na USDC.** Płynność unijna siedzi na parach
+   USDC; z 24 aktywów bazowych sensowny obrót ma tam 10, przy progu
+   `MIN_INSTRUMENTS = 8`.
+
+Dane publiczne — świece, arkusz zleceń, finansowanie — pochodzą nadal z hosta
+globalnego, bo to jego księga stoi za czterema latami historii.
 
 ## Kontrola po zmianach w silniku
 
