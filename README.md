@@ -69,6 +69,23 @@ Trzy konsekwencje, każda twarda:
 Dane publiczne — świece, arkusz zleceń, finansowanie — pochodzą nadal z hosta
 globalnego, bo to jego księga stoi za czterema latami historii.
 
+## Agenci
+
+Cztery definicje w `.claude/agents/`, każda z dyscypliną wypracowaną przez ten
+projekt wpisaną wprost w instrukcje:
+
+| Agent | Rola | Czego nie robi |
+|---|---|---|
+| `strateg` | hipotezy z góry określonym warunkiem obalenia | nie mierzy sam |
+| `trener` | walk-forward, ≥4 przesunięcia okien, tryb suchy | nie decyduje o wdrożeniu |
+| `analityk` | audyt pomiaru: czy mierzymy to, co się wydaje | nie proponuje sygnałów |
+| `koordynator` | kolejność, decyzja o wdrożeniu, raport | nie mierzy i nie proponuje |
+
+Kolejność nie jest dowolna: **analityk idzie PO trenerze**. Najgroźniejszy błąd
+w historii projektu — prowizja liczona poza miarą, wynik zawyżony o 74% — był
+widoczny dopiero w liczbach: dwa przebiegi o dwukrotnie różnym koszcie dały
+identyczny wynik. Bez pomiaru nie było czego zauważyć.
+
 ## Kontrola po zmianach w silniku
 
 ```bash
