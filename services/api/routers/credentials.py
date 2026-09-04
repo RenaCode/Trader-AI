@@ -9,6 +9,8 @@ Zasady, ktore ten modul egzekwuje:
 """
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
@@ -28,6 +30,15 @@ class CredentialBody(BaseModel):
     passphrase: str | None = Field(default=None, max_length=512)
 
 
+def _waznosc(created_at, dni: int | None) -> dict:
+    """Termin waznosci klucza i ile dni zostalo. Pusty, gdy gielda go nie ogranicza."""
+    if not dni or not created_at:
+        return {}
+    wygasa = created_at + timedelta(days=dni)
+    zostalo = (wygasa - datetime.now(timezone.utc)).days
+    return {"expires_at": wygasa.isoformat(), "days_left": zostalo}
+
+
 def _hint(value: str) -> str:
     return "••••" + value[-4:] if len(value) >= 4 else "••••"
 
@@ -38,7 +49,8 @@ async def list_credentials(user: dict = Depends(current_user)):
         """
         SELECT c.id, c.mode, c.label, c.key_hint, c.active, c.can_withdraw,
                c.permissions, c.created_at, c.last_used_at, c.last_error,
-               v.code AS venue_code, v.name AS venue_name, v.engine
+               v.code AS venue_code, v.name AS venue_name, v.engine,
+               (v.meta->>'waznosc_klucza_dni')::int AS waznosc_dni
         FROM app.api_credential c
         JOIN ref.venue v ON v.id = c.venue_id
         WHERE c.user_id = %s
@@ -52,6 +64,11 @@ async def list_credentials(user: dict = Depends(current_user)):
             "engine": r["engine"], "mode": r["mode"], "label": r["label"],
             "key_hint": r["key_hint"], "active": r["active"],
             "can_withdraw": r["can_withdraw"], "permissions": r["permissions"],
+            # Klucz bez przypietego IP gasnie po trzech miesiacach, a wygasniecie
+            # w polowie fazy demo nie objawia sie niczym widocznym: dane rynkowe
+            # ida z hosta publicznego, wiec dashboard nadal wyglada zdrowo.
+            # Patrz migracja 0019 - to zalozenie z regulaminu, nie odczyt z gieldy.
+            **_waznosc(r["created_at"], r["waznosc_dni"]),
             "created_at": r["created_at"].isoformat(),
             "last_used_at": r["last_used_at"].isoformat() if r["last_used_at"] else None,
             "last_error": r["last_error"],

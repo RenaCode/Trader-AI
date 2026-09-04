@@ -165,9 +165,14 @@ export default function Settings({ user, onUserChanged }) {
                   </span>
                   <span style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
                     <span className="badge">{c.mode}</span>
-                    {c.can_withdraw
+                    {c.can_withdraw === true
                       ? <span className="badge bad">PRAWO WYPŁATY</span>
-                      : <span className="badge ok">bez wypłat</span>}
+                      : c.can_withdraw === false
+                        ? <span className="badge ok">bez wypłat</span>
+                        /* Podmiot unijny nie wystawia metadanych klucza, więc
+                           uprawnień nie da się odczytać. „Bez wypłat" byłoby
+                           tu zapewnieniem, którego nikt nie sprawdził. */
+                        : <span className="badge warn">uprawnienia nieznane</span>}
                     <span className={`badge ${c.active ? 'ok' : 'warn'}`}>
                       {c.active ? 'aktywny' : 'nieaktywny'}
                     </span>
@@ -177,6 +182,13 @@ export default function Settings({ user, onUserChanged }) {
                   <span className="mono">{c.key_hint}</span>
                   <span>dodany {fmtTime(c.created_at)}</span>
                   {c.last_used_at && <span>ostatnio użyty {fmtAgo(c.last_used_at)}</span>}
+                  {c.days_left != null && (
+                    <span className={c.days_left <= 21 ? 'badge warn' : undefined}>
+                      {c.days_left > 0
+                        ? `wygasa za ${c.days_left} dni (${fmtTime(c.expires_at)})`
+                        : 'KLUCZ WYGASŁ — wygeneruj nowy'}
+                    </span>
+                  )}
                 </div>
                 {c.last_error && (
                   <div className="row-body" style={{ color: 'var(--danger-light)' }}>
