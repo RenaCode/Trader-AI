@@ -41,6 +41,11 @@ spec:
                 - {{ .Values.trainerCron.days | quote }}
                 - --trials
                 - {{ .Values.trainerCron.trials | quote }}
+                - --kind
+                - {{ .Values.trainerCron.kind | default "spot" | quote }}
+                {{- if .Values.trainerCron.limit }}
+                - --limit
+                {{- end }}
               env:
                 {{- include "trader.appDbPasswordEnv" . | nindent 16 }}
                 - name: DATABASE_URL

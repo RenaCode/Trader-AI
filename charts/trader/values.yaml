@@ -159,6 +159,14 @@ trainerCron:
   bar: "4h"
   days: 1400
   trials: 60
+  # Cennik podmiotu UNIJNEGO - tam stoi konto (patrz migracja 0018). Taker
+  # kosztuje tam 0,250% zamiast 0,100%, wiec runda zleceniem rynkowym rosnie
+  # z 0,280% do 0,580%. Przy tej stawce mediana Sharpe schodzi ponizej zera:
+  # zlecenia rynkowe na tej gieldzie nie maja sensu, zostaje egzekucja
+  # z limitem, gdzie stawka maker jest identyczna jak globalnie. Pomiar
+  # w docs/03.
+  kind: "spot_eu"
+  limit: true
   # Limity dobrane do ZMIERZONEGO zuzycia (388 MB przy pelnym przebiegu na
   # 24 instrumentach), nie do zapasu "na wszelki wypadek". Wezel ma 7,8 GB
   # i dzieli je z trzema innymi projektami; limit 3 GB dla zadania, ktore

@@ -42,6 +42,18 @@ class Koszty:
 # Klucz: ref.instrument.kind
 CENNIK = {
     "spot": Koszty(maker=0.0010, taker=0.0010, krotka_pozycja=False),
+    # PODMIOT UNIJNY MA INNY CENNIK NIZ GLOBALNY.
+    #
+    # Odczytane z konta przez /v5/account/fee-rate na api-demo.bybit.eu
+    # (2026-09-04, wszystkie 140 par jednakowo): maker 0,100%, taker 0,250%.
+    # Taker jest wiec DWA I POL RAZA drozszy niz na podmiocie globalnym,
+    # a runda zleceniem rynkowym rosnie z 0,280% do 0,580%.
+    #
+    # Konsekwencja jest jednoznaczna i wynika wprost z docs/03: przy 0,280%
+    # zaden sygnal nie pokrywal wlasnych kosztow. Przy 0,580% zlecenia rynkowe
+    # na tym podmiocie nie maja sensu w ogole - zostaje wylacznie egzekucja
+    # z limitem, gdzie stawka maker jest identyczna jak globalnie (0,100%).
+    "spot_eu": Koszty(maker=0.0010, taker=0.0025, krotka_pozycja=False),
     "perp": Koszty(maker=0.0002, taker=0.00055, krotka_pozycja=True),
     # Akcje i ETF-y przez IBKR - stawki prowizyjne, nie procentowe; zaslepka
     # do czasu wdrozenia silnika equity.

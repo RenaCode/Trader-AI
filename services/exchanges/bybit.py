@@ -11,9 +11,31 @@ Rozroznienie hostow jest tu istotne i latwe do pomylenia:
                        orderbook - inne ceny niz rynek)
   - produkcja       -> https://api.bybit.com
 
+PODMIOT UNIJNY TO OSOBNA GIELDA, NIE INNA DOMENA TEJ SAMEJ
+
+Po MiCA uzytkownicy z EOG maja konta na bybit.eu, z wlasnymi hostami
+(https://api.bybit.eu, https://api-demo.bybit.eu). Klucz z bybit.eu dostaje na
+hoscie globalnym odpowiedz 10003 "API key is invalid" - i to jest poprawne
+zachowanie, nie blad klucza.
+
+Roznica siega ksiegi zlecen i listy instrumentow (zmierzone 2026-09-04):
+
+    bybit.com   541 par spot, 399 par *USDT, 859 kontraktow wieczystych
+    bybit.eu    140 par spot,   4 pary *USDT,   0 kontraktow wieczystych
+
+Plynnosc unijna siedzi na parach USDC. Konsekwencja dla projektu jest twarda:
+strategia dwustronna wymaga kontraktow wieczystych (patrz engine/koszty.py),
+a tych podmiot unijny nie oferuje i nie bedzie.
+
 Dane publiczne (swiece, orderbook) bierzemy ZAWSZE z hosta produkcyjnego, bo
 host demo ich nie duplikuje - i o to chodzi: demo ma chodzic po prawdziwych
 cenach, inaczej szesciomiesieczna faza testowa nic nie znaczy.
+
+OGRANICZENIE DEMO, ktore wymusza projekt bazy: gielda trzyma zlecenia z konta
+demo TYLKO 7 DNI. Przy fazie testowej liczonej w miesiacach historia zlecen
+i wypelnien musi byc kompletna PO NASZEJ STRONIE (schemat `exec`) - odtworzenie
+jej z gieldy po fakcie jest niemozliwe. Limit zapytan na demo jest domyslny
+i nie da sie go podniesc.
 """
 from __future__ import annotations
 
@@ -30,7 +52,13 @@ from .base import (
     AuthError, Balance, BookLevel, Candle, ConnectionCheck, ExchangeError, OrderBook,
 )
 
+# Dane publiczne bierzemy z podmiotu GLOBALNEGO niezaleznie od tego, gdzie stoi
+# konto - to on ma ksiege, na ktorej model byl trenowany.
 PUBLIC_HOST = "https://api.bybit.com"
+
+# Hosty PRYWATNE (podpisane zapytania). Domyslne wartosci sluza wylacznie
+# adapterom czytajacym dane publiczne; wlasciwy host przychodzi z ref.venue,
+# zeby nie trzymac tej samej prawdy w dwoch miejscach.
 HOSTS = {
     "demo": "https://api-demo.bybit.com",
     "live": "https://api.bybit.com",
@@ -49,12 +77,16 @@ class BybitAdapter:
     venue_code = "bybit"
 
     def __init__(self, api_key: str, api_secret: str, mode: str = "demo",
-                 category: str = "spot", timeout: float = 15.0):
+                 category: str = "spot", timeout: float = 15.0,
+                 host: str | None = None):
         if mode not in HOSTS:
             raise ValueError(f"nieznany tryb: {mode}")
         self._key = api_key
         self._secret = api_secret.encode()
-        self._host = HOSTS[mode]
+        # Host z ref.venue ma pierwszenstwo. Tabela wie, ktorego PODMIOTU jest
+        # konto - a to nie wynika z samego trybu demo/live, odkad Bybit rozdzielil
+        # sie na globalny i unijny (patrz komentarz na gorze modulu).
+        self._host = host or HOSTS[mode]
         self._category = category
         self._client = httpx.AsyncClient(timeout=timeout)
 
@@ -88,6 +120,13 @@ class BybitAdapter:
         except httpx.HTTPError as e:
             raise ExchangeError(f"blad polaczenia: {e}", retryable=True) from e
 
+        if r.status_code == 404:
+            # BRAK TRASY, nie blad klucza. Podmiot unijny nie wystawia czesci
+            # endpointow konta na hoscie demo, a odpowiedz 404 bywa HTML-em,
+            # wiec bez tego warunku konczylaby sie jako "odpowiedz nie jest
+            # JSON-em" - komunikat nie do odroznienia od awarii.
+            raise ExchangeError(f"endpoint niedostepny na tym hoscie: {path}",
+                                code="404")
         if r.status_code == 429:
             raise ExchangeError("przekroczono limit zapytan", code="429", retryable=True)
         if r.status_code >= 500:
@@ -203,25 +242,41 @@ class BybitAdapter:
         test polaczenia nie moze miec skutkow ubocznych.
         """
         started = time.perf_counter()
+        info: dict = {}
+        note = ""
         try:
             info = await self._get("/v5/user/query-api")
         except AuthError as e:
             return ConnectionCheck(ok=False, message=f"Klucz odrzucony: {e}")
         except ExchangeError as e:
-            return ConnectionCheck(ok=False, message=f"Nie udalo sie polaczyc: {e}")
+            if e.code != "404":
+                return ConnectionCheck(ok=False, message=f"Nie udalo sie polaczyc: {e}")
+            # Host bez endpointu metadanych klucza - tak zachowuje sie demo
+            # podmiotu unijnego. Poswiadczenia sprawdzamy wtedy dowolnym innym
+            # zapytaniem PODPISANYM: przechodzi tylko z poprawnym podpisem,
+            # a stawek prowizji nie da sie niczym zmienic.
+            try:
+                await self._get("/v5/account/fee-rate", {"category": self._category})
+            except AuthError as e2:
+                return ConnectionCheck(ok=False, message=f"Klucz odrzucony: {e2}")
+            except ExchangeError as e2:
+                return ConnectionCheck(ok=False, message=f"Nie udalo sie polaczyc: {e2}")
+            note = (" Ten host nie wystawia metadanych klucza ani salda, "
+                    "wiec uprawnien nie da sie tu odczytac - sprawdz je w panelu gieldy.")
 
         perms_raw = info.get("permissions") or {}
         perms = sorted({p for group in perms_raw.values() if isinstance(group, list) for p in group})
-        can_withdraw = "Withdraw" in perms
+        can_withdraw = "Withdraw" in perms if info else None
 
         balances: list[Balance] = []
-        note = ""
         try:
             balances = await self.fetch_balances()
         except ExchangeError as e:
-            # Klucz dziala, ale nie ma prawa odczytu salda - to wazna informacja
-            # dla uzytkownika, a nie powod, zeby uznac polaczenie za nieudane.
-            note = f" Odczyt salda niedostepny: {e}."
+            # Klucz dziala, ale saldo jest nieczytelne - albo brak uprawnienia,
+            # albo host go nie wystawia. To wazna informacja dla uzytkownika,
+            # a nie powod, zeby uznac polaczenie za nieudane.
+            if e.code != "404":
+                note += f" Odczyt salda niedostepny: {e}."
 
         latency = int((time.perf_counter() - started) * 1000)
         return ConnectionCheck(

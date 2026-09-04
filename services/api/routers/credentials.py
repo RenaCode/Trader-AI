@@ -126,7 +126,8 @@ async def test_credential(credential_id: int, request: Request,
                           user: dict = Depends(current_user)):
     row = await fetch_one(
         """
-        SELECT c.id, c.mode, c.key_enc, c.secret_enc, v.code AS venue_code
+        SELECT c.id, c.mode, c.key_enc, c.secret_enc, v.code AS venue_code,
+               v.demo_host, v.live_host
         FROM app.api_credential c JOIN ref.venue v ON v.id = c.venue_id
         WHERE c.id = %s AND c.user_id = %s
         """,
@@ -141,7 +142,12 @@ async def test_credential(credential_id: int, request: Request,
 
     if row["venue_code"] == "bybit":
         from services.exchanges.bybit import BybitAdapter
-        adapter = BybitAdapter(api_key, api_secret, mode=row["mode"])
+        # Host bierzemy z ref.venue, nie z tablicy w adapterze. Podmiot unijny
+        # ma wlasne hosty, a klucz z bybit.eu odbija sie od globalnego z kodem
+        # 10003 - komunikat nie do odroznienia od zlego klucza.
+        adapter = BybitAdapter(api_key, api_secret, mode=row["mode"],
+                               host=row["demo_host"] if row["mode"] == "demo"
+                               else row["live_host"])
     else:
         raise HTTPException(501, f"Adapter dla {row['venue_code']} nie jest jeszcze gotowy")
 
