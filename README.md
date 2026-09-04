@@ -39,7 +39,10 @@ z osobnymi modelami, osobnym ryzykiem i osobnymi zakładkami w UI.
 - [x] Prowizja w mierze, a nie tylko w krzywej kapitału — odsetek dodatnich
       okien i mediana Sharpe były liczone **przed kosztami** (patrz `docs/03`)
 - [x] Konto demo Bybit **EU** zweryfikowane; cennik odczytany z giełdy
-- [ ] Skaner RSS + analiza Claude — **czeka na klucz API Anthropic**
+- [x] Skaner RSS — 10 kanałów sprawdzonych i zbierających (235 wpisów w pierwszym
+      cyklu, zero błędów); artykuły zapisują się **bez** klucza
+- [ ] Analiza Claude — **czeka na klucz API Anthropic**; do tego czasu
+      `news_shock` jest wykluczany z kalibracji jako sygnał martwy
 - [ ] Egzekucja zleceń — **zablokowana wąskim gardłem podmiotu unijnego**
       (patrz niżej), nie brakiem klucza
 - [ ] Adapter IBKR + silnik equity
@@ -165,7 +168,7 @@ kasuje wszystko, co wygenerował, zostawiając realne dane rynkowe.
 | `features` | cechy z realnych świec, co 5 min | — |
 | `engine` | pętla decyzyjna: reżim → sygnały → risk kernel → dziennik | cechy |
 | `trainer` | walk-forward, raz na dobę, po nim **dozór** | cechy |
-| `news` | RSS → filtr → analiza, co 5 min | klucz Anthropic |
+| `news` | RSS → zapis; z kluczem także filtr → analiza, co 5 min | — |
 
 ## Dozór stanu nauki
 
