@@ -99,10 +99,16 @@ workers:
       limits:   { cpu: 500m, memory: 384Mi }
       requests: { cpu: 50m,  memory: 96Mi }
 
-  # Liczy cechy z realnych swiec na horyzoncie domyslnym (4h).
+  # Liczy cechy na KAZDYM trenowanym horyzoncie.
+  #
+  # Lista musi sie zgadzac z trainerCron.horyzonty. Rozjazd nie objawia sie
+  # awaria: trener po prostu uczy sie na cechach, ktore przestaly przychodzic,
+  # a wynik degraduje sie po cichu z kazda doba. Zdarzylo sie to 2026-09-04 -
+  # drugi horyzont doszedl do trenera, a nie doszedl tutaj, i cechy 1h stanely
+  # na 21 godzin, zanim ktos spojrzal.
   features:
     enabled: true
-    command: ["sh", "-c", "while true; do python services/ingest/features.py --bar 4h --once || true; sleep 900; done"]
+    command: ["sh", "-c", "while true; do for B in 4h 1h; do python services/ingest/features.py --bar $B --once || true; done; sleep 900; done"]
     resources:
       limits:   { cpu: 1000m, memory: 768Mi }
       requests: { cpu: 100m,  memory: 192Mi }

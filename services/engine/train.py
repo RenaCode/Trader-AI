@@ -435,6 +435,34 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
         conn.commit()
         return
 
+    # CECHY, KTORE PRZESTALY PRZYCHODZIC, TO NIE JEST WYNIK - TO AWARIA.
+    #
+    # Trener nie ma jak zauwazyc, ze potok cech dla JEGO horyzontu stanal:
+    # panel po prostu konczy sie wczesniej, okna z konca wypadaja, a odsetek
+    # dodatnich okien zmienia sie o kilka punktow - czyli mniej niz zmierzony
+    # szum. Wynik degraduje sie po cichu z kazda doba.
+    #
+    # Zdarzylo sie to 2026-09-04: drugi horyzont doszedl do zadania cyklicznego,
+    # a nie doszedl do procesu liczacego cechy. Cechy 1h stanely na 21 godzin
+    # i nikt by tego nie zobaczyl, gdyby nie przeglad recznie.
+    #
+    # Prog to `max_staleness_min` tego horyzontu - ta sama liczba, ktorej petla
+    # decyzyjna uzywa przy odczycie point-in-time, a nie osobna stala dobrana tu
+    # na nowo. Kod wyjscia idzie do dozoru, wiec awaria konczy sie
+    # powiadomieniem, a nie wpisem w logu, ktorego nikt nie czyta.
+    najnowszy = max(p[-1]["t"] for p in panels.values())
+    wiek_min = (now - najnowszy).total_seconds() / 60
+    if wiek_min > h.max_staleness_min:
+        komunikat = (f"najnowsza cecha ma {wiek_min:.0f} min, dopuszczalne "
+                     f"{h.max_staleness_min} min — potok cech dla świecy {h.bar} stanął")
+        print(f"\nPRZERWANO: {komunikat}")
+        print(f"  ostatni punkt panelu: {najnowszy:%Y-%m-%d %H:%M} UTC")
+        print(f"  sprawdź: kubectl logs deploy/trader-features --tail=30")
+        cur.execute("UPDATE learn.training_run SET status='failed', finished_at=now(),"
+                    " error=%s WHERE id=%s", (komunikat, run_id))
+        conn.commit()
+        raise SystemExit(2)
+
     idx = 0
     positive = 0
     gate_history: list[float] = []

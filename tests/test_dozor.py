@@ -118,3 +118,22 @@ def test_kilka_powodow_naraz_jest_raportowanych_lacznie():
     p = zmiany(BAZA, wariant(status="degraded", windows_positive=12,
                              median_oos_sharpe=-0.05))
     assert len(p) >= 3
+
+
+# --- kontrola swiezosci cech (services/engine/train.py) ---------------------
+def test_prog_swiezosci_jest_ten_sam_co_w_petli_decyzyjnej():
+    """Trener i pętla decyzyjna muszą używać JEDNEJ liczby.
+
+    Osobna stała dobrana w trenerze rozjechałaby się z progiem, którego pętla
+    używa przy odczycie point-in-time — i wtedy trener uczyłby się na cechach,
+    których produkcja już nie przyjmuje.
+    """
+    from services.engine.horizons import HORIZONS
+
+    for bar, h in HORIZONS.items():
+        assert h.max_staleness_min > 0, bar
+        # Prog musi byc dluzszy niz swieca, inaczej kazdy przebieg tuz po
+        # zamknieciu bariery falszywie zglaszalby awarie.
+        assert h.max_staleness_min > h.bar_minutes, (
+            f"{bar}: prog {h.max_staleness_min} min nie jest dluzszy niz swieca "
+            f"{h.bar_minutes} min")
