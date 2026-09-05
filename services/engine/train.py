@@ -429,11 +429,23 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
             panels[inst["symbol"]] = p
         print(f"  {inst['symbol']:10s} {len(p):>7,} punktów panelu")
     if not panels:
-        print("za mało danych do treningu")
+        # KOD WYJSCIA MUSI TO ODZWIERCIEDLAC.
+        #
+        # Ten przypadek oznaczal `return`, czyli kod 0 - trener konczyl sie
+        # SUKCESEM, nie majac ani jednego punktu danych. Przebieg wygladal
+        # z zewnatrz identycznie jak udany, a dozor nie mial sie o czym dowiedziec,
+        # bo dziennik stanu nie dostawal nowego wiersza i porownywal dwa stare.
+        #
+        # `training_run` byl juz oznaczany jako `failed`, wiec intencja byla
+        # jasna od poczatku - brakowalo tylko, zeby zobaczyl to ktos poza baza.
+        print("PRZERWANO: za mało danych do treningu — żaden instrument nie ma "
+              "panelu dłuższego niż 500 punktów")
+        print(f"  sprawdź: czy świeca {h.bar} ma policzone cechy "
+              f"(proces trader-features) i czy uniwersum nie jest puste")
         cur.execute("UPDATE learn.training_run SET status='failed', finished_at=now(),"
                     " error='za mało punktów panelu' WHERE id=%s", (run_id,))
         conn.commit()
-        return
+        raise SystemExit(2)
 
     # CECHY, KTORE PRZESTALY PRZYCHODZIC, TO NIE JEST WYNIK - TO AWARIA.
     #
