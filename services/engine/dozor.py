@@ -89,8 +89,99 @@ def zmiany(poprzedni: dict | None, biezacy: dict) -> list[str]:
     return powody
 
 
+# Ile moze minac od ostatniego uderzenia serca, zanim uznamy silnik za martwy.
+#
+# Petla decyzyjna budzi sie co 300 s, wiec trzy pominiete cykle to sygnal,
+# a nie wahanie. Zapas jest istotny: po wdrozeniu pod startuje z `sleep 90`
+# i kontrola petli, wiec pierwsze uderzenie potrafi spoznic sie o kilka minut.
+MARTWY_PO_MIN = 15
+
+
+async def sprawdz_zywotnosc(fetch_all, notify, sucho: bool = False) -> int:
+    """Czy silniki, ktore MAJA dzialac, faktycznie bija.
+
+    DLACZEGO TO JEST OSOBNY PROCES
+
+    Martwy proces nie zglosi wlasnej smierci. Petla decyzyjna zapisuje
+    `risk.engine_heartbeat` przy kazdym cyklu, a dashboard to pokazuje - ale
+    dashboard trzeba ogladac. Typ zdarzenia `engine.down` istnial w bazie od
+    migracji 0007, oznaczony jako krytyczny i zawsze wlaczony, i NIKT GO NIGDY
+    NIE WYSYLAL.
+
+    STATUS ODROZNIA ZATRZYMANIE OD AWARII
+
+    Silnik `equity` ma status `halted` i uderzenie sprzed dziesieciu dni, bo nie
+    zostal jeszcze zbudowany. To nie jest awaria i nie ma o czym powiadamiac.
+    Sprawdzamy wylacznie te, ktore twierdza, ze dzialaja.
+
+    TLUMIENIE BEZ DODATKOWEJ KOLUMNY
+
+    Powiadomienie o zdarzeniu `always_on` omija zwykly cooldown, wiec bez
+    tlumienia czujka krzyczalaby przy kazdym przebiegu. Zamiast trzymac stan
+    w osobnej kolumnie sprawdzamy, czy powiadomienie zostalo juz wyslane PO
+    ostatnim uderzeniu serca: jesli tak, ta awaria jest juz zgloszona. Gdy silnik
+    wroci, `last_beat_at` przesunie sie i nastepna awaria bedzie nowa.
+    """
+    silniki = await fetch_all(
+        "SELECT engine::text AS engine, mode::text AS mode, status, last_beat_at,"
+        " round(extract(epoch from (now() - last_beat_at))/60) AS wiek_min"
+        " FROM risk.engine_heartbeat ORDER BY engine")
+    if not silniki:
+        print("brak wpisow o zywotnosci silnikow")
+        return 0
+
+    martwe = []
+    for s in silniki:
+        opis = f"{s['engine']}/{s['mode']}: {s['status']}, ostatnie uderzenie {s['wiek_min']:.0f} min temu"
+        if s["status"] != "running":
+            print(f"  pomijam  {opis} — zatrzymany świadomie")
+            continue
+        if s["wiek_min"] > MARTWY_PO_MIN:
+            martwe.append(s)
+            print(f"  MARTWY   {opis}")
+        else:
+            print(f"  żyje     {opis}")
+
+    if not martwe:
+        return 0
+
+    if sucho:
+        print("Tryb suchy — powiadomienie nie wysyłane.")
+        return 1
+
+    odbiorcy = await fetch_all('SELECT id FROM app."user" WHERE is_active')
+    for s in martwe:
+        juz = await fetch_all(
+            "SELECT 1 FROM notify.notification WHERE event_code = 'engine.down'"
+            " AND engine::text = %s AND created_at > %s LIMIT 1",
+            (s["engine"], s["last_beat_at"]))
+        if juz:
+            print(f"  (awaria {s['engine']} juz zgloszona — cisza)")
+            continue
+        tresc = (f"Ostatnie uderzenie serca {s['wiek_min']:.0f} minut temu "
+                 f"({s['last_beat_at']:%Y-%m-%d %H:%M} UTC), próg to {MARTWY_PO_MIN} min.\n\n"
+                 f"Sprawdź: kubectl logs deploy/trader-engine --tail=50")
+        for u in odbiorcy:
+            await notify(u["id"], "engine.down",
+                         f"Silnik {s['engine']} przestał odpowiadać", tresc,
+                         engine=s["engine"], severity="critical",
+                         data={"wiek_min": float(s["wiek_min"]), "status": s["status"]})
+        print(f"  powiadomiono o {s['engine']}: {len(odbiorcy)} odbiorców")
+
+    # KOD WYJSCIA NIEZEROWY, choc powiadomienie juz poszlo.
+    #
+    # To jest DRUGI, niezalezny sygnal: nieudane zadanie widac w `kubectl get
+    # jobs` nawet wtedy, gdy kanal powiadomien zawiodl. Czujka, ktora polega na
+    # jednej drodze zgloszenia, ma ten sam problem co system, ktory pilnuje.
+    return 1
+
+
 async def main() -> int:
     ap = argparse.ArgumentParser()
+    ap.add_argument("--co", default="stan-nauki",
+                    choices=("stan-nauki", "zywotnosc"),
+                    help="stan-nauki: czy wynik treningu sie zmienil; "
+                         "zywotnosc: czy silniki bija")
     ap.add_argument("--engine", default="crypto")
     # Domyslnie horyzont, ktorym handluje silnik. Tory porownawcze (np. 1h) maja
     # wlasny stan, ale NIE podnosza alarmu - inaczej powiadomienie mowiloby
@@ -111,6 +202,9 @@ async def main() -> int:
 
     await open_pool()
     try:
+        if args.co == "zywotnosc":
+            return await sprawdz_zywotnosc(fetch_all, notify, sucho=args.sucho)
+
         wiersze = await fetch_all(
             "SELECT status, windows_total, windows_positive, positive_ci_low,"
             " positive_ci_high, median_oos_sharpe, max_psi, trials_run, run_at"

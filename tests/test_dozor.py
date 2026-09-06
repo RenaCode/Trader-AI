@@ -157,3 +157,49 @@ def test_kanaly_makro_zostaja_przy_filtrze_silnika():
         "filtr silnika nie przepuszcza kanalow makro (engine IS NULL)")
     assert re.search(r"%s::text\[\] IS NULL OR", zrodlo), (
         "pusta lista silnikow musi znaczyc 'wszystkie kanaly', nie 'zadnych'")
+
+
+# --- czujka zywotnosci silnikow --------------------------------------------
+def test_prog_martwoty_jest_wielokrotnoscia_cyklu_petli():
+    """Pętla budzi się co 300 s. Próg musi zostawiać zapas na wolniejszy cykl
+    i na start poda (`sleep 90` plus kontrola pętli), inaczej każde wdrożenie
+    zgłaszałoby fałszywą awarię."""
+    from services.engine.dozor import MARTWY_PO_MIN
+
+    CYKL_MIN = 5
+    assert MARTWY_PO_MIN >= 3 * CYKL_MIN, \
+        f"próg {MARTWY_PO_MIN} min to mniej niż trzy cykle pętli"
+    assert MARTWY_PO_MIN <= 60, \
+        "próg powyżej godziny czyni czujkę bezużyteczną"
+
+
+def test_czujka_pomija_silnik_zatrzymany_swiadomie():
+    """Silnik `equity` ma status `halted` i uderzenie sprzed dziesięciu dni, bo
+    nie został jeszcze zbudowany. To nie jest awaria."""
+    from pathlib import Path
+
+    zrodlo = Path("services/engine/dozor.py").read_text()
+    assert 'if s["status"] != "running":' in zrodlo, \
+        "czujka nie odróżnia zatrzymania od awarii"
+
+
+def test_czujka_tlumi_powtorne_zgloszenie_tej_samej_awarii():
+    """`engine.down` jest always_on, więc omija zwykły cooldown — bez własnego
+    tłumienia czujka krzyczałaby przy każdym przebiegu."""
+    from pathlib import Path
+
+    zrodlo = Path("services/engine/dozor.py").read_text()
+    assert "created_at > %s" in zrodlo and "event_code = 'engine.down'" in zrodlo, \
+        "brak tłumienia opartego o czas ostatniego uderzenia serca"
+
+
+def test_czujka_konczy_sie_kodem_niezerowym_przy_awarii():
+    """Drugi, niezależny sygnał: nieudane zadanie widać w `kubectl get jobs`
+    nawet wtedy, gdy kanał powiadomień zawiódł."""
+    from pathlib import Path
+
+    zrodlo = Path("services/engine/dozor.py").read_text()
+    ogon = zrodlo[zrodlo.index("async def sprawdz_zywotnosc"):
+                  zrodlo.index("async def main")]
+    assert ogon.rstrip().endswith("return 1"), \
+        "czujka kończy się zerem mimo wykrytej awarii"

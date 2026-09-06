@@ -177,6 +177,13 @@ backup:
   retentionDays: 14
   hostPath: /opt/trader-backups
 
+# Czujka zywotnosci silnikow. Osobny proces, bo martwy proces nie zglosi
+# wlasnej smierci. Przy progu 15 minut i przebiegu co 10 awaria jest zgloszona
+# najpozniej po 25 minutach.
+zywotnoscCron:
+  enabled: true
+  schedule: "*/10 * * * *"
+
 # Trener walk-forward. Zadanie cykliczne, nie proces w Deploymencie - dlugie
 # obliczenia nie moga ginac przy wdrozeniach.
 trainerCron:

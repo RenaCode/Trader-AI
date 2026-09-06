@@ -1,0 +1,49 @@
+{{- if .Values.zywotnoscCron.enabled }}
+# Czujka zywotnosci silnikow.
+#
+# MUSI byc osobnym procesem: martwy proces nie zglosi wlasnej smierci. Petla
+# decyzyjna zapisuje risk.engine_heartbeat przy kazdym cyklu, ale az do
+# 2026-09-06 nikt tego nie czytal poza dashboardem - a typ zdarzenia
+# `engine.down` istnial w bazie od migracji 0007 i nigdy nie zostal wyslany.
+#
+# Czestotliwosc dobrana do progu: przy progu 15 minut i przebiegu co 10 minut
+# awaria jest zgloszona najpozniej po 25 minutach.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: trader-zywotnosc
+  labels: {{- include "trader.labels" . | nindent 4 }}
+spec:
+  schedule: {{ .Values.zywotnoscCron.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  startingDeadlineSeconds: 300
+  jobTemplate:
+    spec:
+      # Bez ponawiania: awaria silnika nie naprawi sie przez powtorzenie
+      # sprawdzenia, a kazde powtorzenie wyslaloby to samo powiadomienie.
+      backoffLimit: 0
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: zywotnosc
+              image: "{{ .Values.api.image.repository }}:{{ .Values.api.image.tag }}"
+              imagePullPolicy: {{ .Values.api.image.pullPolicy }}
+              command: ["python", "services/engine/dozor.py", "--co", "zywotnosc"]
+              env:
+                - name: APP_DB_PASSWORD
+                  valueFrom:
+                    secretKeyRef: { name: {{ .Values.secretName }}, key: APP_DB_PASSWORD }
+                - name: DATABASE_URL
+                  value: "postgresql://{{ .Values.db.appUsername }}:$(APP_DB_PASSWORD)@trader-db:5432/{{ .Values.db.database }}"
+                - name: SECRETS_KEY
+                  valueFrom:
+                    secretKeyRef: { name: {{ .Values.secretName }}, key: SECRETS_KEY }
+                - name: PYTHONUNBUFFERED
+                  value: "1"
+              resources:
+                limits:   { cpu: 200m, memory: 256Mi }
+                requests: { cpu: 20m,  memory: 64Mi }
+{{- end }}
