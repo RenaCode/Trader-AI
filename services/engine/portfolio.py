@@ -31,6 +31,7 @@ from decimal import Decimal
 from services.engine.horizons import Horizon
 from services.engine.koszty import POSLIZG_MAKER, POSLIZG_TAKER, koszty
 from services.engine.risk_rules import (
+    START_EQUITY, udzial_budzetu,
     DEFAULT_LIMITS, RiskState, evaluate_account, evaluate_limits, position_budget,
 )
 from services.engine.signals import classify_regime, combine, evaluate, precompute
@@ -39,7 +40,8 @@ from services.engine.signals import classify_regime, combine, evaluate, precompu
 # bo zaleza od RODZAJU instrumentu i typu zlecenia - wczesniej byla tu jedna
 # stala 0,055%, czyli stawka taker kontraktow wieczystych, stosowana takze do
 # instrumentow spotowych, gdzie Bybit liczy 0,1%.
-START_EQUITY = 100_000.0
+# START_EQUITY, MIN_CONFIDENCE i udzial_budzetu przychodza z risk_rules -
+# patrz komentarz przy nich. Tu byly zdefiniowane po raz drugi.
 # Bazowa wielkosc zlecenia wyprowadzana z limitu ekspozycji i liczby
 # instrumentow - patrz risk_rules.position_budget().
 
@@ -139,8 +141,8 @@ def _wypelnione(limit: float, swieca: dict, kupno: bool) -> bool:
 
 
 def _sizing(score: float, price: float, baza: float) -> tuple[float, float]:
-    """Wielkosc zlecenia dokladnie jak w petli decyzyjnej."""
-    notional = baza * min(1.0, abs(score) * 2)
+    """Wielkosc zlecenia z REGULY WSPOLNEJ z petla decyzyjna, nie z jej kopii."""
+    notional = baza * udzial_budzetu(score)
     return notional, notional / price
 
 

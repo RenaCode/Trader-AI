@@ -184,6 +184,40 @@ DEFAULT_LIMITS = {
 }
 
 
+# --------------------------------------------------------------- wspolne stale
+#
+# Te trzy rzeczy byly do 2026-09-06 zdefiniowane OSOBNO w symulacji, w trenerze
+# i w petli decyzyjnej. Wartosci sie zgadzaly, wiec nic nie bylo widac - ale to
+# jest dokladnie ten uklad, ktory ten modul mial wykluczyc (patrz docstring
+# wyzej). Tego samego dnia znaleziono w projekcie dwa rozjazdy tego rodzaju:
+# stawke prowizji zapisana osobno w petli i regule wypelnienia limitu, ktora
+# omal nie zostala przepisana po raz drugi.
+
+# Kapital poczatkowy rachunku. Symulacja i rachunek papierowy musza startowac
+# z tej samej liczby, inaczej ich krzywe nie sa porownywalne.
+START_EQUITY = 100_000.0
+
+# Prog pewnosci, ponizej ktorego sygnal nie prowadzi do wejscia. Trener kalibruje
+# wagi przy TYM progu; gdyby produkcja stosowala inny, handlowalaby innym
+# podzbiorem sygnalow niz ten, na ktorym mierzono wynik.
+MIN_CONFIDENCE = 0.25
+
+
+def udzial_budzetu(score: float) -> float:
+    """Jaka czesc budzetu na pozycje angazuje sygnal o sile `score`.
+
+    Wzor byl przepisany w dwoch miejscach: `portfolio._sizing` z komentarzem
+    "wielkosc zlecenia dokladnie jak w petli decyzyjnej" - czyli z jawnym
+    przyznaniem, ze to kopia. Kopia opisana w komentarzu nadal jest kopia
+    i rozjedzie sie przy pierwszej zmianie.
+
+    Zwracamy sam UDZIAL, a nie gotowa wielkosc: petla liczy w Decimal i zaokragla
+    do groszy, symulacja we float. Dzielenie sie sama regula, a nie arytmetyka,
+    nie zmusza zadnej ze stron do zmiany typu.
+    """
+    return min(1.0, abs(score) * 2)
+
+
 def position_budget(limits: dict[str, dict], n_instruments: int,
                     fallback: Decimal = Decimal("3000")) -> Decimal:
     """Bazowa wielkosc zlecenia wyprowadzona z limitu lacznej ekspozycji.

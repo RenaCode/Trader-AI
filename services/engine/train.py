@@ -41,6 +41,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import psycopg
 from psycopg.rows import dict_row
 
+from services.engine.risk_rules import MIN_CONFIDENCE
 from services.engine.horizons import DEFAULT_BAR, HORIZONS, Horizon, get as get_horizon
 from services.engine.portfolio import (
     Egzekucja, kup_i_trzymaj, metrics as portfolio_metrics, precompute_panels,
@@ -64,7 +65,10 @@ from services.engine.signals import (
 # przenosi sie miedzy horyzontami sam.
 ENTER_PCTL = 0.88
 EXIT_RATIO = 0.45          # wyjscie przy spadku sily sygnalu do 45% progu wejscia
-MIN_CONF = 0.25
+# Prog pewnosci przychodzi z risk_rules - ta sama liczba, ktora stosuje petla
+# decyzyjna. Zdefiniowany tu osobno oznaczalby, ze trener kalibruje wagi przy
+# innym progu, niz produkcja potem stosuje.
+MIN_CONF = MIN_CONFIDENCE
 
 # Minimum informatywnych okien, ponizej ktorego NIE WOLNO orzec "zwalidowane".
 # Bez tego jedno dodatnie okno przy 40 pominietych dawalo 100% skutecznosci

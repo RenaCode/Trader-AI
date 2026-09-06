@@ -39,7 +39,9 @@ from services.engine.horizons import DEFAULT_BAR, HORIZONS, Horizon, get as get_
 from services.engine.risk import RiskKernel
 from services.engine.koszty import POSLIZG_MAKER, POSLIZG_TAKER, koszty
 from services.engine.portfolio import _wypelnione
-from services.engine.risk_rules import position_budget
+from services.engine.risk_rules import (
+    MIN_CONFIDENCE, START_EQUITY as START_EQUITY_WSPOLNY, position_budget, udzial_budzetu,
+)
 from services.engine.signals import SIGNALS, classify_regime, evaluate
 
 # Progi awaryjne - obowiazuja WYLACZNIE, dopoki nie ma aktywnej wersji modelu.
@@ -48,7 +50,8 @@ from services.engine.signals import SIGNALS, classify_regime, evaluate
 # w dwoch miejscach bylo pewna droga do rozjazdu trening-produkcja.
 ENTER_THRESHOLD = 0.25
 EXIT_THRESHOLD = 0.12
-MIN_CONFIDENCE = 0.25
+# MIN_CONFIDENCE i START_EQUITY: patrz risk_rules. Byly tu zdefiniowane
+# po raz drugi, obok tych samych wartosci w symulacji i w trenerze.
 
 # PROWIZJA I POSLIZG POCHODZA Z services/engine/koszty.py, NIE Z TEGO PLIKU.
 #
@@ -66,7 +69,7 @@ MIN_CONFIDENCE = 0.25
 # Model egzekucji (rodzaj instrumentu + limit/rynek) przychodzi z wiersza
 # polecen, tak samo jak w trenerze, i jest ustawiany z jednego miejsca w charcie.
 
-START_EQUITY = Decimal("100000")
+START_EQUITY = Decimal(str(START_EQUITY_WSPOLNY))
 
 
 def ensure_signal_defs(cur, engine: str) -> dict[str, int]:
@@ -784,7 +787,7 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
         qty = Decimal(0)
         notional = Decimal(0)
         if action in ("enter_long", "enter_short"):
-            notional = (baza * Decimal(str(min(1.0, abs(score) * 2)))).quantize(Decimal("0.01"))
+            notional = (baza * Decimal(str(udzial_budzetu(score)))).quantize(Decimal("0.01"))
             qty = (notional / price).quantize(Decimal("0.000001"))
 
         if action.startswith("enter") and wejscia_wstrzymane:
