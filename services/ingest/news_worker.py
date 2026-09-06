@@ -266,6 +266,134 @@ def spent_today(cur) -> float:
     return float(cur.fetchone()["s"])
 
 
+def zapisz_analize(cur, article_id: int, data: dict, usage: dict, price: float,
+                   published, instruments: dict[str, int]) -> None:
+    """Zapis wyniku analizy i powiazan z instrumentami.
+
+    Wydzielone, bo korzystaja z tego DWIE sciezki: analiza swiezo pobranego
+    artykulu i nadrabianie zaleglosci. Dwie kopie tego zapisu rozjechalyby sie
+    przy pierwszej zmianie schematu, a roznica byla by niewidoczna.
+
+    `ingested_at = now()` jest tu istotne i celowe: mowi, KIEDY POZNALISMY ten
+    wynik. compute_news bierze pod uwage wylacznie analizy gotowe przed dana
+    swieca (`an.ingested_at <= b.t`), wiec artykul przeanalizowany z opoznieniem
+    nie wchodzi wstecz do swiec, ktorych wtedy nie mogl dotyczyc.
+    """
+    cur.execute(
+        "INSERT INTO news.article_analysis (article_id, model, prompt_version, direction,"
+        " magnitude, horizon, confidence, novelty, reasoning, raw, input_tokens,"
+        " output_tokens, cost_usd, event_time, ingested_at)"
+        " VALUES (%s,%s,'v1',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s, now())",
+        (article_id, ANALYSIS_MODEL, data["direction"],
+         max(0.0, min(1.0, data["magnitude"])), data["horizon"],
+         max(0.0, min(1.0, data["confidence"])), max(0.0, min(1.0, data["novelty"])),
+         data["reasoning"], json.dumps(data), usage["input"], usage["output"],
+         price, published),
+    )
+    for sym in data.get("instruments", []):
+        iid = instruments.get(sym.upper())
+        if iid:
+            cur.execute(
+                "INSERT INTO news.article_instrument (article_id, instrument_id, relevance)"
+                " VALUES (%s,%s,%s) ON CONFLICT DO NOTHING",
+                (article_id, iid, max(0.0, min(1.0, data["confidence"]))),
+            )
+
+
+# Okno, w ktorym artykul moze jeszcze wejsc do jakiejkolwiek swiecy.
+#
+# NIE JEST TO LICZBA DOBRANA NA OKO. compute_news liczy sentyment swiecy `t`
+# z artykulow spelniajacych `a.event_time > t - 24 godziny` ORAZ analiz
+# spelniajacych `an.ingested_at <= t`. Artykul opublikowany o P i przeanalizowany
+# o A wchodzi wiec do swiecy t tylko wtedy, gdy A <= t < P + 24 h - czyli
+# WYLACZNIE gdy analiza nastapila w ciagu doby od publikacji.
+#
+# Starszy artykul nie zasili juz zadnej swiecy, niezaleznie od tego, ile za jego
+# analize zaplacimy.
+OKNO_ZALEGLOSCI_H = 24
+
+
+async def nadrob_zaleglosci(conn, cur, ai: AsyncAnthropic, instruments: dict[str, int],
+                            symbols: list[str], wydano: float, stats: dict,
+                            verbose: bool) -> float:
+    """Analiza artykulow zapisanych wczesniej, ktore analizy nie dostaly.
+
+    DLACZEGO TO ISTNIEJE
+
+    Proces potrafi pobierac artykuly bez klucza Anthropic (tryb --auto), zeby
+    material nie przepadal - kanal RSS nie odda jutro tego, czego dzis nie
+    pobralismy. Ale zwykly cykl pomija artykul, ktorego `content_hash` juz jest
+    w bazie, wiec po pojawieniu sie klucza zaleglosci nie zostalyby tkniete.
+
+    ILE TO REALNIE ODZYSKUJE
+
+    Tylko artykuly z ostatniej doby - patrz OKNO_ZALEGLOSCI_H. Zmierzone
+    2026-09-06: z 496 zapisanych artykulow w oknie miescily sie 23. Reszta
+    zostaje jako material badawczy i nie da sie jej juz uzyc jako cechy.
+
+    KOLEJNOSC OD NAJNOWSZYCH
+
+    Gdy budzet dobowy sie skonczy, tracimy najstarsze - czyli te, ktorym do
+    wypadniecia z okna zostalo najmniej czasu.
+    """
+    cur.execute(
+        "SELECT a.id, a.title, a.summary, a.event_time, f.name AS feed"
+        " FROM news.article a"
+        " JOIN news.feed f ON f.id = a.feed_id"
+        " LEFT JOIN news.article_analysis an ON an.article_id = a.id"
+        " WHERE an.id IS NULL"
+        "   AND a.event_time > now() - make_interval(hours => %s)"
+        " ORDER BY a.event_time DESC", (OKNO_ZALEGLOSCI_H,))
+    zalegle = cur.fetchall()
+    if not zalegle:
+        return wydano
+    if verbose:
+        print(f"  zaległości do przeanalizowania: {len(zalegle)}")
+
+    for a in zalegle:
+        if wydano >= DAILY_LIMIT_USD:
+            if verbose:
+                print(f"    [stop] limit dobowy ${DAILY_LIMIT_USD:.2f} osiągnięty, "
+                      f"zostało {len(zalegle) - stats['zaleglosci']} zaległych")
+            break
+        try:
+            worth, why, tri_usage = await triage(ai, a["title"], a["summary"] or "")
+        except Exception as e:                                # noqa: BLE001
+            stats["bledy"] += 1
+            if verbose:
+                print(f"    filtr padl: {type(e).__name__}: {e}")
+            continue
+        tri_cost = cost_usd(TRIAGE_MODEL, tri_usage)
+        record_spend(cur, TRIAGE_MODEL, "triage", tri_usage, tri_cost)
+        conn.commit()
+        stats["koszt"] += tri_cost
+        wydano += tri_cost
+        if not worth:
+            continue
+
+        try:
+            data, usage = await analyze(ai, a["title"], a["summary"] or "", a["feed"],
+                                        a["event_time"], symbols)
+        except Exception as e:                                # noqa: BLE001
+            stats["bledy"] += 1
+            if verbose:
+                print(f"    analiza padla: {type(e).__name__}: {e}")
+            continue
+        if not data.get("relevant"):
+            continue
+
+        price = cost_usd(ANALYSIS_MODEL, usage)
+        record_spend(cur, ANALYSIS_MODEL, "analysis", usage, price)
+        stats["koszt"] += price
+        wydano += price
+        zapisz_analize(cur, a["id"], data, usage, price, a["event_time"], instruments)
+        conn.commit()
+        stats["zaleglosci"] += 1
+        if verbose:
+            print(f"    [zaległy] {data['direction']:>7s} {a['title'][:60]}")
+    return wydano
+
+
 async def run_cycle(conn, ai: AsyncAnthropic | None, http: httpx.AsyncClient,
                     verbose: bool, analizuj: bool = True,
                     silniki: list[str] | None = None) -> dict:
@@ -320,7 +448,8 @@ async def run_cycle(conn, ai: AsyncAnthropic | None, http: httpx.AsyncClient,
     feeds = cur.fetchall()
 
     stats = {"kanaly": len(feeds), "pobrane": 0, "nowe": 0, "przeszly_filtr": 0,
-             "przeanalizowane": 0, "zapisane": 0, "koszt": 0.0, "bledy": 0}
+             "przeanalizowane": 0, "zapisane": 0, "zaleglosci": 0,
+             "koszt": 0.0, "bledy": 0}
 
     for feed in feeds:
         entries, status = await fetch_feed(http, feed["url"])
@@ -424,26 +553,7 @@ async def run_cycle(conn, ai: AsyncAnthropic | None, http: httpx.AsyncClient,
                 continue
             article_id = row["id"]
 
-            cur.execute(
-                "INSERT INTO news.article_analysis (article_id, model, prompt_version, direction,"
-                " magnitude, horizon, confidence, novelty, reasoning, raw, input_tokens,"
-                " output_tokens, cost_usd, event_time, ingested_at)"
-                " VALUES (%s,%s,'v1',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s, now())",
-                (article_id, ANALYSIS_MODEL, data["direction"],
-                 max(0.0, min(1.0, data["magnitude"])), data["horizon"],
-                 max(0.0, min(1.0, data["confidence"])), max(0.0, min(1.0, data["novelty"])),
-                 data["reasoning"], json.dumps(data), usage["input"], usage["output"],
-                 price, published),
-            )
-
-            for sym in data.get("instruments", []):
-                iid = instruments.get(sym.upper())
-                if iid:
-                    cur.execute(
-                        "INSERT INTO news.article_instrument (article_id, instrument_id, relevance)"
-                        " VALUES (%s,%s,%s) ON CONFLICT DO NOTHING",
-                        (article_id, iid, max(0.0, min(1.0, data["confidence"]))),
-                    )
+            zapisz_analize(cur, article_id, data, usage, price, published, instruments)
 
             if verbose:
                 print(f"    [{data['direction']:>7s}] siła {data['magnitude']:.2f} "
@@ -457,6 +567,15 @@ async def run_cycle(conn, ai: AsyncAnthropic | None, http: httpx.AsyncClient,
             (status, seen, kept, feed["id"]),
         )
         conn.commit()
+
+    # ZALEGLOSCI NA KONCU, nie na poczatku.
+    #
+    # Swiezo pobrany artykul ma pierwszenstwo przed zaleglym: jest blizej srodka
+    # swojego okna waznosci, wiec zdazy zasilic wiecej swiec. Przy wyczerpaniu
+    # budzetu dobowego tracimy wiec to, co i tak stracilibysmy najszybciej.
+    if analizuj and ai is not None:
+        wydano = await nadrob_zaleglosci(conn, cur, ai, instruments, symbols,
+                                         wydano, stats, verbose)
 
     return stats
 
@@ -520,8 +639,9 @@ async def main() -> int:
                     # cykl bez klucza raportowal "zapisanych 0" po zapisaniu 234
                     # artykulow - log gorszy niz zaden, bo wygladal na awarie.
                     analiza = (f"przez filtr {s['przeszly_filtr']}, "
-                               f"przeanalizowanych {s['przeanalizowane']}, "
-                               f"koszt ${s['koszt']:.4f}"
+                               f"przeanalizowanych {s['przeanalizowane']}"
+                               + (f", zaległych {s['zaleglosci']}" if s['zaleglosci'] else "")
+                               + f", koszt ${s['koszt']:.4f}"
                                if analizuj else "bez analizy (brak klucza)")
                     print(f"[{started:%H:%M:%S}] kanałów {s['kanaly']}, wpisów {s['pobrane']}, "
                           f"nowych {s['nowe']}, zapisanych {s['zapisane']}, {analiza}, "
