@@ -170,6 +170,33 @@ kasuje wszystko, co wygenerował, zostawiając realne dane rynkowe.
 | `trainer` | walk-forward, raz na dobę, po nim **dozór** | cechy |
 | `news` | RSS → zapis; z kluczem także filtr → analiza, co 5 min | — |
 
+## Niezmiennik danych rynkowych
+
+**Do bazy trafiają wyłącznie świece ZAMKNIĘTE, a zapis je poprawia.**
+
+`event_time` świecy to jej **początek**, więc warunek `event_time < now`
+przepuszczał świecę trwającą — o 09:01 świeca 09:00 lądowała w bazie z zakresem
+jednej minuty. Ponieważ wznawianie zaczynało od najnowszej posiadanej świecy,
+a zapis pomijał konflikt, taka świeca nie była już nigdy odpytywana.
+
+Zmierzone 2026-09-06 na BTCUSDC, 55 godzin z kompletem świec minutowych:
+zamknięcie zgodne z faktycznym w **9 przypadkach**, zapisany zakres high-low
+równy **39%** prawdziwego. Każda cecha z nich policzona — ATR, położenie
+w zakresie, reżim zmienności — dziedziczyła to zaniżenie.
+
+Trzy reguły, które to trzymają:
+
+| reguła | gdzie |
+|---|---|
+| tylko świece domknięte: `event_time + step <= now` | `backfill.py`, `market_worker.py` |
+| zapis **poprawia** istniejące, gdy wartości się różnią | `batched_insert`, `insert_values` |
+| zakładka trzech świec przy wznawianiu | `backfill.py` |
+
+Razem sprawiają, że potok **leczy się sam**: błędna świeca zostaje nadpisana
+przy następnym przebiegu, a cechy z niej policzone — przy następnym liczeniu.
+Tryb `backfill.py --napraw` pobiera zadane okno od nowa, gdy zakładka nie sięga
+wystarczająco daleko wstecz.
+
 ## Egzekucja papierowa
 
 Silnik nie składa zleceń na giełdzie — prowadzi **własny rachunek papierowy**
