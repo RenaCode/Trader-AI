@@ -71,3 +71,16 @@ def test_plan_wazny_jest_przez_jedna_nastepna_swiece():
     """
     assert "2 * h.bar_minutes" in ZRODLO, \
         "termin ważności planu nie odpowiada jednej następnej świecy"
+
+
+def test_swieca_trwajaca_nie_moze_byc_oceniana():
+    """Kanarek na lukę znalezioną przy weryfikacji na produkcji.
+
+    `zakres_swiecy` zwracała dane dla świecy, która się jeszcze nie domknęła —
+    bo w środku były już świece źródłowe. Chronił przed tym wyłącznie warunek
+    u wywołującego, a ten przestaje wystarczać po przestoju silnika, gdy minie
+    termin ważności planu. Zakres trwającej świecy jeszcze rośnie, więc
+    orzekanie na niej wypełnienia byłoby zgadywaniem.
+    """
+    assert "if koniec > datetime.now(timezone.utc):" in ZRODLO, \
+        "zakres_swiecy nie odmawia oceny świecy, która się nie domknęła"

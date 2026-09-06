@@ -292,10 +292,18 @@ def zakres_swiecy(cur, instrument_id: int, h: Horizon,
     liczyla ja inaczej, sprawdzenie wypelnienia dotyczyloby innej swiecy niz ta,
     na ktorej model byl kalibrowany.
 
-    Zwraca None, gdy swieca nie jest jeszcze kompletna - wtedy nie ma czego
-    rozstrzygac i plan czeka.
+    Zwraca None, gdy swieca SIE JESZCZE NIE DOMKNELA. Warunek jest czasowy,
+    a nie oparty na liczbie swiec zrodlowych, i to jest celowe: przerwa w danych
+    gieldy nie powinna w nieskonczonosc blokowac rozstrzygniecia, a swieca
+    trwajaca nie powinna byc oceniana NIGDY - jej zakres jeszcze rosnie.
+
+    Ochrona jest tutaj, a nie tylko u wywolujacego. Przy przestoju silnika
+    warunek czasowy w rozstrzygnij_plany przestaje wystarczac (mija termin
+    waznosci planu), wiec funkcja musi bronic sie sama.
     """
     koniec = poczatek + timedelta(minutes=h.bar_minutes)
+    if koniec > datetime.now(timezone.utc):
+        return None
     cur.execute(
         "SELECT max(high) AS high, min(low) AS low,"
         " (array_agg(close ORDER BY event_time DESC))[1] AS close,"
