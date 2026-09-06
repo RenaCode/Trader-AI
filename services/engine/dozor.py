@@ -182,12 +182,80 @@ async def sprawdz_zywotnosc(fetch_all, notify, sucho: bool = False,
     return 1
 
 
+async def sprawdz_ryzyko(fetch_all, notify, sucho: bool = False) -> int:
+    """Czy kill-switch zadzialal i nikt sie o tym nie dowiedzial.
+
+    Kill-switch to moment, w ktorym system SAM SIEBIE zatrzymuje - po
+    przekroczeniu limitu straty dziennej albo obsuniecia kapitalu. Wymaga
+    RECZNEGO odblokowania (patrz RiskKernel._trigger_killswitch), wiec dopoki
+    nikt go nie zwolni, silnik nie wejdzie w zadna pozycje.
+
+    Typ zdarzenia `killswitch.triggered` jest w bazie od migracji 0007,
+    oznaczony jako krytyczny i zawsze wlaczony. Komentarz przy tabeli
+    heartbeatu mowi wprost: "Brak sygnalu => wstrzymanie I ALERT". Wstrzymanie
+    zbudowano, alertu nie.
+
+    Bez powiadomienia system po zadzialaniu kill-switcha wyglada dokladnie tak
+    samo jak system, ktory nie ma sygnalu do wejscia: zero decyzji `enter`,
+    zadnego bledu w logu, heartbeat bije dalej. Roznica - ze przestal handlowac
+    NA STALE - byla widoczna wylacznie dla kogos, kto zajrzalby do
+    risk.killswitch_event.
+
+    Tlumienie jak przy zywotnosci: sprawdzamy, czy powiadomienie poszlo juz po
+    `triggered_at`. Zdarzenie zwolnione (released_at) pomijamy - problem zostal
+    obsluzony przez czlowieka.
+    """
+    zdarzenia = await fetch_all(
+        "SELECT k.id, k.engine::text AS engine, k.mode::text AS mode, k.reason,"
+        "       k.triggered_at,"
+        "       round(extract(epoch from (now() - k.triggered_at))/60) AS wiek_min"
+        " FROM risk.killswitch_event k"
+        " WHERE k.released_at IS NULL"
+        " ORDER BY k.triggered_at")
+    if not zdarzenia:
+        print("kill-switch: brak aktywnych zdarzeń")
+        return 0
+
+    odbiorcy = await fetch_all('SELECT id FROM app."user" WHERE is_active')
+    nowe = 0
+    for z in zdarzenia:
+        print(f"  KILL-SWITCH {z['engine']}/{z['mode']}: {z['reason']} "
+              f"({z['wiek_min']:.0f} min temu)")
+        juz = await fetch_all(
+            "SELECT 1 FROM notify.notification WHERE event_code = 'killswitch.triggered'"
+            " AND engine::text = %s AND created_at > %s LIMIT 1",
+            (z["engine"], z["triggered_at"]))
+        if juz:
+            print("    (już zgłoszone — cisza)")
+            continue
+        nowe += 1
+        if sucho:
+            continue
+        tresc = (f"{z['reason']}\n\nSilnik NIE WEJDZIE w żadną pozycję do czasu "
+                 f"ręcznego zwolnienia — kill-switch nie wygasa sam, bo automatyczne "
+                 f"wznowienie po obsunięciu to najprostsza droga do powtórzenia tej "
+                 f"samej straty.\n\nZwolnienie: zakładka Ryzyko w interfejsie.")
+        for u in odbiorcy:
+            await notify(u["id"], "killswitch.triggered",
+                         f"Kill-switch zadziałał ({z['engine']})", tresc,
+                         engine=z["engine"], severity="critical",
+                         data={"reason": z["reason"], "event_id": z["id"]})
+        print(f"    powiadomiono: {len(odbiorcy)} odbiorców")
+
+    if sucho and nowe:
+        print("Tryb suchy — powiadomienie nie wysyłane.")
+    # Kod niezerowy tylko przy NOWYM zdarzeniu. Kill-switch czekajacy na
+    # zwolnienie jest stanem znanym, a nie powtarzajaca sie awaria zadania.
+    return 1 if nowe else 0
+
+
 async def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--co", default="stan-nauki",
-                    choices=("stan-nauki", "zywotnosc"),
+                    choices=("stan-nauki", "zywotnosc", "ryzyko"),
                     help="stan-nauki: czy wynik treningu sie zmienil; "
-                         "zywotnosc: czy silniki bija")
+                         "zywotnosc: czy silniki bija; "
+                         "ryzyko: czy kill-switch zadzialal")
     ap.add_argument("--prog-min", type=int, default=None, dest="prog_min",
                     help="prog martwoty w minutach; do wywolania sciezki alarmowej "
                          "na zadanie. Domyslnie stala MARTWY_PO_MIN")
@@ -214,6 +282,8 @@ async def main() -> int:
         if args.co == "zywotnosc":
             return await sprawdz_zywotnosc(fetch_all, notify, sucho=args.sucho,
                                            prog_min=args.prog_min)
+        if args.co == "ryzyko":
+            return await sprawdz_ryzyko(fetch_all, notify, sucho=args.sucho)
 
         wiersze = await fetch_all(
             "SELECT status, windows_total, windows_positive, positive_ci_low,"

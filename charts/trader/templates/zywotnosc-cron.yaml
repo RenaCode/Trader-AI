@@ -31,7 +31,18 @@ spec:
             - name: zywotnosc
               image: "{{ .Values.api.image.repository }}:{{ .Values.api.image.tag }}"
               imagePullPolicy: {{ .Values.api.image.pullPolicy }}
-              command: ["python", "services/engine/dozor.py", "--co", "zywotnosc"]
+              # Dwie czujki w jednym zadaniu: zywotnosc silnikow i kill-switch.
+              # Obie odpowiadaja na to samo pytanie - czy system jest w stanie,
+              # o ktorym czlowiek MUSI wiedziec - i obie musza dzialac w procesie
+              # innym niz obserwowany.
+              command:
+                - sh
+                - -c
+                - |
+                  RC=0
+                  python services/engine/dozor.py --co zywotnosc || RC=$?
+                  python services/engine/dozor.py --co ryzyko    || RC=$?
+                  exit $RC
               env:
                 - name: APP_DB_PASSWORD
                   valueFrom:

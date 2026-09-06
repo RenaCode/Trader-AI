@@ -159,6 +159,22 @@ def test_kanaly_makro_zostaja_przy_filtrze_silnika():
         "pusta lista silnikow musi znaczyc 'wszystkie kanaly', nie 'zadnych'")
 
 
+def _cialo(nazwa: str) -> str:
+    """Ciało jednej funkcji z dozor.py.
+
+    Cięcie „od tej funkcji do `async def main`" było kruche: wstawienie nowej
+    funkcji pomiędzy nie psuło kodu, tylko test — czyli zgłaszało fałszywy
+    problem tam, gdzie go nie było.
+    """
+    from pathlib import Path
+
+    zrodlo = Path("services/engine/dozor.py").read_text()
+    start = zrodlo.index(f"async def {nazwa}")
+    reszta = zrodlo[start + 1:]
+    kolejna = reszta.find("\nasync def ")
+    return reszta[:kolejna] if kolejna >= 0 else reszta
+
+
 # --- czujka zywotnosci silnikow --------------------------------------------
 def test_prog_martwoty_jest_wielokrotnoscia_cyklu_petli():
     """Pętla budzi się co 300 s. Próg musi zostawiać zapas na wolniejszy cykl
@@ -198,8 +214,26 @@ def test_czujka_konczy_sie_kodem_niezerowym_przy_awarii():
     nawet wtedy, gdy kanał powiadomień zawiódł."""
     from pathlib import Path
 
-    zrodlo = Path("services/engine/dozor.py").read_text()
-    ogon = zrodlo[zrodlo.index("async def sprawdz_zywotnosc"):
-                  zrodlo.index("async def main")]
+    ogon = _cialo("sprawdz_zywotnosc")
     assert ogon.rstrip().endswith("return 1"), \
         "czujka kończy się zerem mimo wykrytej awarii"
+
+
+# --- czujka kill-switcha ----------------------------------------------------
+def test_czujka_ryzyka_pomija_zdarzenia_zwolnione():
+    """Kill-switch zwolniony ręcznie to problem OBSŁUŻONY — powtarzanie alarmu
+    o nim nauczyłoby ignorować alarm o nowym."""
+    assert "WHERE k.released_at IS NULL" in _cialo("sprawdz_ryzyko")
+
+
+def test_czujka_ryzyka_tlumi_powtorne_zgloszenie():
+    cialo = _cialo("sprawdz_ryzyko")
+    assert "event_code = 'killswitch.triggered'" in cialo
+    assert "created_at > %s" in cialo
+
+
+def test_czujka_ryzyka_alarmuje_tylko_o_NOWYM_zdarzeniu():
+    """Kill-switch czekający na zwolnienie jest stanem znanym, a nie
+    powtarzającą się awarią zadania — inaczej `kubectl get jobs` pokazywałby
+    porażkę co dziesięć minut aż do ręcznej interwencji."""
+    assert "return 1 if nowe else 0" in _cialo("sprawdz_ryzyko")
