@@ -237,3 +237,36 @@ def test_czujka_ryzyka_alarmuje_tylko_o_NOWYM_zdarzeniu():
     powtarzającą się awarią zadania — inaczej `kubectl get jobs` pokazywałby
     porażkę co dziesięć minut aż do ręcznej interwencji."""
     assert "return 1 if nowe else 0" in _cialo("sprawdz_ryzyko")
+
+
+# --- czujka kopii zapasowych ------------------------------------------------
+def test_czujka_kopii_uzywa_wlasnego_typu_zdarzenia():
+    """Doklejenie się do `engine.down` zaśmieciłoby historię: „silnik przestał
+    odpowiadać" przy działającym silniku uczy czytać alarmy nieuważnie."""
+    cialo = _cialo("sprawdz_kopie")
+    assert '"backup.missing"' in cialo
+    assert '"engine.down"' not in cialo
+
+
+def test_prog_swiezosci_kopii_zostawia_zapas_na_dobowy_harmonogram():
+    from services.engine.dozor import KOPIA_STARA_PO_H
+
+    assert 24 < KOPIA_STARA_PO_H <= 36, \
+        "próg musi przekraczać dobę (zapas na wolny zrzut), ale nie tolerować dwóch"
+
+
+def test_pusty_dziennik_kopii_to_nie_awaria():
+    """Tuż po wdrożeniu dziennik jest pusty, bo zadanie jeszcze nie przebiegło.
+    Alarm w tej sytuacji byłby fałszywy — i pierwszym, jaki zobaczy użytkownik."""
+    cialo = _cialo("sprawdz_kopie")
+    assert "dziennik pusty" in cialo
+    i_pusty = cialo.index("dziennik pusty")
+    assert "return 0" in cialo[i_pusty:i_pusty + 200]
+
+
+def test_czujka_kopii_wykrywa_skurczenie():
+    """Zrzut, który stracił dane, nadal przechodzi pg_restore --list."""
+    from services.engine.dozor import KOPIA_SKURCZ
+
+    assert 0 < KOPIA_SKURCZ < 1
+    assert 'poprzednia["bajtow"] * KOPIA_SKURCZ' in _cialo("sprawdz_kopie")

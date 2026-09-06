@@ -63,6 +63,17 @@ spec:
                   pg_restore --list "$PLIK" > /dev/null
                   echo "==> weryfikacja archiwum ok, rozmiar: $(du -h "$PLIK" | cut -f1)"
 
+                  # Slad w bazie, ZAPISYWANY PO WERYFIKACJI - jego obecnosc znaczy
+                  # "istnieje czytelny zrzut", a nie "zadanie sie uruchomilo".
+                  # Bez niego brak kopii nie objawia sie niczym: zawieszony
+                  # harmonogram, pelny wolumen i padniety wezel wygladaja tak samo.
+                  # Rozmiar sluzy wykryciu zrzutu, ktory nagle skurczyl sie o rzad
+                  # wielkosci - taki plik nadal przechodzi pg_restore --list, bo
+                  # jest poprawnym archiwum, tyle ze prawie pustym.
+                  psql -h {{ include "trader.fullname" . }}-db \
+                       -U {{ .Values.db.username }} -d {{ .Values.db.database }} \
+                       -c "INSERT INTO app.backup_run (plik, bajtow) VALUES ('$PLIK', $(stat -c %s "$PLIK"))"
+
                   # UWAGA DO ODTWARZANIA: pg_restore --list dowodzi, ze archiwum jest
                   # czytelne - nie dowodzi, ze wgra sie do dzialajacej bazy. Baza z
                   # TimescaleDB wymaga procedury z dokumentacji, inaczej odtworzenie

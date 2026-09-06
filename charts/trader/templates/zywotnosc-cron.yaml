@@ -42,6 +42,7 @@ spec:
                   RC=0
                   python services/engine/dozor.py --co zywotnosc || RC=$?
                   python services/engine/dozor.py --co ryzyko    || RC=$?
+                  python services/engine/dozor.py --co kopie     || RC=$?
                   exit $RC
               env:
                 - name: APP_DB_PASSWORD

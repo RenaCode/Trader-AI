@@ -249,13 +249,95 @@ async def sprawdz_ryzyko(fetch_all, notify, sucho: bool = False) -> int:
     return 1 if nowe else 0
 
 
+# Ile moze minac od ostatniej udanej kopii, zanim uznamy to za problem.
+#
+# Zadanie chodzi raz na dobe o 03:17 UTC, wiec 26 godzin daje dwie godziny
+# zapasu na dlugi zrzut i na przesuniecie startu przez zajety wezel. Krotszy
+# prog zglaszalby falszywy alarm przy kazdym wolniejszym przebiegu.
+KOPIA_STARA_PO_H = 26
+
+# O ile kopia moze byc mniejsza od poprzedniej, zanim uznamy to za utrate danych.
+#
+# Baza rosnie, wiec zrzut powinien rosnac albo stac. Skurczenie o wiecej niz
+# polowe oznacza, ze zrzut nie objal czesci danych - a taki plik NADAL przechodzi
+# pg_restore --list, bo jest poprawnym archiwum, tyle ze prawie pustym.
+KOPIA_SKURCZ = 0.5
+
+
+async def sprawdz_kopie(fetch_all, notify, sucho: bool = False) -> int:
+    """Czy istnieje swieza, zweryfikowana kopia zapasowa.
+
+    DLACZEGO NIE WYSTARCZY, ZE ZADANIE CYKLICZNE ISTNIEJE
+
+    Zadanie zakonczone bledem widac w `kubectl get jobs`. Zawieszonego
+    harmonogramu nie widac nigdzie. Pelny wolumen, padniety wezel i skasowany
+    CronJob objawiaja sie tak samo - cisza.
+
+    Kopia zapasowa, o ktorej braku dowiadujemy sie w dniu odtwarzania, jest
+    gorsza niz jej brak: przez caly ten czas daje falszywe poczucie
+    zabezpieczenia.
+
+    Sprawdzamy STAN (czy jest swiezy wiersz), a nie zdarzenie (czy zadanie sie
+    uruchomilo) - stan jest odporny na kazdy sposob, w jaki kopia moze nie
+    powstac.
+    """
+    wiersze = await fetch_all(
+        "SELECT plik, bajtow, finished_at,"
+        " round(extract(epoch from (now() - finished_at))/3600, 1) AS wiek_h"
+        " FROM app.backup_run ORDER BY finished_at DESC LIMIT 2")
+    odbiorcy = await fetch_all('SELECT id FROM app."user" WHERE is_active')
+
+    async def zglos(tytul: str, tresc: str) -> None:
+        print(f"  {tytul}: {tresc.splitlines()[0]}")
+        if sucho:
+            return
+        for u in odbiorcy:
+            await notify(u["id"], "backup.missing", tytul, tresc, severity="critical")
+
+    if not wiersze:
+        # Brak WSZYSTKICH wpisow to nie to samo co brak swiezego: tuz po
+        # wdrozeniu tej zmiany dziennik jest pusty, bo zadanie jeszcze nie
+        # przebieglo. Mowimy o tym, ale nie jako o awarii.
+        print("kopie: dziennik pusty — pierwsze zadanie jeszcze nie przebiegło")
+        return 0
+
+    biezaca = wiersze[0]
+    print(f"kopie: ostatnia {biezaca['finished_at']:%Y-%m-%d %H:%M} "
+          f"({biezaca['wiek_h']} h temu), {biezaca['bajtow'] / 1e6:.1f} MB")
+
+    problemy = 0
+    if float(biezaca["wiek_h"]) > KOPIA_STARA_PO_H:
+        problemy += 1
+        await zglos("Brak świeżej kopii zapasowej",
+                    f"Ostatnia udana kopia {biezaca['wiek_h']} godzin temu "
+                    f"({biezaca['finished_at']:%Y-%m-%d %H:%M} UTC), próg to "
+                    f"{KOPIA_STARA_PO_H} h.\n\n"
+                    f"Sprawdź: kubectl get cronjob trader-backup; "
+                    f"kubectl get jobs | grep backup")
+
+    if len(wiersze) > 1:
+        poprzednia = wiersze[1]
+        if biezaca["bajtow"] < poprzednia["bajtow"] * KOPIA_SKURCZ:
+            problemy += 1
+            await zglos("Kopia zapasowa skurczyła się o ponad połowę",
+                        f"Ostatnia: {biezaca['bajtow'] / 1e6:.1f} MB, "
+                        f"poprzednia: {poprzednia['bajtow'] / 1e6:.1f} MB.\n\n"
+                        f"Taki plik nadal przechodzi pg_restore --list, bo jest "
+                        f"poprawnym archiwum — po prostu prawie pustym.")
+
+    if not problemy:
+        print("  bez zastrzeżeń")
+    return 1 if problemy else 0
+
+
 async def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--co", default="stan-nauki",
-                    choices=("stan-nauki", "zywotnosc", "ryzyko"),
+                    choices=("stan-nauki", "zywotnosc", "ryzyko", "kopie"),
                     help="stan-nauki: czy wynik treningu sie zmienil; "
                          "zywotnosc: czy silniki bija; "
-                         "ryzyko: czy kill-switch zadzialal")
+                         "ryzyko: czy kill-switch zadzialal; "
+                         "kopie: czy jest swieza kopia zapasowa")
     ap.add_argument("--prog-min", type=int, default=None, dest="prog_min",
                     help="prog martwoty w minutach; do wywolania sciezki alarmowej "
                          "na zadanie. Domyslnie stala MARTWY_PO_MIN")
@@ -284,6 +366,8 @@ async def main() -> int:
                                            prog_min=args.prog_min)
         if args.co == "ryzyko":
             return await sprawdz_ryzyko(fetch_all, notify, sucho=args.sucho)
+        if args.co == "kopie":
+            return await sprawdz_kopie(fetch_all, notify, sucho=args.sucho)
 
         wiersze = await fetch_all(
             "SELECT status, windows_total, windows_positive, positive_ci_low,"
