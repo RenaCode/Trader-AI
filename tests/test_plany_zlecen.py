@@ -84,3 +84,22 @@ def test_swieca_trwajaca_nie_moze_byc_oceniana():
     """
     assert "if koniec > datetime.now(timezone.utc):" in ZRODLO, \
         "zakres_swiecy nie odmawia oceny świecy, która się nie domknęła"
+
+
+# --- cena decyzyjna --------------------------------------------------------
+def test_cena_decyzyjna_to_zamkniecie_swiecy_a_nie_ostatnia_minuta():
+    """Symulacja stawia limit po zamknięciu świecy; pętla musi tak samo.
+
+    Pętla budzi się co 300 s, więc `mark_price(now)` oddaje cenę nawet pięć
+    minut późniejszą. Zmierzone na dziesięciu instrumentach uniwersum: mediana
+    dryfu po pięciu minutach to 0,0808%, czyli 40% całej rundy kosztowej
+    (0,200%), a dziewiąty decyl 0,3195% — półtora budżetu.
+
+    Cena limitu wprost decyduje o tym, czy zlecenie się wypełni, więc rozjazd
+    tej wielkości zmienia mierzoną strategię, a nie tylko jej dokładność.
+    """
+    assert "swieca_dec = zakres_swiecy(cur, iid, h, bar_start)" in ZRODLO, \
+        "pętla nie bierze ceny decyzyjnej z zamknięcia świecy"
+    # mark_price zostaje wyłącznie jako ścieżka awaryjna i do wyceny pozycji
+    assert "stats[\"bez_swiecy\"]" in ZRODLO, \
+        "użycie ceny zastępczej nie jest zliczane — byłaby to cicha zamiana źródła"

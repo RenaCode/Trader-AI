@@ -655,7 +655,7 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
         print(f"  wagi: {'wersja modelu ' + str(model['version']) if model['version'] else 'założenia początkowe (brak zwalidowanego modelu)'}"
               f", próg wejścia {model['enter']:.4f}")
     stats = {"rozwazone": 0, "wejscia": 0, "wyjscia": 0, "wstrzymane": 0,
-             "zablokowane": 0, "poza_swieca": 0,
+             "zablokowane": 0, "poza_swieca": 0, "bez_swiecy": 0,
              "wypelnione": 0, "niewypelnione": 0, "czekaja": 0}
 
     # ROZSTRZYGNIECIE PLANOW IDZIE PRZED OCENA, nie po niej.
@@ -700,7 +700,37 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
             if verbose:
                 print(f"  {symbol:10s} pominięty — za mało cech ({len(features)})")
             continue
-        price = mark_price(cur, iid, now)
+        # CENA DECYZYJNA TO ZAMKNIECIE SWIECY, nie ostatnia cena minutowa.
+        #
+        # Symulacja walk-forward stawia limit i liczy wielkosc pozycji po
+        # ZAMKNIECIU swiecy (portfolio: limit_px = cur["row"]["price"]).
+        # Petla budzi sie co 300 s, wiec mark_price(now) oddaje cene nawet piec
+        # minut pozniejsza - a to jest inna cena, nie zaokraglenie tej samej.
+        #
+        # Zmierzone na dziesieciu instrumentach uniwersum (2026-09-06, dane
+        # minutowe, po naprawie swiec godzinowych):
+        #
+        #     po 1 min   mediana 0,0240%   90 centyl 0,2186%
+        #     po 3 min   mediana 0,0530%   90 centyl 0,2741%
+        #     po 5 min   mediana 0,0808%   90 centyl 0,3195%
+        #
+        # Runda kosztowa wynosi 0,200%, wiec mediana rozjazdu po pieciu minutach
+        # to 40% calego budzetu, a dziewiaty decyl poltora budzetu. Cena limitu
+        # wprost decyduje o tym, czy zlecenie sie wypelni, wiec rozjazd tej
+        # wielkosci zmienia mierzona strategie, a nie tylko jej dokladnosc.
+        swieca_dec = zakres_swiecy(cur, iid, h, bar_start)
+        if swieca_dec:
+            price = swieca_dec["close"]
+        else:
+            # Brak domknietej swiecy oznacza, ze dane rynkowe dla tego
+            # instrumentu sa niekompletne. Decydujemy po ostatniej cenie, ale
+            # GLOSNO - cicha zamiana zrodla ceny byla dokladnie tym, co
+            # rozjechalo produkcje z kalibracja.
+            price = mark_price(cur, iid, now)
+            stats["bez_swiecy"] += 1
+            if verbose:
+                print(f"  UWAGA {symbol}: brak domkniętej świecy {h.bar} "
+                      f"{bar_start:%m-%d %H:%M} — cena z ostatniej minuty")
         if price is None:
             continue
         stats["rozwazone"] += 1
@@ -888,6 +918,8 @@ async def main() -> int:
                 plany = (f", plany: wypełnione {s['wypelnione']}, "
                          f"niewypełnione {s['niewypelnione']}, czekają {s['czekaja']}"
                          if args.limit else "")
+                if s.get("bez_swiecy"):
+                    plany += f", BEZ ŚWIECY {s['bez_swiecy']}"
                 print(f"[{t0:%H:%M:%S}] rozważone {s['rozwazone']}, wejścia {s['wejscia']}, "
                       f"wyjścia {s['wyjscia']}, wstrzymane {s['wstrzymane']}, "
                       f"zablokowane {s['zablokowane']}, "
