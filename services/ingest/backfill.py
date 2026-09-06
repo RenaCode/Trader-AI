@@ -35,17 +35,50 @@ BATCH = 2000
 MAX_EMPTY_PROBES = 5000
 
 
+# Ile ostatnich swiec pobieramy ponownie przy kazdym przebiegu, zeby poprawic
+# ewentualne bledy. Trzy wystarczaja: swieca zamyka sie raz i wiecej sie nie
+# zmienia, wiec jedyne, co wymaga poprawki, to koncowka poprzedniego przebiegu.
+ZAKLADKA = 3
+
+
 def batched_insert(cur, rows: list) -> int:
+    """Zapis swiec z POPRAWIANIEM tego, co juz jest.
+
+    DLACZEGO NIE "DO NOTHING"
+
+    Do 2026-09-06 zapis pomijal konflikt, a wznawianie zaczynalo od najnowszej
+    posiadanej swiecy - wiec swieca raz zapisana nie byla juz nigdy odpytywana.
+    W polaczeniu z blednym filtrem (ponizej) oznaczalo to, ze swieca zapisana
+    W TRAKCIE swojej godziny zostawala w bazie na zawsze z zakresem pierwszych
+    dwoch minut.
+
+    Zmierzone na BTCUSDC: zamkniecie zgodne z faktycznym w 9 godzinach na 55,
+    a zapisany zakres high-low stanowil 39% prawdziwego.
+
+    Swieca ZAMKNIETA jest niezmienna, wiec ponowne pobranie daje te same
+    wartosci i nadpisanie jest bezpieczne. Warunek WHERE pilnuje, zeby
+    `ingested_at` nie zmienialo sie przy kazdym przebiegu bez powodu - inaczej
+    stracilibysmy informacje o tym, kiedy naprawde poznalismy te swiece.
+    """
     sql = ("INSERT INTO market.candle (instrument_id, timeframe, event_time, open, high, low,"
            " close, volume, trade_count, ingested_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)"
-           " ON CONFLICT DO NOTHING")
+           " ON CONFLICT (instrument_id, timeframe, event_time) DO UPDATE SET"
+           " open = EXCLUDED.open, high = EXCLUDED.high, low = EXCLUDED.low,"
+           " close = EXCLUDED.close, volume = EXCLUDED.volume,"
+           " trade_count = EXCLUDED.trade_count, ingested_at = EXCLUDED.ingested_at"
+           " WHERE (market.candle.open, market.candle.high, market.candle.low,"
+           "        market.candle.close, market.candle.volume)"
+           "    IS DISTINCT FROM"
+           "       (EXCLUDED.open, EXCLUDED.high, EXCLUDED.low,"
+           "        EXCLUDED.close, EXCLUDED.volume)")
     for i in range(0, len(rows), BATCH):
         cur.executemany(sql, rows[i:i + BATCH])
     return len(rows)
 
 
 async def backfill_symbol(adapter, conn, instrument_id: int, symbol: str,
-                          timeframe: str, since: datetime) -> int:
+                          timeframe: str, since: datetime,
+                          napraw: bool = False) -> int:
     step = timedelta(minutes=TF_MINUTES[timeframe])
     cur = conn.cursor()
 
@@ -62,13 +95,28 @@ async def backfill_symbol(adapter, conn, instrument_id: int, symbol: str,
     now = datetime.now(timezone.utc)
 
     ranges: list[tuple[datetime, datetime]] = []
-    if have_until is None:
+    if napraw:
+        # TRYB NAPRAWCZY: pobierz okno PONOWNIE, niezaleznie od tego, co juz mamy.
+        #
+        # Zwykla sciezka z zalozenia nie odpytuje swiec, ktore posiada - i to
+        # jest wlasciwe, dopoki zapisane swiece sa poprawne. Gdy nie sa (np.
+        # zapisano je w trakcie ich trwania, patrz filtr w _fetch_range),
+        # zakladka trzech swiec nie siega wstecz wystarczajaco daleko.
+        print(f"  {symbol:10s} tryb naprawczy: ponowne pobranie od {since:%Y-%m-%d %H:%M}")
+        ranges.append((since, now))
+    elif have_until is None:
         ranges.append((since, now))
     else:
         if since < have_from:
             ranges.append((since, have_from))
+        # ZAKLADKA: cofamy sie o kilka swiec zamiast zaczynac od nastepnej.
+        #
+        # Bez niej swieca raz zapisana nigdy nie jest odpytywana ponownie, wiec
+        # jakikolwiek blad w niej - w szczegolnosci zapis w trakcie jej trwania -
+        # zostaje na zawsze. Z zakladka i zapisem poprawiajacym potok leczy sie
+        # sam przy nastepnym przebiegu.
         if have_until + step < now:
-            ranges.append((have_until + step, now))
+            ranges.append((have_until - ZAKLADKA * step, now))
     if not ranges:
         print(f"  {symbol:10s} już aktualne")
         return 0
@@ -111,10 +159,22 @@ async def _fetch_range(adapter, conn, cur, instrument_id: int, symbol: str,
             continue
         empty_rounds = 0
 
+        # WYLACZNIE SWIECE ZAMKNIETE.
+        #
+        # `event_time` to POCZATEK swiecy, wiec warunek `event_time < now`
+        # przepuszczal swiece trwajaca: o 09:01 swieca 09:00 spelniala go
+        # i ladowala w bazie z zakresem jednej minuty. Domkniecie wymaga
+        # `event_time + step <= now`.
+        #
+        # Zmierzony skutek starego warunku (BTCUSDC, 55 godzin z kompletem
+        # danych minutowych): zamkniecie zgodne w 9 przypadkach, zapisany
+        # zakres high-low rowny 39% faktycznego. Kazda cecha liczona z tych
+        # swiec - ATR, polozenie w zakresie, rezim zmiennosci - byla zanizona.
         rows = [
             (instrument_id, timeframe, c.event_time, c.open, c.high, c.low, c.close,
              c.volume, c.trades, now)
-            for c in candles if c.event_time < min(stop, now)
+            for c in candles
+            if c.event_time < stop and c.event_time + step <= now
         ]
         if rows:
             batched_insert(cur, rows)
@@ -142,6 +202,10 @@ async def main() -> int:
     ap.add_argument("--timeframe", default="1m", choices=sorted(TF_MINUTES))
     ap.add_argument("--symbol", help="tylko ten instrument")
     ap.add_argument("--engine", default="crypto")
+    ap.add_argument("--napraw", action="store_true",
+                    help="pobierz okno PONOWNIE i popraw to, co juz jest w bazie. "
+                         "Do usuwania skutkow blednego zapisu; zwykly przebieg "
+                         "pomija swiece, ktore posiada")
     args = ap.parse_args()
 
     url = os.environ.get("DATABASE_URL")
@@ -173,7 +237,8 @@ async def main() -> int:
                 if venue != "bybit":
                     print(f"  {symbol:10s} pominiete ({venue} nieobslugiwany w backfillu)")
                     continue
-                grand += await backfill_symbol(adapter, conn, iid, symbol, args.timeframe, since)
+                grand += await backfill_symbol(adapter, conn, iid, symbol, args.timeframe,
+                                               since, napraw=args.napraw)
         finally:
             await adapter.close()
 
