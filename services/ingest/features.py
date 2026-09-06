@@ -559,9 +559,34 @@ def compute_funding(cur, instrument_id: int, h: Horizon, feat_ids: dict[str, int
 
 
 def insert_values(cur, rows: list[tuple]) -> int:
+    """Zapis wartosci cech, POPRAWIAJACY istniejace.
+
+    DLACZEGO NIE "DO NOTHING"
+
+    Cecha jest deterministyczna funkcja swiec. Gdy swieca byla w bazie bledna,
+    bledna byla tez cecha - a przy pomijaniu konfliktu zostawala taka na zawsze,
+    bo kazdy pozniejszy przebieg trafial na istniejacy wiersz i milczal.
+
+    Zdarzylo sie to 2026-09-06: swiece godzinowe zapisywane w trakcie ich
+    trwania mialy zakres rowny 39% faktycznego, a wszystkie cechy z nich
+    policzone - ATR, polozenie w zakresie, rezim - dziedziczyly to zanizenie.
+    Poprawienie swiec nie naprawilo cech; dopiero to.
+
+    DLACZEGO TO NIE JEST PRZEPISYWANIE HISTORII
+
+    Wartosc cechy datowana jest przez `znane_od(t, h)`, czyli momentem, w ktorym
+    BYLA DO WYLICZENIA z danych dostepnych wtedy na gieldzie. Informacja
+    istniala; zepsuta byla nasza kopia. Poprawka odtwarza wiec to, co dalo sie
+    wiedziec, a nie dokłada wiedzy z przyszlosci - i dlatego `ingested_at`
+    pozostaje wyliczane tak samo, a nie ustawiane na teraz.
+
+    Warunek IS DISTINCT FROM sprawia, ze przebieg bez zmian nie dotyka bazy.
+    """
     sql = ("INSERT INTO feat.feature_value (feature_def_id, instrument_id, event_time,"
            " value, ingested_at) VALUES (%s,%s,%s,%s,%s)"
-           " ON CONFLICT (feature_def_id, instrument_id, event_time) DO NOTHING")
+           " ON CONFLICT (feature_def_id, instrument_id, event_time) DO UPDATE SET"
+           " value = EXCLUDED.value, ingested_at = EXCLUDED.ingested_at"
+           " WHERE feat.feature_value.value IS DISTINCT FROM EXCLUDED.value")
     for k in range(0, len(rows), BATCH):
         cur.executemany(sql, rows[k:k + BATCH])
     return len(rows)

@@ -72,3 +72,17 @@ def test_wznawianie_ma_zakladke():
     więc żadna poprawka nie miałaby jak dotrzeć."""
     assert re.search(r"have_until - ZAKLADKA \* step", ZRODLO), \
         "wznawianie nie cofa się o zakładkę"
+
+
+# --- cechy tez musza sie dac poprawic ---------------------------------------
+def test_zapis_cech_poprawia_bledne_wartosci():
+    """Poprawienie świec nie naprawia cech, jeśli zapis cech pomija konflikt.
+
+    Cecha jest deterministyczną funkcją świec. Gdy świeca była błędna, błędna
+    była też cecha — i przy `DO NOTHING` zostawała taka na zawsze, bo każdy
+    późniejszy przebieg trafiał na istniejący wiersz i milczał.
+    """
+    zrodlo = Path("services/ingest/features.py").read_text()
+    assert "DO UPDATE SET" in zrodlo, "zapis cech nadal pomija konflikt"
+    assert "IS DISTINCT FROM EXCLUDED.value" in zrodlo, \
+        "brak warunku — każdy przebieg przepisywałby bazę bez powodu"
