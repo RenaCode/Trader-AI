@@ -24,6 +24,7 @@ from ..auth import (
     set_session_cookies,
 )
 from ..db import execute, fetch_all, fetch_one
+from ..notifications import powiadom_o_bezpieczenstwie
 from ..security import (
     SESSION_TTL, backup_code_hash, hash_password, new_backup_codes, new_session_token,
     new_totp_secret, session_expiry, totp_uri, verify_password, verify_totp,
@@ -148,7 +149,48 @@ async def login(body: LoginBody, request: Request, response: Response):
 
     await _start_session(row["id"], True, request, response)
     await audit("auth.login", user_id=row["id"], request=request)
+    await _zglos_nowe_urzadzenie(row["id"], request)
     return {"mfa_required": False, "login": row["login"]}
+
+
+async def _zglos_nowe_urzadzenie(user_id: int, request: Request) -> None:
+    """Powiadomienie o logowaniu z pary (adres, przegladarka), ktorej nie bylo.
+
+    DEFINICJA "NOWEGO URZADZENIA" JEST TAKA, NA JAKA POZWALAJA DANE
+
+    Dziennik audytu zapisuje `ip` i `user_agent` przy kazdym zdarzeniu. Nowe
+    urzadzenie to para, ktora nie wystapila przy zadnym WCZESNIEJSZYM udanym
+    logowaniu tego uzytkownika. To nie jest odcisk przegladarki ani rozpoznanie
+    sprzetu - i nie udaje, ze jest.
+
+    Skutki tej definicji, ktore trzeba znac: zmiana adresu IP u tego samego
+    operatora wywola powiadomienie, a logowanie z tego samego adresu i tej samej
+    przegladarki przez kogos innego - nie. Przy systemie trzymajacym klucze API
+    gieldy falszywy alarm jest tanszy niz przeoczenie.
+
+    Typ zdarzenia `auth.new_login` jest oznaczony jako `always_on`, wiec
+    uzytkownik nie moze go wylaczyc. Tak zaprojektowano to w migracji 0007
+    i nikt tego nigdy nie podlaczyl.
+    """
+    fwd = request.headers.get("x-forwarded-for")
+    ip = (fwd.split(",")[0].strip() if fwd
+          else (request.client.host if request.client else None))
+    ua = request.headers.get("user-agent")
+
+    # `< now()` odcina wpis wlasnie zapisany przez audit() - inaczej kazde
+    # logowanie widzialoby samo siebie jako wczesniejsze i nic by nie zglaszalo.
+    znane = await fetch_one(
+        "SELECT 1 FROM app.audit_log WHERE actor_user_id = %s AND action = 'auth.login'"
+        "   AND ip IS NOT DISTINCT FROM %s::inet AND user_agent IS NOT DISTINCT FROM %s"
+        "   AND created_at < now() - interval '1 second' LIMIT 1",
+        (user_id, ip, ua))
+    if znane:
+        return
+    await powiadom_o_bezpieczenstwie(
+        user_id, "auth.new_login", "Logowanie z nowego urządzenia",
+        f"Adres: {ip or 'nieznany'}\nPrzeglądarka: {(ua or 'nieznana')[:200]}\n\n"
+        f"Jeśli to nie Ty — zmień hasło i usuń klucze API giełdy.",
+        severity="warning")
 
 
 @router.post("/mfa")
@@ -227,6 +269,14 @@ async def change_password(body: PasswordBody, request: Request,
         (user["id"], user["session_id"]),
     )
     await audit("auth.password_changed", user_id=user["id"], request=request)
+    # `credential.changed` obejmuje "zmiane kluczy LUB hasla" - patrz etykieta
+    # typu zdarzenia w migracji 0007. Zawsze wlaczone, bo zmiana hasla bez
+    # wiedzy wlasciciela to pierwszy krok przejecia konta.
+    await powiadom_o_bezpieczenstwie(
+        user["id"], "credential.changed", "Hasło zostało zmienione",
+        "Jeśli to nie Ty — konto jest przejęte. Wszystkie sesje zostały "
+        "unieważnione, ale klucze API giełdy nadal działają.",
+        severity="warning")
     return {"ok": True}
 
 

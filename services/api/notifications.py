@@ -56,6 +56,27 @@ async def _send_webhook(config: dict, payload: dict) -> None:
             raise RuntimeError(f"Webhook zwrocil {r.status_code}")
 
 
+async def powiadom_o_bezpieczenstwie(user_id: int, event_code: str, title: str,
+                                     body: str = "", **kw) -> None:
+    """Powiadomienie, ktore NIE MOZE przerwac operacji, o ktorej powiadamia.
+
+    Zdarzenia bezpieczenstwa - nowe logowanie, zmiana klucza, zmiana hasla - sa
+    zgłaszane W TRAKCIE obslugi zadania uzytkownika. Wyjatek z kanalu
+    powiadomien (niedostepny Telegram, blad webhooka, zerwane polaczenie) nie
+    moze wywrocic logowania ani zapisu klucza.
+
+    Mechanizm ostrzegania, ktory potrafi zablokowac chroniona operacje, jest
+    gorszy niz jego brak: zamienia awarie kanalu powiadomien w awarie systemu.
+
+    Blad jest polykany, ale nie milczaco - trafia do dziennika procesu.
+    """
+    try:
+        await notify(user_id, event_code, title, body, **kw)
+    except Exception as e:                                    # noqa: BLE001
+        print(f"[powiadomienie] {event_code} nie zostało wysłane: "
+              f"{type(e).__name__}: {e}", flush=True)
+
+
 async def notify(user_id: int, event_code: str, title: str, body: str = "",
                  *, data: dict | None = None, engine: str | None = None,
                  severity: str | None = None) -> int | None:

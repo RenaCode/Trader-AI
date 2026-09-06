@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 
 from ..auth import audit, current_user, require_csrf
 from ..db import execute, fetch_all, fetch_one
+from ..notifications import powiadom_o_bezpieczenstwie
 from ..security import SecretBox
 
 router = APIRouter(prefix="/api/credentials", tags=["credentials"])
@@ -120,6 +121,11 @@ async def add_credential(body: CredentialBody, request: Request,
 
     await audit("credential.create", user_id=user["id"], entity="api_credential",
                 entity_id=body.label, request=request)
+    await powiadom_o_bezpieczenstwie(
+        user["id"], "credential.changed", "Dodano klucz API giełdy",
+        f"Giełda: {venue['name']}, etykieta: {body.label.strip()}, "
+        f"tryb: {body.mode}.\n\nJeśli to nie Ty — usuń klucz i zmień hasło.",
+        severity="warning")
     return {"ok": True, "key_hint": _hint(body.api_key.strip())}
 
 
