@@ -97,7 +97,8 @@ def zmiany(poprzedni: dict | None, biezacy: dict) -> list[str]:
 MARTWY_PO_MIN = 15
 
 
-async def sprawdz_zywotnosc(fetch_all, notify, sucho: bool = False) -> int:
+async def sprawdz_zywotnosc(fetch_all, notify, sucho: bool = False,
+                            prog_min: int | None = None) -> int:
     """Czy silniki, ktore MAJA dzialac, faktycznie bija.
 
     DLACZEGO TO JEST OSOBNY PROCES
@@ -122,6 +123,11 @@ async def sprawdz_zywotnosc(fetch_all, notify, sucho: bool = False) -> int:
     ostatnim uderzeniu serca: jesli tak, ta awaria jest juz zgloszona. Gdy silnik
     wroci, `last_beat_at` przesunie sie i nastepna awaria bedzie nowa.
     """
+    # Prog jako parametr, zeby dalo sie wywolac SCIEZKE ALARMOWA na zadanie.
+    # Bez tego jedyna droga sprawdzenia, czy alarm w ogole dziala, bylo zabicie
+    # silnika na produkcji - czyli sciezka, ktora ma zadzialac raz na rok
+    # w najgorszym momencie, nie bylaby przetestowana nigdy.
+    prog = MARTWY_PO_MIN if prog_min is None else prog_min
     silniki = await fetch_all(
         "SELECT engine::text AS engine, mode::text AS mode, status, last_beat_at,"
         " round(extract(epoch from (now() - last_beat_at))/60) AS wiek_min"
@@ -136,7 +142,7 @@ async def sprawdz_zywotnosc(fetch_all, notify, sucho: bool = False) -> int:
         if s["status"] != "running":
             print(f"  pomijam  {opis} — zatrzymany świadomie")
             continue
-        if s["wiek_min"] > MARTWY_PO_MIN:
+        if s["wiek_min"] > prog:
             martwe.append(s)
             print(f"  MARTWY   {opis}")
         else:
@@ -159,7 +165,7 @@ async def sprawdz_zywotnosc(fetch_all, notify, sucho: bool = False) -> int:
             print(f"  (awaria {s['engine']} juz zgloszona — cisza)")
             continue
         tresc = (f"Ostatnie uderzenie serca {s['wiek_min']:.0f} minut temu "
-                 f"({s['last_beat_at']:%Y-%m-%d %H:%M} UTC), próg to {MARTWY_PO_MIN} min.\n\n"
+                 f"({s['last_beat_at']:%Y-%m-%d %H:%M} UTC), próg to {prog} min.\n\n"
                  f"Sprawdź: kubectl logs deploy/trader-engine --tail=50")
         for u in odbiorcy:
             await notify(u["id"], "engine.down",
@@ -182,6 +188,9 @@ async def main() -> int:
                     choices=("stan-nauki", "zywotnosc"),
                     help="stan-nauki: czy wynik treningu sie zmienil; "
                          "zywotnosc: czy silniki bija")
+    ap.add_argument("--prog-min", type=int, default=None, dest="prog_min",
+                    help="prog martwoty w minutach; do wywolania sciezki alarmowej "
+                         "na zadanie. Domyslnie stala MARTWY_PO_MIN")
     ap.add_argument("--engine", default="crypto")
     # Domyslnie horyzont, ktorym handluje silnik. Tory porownawcze (np. 1h) maja
     # wlasny stan, ale NIE podnosza alarmu - inaczej powiadomienie mowiloby
@@ -203,7 +212,8 @@ async def main() -> int:
     await open_pool()
     try:
         if args.co == "zywotnosc":
-            return await sprawdz_zywotnosc(fetch_all, notify, sucho=args.sucho)
+            return await sprawdz_zywotnosc(fetch_all, notify, sucho=args.sucho,
+                                           prog_min=args.prog_min)
 
         wiersze = await fetch_all(
             "SELECT status, windows_total, windows_positive, positive_ci_low,"
