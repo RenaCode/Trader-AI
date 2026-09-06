@@ -267,7 +267,8 @@ def spent_today(cur) -> float:
 
 
 async def run_cycle(conn, ai: AsyncAnthropic | None, http: httpx.AsyncClient,
-                    verbose: bool, analizuj: bool = True) -> dict:
+                    verbose: bool, analizuj: bool = True,
+                    silniki: list[str] | None = None) -> dict:
     """Jeden cykl: pobierz kanaly, odsiej, przeanalizuj, zapisz.
 
     TRYB BEZ ANALIZY istnieje, bo bez klucza Anthropic ten proces nie robil
@@ -296,14 +297,26 @@ async def run_cycle(conn, ai: AsyncAnthropic | None, http: httpx.AsyncClient,
     instruments = {r["symbol"]: r["id"] for r in cur.fetchall()}
     symbols = sorted(instruments)
 
+    # KANALY OGRANICZONE DO SILNIKOW, KTORE ISTNIEJA.
+    #
+    # `news.feed.engine` byla w schemacie od poczatku i NIE BYLA UZYWANA nigdzie -
+    # proces pobieral i analizowal wszystko. Przy wylacznie krypto w produkcji
+    # oznaczalo to, ze polowa ruchu to zgloszenia 8-K spolek gieldowych (225 z 476
+    # artykulow w ciagu dwoch dob), za ktorych filtrowanie zaplacilby silnik, dla
+    # ktorego nie moga mieć znaczenia. Przy limicie 5 USD na dobe to nie jest
+    # drobiazg.
+    #
+    # Kanaly BEZ przypisanego silnika (Fed, EBC) zostaja zawsze: polityka pieniezna
+    # dotyczy kazdego rynku i nie da sie jej przypisac do jednego z nich.
     cur.execute("""
         SELECT id, name, url, engine, poll_interval_s, last_polled_at
         FROM news.feed
         WHERE enabled
+          AND (%s::text[] IS NULL OR engine IS NULL OR engine::text = ANY(%s))
           AND (last_polled_at IS NULL
                OR last_polled_at < now() - make_interval(secs => poll_interval_s))
         ORDER BY last_polled_at NULLS FIRST
-    """)
+    """, (silniki, silniki))
     feeds = cur.fetchall()
 
     stats = {"kanaly": len(feeds), "pobrane": 0, "nowe": 0, "przeszly_filtr": 0,
@@ -459,11 +472,20 @@ async def main() -> int:
                          "dzis nie zapiszemy, przepadnie - RSS nie odda go jutro")
     ap.add_argument("--auto", action="store_true",
                     help="wybierz tryb sam: z kluczem analizuj, bez klucza pobieraj")
+    ap.add_argument("--silniki", default="",
+                    help="lista silnikow po przecinku - pobieraj tylko kanaly do nich "
+                         "przypisane. Kanaly bez przypisania (makro: Fed, EBC) zostaja "
+                         "zawsze. Puste = wszystkie kanaly")
     args = ap.parse_args()
 
     url = os.environ.get("DATABASE_URL")
     if not url:
         sys.exit("DATABASE_URL nie jest ustawiony")
+
+    silniki = [x.strip() for x in args.silniki.split(",") if x.strip()] or None
+    if silniki:
+        print(f"Kanały ograniczone do silników: {', '.join(silniki)} "
+              f"(oraz kanały makro bez przypisania)")
 
     async with httpx.AsyncClient(timeout=20.0) as http:
         with psycopg.connect(url) as conn:
@@ -491,7 +513,7 @@ async def main() -> int:
                                           "wylacznie pobieranie (brak klucza Anthropic)"))
                         poprzedni_tryb = analizuj
                     s = await run_cycle(conn, ai, http, verbose=not args.quiet,
-                                        analizuj=analizuj)
+                                        analizuj=analizuj, silniki=silniki)
                     took = (datetime.now(timezone.utc) - started).total_seconds()
                     # Podsumowanie musi rozrozniac ZAPISANE od PRZEANALIZOWANYCH.
                     # Pierwsza wersja liczyla zapisane jako przeanalizowane, wiec

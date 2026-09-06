@@ -121,7 +121,11 @@ workers:
     # przebiegu, a jedynym sladem byl wpis w logu, ktorego nikt nie czytal.
     # Teraz taki blad zatrzymuje pod od razu - widac go w `kubectl get pods`,
     # nie trzeba go szukac.
-    command: ["sh", "-c", "sleep 90; python services/engine/loop.py --bar 4h --sprawdz || exit 1; while true; do python services/engine/loop.py --bar 4h --once --quiet || true; sleep 300; done"]
+    # --kind i --limit MUSZA sie zgadzac z trainerCron: rachunek papierowy ma
+    # kosztowac tyle, ile kosztuje strategia, ktora kalibrujemy. Do 2026-09-06
+    # petla miala wlasna stala 0,055% - stawke perpetualow - i liczyla rundzie
+    # 0,190% zamiast 0,200%, a przy zleceniach rynkowych na tej gieldzie 0,580%.
+    command: ["sh", "-c", "sleep 90; python services/engine/loop.py --bar 4h --sprawdz || exit 1; while true; do python services/engine/loop.py --bar 4h --once --quiet --kind spot_eu --limit || true; sleep 300; done"]
     resources:
       limits:   { cpu: 1000m, memory: 512Mi }
       requests: { cpu: 100m,  memory: 128Mi }
@@ -155,7 +159,13 @@ workers:
     #
     # Tryb wybierany jest przy KAZDYM cyklu, nie raz przy starcie: klucz pojawia
     # sie wtedy, gdy uzytkownik wpisze go w UI, a nie gdy restartujemy poda.
-    command: ["sh", "-c", "while true; do python services/ingest/news_worker.py --once --auto --quiet || true; sleep 300; done"]
+    # --silniki crypto: pobieramy kanaly krypto i makro, pomijamy gieldowe.
+    #
+    # Silnik equity nie istnieje, a kanaly do niego przypisane to polowa ruchu
+    # (225 z 476 artykulow w ciagu dwoch dob, glownie zgloszenia 8-K). Przy
+    # limicie 5 USD na dobe silnik krypto placilby za filtrowanie material,
+    # ktory nie moze go dotyczyc. Do listy wrocic, gdy ruszy drugi silnik.
+    command: ["sh", "-c", "while true; do python services/ingest/news_worker.py --once --auto --quiet --silniki crypto || true; sleep 300; done"]
     resources:
       limits:   { cpu: 1000m, memory: 512Mi }
       requests: { cpu: 50m,   memory: 128Mi }

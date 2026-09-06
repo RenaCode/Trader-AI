@@ -37,7 +37,7 @@ from psycopg.rows import dict_row
 
 from services.engine.horizons import DEFAULT_BAR, HORIZONS, Horizon, get as get_horizon
 from services.engine.risk import RiskKernel
-from services.engine.koszty import koszty
+from services.engine.koszty import POSLIZG_MAKER, POSLIZG_TAKER, koszty
 from services.engine.risk_rules import position_budget
 from services.engine.signals import SIGNALS, classify_regime, evaluate
 
@@ -49,8 +49,21 @@ ENTER_THRESHOLD = 0.25
 EXIT_THRESHOLD = 0.12
 MIN_CONFIDENCE = 0.25
 
-FEE_RATE = Decimal("0.00055")        # prowizja taker Bybit spot
-SLIPPAGE = Decimal("0.0004")         # ostrozne zalozenie poslizgu
+# PROWIZJA I POSLIZG POCHODZA Z services/engine/koszty.py, NIE Z TEGO PLIKU.
+#
+# Do 2026-09-06 stala byla tutaj: FEE_RATE = 0,00055 z komentarzem "prowizja
+# taker Bybit spot". To bylo 0,055%, czyli stawka taker KONTRAKTOW WIECZYSTYCH -
+# dokladnie ten sam blad, ktory docs/03 opisal i naprawil 2026-08-31 w symulacji.
+# Poprawka poszla wtedy do koszty.py i portfolio.py, a petla decyzyjna - czyli
+# to, co faktycznie prowadzi rachunek papierowy - zostala ze stara stala.
+#
+# Rozmiar rozjazdu: petla liczyla rundzie 0,190%, trener modelowal 0,200% przy
+# zleceniach z limitem, a przy rynkowych na podmiocie unijnym runda wynosi
+# 0,580%. Krzywa kapitalu mierzyla wiec strategie TANSZA TRZYKROTNIE od tej,
+# ktora dalo by sie wykonac.
+#
+# Model egzekucji (rodzaj instrumentu + limit/rynek) przychodzi z wiersza
+# polecen, tak samo jak w trenerze, i jest ustawiany z jednego miejsca w charcie.
 
 START_EQUITY = Decimal("100000")
 
@@ -269,23 +282,53 @@ def record_decision(cur, engine: str, mode: str, instrument_id: int, as_of: date
     return did
 
 
+def stawki(kind: str, limit: bool) -> tuple[Decimal, Decimal]:
+    """Prowizja i poslizg dla przyjetego modelu egzekucji - z koszty.py.
+
+    Zlecenie z limitem placi stawke maker i nie ma poslizgu, bo nie przechodzi
+    przez spread; placi za to ryzykiem niewypelnienia, ktorego ta petla NIE
+    modeluje (patrz zastrzezenie przy execute_paper).
+    """
+    k = koszty(kind)
+    return (Decimal(str(k.maker if limit else k.taker)),
+            Decimal(str(POSLIZG_MAKER if limit else POSLIZG_TAKER)))
+
+
 def execute_paper(cur, engine: str, mode: str, instrument_id: int, decision_id: int,
-                  side: str, qty: Decimal, price: Decimal, as_of: datetime) -> None:
-    """Symulacja wypelnienia po realnej cenie, z prowizja i poslizgiem."""
-    fill = price * (Decimal(1) + SLIPPAGE) if side == "buy" else price * (Decimal(1) - SLIPPAGE)
-    fee = qty * fill * FEE_RATE
+                  side: str, qty: Decimal, price: Decimal, as_of: datetime,
+                  kind: str, limit: bool, quote_ccy: str) -> None:
+    """Symulacja wypelnienia po realnej cenie, z prowizja i poslizgiem.
+
+    ZASTRZEZENIE, KTORE TRZEBA CZYTAC RAZEM Z KRZYWA KAPITALU
+
+    Przy egzekucji z limitem ta funkcja PRZYJMUJE, ze zlecenie sie wypelnilo.
+    Petla dziala raz na swiece i zapisuje wynik od razu, wiec nie ma jak
+    sprawdzic, czy cena dotknela limitu - symulacja walk-forward to potrafi
+    (portfolio._wypelnione), produkcja nie.
+
+    Krzywa kapitalu jest wiec w tym jednym miejscu OPTYMISTYCZNA. Zapisujemy to
+    w `raw` przy kazdym zleceniu, zeby dalo sie to policzyc pozniej, zamiast
+    odkryc przy przejsciu na zywo.
+    """
+    fee_rate, slip = stawki(kind, limit)
+    fill = price * (Decimal(1) + slip) if side == "buy" else price * (Decimal(1) - slip)
+    fee = qty * fill * fee_rate
 
     cur.execute(
         "INSERT INTO exec.order (decision_id, engine, mode, instrument_id, client_order_id,"
         " side, order_type, qty, status, submitted_at, raw)"
         " VALUES (%s,%s,%s,%s,%s,%s,'market',%s,'filled',%s,%s) RETURNING id",
         (decision_id, engine, mode, instrument_id, f"tai-{decision_id}", side, qty, as_of,
-         json.dumps({"execution": "internal_paper", "slippage": str(SLIPPAGE)})))
+         json.dumps({"execution": "internal_paper", "kind": kind,
+                     "order": "limit" if limit else "market",
+                     "fee_rate": str(fee_rate), "slippage": str(slip),
+                     "zalozenie": ("wypelnienie limitu przyjete bez sprawdzenia"
+                                   if limit else None)})))
     oid = cur.fetchone()["id"]
     cur.execute(
         "INSERT INTO exec.fill (order_id, venue_fill_id, qty, price, fee, fee_ccy, event_time)"
-        " VALUES (%s,%s,%s,%s,%s,'USDT',%s)",
-        (oid, f"paper-{oid}", qty, fill, fee, as_of))
+        " VALUES (%s,%s,%s,%s,%s,%s,%s)",
+        (oid, f"paper-{oid}", qty, fill, fee, quote_ccy, as_of))
     cur.execute(
         "INSERT INTO exec.position (engine, mode, instrument_id, side, qty, avg_price,"
         " opened_at, fees_paid, open_decision_id) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
@@ -294,11 +337,12 @@ def execute_paper(cur, engine: str, mode: str, instrument_id: int, decision_id: 
 
 
 def close_paper(cur, position: dict, price: Decimal, as_of: datetime,
-                decision_id: int) -> Decimal:
+                decision_id: int, kind: str, limit: bool) -> Decimal:
+    fee_rate, slip = stawki(kind, limit)
     qty, entry = Decimal(position["qty"]), Decimal(position["avg_price"])
-    exit_px = price * (Decimal(1) - SLIPPAGE) if position["side"] == "long" \
-        else price * (Decimal(1) + SLIPPAGE)
-    fee = qty * exit_px * FEE_RATE
+    exit_px = price * (Decimal(1) - slip) if position["side"] == "long" \
+        else price * (Decimal(1) + slip)
+    fee = qty * exit_px * fee_rate
     diff = (exit_px - entry) if position["side"] == "long" else (entry - exit_px)
     pnl = diff * qty
     cur.execute(
@@ -452,6 +496,7 @@ async def sprawdz(conn, engine: str = "crypto", h: Horizon | None = None) -> int
 
 
 async def run_once(conn, engine: str = "crypto", mode: str = "demo",
+                   kind_kosztow: str = "spot", limit: bool = False,
                    verbose: bool = True, h: Horizon | None = None) -> dict:
     h = h or get_horizon(DEFAULT_BAR)
     cur = conn.cursor()
@@ -485,8 +530,8 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
     # `tradeable`, nie `active`: historię zbieramy szerzej, niż handlujemy.
     # Obstawianie instrumentu, którego giełda z kontem nie oferuje, to decyzja
     # niewykonalna - a trener kalibruje wagi na tym samym zbiorze (0020).
-    cur.execute("SELECT id, symbol, kind FROM ref.instrument WHERE engine=%s AND active"
-                " AND tradeable AND kind <> 'perp' ORDER BY symbol", (engine,))
+    cur.execute("SELECT id, symbol, kind, quote_ccy FROM ref.instrument WHERE engine=%s"
+                " AND active AND tradeable AND kind <> 'perp' ORDER BY symbol", (engine,))
     instrumenty = cur.fetchall()
 
     # Budzet na pozycje wyprowadzony z limitu lacznej ekspozycji i liczby
@@ -521,6 +566,7 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
         weights = (model["weights"] or {}).get(regime)
         score, confidence, contributions = evaluate(features, regime, weights, h)
         oceny.append({"iid": iid, "symbol": symbol, "kind": inst["kind"],
+                      "quote_ccy": inst["quote_ccy"],
                       "features": features, "price": price,
                       "regime": regime, "regime_conf": regime_conf, "score": score,
                       "confidence": confidence, "contributions": contributions,
@@ -601,13 +647,18 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
         risk.record_violations(verdict.violations, did)
 
         if did and verdict.verdict != "block":
+            # Model egzekucji z konfiguracji, nie z domyslu w tym pliku: `kind`
+            # wyznacza cennik gieldy, `limit` - czy placimy stawke maker bez
+            # poslizgu, czy taker ze spreadem. Te same dwie wartosci dostaje
+            # trener, z jednego miejsca w charcie.
             if action == "exit" and position:
-                close_paper(cur, position, price, now, did)
+                close_paper(cur, position, price, now, did, kind_kosztow, limit)
                 stats["wyjscia"] += 1
             elif action.startswith("enter") and verdict.qty and verdict.qty > 0:
                 execute_paper(cur, engine, mode, iid, did,
                               "buy" if action == "enter_long" else "sell",
-                              verdict.qty, price, now)
+                              verdict.qty, price, now,
+                              kind_kosztow, limit, ocena["quote_ccy"])
                 stats["wejscia"] += 1
             else:
                 stats["wstrzymane"] += 1
@@ -639,6 +690,15 @@ async def main() -> int:
     ap.add_argument("--bar", default=DEFAULT_BAR, choices=sorted(HORIZONS))
     ap.add_argument("--sprawdz", action="store_true",
                     help="wykonaj wszystkie odczyty bez zapisu i zakończ")
+    # MODEL EGZEKUCJI - te same dwa przelaczniki co w trenerze.
+    #
+    # Rachunek papierowy musi kosztowac tyle, ile kosztuje strategia, ktora
+    # kalibrujemy. Rozjazd nie objawia sie awaria: krzywa kapitalu po prostu
+    # rosnie szybciej, niz powinna, i wyglada jak wynik.
+    ap.add_argument("--kind", default="spot", choices=("spot", "spot_eu", "perp"),
+                    help="cennik giełdy dla rachunku papierowego")
+    ap.add_argument("--limit", action="store_true",
+                    help="zlecenia z limitem: stawka maker, bez poślizgu")
     args = ap.parse_args()
 
     url = os.environ.get("DATABASE_URL")
@@ -651,13 +711,25 @@ async def main() -> int:
         with psycopg.connect(url, row_factory=dict_row) as conn:
             return await sprawdz(conn, args.engine, h)
 
-    print(f"Silnik {args.engine}, świeca {h.bar} — jedna decyzja na świecę.\n")
+    from services.engine.koszty import runda
+    print(f"Silnik {args.engine}, świeca {h.bar} — jedna decyzja na świecę.")
+    print(f"Rachunek papierowy: {args.kind}, zlecenia "
+          f"{'z limitem' if args.limit else 'rynkowe'}, "
+          f"koszt rundy {runda(args.kind, args.limit) * 100:.3f}%")
+    if args.limit:
+        # Zastrzezenie wypisywane przy KAZDYM starcie, nie schowane w kodzie:
+        # petla nie sprawdza, czy limit sie wypelnil, bo dziala raz na swiece.
+        print("UWAGA: wypełnienie limitu jest PRZYJMOWANE bez sprawdzenia — "
+              "krzywa kapitału jest w tym miejscu optymistyczna.\n")
+    else:
+        print()
 
     with psycopg.connect(url, row_factory=dict_row) as conn:
         while True:
             t0 = datetime.now(timezone.utc)
             try:
-                s = await run_once(conn, args.engine, verbose=not args.quiet, h=h)
+                s = await run_once(conn, args.engine, kind_kosztow=args.kind,
+                                   limit=args.limit, verbose=not args.quiet, h=h)
                 print(f"[{t0:%H:%M:%S}] rozważone {s['rozwazone']}, wejścia {s['wejscia']}, "
                       f"wyjścia {s['wyjscia']}, wstrzymane {s['wstrzymane']}, "
                       f"zablokowane {s['zablokowane']}, "

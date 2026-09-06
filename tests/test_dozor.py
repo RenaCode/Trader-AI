@@ -137,3 +137,23 @@ def test_prog_swiezosci_jest_ten_sam_co_w_petli_decyzyjnej():
         assert h.max_staleness_min > h.bar_minutes, (
             f"{bar}: prog {h.max_staleness_min} min nie jest dluzszy niz swieca "
             f"{h.bar_minutes} min")
+
+
+# --- kanaly wiadomosci ograniczone do istniejacych silnikow -----------------
+def test_kanaly_makro_zostaja_przy_filtrze_silnika():
+    """Kanal bez przypisanego silnika (Fed, EBC) musi przechodzic ZAWSZE.
+
+    Polityka pieniezna dotyczy kazdego rynku i nie da sie jej przypisac do
+    jednego z nich. Gdyby filtr je odcinal, ograniczenie do jednego silnika
+    kasowaloby jedyne zrodlo makro, jakie projekt ma.
+    """
+    import re
+
+    from pathlib import Path
+
+    zrodlo = Path("services/ingest/news_worker.py").read_text()
+    # Warunek musi przepuszczac NULL niezaleznie od listy silnikow.
+    assert re.search(r"engine IS NULL OR engine::text = ANY", zrodlo), (
+        "filtr silnika nie przepuszcza kanalow makro (engine IS NULL)")
+    assert re.search(r"%s::text\[\] IS NULL OR", zrodlo), (
+        "pusta lista silnikow musi znaczyc 'wszystkie kanaly', nie 'zadnych'")
