@@ -1003,3 +1003,43 @@ horyzontem domyślnym; 1h jest torem porównawczym i nie podnosi alarmu.
 Okna 1h przesuwają się o 14 dni zamiast 30, więc ten tor zyskuje nowe okno
 testowe dwa razy częściej — jest w tym sensie „szybszy" i to on pierwszy pokaże
 zmianę, jeśli jakaś nadejdzie.
+
+
+---
+
+# Sprostowanie: „trzykrotnie" dotyczyło innego porównania
+
+Commit naprawiający prowizję w pętli decyzyjnej stwierdza, że krzywa kapitału
+mierzyła strategię *tańszą trzykrotnie od wykonalnej*. To zdanie jest prawdziwe
+tylko przy jednym z dwóch możliwych porównań i nie powinno stać bez tego
+zastrzeżenia.
+
+Policzone na faktycznych wypełnieniach (18 wypełnień, obrót 14 731):
+
+| model kosztu | runda | koszt na tym obrocie |
+|---|---|---|
+| stała z pętli: 0,055% + poślizg 0,04% | 0,190% | 13,99 |
+| przyjęty: spot unijny, zlecenia z limitem | 0,200% | 14,73 |
+| gdyby zlecenia **rynkowe** na tej giełdzie | 0,580% | 42,72 |
+
+**Trzykrotność dotyczy trzeciego wiersza wobec pierwszego** — czyli tego, ile
+kosztowałaby egzekucja rynkowa, którą pętla symulowała. Wobec modelu, który
+faktycznie przyjęliśmy, różnica wynosi **5%**, a błąd zapisany w krzywej to
+**0,74** na rachunku stu tysięcy.
+
+Wyszło tak, bo dwa błędy częściowo się zniosły: zaniżona stawka (0,055%
+zamiast 0,100%) i doliczony poślizg 0,04%, którego przy zleceniu z limitem
+nie ma. Suma wypadła blisko poprawnej — przypadkiem, nie z projektu.
+
+## Co z tego wynika praktycznie
+
+**Krzywej kapitału nie trzeba resetować.** Rozważałem to, bo mieszanie dwóch
+modeli kosztu czyni ją nieinterpretowalną — ale przy różnicy 0,74 nie ma czego
+mieszać.
+
+Wniosek o samym błędzie zostaje w mocy i jest poważny niezależnie od skali:
+produkcja liczyła koszt z własnej stałej, a nie z `koszty.py`, przez tydzień po
+tym, jak ten sam błąd naprawiono w symulacji. Gdyby stawki rozjechały się
+bardziej — a rozjadą się przy każdej zmianie cennika giełdy — nikt by tego nie
+zauważył. Dlatego naprawą jest jedno źródło prawdy plus test, który pada, gdy
+wróci własna stała, a nie sama korekta liczby.
