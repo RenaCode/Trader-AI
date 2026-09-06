@@ -269,4 +269,52 @@ def test_czujka_kopii_wykrywa_skurczenie():
     from services.engine.dozor import KOPIA_SKURCZ
 
     assert 0 < KOPIA_SKURCZ < 1
-    assert 'poprzednia["bajtow"] * KOPIA_SKURCZ' in _cialo("sprawdz_kopie")
+
+
+# --- werdykt o kopiach jako czysta funkcja ----------------------------------
+def _kopia(mb: float, wiek_h: float = 1.0):
+    from datetime import datetime, timezone
+
+    return {"bajtow": int(mb * 1e6), "wiek_h": wiek_h, "plik": "x.dump",
+            "finished_at": datetime(2026, 9, 6, 3, 17, tzinfo=timezone.utc)}
+
+
+def test_swieza_kopia_o_stalym_rozmiarze_to_cisza():
+    from services.engine.dozor import ocen_kopie
+
+    assert ocen_kopie(_kopia(149), _kopia(148)) == []
+
+
+def test_kopia_ktora_urosla_to_cisza():
+    """Baza rośnie, więc zrzut ma rosnąć — to jest stan normalny."""
+    from services.engine.dozor import ocen_kopie
+
+    assert ocen_kopie(_kopia(160), _kopia(149)) == []
+
+
+def test_skurczenie_o_polowe_jest_zglaszane():
+    from services.engine.dozor import ocen_kopie
+
+    powody = ocen_kopie(_kopia(40), _kopia(149))
+    assert len(powody) == 1 and "skurczyła" in powody[0][0]
+
+
+def test_bez_poprzedniej_kopii_nie_ma_z_czym_porownac():
+    """Pierwsza kopia w historii nie może być uznana za skurczoną."""
+    from services.engine.dozor import ocen_kopie
+
+    assert ocen_kopie(_kopia(1), None) == []
+
+
+def test_stara_kopia_jest_zglaszana():
+    from services.engine.dozor import ocen_kopie
+
+    powody = ocen_kopie(_kopia(149, wiek_h=30), _kopia(149))
+    assert len(powody) == 1 and "świeżej" in powody[0][0]
+
+
+def test_stara_I_skurczona_daje_dwa_powody():
+    """Oba warunki są niezależne — jeden nie może przesłonić drugiego."""
+    from services.engine.dozor import ocen_kopie
+
+    assert len(ocen_kopie(_kopia(10, wiek_h=48), _kopia(149))) == 2

@@ -264,6 +264,38 @@ KOPIA_STARA_PO_H = 26
 KOPIA_SKURCZ = 0.5
 
 
+def ocen_kopie(biezaca: dict, poprzednia: dict | None,
+               prog_h: float = KOPIA_STARA_PO_H,
+               skurcz: float = KOPIA_SKURCZ) -> list[tuple[str, str]]:
+    """Werdykt o kopiach jako CZYSTA funkcja - lista (tytul, tresc).
+
+    Wydzielone z tego samego powodu co `zmiany()` przy stanie nauki: galaz
+    "kopia skurczyla sie" nie dala sie wywolac przeciwko produkcji, bo wymaga
+    DWOCH wierszy, a po wdrozeniu byl jeden. Logika alarmu, ktora da sie
+    sprawdzic tylko wtedy, gdy dane produkcyjne akurat sie ulozą, jest logika
+    niesprawdzona.
+    """
+    powody: list[tuple[str, str]] = []
+
+    if float(biezaca["wiek_h"]) > prog_h:
+        powody.append((
+            "Brak świeżej kopii zapasowej",
+            f"Ostatnia udana kopia {biezaca['wiek_h']} godzin temu "
+            f"({biezaca['finished_at']:%Y-%m-%d %H:%M} UTC), próg to {prog_h} h.\n\n"
+            f"Sprawdź: kubectl get cronjob trader-backup; "
+            f"kubectl get jobs | grep backup"))
+
+    if poprzednia and biezaca["bajtow"] < poprzednia["bajtow"] * skurcz:
+        powody.append((
+            "Kopia zapasowa skurczyła się o ponad połowę",
+            f"Ostatnia: {biezaca['bajtow'] / 1e6:.1f} MB, "
+            f"poprzednia: {poprzednia['bajtow'] / 1e6:.1f} MB.\n\n"
+            f"Taki plik nadal przechodzi pg_restore --list, bo jest poprawnym "
+            f"archiwum — po prostu prawie pustym."))
+
+    return powody
+
+
 async def sprawdz_kopie(fetch_all, notify, sucho: bool = False) -> int:
     """Czy istnieje swieza, zweryfikowana kopia zapasowa.
 
@@ -305,29 +337,13 @@ async def sprawdz_kopie(fetch_all, notify, sucho: bool = False) -> int:
     print(f"kopie: ostatnia {biezaca['finished_at']:%Y-%m-%d %H:%M} "
           f"({biezaca['wiek_h']} h temu), {biezaca['bajtow'] / 1e6:.1f} MB")
 
-    problemy = 0
-    if float(biezaca["wiek_h"]) > KOPIA_STARA_PO_H:
-        problemy += 1
-        await zglos("Brak świeżej kopii zapasowej",
-                    f"Ostatnia udana kopia {biezaca['wiek_h']} godzin temu "
-                    f"({biezaca['finished_at']:%Y-%m-%d %H:%M} UTC), próg to "
-                    f"{KOPIA_STARA_PO_H} h.\n\n"
-                    f"Sprawdź: kubectl get cronjob trader-backup; "
-                    f"kubectl get jobs | grep backup")
+    powody = ocen_kopie(biezaca, wiersze[1] if len(wiersze) > 1 else None)
+    for tytul, tresc in powody:
+        await zglos(tytul, tresc)
 
-    if len(wiersze) > 1:
-        poprzednia = wiersze[1]
-        if biezaca["bajtow"] < poprzednia["bajtow"] * KOPIA_SKURCZ:
-            problemy += 1
-            await zglos("Kopia zapasowa skurczyła się o ponad połowę",
-                        f"Ostatnia: {biezaca['bajtow'] / 1e6:.1f} MB, "
-                        f"poprzednia: {poprzednia['bajtow'] / 1e6:.1f} MB.\n\n"
-                        f"Taki plik nadal przechodzi pg_restore --list, bo jest "
-                        f"poprawnym archiwum — po prostu prawie pustym.")
-
-    if not problemy:
+    if not powody:
         print("  bez zastrzeżeń")
-    return 1 if problemy else 0
+    return 1 if powody else 0
 
 
 async def main() -> int:
