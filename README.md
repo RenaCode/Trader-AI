@@ -170,6 +170,32 @@ kasuje wszystko, co wygenerował, zostawiając realne dane rynkowe.
 | `trainer` | walk-forward, raz na dobę, po nim **dozór** | cechy |
 | `news` | RSS → zapis; z kluczem także filtr → analiza, co 5 min | — |
 
+## Egzekucja papierowa
+
+Silnik nie składa zleceń na giełdzie — prowadzi **własny rachunek papierowy**
+po realnych cenach. Zlecenia są jawnie oznaczone (`execution: internal_paper`,
+`venue_fill_id: paper-*`), a koszt liczony z `services/engine/koszty.py` tym
+samym wywołaniem co w symulacji walk-forward.
+
+**Zlecenie z limitem jest planem, nie faktem.** Decyzja na zamknięciu świecy T
+zapisuje `journal.planned_order` z ceną limitu i terminem ważności do końca
+świecy T+1. Na początku kolejnego cyklu plan jest rozstrzygany regułą
+`portfolio._wypelnione` — tą samą, której używa symulacja:
+
+```
+kupno   wypełnia się, gdy low  ≤ limit
+sprzedaż                gdy high ≥ limit
+```
+
+Niewypełnienie jest **wynikiem, nie błędem**. Przy wyjściu oznacza, że pozycja
+zostaje otwarta — najdroższy przypadek w całym modelu, bo dotyczy rynku, który
+ucieka przeciwko nam.
+
+Do 2026-09-06 pętla zapisywała wypełnienie od razu, przyjmując, że limit się
+wypełnił. Błąd był systematyczny w jedną stronę: zlecenia, które się nie
+wypełniają, to zwykle te, przy których rynek uciekł w naszą stronę, czyli
+najbardziej zyskowne.
+
 ## Dozór stanu nauki
 
 Po każdym nocnym treningu uruchamia się `services/engine/dozor.py`. Odzywa się
