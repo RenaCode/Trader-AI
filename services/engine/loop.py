@@ -38,6 +38,7 @@ from psycopg.rows import dict_row
 from services.engine.horizons import DEFAULT_BAR, HORIZONS, Horizon, get as get_horizon
 from services.engine.risk import RiskKernel
 from services.engine.koszty import POSLIZG_MAKER, POSLIZG_TAKER, koszty
+from services.engine.portfolio import _wypelnione
 from services.engine.risk_rules import position_budget
 from services.engine.signals import SIGNALS, classify_regime, evaluate
 
@@ -282,6 +283,33 @@ def record_decision(cur, engine: str, mode: str, instrument_id: int, as_of: date
     return did
 
 
+def zakres_swiecy(cur, instrument_id: int, h: Horizon,
+                  poczatek: datetime) -> dict | None:
+    """Najwyzszy, najnizszy i zamkniecie swiecy zaczynajacej sie o `poczatek`.
+
+    Agregacja jest ta sama, ktorej uzywa trener przy budowaniu panelu: swieca
+    horyzontu powstaje z `source_timeframe` przez time_bucket. Gdyby produkcja
+    liczyla ja inaczej, sprawdzenie wypelnienia dotyczyloby innej swiecy niz ta,
+    na ktorej model byl kalibrowany.
+
+    Zwraca None, gdy swieca nie jest jeszcze kompletna - wtedy nie ma czego
+    rozstrzygac i plan czeka.
+    """
+    koniec = poczatek + timedelta(minutes=h.bar_minutes)
+    cur.execute(
+        "SELECT max(high) AS high, min(low) AS low,"
+        " (array_agg(close ORDER BY event_time DESC))[1] AS close,"
+        " count(*) AS n"
+        " FROM market.candle WHERE instrument_id = %s AND timeframe = %s"
+        "   AND event_time >= %s AND event_time < %s",
+        (instrument_id, h.source_timeframe, poczatek, koniec))
+    r = cur.fetchone()
+    if not r or not r["n"] or r["high"] is None:
+        return None
+    return {"high": float(r["high"]), "low": float(r["low"]),
+            "close": Decimal(r["close"]), "n": r["n"]}
+
+
 def stawki(kind: str, limit: bool) -> tuple[Decimal, Decimal]:
     """Prowizja i poslizg dla przyjetego modelu egzekucji - z koszty.py.
 
@@ -296,34 +324,30 @@ def stawki(kind: str, limit: bool) -> tuple[Decimal, Decimal]:
 
 def execute_paper(cur, engine: str, mode: str, instrument_id: int, decision_id: int,
                   side: str, qty: Decimal, price: Decimal, as_of: datetime,
-                  kind: str, limit: bool, quote_ccy: str) -> None:
+                  kind: str, limit: bool, quote_ccy: str,
+                  planned_order_id: int | None = None) -> None:
     """Symulacja wypelnienia po realnej cenie, z prowizja i poslizgiem.
 
-    ZASTRZEZENIE, KTORE TRZEBA CZYTAC RAZEM Z KRZYWA KAPITALU
-
-    Przy egzekucji z limitem ta funkcja PRZYJMUJE, ze zlecenie sie wypelnilo.
-    Petla dziala raz na swiece i zapisuje wynik od razu, wiec nie ma jak
-    sprawdzic, czy cena dotknela limitu - symulacja walk-forward to potrafi
-    (portfolio._wypelnione), produkcja nie.
-
-    Krzywa kapitalu jest wiec w tym jednym miejscu OPTYMISTYCZNA. Zapisujemy to
-    w `raw` przy kazdym zleceniu, zeby dalo sie to policzyc pozniej, zamiast
-    odkryc przy przejsciu na zywo.
+    Przy egzekucji z limitem ta funkcja jest wolana DOPIERO po stwierdzeniu, ze
+    zlecenie sie wypelnilo (rozstrzygnij_plany), a cena wypelnienia to cena
+    limitu - bez poslizgu, bo zlecenie nie przechodzilo przez spread.
     """
     fee_rate, slip = stawki(kind, limit)
     fill = price * (Decimal(1) + slip) if side == "buy" else price * (Decimal(1) - slip)
     fee = qty * fill * fee_rate
 
     cur.execute(
-        "INSERT INTO exec.order (decision_id, engine, mode, instrument_id, client_order_id,"
-        " side, order_type, qty, status, submitted_at, raw)"
-        " VALUES (%s,%s,%s,%s,%s,%s,'market',%s,'filled',%s,%s) RETURNING id",
-        (decision_id, engine, mode, instrument_id, f"tai-{decision_id}", side, qty, as_of,
+        "INSERT INTO exec.order (decision_id, planned_order_id, engine, mode, instrument_id,"
+        " client_order_id, side, order_type, qty, status, submitted_at, raw)"
+        " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,'filled',%s,%s) RETURNING id",
+        (decision_id, planned_order_id, engine, mode, instrument_id,
+         f"tai-{decision_id}", side, "limit" if limit else "market", qty, as_of,
          json.dumps({"execution": "internal_paper", "kind": kind,
                      "order": "limit" if limit else "market",
                      "fee_rate": str(fee_rate), "slippage": str(slip),
-                     "zalozenie": ("wypelnienie limitu przyjete bez sprawdzenia"
-                                   if limit else None)})))
+                     "wypelnienie": ("sprawdzone na swiecy T+1 (plan "
+                                     f"{planned_order_id})" if planned_order_id
+                                    else "natychmiastowe")})))
     oid = cur.fetchone()["id"]
     cur.execute(
         "INSERT INTO exec.fill (order_id, venue_fill_id, qty, price, fee, fee_ccy, event_time)"
@@ -350,6 +374,104 @@ def close_paper(cur, position: dict, price: Decimal, as_of: datetime,
         " fees_paid = fees_paid + %s, close_decision_id=%s WHERE id=%s",
         (as_of, pnl, fee, decision_id, position["id"]))
     return pnl
+
+
+def zaplanuj(cur, decision_id: int, instrument_id: int, side: str, qty: Decimal,
+             limit_price: Decimal, h: Horizon, bar_start: datetime,
+             rodzaj: str, position_id: int | None = None) -> None:
+    """Zlecenie z limitem NIE jest wypelnieniem - jest planem na nastepna swiece.
+
+    DLACZEGO ODROCZENIE, A NIE ZAPIS OD RAZU
+
+    Do 2026-09-06 petla zapisywala wypelnienie natychmiast, PRZYJMUJAC, ze limit
+    sie wypelnil. To jedyne miejsce, w ktorym rachunek papierowy byl
+    optymistyczny - i to systematycznie w jedna strone, bo zlecenia, ktore sie
+    nie wypelniaja, to zwykle te, przy ktorych rynek uciekl w nasza strone,
+    czyli najbardziej zyskowne.
+
+    Symulacja walk-forward modelowala to od poczatku (portfolio._wypelnione),
+    produkcja nie - czyli krzywa kapitalu i wynik kalibracji opisywaly dwie
+    rozne strategie.
+
+    `journal.planned_order` istnieje w schemacie od migracji 0005 z polami
+    `limit_price`, `valid_until` i statusem pending/triggered/expired.
+    Zaprojektowano ja dokladnie na to i nigdy nie uzyto.
+    """
+    koniec_nastepnej = bar_start + timedelta(minutes=2 * h.bar_minutes)
+    cur.execute(
+        "INSERT INTO journal.planned_order (decision_id, instrument_id, side, qty,"
+        " order_type, limit_price, trigger, valid_until, status)"
+        " VALUES (%s,%s,%s,%s,'limit',%s,%s,%s,'pending')",
+        (decision_id, instrument_id, side, qty, limit_price,
+         json.dumps({"rodzaj": rodzaj, "position_id": position_id,
+                     "bar": bar_start.isoformat(),
+                     "regula": "kupno gdy low <= limit, sprzedaz gdy high >= limit"}),
+         koniec_nastepnej))
+
+
+def rozstrzygnij_plany(cur, engine: str, mode: str, h: Horizon, now: datetime,
+                       kind: str, verbose: bool) -> dict:
+    """Sprawdza, czy plany z poprzedniej swiecy doczekaly sie wypelnienia.
+
+    Reguly nie powtarzamy - uzywamy `portfolio._wypelnione`, tej samej funkcji,
+    ktora rozstrzyga to w symulacji. Dwie kopie tej samej reguly rozjechalyby
+    sie przy pierwszej zmianie, a roznica bylaby niewidoczna.
+    """
+    st = {"wypelnione": 0, "niewypelnione": 0, "czekaja": 0}
+    cur.execute(
+        "SELECT p.id, p.decision_id, p.instrument_id, p.side, p.qty, p.limit_price,"
+        "       p.trigger, p.valid_until, i.symbol, i.quote_ccy"
+        " FROM journal.planned_order p JOIN ref.instrument i ON i.id = p.instrument_id"
+        " WHERE p.status = 'pending' ORDER BY p.id")
+    for plan in cur.fetchall():
+        bar = datetime.fromisoformat(plan["trigger"]["bar"])
+        sprawdzana = bar + timedelta(minutes=h.bar_minutes)
+        if sprawdzana + timedelta(minutes=h.bar_minutes) > now and now < plan["valid_until"]:
+            st["czekaja"] += 1
+            continue
+
+        swieca = zakres_swiecy(cur, plan["instrument_id"], h, sprawdzana)
+        limit_px = float(plan["limit_price"])
+        trafiony = bool(swieca) and _wypelnione(limit_px, swieca, kupno=plan["side"] == "buy")
+
+        if not trafiony:
+            # NIEWYPELNIENIE JEST WYNIKIEM, NIE BLEDEM. Przy wyjsciu oznacza, ze
+            # pozycja ZOSTAJE OTWARTA - i to jest najdrozszy przypadek w calym
+            # modelu, bo dotyczy rynku, ktory ucieka przeciwko nam.
+            cur.execute("UPDATE journal.planned_order SET status='expired',"
+                        " resolved_at=%s WHERE id=%s", (now, plan["id"]))
+            st["niewypelnione"] += 1
+            if verbose:
+                print(f"  [niewypełnione] {plan['symbol']} {plan['side']} @ {limit_px:.6g}"
+                      f" — {plan['trigger']['rodzaj']}")
+            continue
+
+        cena = Decimal(str(limit_px))
+        # DATA WYPELNIENIA to zamkniecie swiecy, w ktorej limit zostal dotkniety,
+        # a nie chwila, w ktorej petla to zauwazyla. Przy przestoju silnika
+        # roznica bylaby dowolnie duza, a `opened_at` pozycji wchodzi do
+        # dziennika i do liczenia czasu trzymania.
+        wypelniono = sprawdzana + timedelta(minutes=h.bar_minutes)
+        if plan["trigger"]["rodzaj"] == "wyjscie":
+            poz = None
+            if plan["trigger"].get("position_id"):
+                cur.execute("SELECT id, side, qty, avg_price FROM exec.position"
+                            " WHERE id=%s AND closed_at IS NULL",
+                            (plan["trigger"]["position_id"],))
+                poz = cur.fetchone()
+            if poz:
+                close_paper(cur, poz, cena, wypelniono, plan["decision_id"], kind, True)
+        else:
+            execute_paper(cur, engine, mode, plan["instrument_id"], plan["decision_id"],
+                          plan["side"], Decimal(plan["qty"]), cena, wypelniono,
+                          kind, True, plan["quote_ccy"], planned_order_id=plan["id"])
+        cur.execute("UPDATE journal.planned_order SET status='triggered',"
+                    " resolved_at=%s WHERE id=%s", (now, plan["id"]))
+        st["wypelnione"] += 1
+        if verbose:
+            print(f"  [wypełnione]   {plan['symbol']} {plan['side']} @ {limit_px:.6g}"
+                  f" — {plan['trigger']['rodzaj']}")
+    return st
 
 
 async def sprawdz(conn, engine: str = "crypto", h: Horizon | None = None) -> int:
@@ -525,7 +647,19 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
         print(f"  wagi: {'wersja modelu ' + str(model['version']) if model['version'] else 'założenia początkowe (brak zwalidowanego modelu)'}"
               f", próg wejścia {model['enter']:.4f}")
     stats = {"rozwazone": 0, "wejscia": 0, "wyjscia": 0, "wstrzymane": 0,
-             "zablokowane": 0, "poza_swieca": 0}
+             "zablokowane": 0, "poza_swieca": 0,
+             "wypelnione": 0, "niewypelnione": 0, "czekaja": 0}
+
+    # ROZSTRZYGNIECIE PLANOW IDZIE PRZED OCENA, nie po niej.
+    #
+    # Plan z poprzedniej swiecy moze otworzyc albo zamknac pozycje, a ocena
+    # musi widziec stan PO tym rozstrzygnieciu - inaczej silnik podejmowalby
+    # decyzje na podstawie pozycji, ktorej juz nie ma albo ktora wlasnie
+    # powstala.
+    if limit:
+        stats.update(rozstrzygnij_plany(cur, engine, mode, h, now,
+                                        kind_kosztow, verbose))
+        conn.commit()
 
     # `tradeable`, nie `active`: historię zbieramy szerzej, niż handlujemy.
     # Obstawianie instrumentu, którego giełda z kontem nie oferuje, to decyzja
@@ -651,14 +785,29 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
             # wyznacza cennik gieldy, `limit` - czy placimy stawke maker bez
             # poslizgu, czy taker ze spreadem. Te same dwie wartosci dostaje
             # trener, z jednego miejsca w charcie.
+            # Z LIMITEM: plan na nastepna swiece. RYNKOWE: wypelnienie od razu.
+            #
+            # Zlecenie z limitem zlozone na zamknieciu swiecy T nie jest faktem,
+            # tylko zamiarem - rozstrzyga sie w swiecy T+1 i moze sie nie
+            # wypelnic. Zapisywanie go od razu jako wypelnienia zawyzalo krzywa
+            # kapitalu systematycznie w jedna strone.
             if action == "exit" and position:
-                close_paper(cur, position, price, now, did, kind_kosztow, limit)
+                if limit:
+                    zaplanuj(cur, did, iid, "sell" if position["side"] == "long" else "buy",
+                             Decimal(position["qty"]), price, h, bar_start,
+                             "wyjscie", position["id"])
+                else:
+                    close_paper(cur, position, price, now, did, kind_kosztow, limit)
                 stats["wyjscia"] += 1
             elif action.startswith("enter") and verdict.qty and verdict.qty > 0:
-                execute_paper(cur, engine, mode, iid, did,
-                              "buy" if action == "enter_long" else "sell",
-                              verdict.qty, price, now,
-                              kind_kosztow, limit, ocena["quote_ccy"])
+                strona = "buy" if action == "enter_long" else "sell"
+                if limit:
+                    zaplanuj(cur, did, iid, strona, verdict.qty, price, h, bar_start,
+                             "wejscie")
+                else:
+                    execute_paper(cur, engine, mode, iid, did, strona,
+                                  verdict.qty, price, now,
+                                  kind_kosztow, limit, ocena["quote_ccy"])
                 stats["wejscia"] += 1
             else:
                 stats["wstrzymane"] += 1
@@ -717,10 +866,8 @@ async def main() -> int:
           f"{'z limitem' if args.limit else 'rynkowe'}, "
           f"koszt rundy {runda(args.kind, args.limit) * 100:.3f}%")
     if args.limit:
-        # Zastrzezenie wypisywane przy KAZDYM starcie, nie schowane w kodzie:
-        # petla nie sprawdza, czy limit sie wypelnil, bo dziala raz na swiece.
-        print("UWAGA: wypełnienie limitu jest PRZYJMOWANE bez sprawdzenia — "
-              "krzywa kapitału jest w tym miejscu optymistyczna.\n")
+        print("Zlecenia z limitem są PLANOWANE na świecę T i rozstrzygane na T+1 "
+              "(kupno gdy low ≤ limit, sprzedaż gdy high ≥ limit).\n")
     else:
         print()
 
@@ -730,10 +877,13 @@ async def main() -> int:
             try:
                 s = await run_once(conn, args.engine, kind_kosztow=args.kind,
                                    limit=args.limit, verbose=not args.quiet, h=h)
+                plany = (f", plany: wypełnione {s['wypelnione']}, "
+                         f"niewypełnione {s['niewypelnione']}, czekają {s['czekaja']}"
+                         if args.limit else "")
                 print(f"[{t0:%H:%M:%S}] rozważone {s['rozwazone']}, wejścia {s['wejscia']}, "
                       f"wyjścia {s['wyjscia']}, wstrzymane {s['wstrzymane']}, "
                       f"zablokowane {s['zablokowane']}, "
-                      f"już rozstrzygnięte w tej świecy {s['poza_swieca']}")
+                      f"już rozstrzygnięte w tej świecy {s['poza_swieca']}{plany}")
             except Exception as e:                            # noqa: BLE001
                 conn.rollback()
                 print(f"[{t0:%H:%M:%S}] przebieg przerwany: {type(e).__name__}: {e}")
