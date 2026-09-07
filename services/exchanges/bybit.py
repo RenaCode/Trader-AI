@@ -59,6 +59,7 @@ import httpx
 
 from .base import (
     AuthError, Balance, BookLevel, Candle, ConnectionCheck, ExchangeError, OrderBook,
+    StanZlecenia, ZlozoneZlecenie,
 )
 
 # Dane publiczne bierzemy z podmiotu GLOBALNEGO niezaleznie od tego, gdzie stoi
@@ -80,6 +81,21 @@ INTERVAL = {
 }
 
 RECV_WINDOW = "5000"
+
+# Mapowanie statusow Bybita na nasze. Slownik, a nie lancuch if-ow: status
+# nieznany ma zostac nieznany, a nie wpasc do "new" przez przypadek.
+_STATUSY = {
+    "New": "new", "Created": "new", "Untriggered": "new",
+    "PartiallyFilled": "partial",
+    "Filled": "filled",
+    "Cancelled": "cancelled", "PartiallyFilledCanceled": "cancelled",
+    "Deactivated": "cancelled",
+    "Rejected": "rejected",
+}
+
+
+def _status_bybita(status: str) -> str:
+    return _STATUSY.get(status, f"nieznany:{status}")
 
 
 class BybitAdapter:
@@ -381,6 +397,136 @@ class BybitAdapter:
             can_withdraw=can_withdraw,
             latency_ms=latency,
         )
+
+    # ---------------------------------------------------------------- zlecenia
+    async def _post(self, path: str, body: dict) -> dict:
+        """POST BEZ PONAWIANIA. Brak ponawiania jest tu funkcją, nie brakiem.
+
+        Ponawianie GET-a jest niegroźne - najwyżej pobierzemy te same świece
+        dwa razy. Ponawianie POST-a po przekroczeniu czasu jest DOKŁADNIE tym
+        mechanizmem, który tworzy drugą pozycję: odpowiedź mogła nie dotrzeć,
+        mimo że zlecenie weszło.
+
+        Kto chce ponowić, musi najpierw SPRAWDZIĆ - patrz `zloz_zlecenie`.
+        """
+        query = json.dumps(body, separators=(",", ":"))
+        ts = str(int(time.time() * 1000))
+        headers = {
+            "X-BAPI-API-KEY": self._key,
+            "X-BAPI-TIMESTAMP": ts,
+            "X-BAPI-RECV-WINDOW": RECV_WINDOW,
+            "X-BAPI-SIGN": self._sign(ts, query),
+            "Content-Type": "application/json",
+        }
+        try:
+            r = await self._client.post(f"{self._host}{path}", content=query, headers=headers)
+        except httpx.TimeoutException as e:
+            # `retryable=False`: ponowienie w gorę stosu byłoby podwójnym
+            # zleceniem. Odpowiedź na przekroczenie czasu to SPRAWDZENIE, nie
+            # powtórzenie - i o tym mówi komunikat.
+            raise ExchangeError(
+                f"brak odpowiedzi na zlecenie ({e}) - zlecenie MOGLO wejsc, "
+                f"sprawdz je po id wlasnym przed jakakolwiek proba ponowienia",
+                code="timeout", retryable=False) from e
+        except httpx.HTTPError as e:
+            raise ExchangeError(f"blad polaczenia przy zleceniu: {e}",
+                                code="network", retryable=False) from e
+
+        try:
+            data = r.json()
+        except ValueError as e:
+            raise ExchangeError(f"odpowiedz na zlecenie nie jest JSON-em "
+                                f"({r.status_code})") from e
+        ret = data.get("retCode")
+        if ret != 0:
+            msg = data.get("retMsg", "nieznany blad")
+            if ret in (10003, 10004, 10005, 33004):
+                raise AuthError(f"{msg} (kod {ret})", code=str(ret))
+            raise ExchangeError(f"{msg} (kod {ret})", code=str(ret))
+        return data.get("result") or {}
+
+    async def stan_zlecenia(self, id_wlasne: str, kategoria: str = "spot") -> StanZlecenia | None:
+        """Stan zlecenia po NASZYM identyfikatorze. None, gdy giełda go nie zna.
+
+        Odpytujemy po `orderLinkId`, nie po identyfikatorze giełdy - ten drugi
+        poznajemy dopiero z odpowiedzi, więc w sytuacji, dla której to istnieje,
+        jeszcze go nie mamy.
+
+        Sprawdzamy zlecenia otwarte ORAZ historię: zlecenie mogło się wypełnić
+        i zniknąć z listy otwartych między naszym timeoutem a zapytaniem.
+        """
+        for sciezka in ("/v5/order/realtime", "/v5/order/history"):
+            odp = await self._get(sciezka, {"category": kategoria,
+                                            "orderLinkId": id_wlasne})
+            lista = odp.get("list") or []
+            if lista:
+                o = lista[0]
+                ilosc = Decimal(str(o.get("qty") or 0))
+                wyp = Decimal(str(o.get("cumExecQty") or 0))
+                cena = o.get("avgPrice")
+                return StanZlecenia(
+                    id_wlasne=id_wlasne,
+                    id_gieldy=o.get("orderId"),
+                    status=_status_bybita(o.get("orderStatus", "")),
+                    ilosc=ilosc, wypelniono=wyp,
+                    srednia_cena=Decimal(str(cena)) if cena else None,
+                    prowizja=Decimal(str(o.get("cumExecFee") or 0)),
+                )
+        return None
+
+    async def zloz_zlecenie(self, *, symbol: str, strona: str, ilosc: Decimal,
+                            cena_limitu: Decimal, id_wlasne: str,
+                            kategoria: str = "spot") -> ZlozoneZlecenie:
+        """Składa zlecenie z limitem. IDEMPOTENTNIE.
+
+        `id_wlasne` musi być wyprowadzone z decyzji, a NIE z czasu ani losowo -
+        inaczej ponowienie tworzy nowy identyfikator i cała ochrona znika.
+
+        SPRAWDŹ, POTEM SKŁADAJ. Zamiast ponawiać na ślepo, przy braku odpowiedzi
+        pytamy giełdę, czy zna to `id_wlasne`. Trzy możliwe odpowiedzi i każda
+        prowadzi gdzie indziej:
+          * zna i wypełnione  -> nic nie robimy, zwracamy stan
+          * zna i otwarte     -> nic nie robimy, zwracamy stan
+          * nie zna           -> zlecenie nie weszło, wolno złożyć
+        """
+        # Giełda też sprawdza unikalność orderLinkId, ale dopiero PO przyjęciu
+        # zapytania. Sprawdzenie u nas oszczędza jedno okrążenie i - co ważniejsze -
+        # daje ten sam wynik, gdy poprzednia próba skończyła się timeoutem.
+        istniejace = await self.stan_zlecenia(id_wlasne, kategoria)
+        if istniejace is not None:
+            return ZlozoneZlecenie(id_wlasne=id_wlasne, id_gieldy=istniejace.id_gieldy,
+                                   status=istniejace.status, juz_istnialo=True)
+
+        wynik = await self._post("/v5/order/create", {
+            "category": kategoria,
+            "symbol": symbol,
+            "side": "Buy" if strona == "buy" else "Sell",
+            "orderType": "Limit",
+            "qty": str(ilosc),
+            "price": str(cena_limitu),
+            "timeInForce": "GTC",
+            "orderLinkId": id_wlasne,
+        })
+        return ZlozoneZlecenie(id_wlasne=id_wlasne, id_gieldy=wynik.get("orderId"),
+                               status="new")
+
+    async def anuluj_zlecenie(self, *, symbol: str, id_wlasne: str,
+                              kategoria: str = "spot") -> bool:
+        """Anuluje zlecenie po naszym identyfikatorze. False, gdy nie było czego.
+
+        Zlecenie z limitem jest planem na JEDNĄ świecę (patrz README). Bez
+        anulowania niewypełnione plany zbierałyby się na giełdzie i wypełniały
+        po cenach, których żadna decyzja już nie popiera.
+        """
+        try:
+            await self._post("/v5/order/cancel", {
+                "category": kategoria, "symbol": symbol, "orderLinkId": id_wlasne})
+            return True
+        except ExchangeError as e:
+            # 110001 to "zlecenia nie ma" - przy anulowaniu to sukces, nie awaria.
+            if e.code == "110001":
+                return False
+            raise
 
     async def close(self) -> None:
         await self._client.aclose()

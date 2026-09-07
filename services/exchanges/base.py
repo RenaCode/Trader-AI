@@ -109,3 +109,34 @@ class ExchangeAdapter(Protocol):
     async def fetch_balances(self) -> list[Balance]: ...
 
     async def close(self) -> None: ...
+
+
+@dataclass(frozen=True)
+class ZlozoneZlecenie:
+    """Odpowiedź giełdy na złożenie zlecenia.
+
+    `id_wlasne` jest w tej strukturze WAŻNIEJSZE niż `id_gieldy`: to my je
+    nadajemy i to po nim odnajdujemy zlecenie, gdy odpowiedź nie dotarła.
+    Identyfikator giełdy poznajemy dopiero z odpowiedzi, więc w sytuacji, dla
+    której idempotencja istnieje, jeszcze go nie mamy.
+    """
+    id_wlasne: str
+    id_gieldy: str | None
+    status: str                    # 'new','partial','filled','cancelled','rejected'
+    juz_istnialo: bool = False     # zlecenie odnalezione, nie zlozone od nowa
+
+
+@dataclass(frozen=True)
+class StanZlecenia:
+    """Stan zlecenia po stronie giełdy — źródło prawdy przy uzgadnianiu."""
+    id_wlasne: str
+    id_gieldy: str | None
+    status: str
+    ilosc: Decimal
+    wypelniono: Decimal            # ILE JUŻ WESZŁO — wypełnienie częściowe
+    srednia_cena: Decimal | None
+    prowizja: Decimal
+
+    @property
+    def czesciowe(self) -> bool:
+        return Decimal(0) < self.wypelniono < self.ilosc
