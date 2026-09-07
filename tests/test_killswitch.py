@@ -298,3 +298,47 @@ def test_dozorca_uzywa_TEGO_SAMEGO_risk_kernela_co_silnik():
     zrodlo = Path("services/engine/dozorca.py").read_text(encoding="utf-8")
     assert "from services.engine.risk import RiskKernel" in zrodlo
     assert "check_account()" in zrodlo
+
+
+# --------------------------------------------------- autonomia widoczna w UI
+
+def test_interfejs_pokazuje_KTO_zwolnil():
+    """System, który sam siebie zatrzymuje i sam wznawia, a w interfejsie
+    wygląda tak samo jak zwolniony ręcznie, nie daje się rozliczyć. Po serii
+    zatrzymań pierwsze pytanie brzmi „czy ktoś to przemyślał, czy poszło
+    automatem"."""
+    api = Path("services/api/routers/risk.py").read_text(encoding="utf-8")
+    assert "released_auto" in api, "API nie oddaje, kto zwolnił"
+    ui = Path("web/src/components/Risk.jsx").read_text(encoding="utf-8")
+    assert "released_auto" in ui and "automatycznie" in ui
+
+
+def test_interfejs_pokazuje_REGULE_WZNOWIENIA_przy_limicie():
+    """Interfejs mówił, że system się zatrzyma, i milczał o tym, czy sam wróci.
+    To pierwsze pytanie, jakie zadaje się o autonomiczny bezpiecznik."""
+    ui = Path("web/src/components/Risk.jsx").read_text(encoding="utf-8")
+    for regula in ("reczne", "po_ustaniu", "po_odbudowie"):
+        assert regula in ui, f"brak opisu reguły {regula}"
+    api = Path("services/api/routers/risk.py").read_text(encoding="utf-8")
+    assert "ld.wznowienie" in api
+
+
+def test_interfejs_pokazuje_PULS_DOZORCY():
+    """Martwy dozorca wygląda dokładnie jak dozorca, który nie ma co zgłaszać —
+    różnicę widać wyłącznie w wieku pulsu. Bez tego widoku autonomia jest
+    niewidoczna: system decyduje sam, a interfejs pokazuje tylko skutki."""
+    api = Path("services/api/routers/risk.py").read_text(encoding="utf-8")
+    assert "dozorca_heartbeat" in api and '"/dozorca"' in api
+    ui = Path("web/src/components/Risk.jsx").read_text(encoding="utf-8")
+    assert "risk/dozorca" in ui and "DOZORCA NIE BIJE" in ui
+
+
+def test_prog_zywotnosci_dozorcy_jest_wielokrotnoscia_interwalu():
+    """Próg równy interwałowi zgłaszałby awarię przy każdym wdrożeniu.
+    Próg zbyt luźny przestaje cokolwiek wykrywać."""
+    from services.engine.dozorca import INTERWAL_S
+
+    api = Path("services/api/routers/risk.py").read_text(encoding="utf-8")
+    assert "< 180" in api, "próg żywotności dozorcy nie jest w API"
+    assert 180 >= 3 * INTERWAL_S, (
+        f"próg 180 s przy interwale {INTERWAL_S} s to mniej niż trzy cykle")

@@ -13,6 +13,14 @@ const LIMIT_PL = {
 };
 const UNIT_PL = { pct: '%', pct_equity: '% kapitału', quote_ccy: 'USD', count: 'szt.' };
 const ACTION_PL = { block: 'blokada', downsize: 'zmniejszenie', killswitch: 'kill-switch' };
+// Regula wznowienia jest czescia definicji limitu. Bez niej interfejs mowi,
+// ze system sie zatrzyma, i milczy o tym, czy sam wroci - a to pierwsze pytanie,
+// jakie zadaje sie o autonomiczny bezpiecznik.
+const WZNOWIENIE_PL = {
+  reczne: { etykieta: 'tylko ręcznie', opis: 'granica kapitału — automat jej nie zwalnia' },
+  po_ustaniu: { etykieta: 'sam, po ustaniu', opis: 'limit okresowy — mija razem z okresem' },
+  po_odbudowie: { etykieta: 'sam, po odbudowie', opis: 'wznowienie poniżej połowy limitu' },
+};
 
 export default function Risk({ engine }) {
   const [note, setNote] = useState('');
@@ -21,6 +29,7 @@ export default function Risk({ engine }) {
   const limits = useApi(`/api/engines/${engine}/risk/limits`, [engine], { refreshMs: 30000 });
   const viol = useApi(`/api/engines/${engine}/risk/violations?limit=30`, [engine], { refreshMs: 30000 });
   const ks = useApi(`/api/engines/${engine}/risk/killswitch`, [engine], { refreshMs: 30000 });
+  const doz = useApi(`/api/engines/${engine}/risk/dozorca`, [engine], { refreshMs: 30000 });
 
   const active = (ks.data || []).filter((k) => k.active);
 
@@ -88,6 +97,11 @@ export default function Risk({ engine }) {
                         {fmtNum(l.used, 2)} / {fmtNum(l.threshold, 2)} {l.unit === 'pct' ? '%' : l.unit === 'count' ? '' : ''}
                       </span>
                       <span className="badge">{ACTION_PL[l.action] || l.action}</span>
+                      {l.action === 'killswitch' && WZNOWIENIE_PL[l.wznowienie] && (
+                        <span className="badge" title={WZNOWIENIE_PL[l.wznowienie].opis}>
+                          {WZNOWIENIE_PL[l.wznowienie].etykieta}
+                        </span>
+                      )}
                     </span>
                   </div>
                   <div className="bar-track"><div className="bar-fill" style={{ width: `${u * 100}%`, background: tone }} /></div>
@@ -130,7 +144,13 @@ export default function Risk({ engine }) {
         <div className="glass-card">
           <div className="card-title">
             Historia kill-switcha
-            <span className="hint">wymaga ręcznego odblokowania</span>
+            <span className="hint">
+              {doz.data?.length
+                ? (doz.data.every((d) => d.zyje)
+                    ? `dozorca żyje — puls ${doz.data[0].sekund_temu}s temu`
+                    : 'DOZORCA NIE BIJE')
+                : 'brak dozorcy'}
+            </span>
           </div>
           {ks.data?.length ? (
             <div className="row-list" style={{ maxHeight: 380 }}>
@@ -144,8 +164,19 @@ export default function Risk({ engine }) {
                   </div>
                   <div className="row-meta">
                     <span>uruchomiony {fmtTime(k.triggered_at)}</span>
-                    {k.released_at && <span>zwolniony {fmtTime(k.released_at)} przez {k.released_by}</span>}
+                    {k.limit_name && <span className="dim">{LIMIT_PL[k.limit_name] || k.limit_name}</span>}
+                    {k.released_at && (
+                      <span>
+                        zwolniony {fmtTime(k.released_at)}
+                        {k.released_auto ? ' — automatycznie' : ` przez ${k.released_by || 'człowieka'}`}
+                      </span>
+                    )}
                   </div>
+                  {k.release_note && (
+                    <div className="row-meta">
+                      <span className="dim" title="podstawa wznowienia">{k.release_note}</span>
+                    </div>
+                  )}
                 </div>
               ))}
             </div>

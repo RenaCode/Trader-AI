@@ -15,7 +15,7 @@ async def limits(engine: str, mode: str = Query("demo")):
     rows = await fetch_all(
         """
         SELECT ld.id, ld.name, ld.scope, ld.value, ld.unit, ld.action, ld.enabled,
-               i.symbol,
+               ld.wznowienie, ld.max_wznowien, i.symbol,
                lu.used, lu.utilization, lu.event_time
         FROM risk.limit_def ld
         LEFT JOIN ref.instrument i ON i.id = ld.instrument_id
@@ -33,6 +33,11 @@ async def limits(engine: str, mode: str = Query("demo")):
             "id": r["id"], "name": r["name"], "scope": r["scope"], "symbol": r["symbol"],
             "threshold": float(r["value"]), "unit": r["unit"], "action": r["action"],
             "enabled": r["enabled"],
+            # REGULA WZNOWIENIA jest czescia definicji limitu, nie szczegolem
+            # wdrozenia. Bez niej interfejs pokazuje, ze system sie zatrzyma,
+            # i milczy o tym, czy sam wroci - a to jest pierwsze pytanie, jakie
+            # zadaje sie o autonomiczny bezpiecznik.
+            "wznowienie": r["wznowienie"], "max_wznowien": r["max_wznowien"],
             "used": float(r["used"]) if r["used"] is not None else 0.0,
             "utilization": r["utilization"] or 0.0,
             "as_of": r["event_time"].isoformat() if r["event_time"] else None,
@@ -67,7 +72,8 @@ async def violations(engine: str, limit: int = Query(30, le=200)):
 async def killswitch(engine: str, limit: int = Query(10, le=100)):
     rows = await fetch_all(
         """
-        SELECT k.id, k.triggered_at, k.reason, k.released_at, k.release_note, u.login AS released_by
+        SELECT k.id, k.triggered_at, k.reason, k.limit_name, k.released_at,
+               k.released_auto, k.release_note, u.login AS released_by
         FROM risk.killswitch_event k
         LEFT JOIN app.user u ON u.id = k.released_by
         WHERE k.engine = %s ORDER BY k.triggered_at DESC LIMIT %s
@@ -77,11 +83,13 @@ async def killswitch(engine: str, limit: int = Query(10, le=100)):
     return [
         {
             "id": r["id"], "triggered_at": r["triggered_at"].isoformat(),
-            "reason": r["reason"],
+            "reason": r["reason"], "limit_name": r["limit_name"],
             "released_at": r["released_at"].isoformat() if r["released_at"] else None,
             "released_by": r["released_by"], "release_note": r["release_note"],
-            # Kill-switch wymaga RECZNEGO odblokowania - automatyczne wznowienie
-            # po drawdownie to najprostsza droga do powtorzenia tej samej straty.
+            # KTO ZWOLNIL: system czy czlowiek. Bez tego dziennik nie odroznia
+            # zwolnienia przemyslanego od automatycznego, a to jest pierwsza
+            # rzecz, o ktora sie pyta po serii zatrzyman.
+            "released_auto": r["released_auto"],
             "active": r["released_at"] is None,
         }
         for r in rows
@@ -145,3 +153,30 @@ async def zwolnij_killswitch(engine: str, event_id: int, body: ZwolnienieBody,
 
     return {"ok": True, "message": "Kill-switch zwolniony. Silnik wróci do handlu "
                                    "przy najbliższym cyklu decyzyjnym."}
+
+
+@router.get("/dozorca")
+async def dozorca(engine: str):
+    """Puls dozorcy ryzyka — procesu, który ocenia limity NIEZALEŻNIE od silnika.
+
+    Bez tego widoku autonomia jest niewidoczna: system podejmuje decyzje sam,
+    a interfejs pokazuje wyłącznie ich skutki. Martwy dozorca wygląda dokładnie
+    jak dozorca, który nie ma co zgłaszać — różnicę widać tylko w wieku pulsu.
+    """
+    rows = await fetch_all(
+        "SELECT nazwa, last_beat_at, detail,"
+        "       round(extract(epoch from (now() - last_beat_at))) AS sekund_temu"
+        " FROM risk.dozorca_heartbeat WHERE nazwa LIKE %s ORDER BY nazwa",
+        (f"%:{engine}:%",))
+    return [
+        {
+            "nazwa": r["nazwa"],
+            "last_beat_at": r["last_beat_at"].isoformat(),
+            "sekund_temu": int(r["sekund_temu"]),
+            # Prog trzykrotnie wiekszy od interwalu (60 s): jeden pominiety cykl
+            # zdarza sie przy wdrozeniu i nie jest awaria, trzy pod rzad juz sa.
+            "zyje": int(r["sekund_temu"]) < 180,
+            "detail": r["detail"],
+        }
+        for r in rows
+    ]
