@@ -5,13 +5,15 @@ automatycznego handlu mają jako standard. Każda pozycja jest zweryfikowana
 odczytem źródeł, nie dokumentacji.
 
 Pozycje zamknięte znikają z tej listy — historia jest w gicie. Przegląd powstał
-2026-09-07 z siedmioma pozycjami; tego samego dnia zamknięto sześć: przepływy
-kapitału (migracja 0031), ponawianie u giełdy, eksport transakcji, dryf zegara,
-uzgadnianie z giełdą i reguły zleceń.
+2026-09-07 z siedmioma pozycjami; tego samego dnia zamknięto osiem: przepływy
+kapitału, ponawianie u giełdy, eksport transakcji, dryf zegara, uzgadnianie
+z giełdą, reguły zleceń, wypełnienia częściowe i zdejmowanie zleceń przez
+kill-switch.
 
-Dwie pozycje **dopisano po pomiarze**, nie po przeglądzie dokumentacji: brak
-reguł handlu w bazie (dotyczył 10 z 12 instrumentów) i niezdolność demo
-podmiotu unijnego do uzgodnienia sald.
+Trzy pozycje **dopisano po pomiarze**, nie po przeglądzie dokumentacji: brak
+reguł handlu w bazie (dotyczył 10 z 12 instrumentów), niezdolność demo podmiotu
+unijnego do uzgodnienia sald oraz `|| true` w komendach pięciu podów, które
+połykało każdą awarię.
 
 ---
 
@@ -33,51 +35,29 @@ za dopłatą, jest tu warunkiem konstrukcyjnym od migracji 0005.
 
 ---
 
-## 1. Ścieżka egzekucji: elementy są, pętla ich nie używa
+## 1. Poślizg i ułamek wypełnienia — mierzone od dziś, jeszcze bez wyniku
 
-Gotowe i przetestowane: składanie zlecenia z idempotencją (`orderLinkId`),
-odczyt stanu po naszym identyfikatorze, anulowanie, uzgadnianie z giełdą,
-reguły zaokrąglania (`zlecenia.py`) i decyzja o wypełnieniu częściowym
-(`egzekucja.py`). **Pętla decyzyjna nadal prowadzi wyłącznie rachunek
-papierowy** — przełączenie jej to osobna decyzja, nie brakujący kod.
+Egzekucja na koncie demo jest **włączona** (`--egzekucja gielda --mode demo`).
+Plan przestał być rozstrzygany przez świecę, a zaczął przez giełdę: ilość, cena
+i prowizja przestały być naszym założeniem.
 
-Do wpięcia zostaje jedno: **anulowanie planów, które nie weszły**. Zlecenie
-z limitem jest planem na jedną świecę; bez anulowania niewypełnione plany
-zbierają się na giełdzie i wypełniają po cenach, których żadna decyzja już nie
-popiera. Decyzja o anulowaniu jest już podjęta w `co_z_wypelnieniem`
-(`anuluj_reszte`), ale nikt jej jeszcze nie wykonuje na giełdzie.
-
-## 2. Ułamek wypełnienia jest ZAŁOŻONY na 1.0
-
-Symulacja wypełnia w całości każde zlecenie, które dotknęło limitu. Produkcja
-zna trzeci stan i przy większych zleceniach jest on częsty.
-
-Ułamek jest teraz **zapisywany przy każdym zleceniu** i policzalny
-(`rozjazd_z_symulacja`), ale nie ma jeszcze ani jednego pomiaru, bo nie ma
-egzekucji. Zmyślanie tego ułamka w symulacji byłoby gorsze niż jego brak:
-z samych świec OHLC nie da się go wyprowadzić bez założeń o kolejce w arkuszu,
-a założenie przebrane za pomiar jest najgorszym rodzajem liczby.
-
-**Dopóki nie ma pomiaru, backtest zawyża wielkość pozycji o nieznaną wartość.**
-
-## 3. Poślizg jest ZAŁOŻONY, nie mierzony
+Nie ma jeszcze **ani jednego** wypełnienia, więc obie liczby poniżej nadal są
+stałymi w kodzie:
 
 ```python
 POSLIZG_TAKER = 0.0004     # 4 punkty bazowe
 POSLIZG_MAKER = 0.0        # zero
 ```
 
-Waga tego jest policzalna. Runda kosztuje 0,200%, a zmierzona mediana zwrotu
-na transakcję jest rzędu dziesiątych procenta. **Błąd o 4 punkty bazowe w tę czy
+Waga tego jest policzalna. Runda kosztuje 0,200%, a zmierzona mediana zwrotu na
+transakcję jest rzędu dziesiątych procenta. **Błąd o 4 punkty bazowe w tę czy
 w tamtą przesuwa wynik o tyle, ile cała zmierzona przewaga.**
 
-`POSLIZG_MAKER = 0` jest założeniem najmocniejszym: mówi, że zlecenie z limitem
-wykonuje się dokładnie po cenie limitu. Jest to prawda z definicji **wtedy, gdy
-się wykona** — ale nie obejmuje przypadku, w którym część zlecenia wchodzi po
-cenie gorszej. Endpoint `/v5/execution/list` na demo działa, więc pomiar będzie
-możliwy od pierwszego zlecenia.
+Ułamek wypełnienia symulacja przyjmuje jako 1.0. `rozjazd_z_symulacja` policzy
+go z produkcji, gdy tylko będzie co liczyć — a do tego czasu **backtest zawyża
+wielkość pozycji o nieznaną wartość**.
 
-## 4. Demo podmiotu unijnego nie uzgodni sald
+## 2. Demo podmiotu unijnego nie uzgodni sald
 
 Zmierzone, nie założone (`services/exchanges/mozliwosci.py`):
 
@@ -97,7 +77,7 @@ Znaczy to, że ta konkretna obrona **pierwszy raz zadziała w pełni na żywym
 rachunku**. Ryzyko jest ograniczone (ścieżka z rejestru jest przećwiczona
 i wspólna), ale nie jest zerowe i musi być wypowiedziane.
 
-## 5. Rozdzielenie uprawnień bazodanowych
+## 3. Rozdzielenie uprawnień bazodanowych
 
 Silnik, dozorca i API chodzą na tej samej roli `trader_app`. Nic nie **wymusza**,
 że silnik nie zwolni sobie kill-switcha — dziś tego nie robi, bo nie ma takiego
