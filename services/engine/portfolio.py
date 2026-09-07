@@ -458,6 +458,11 @@ def metrics(res: PortfolioResult, min_trades: int) -> dict:
             #   avg_exposure = srednio_pozycji x notional_na_pozycje
             "w_rynku": round(res.udzial_swiec_z_pozycja, 6),
             "srednio_pozycji": round(res.srednio_pozycji, 6),
+            # Pozycji na swiece, w ktorej COKOLWIEK jest otwarte. To ten czynnik
+            # wchodzi do iloczynu trzech skladnikow; `srednio_pozycji` jest juz
+            # usredniona po swiecach pustych, wiec pomnozenie jej przez `w_rynku`
+            # liczyloby ten sam czynnik dwa razy.
+            "pozycji_w_rynku": round(res.pozycji_gdy_w_rynku, 6),
             "notional_na_pozycje": round(res.sredni_notional / START_EQUITY, 6),
             # Budzet wyliczony z limitu - odniesienie dla powyzszego. Roznica
             # miedzy nimi to `udzial_budzetu(score)`, czyli sila sygnalu.

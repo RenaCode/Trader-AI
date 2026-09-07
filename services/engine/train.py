@@ -75,6 +75,52 @@ MIN_CONF = MIN_CONFIDENCE
 # i status otwierajacy droge do handlu na zywo.
 MIN_WINDOWS_FOR_VALIDATION = 20
 
+# Klucze z `portfolio.metrics`, z ktorych sklada sie rozklad sredniej ekspozycji.
+# Kolejnosc jest kolejnoscia czynnikow w iloczynie.
+KLUCZE_ROZKLADU = ("w_rynku", "pozycji_w_rynku", "notional_na_pozycje",
+                   "budzet_na_pozycje")
+
+
+def probka_rozkladu(m: dict, instrumentow: int) -> dict:
+    """Czynniki ekspozycji z jednego okna, bez reszty miar."""
+    return {k: m[k] for k in KLUCZE_ROZKLADU} | {"instrumentow": instrumentow}
+
+
+def opis_rozkladu(probki: list[dict]) -> tuple[list[str], float]:
+    """Rozklad sredniej ekspozycji na czynniki: linie do wydruku i iloczyn.
+
+    CZYSTA FUNKCJA, bo wpisana wprost w wydruk byla NIESPRAWDZALNA - i zdazyla
+    juz raz sklamac. Pierwsza wersja mnozyla udzial swiec w rynku przez
+    `srednio_pozycji`, a ta jest JUZ usredniona po swiecach pustych: czynnik
+    "ile czasu w rynku" wchodzil do iloczynu dwa razy. Zmierzone 1,29% wychodzilo
+    z wydruku jako 0,56%, a linia czytala sie jak wyjasnienie.
+
+    Testy symulacji tego nie widzialy, bo pomylka siedziala w SKLEJENIU miar,
+    nie w samych miarach. Wstawienie bledu z powrotem przechodzilo caly zestaw.
+
+    Zwracamy iloczyn osobno, zeby test mogl porownac go ze srednia ekspozycja
+    policzona niezaleznie - bez tego "iloczyn zgadza sie sam ze soba" i nie
+    dowodzi niczego.
+    """
+    if not probki:
+        return [], 0.0
+    w_rynku = statistics.fmean(p["w_rynku"] for p in probki)
+    poz = statistics.fmean(p["pozycji_w_rynku"] for p in probki)
+    notional = statistics.fmean(p["notional_na_pozycje"] for p in probki)
+    budzet = statistics.fmean(p["budzet_na_pozycje"] for p in probki)
+    instr = statistics.fmean(p["instrumentow"] for p in probki)
+    iloczyn = w_rynku * poz * notional
+
+    linie = [f"  = w rynku {w_rynku:.1%} świec × {poz:.2f} pozycji na świecę "
+             f"w rynku × {notional:.2%} kapitału na pozycję = {iloczyn:.2%}"]
+    if budzet and instr:
+        linie.append(
+            f"    do wykorzystania: {instr:.0f} pozycji × {budzet:.2%} "
+            f"= {instr * budzet:.1%} kapitału. Zajęte: {poz:.2f} pozycji "
+            f"({poz / instr:.0%} miejsc) po {notional / budzet:.0%} budżetu, "
+            f"przez {w_rynku:.0%} czasu")
+    return linie, iloczyn
+
 # Minimalna liczba instrumentow, ktore musza byc notowane w danym oknie.
 # Portfel z garstki rynkow to inna strategia niz portfel z dwudziestu czterech.
 MIN_INSTRUMENTS = 8
@@ -505,7 +551,7 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
     pokonane_pelne = 0        # przy odniesieniu 100% zaangazowanym - do raportu
     ekspozycje: list[float] = []
     zwroty_okien: list[float] = []
-    rozklad: list[tuple[float, float, float]] = []   # (w rynku, pozycji, notional)
+    rozklad: list[dict] = []          # czynniki ekspozycji, okno po oknie
     porownywalne = 0
     all_sharpes: list[float] = []
     worst_dd = 0.0
@@ -720,9 +766,7 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
             porownywalne += 1
             ekspozycje.append(ekspozycja)
             zwroty_okien.append(oos_m["total_return"])
-            rozklad.append((oos_m["w_rynku"], oos_m["srednio_pozycji"],
-                            oos_m["notional_na_pozycje"], oos_m["budzet_na_pozycje"],
-                            len(aktywne)))
+            rozklad.append(probka_rozkladu(oos_m, len(aktywne)))
             if oos_m["total_return"] > odniesienie_dop:
                 pokonane_odniesienie += 1
             if oos_m["total_return"] > odniesienie:
@@ -1014,21 +1058,8 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
               f"(limit łączny: {DEFAULT_LIMITS['max_total_exposure']['value']:.0f} "
               f"z {START_EQUITY:.0f}, czyli "
               f"{float(DEFAULT_LIMITS['max_total_exposure']['value']) / START_EQUITY:.0%})")
-        # ROZKLAD TEJ SREDNIEJ NA CZYNNIKI. Bez niego "1,28%" prowadzi do trzech
-        # roznych hipotez i zadnego sposobu, zeby je rozroznic.
-        if rozklad:
-            w_rynku = statistics.fmean(x[0] for x in rozklad)
-            poz = statistics.fmean(x[1] for x in rozklad)
-            notional = statistics.fmean(x[2] for x in rozklad)
-            budzet = statistics.fmean(x[3] for x in rozklad)
-            instr = statistics.fmean(x[4] for x in rozklad)
-            print(f"  = w rynku {w_rynku:.1%} świec × średnio {poz:.2f} pozycji "
-                  f"jednocześnie × {notional:.2%} kapitału na pozycję")
-            if budzet:
-                print(f"    budżet na pozycję z limitu: {budzet:.2%} kapitału "
-                      f"({instr:.0f} instrumentów) — wykorzystany w "
-                      f"{notional / budzet:.0%}; miejsc na pozycje wolnych: "
-                      f"{instr - poz:.1f} z {instr:.0f}")
+        for linia in opis_rozkladu(rozklad)[0]:
+            print(linia)
         print(f"Pokonano kup-i-trzymaj PRZY TEJ SAMEJ EKSPOZYCJI w "
               f"{pokonane_odniesienie}/{porownywalne} oknach "
               f"({pct_odn:.1f}%)   przedział 95%: {odn_lo:.1%}–{odn_hi:.1%}")

@@ -721,3 +721,69 @@ def test_rozklad_zeruje_sie_bez_pozycji():
     assert res.sredni_notional == 0.0
     assert res.pozycji_gdy_w_rynku == 0.0
     assert res.udzial_swiec_z_pozycja == 0.0
+
+
+def test_TRZY_czynniki_z_wydruku_mnoza_sie_do_sredniej():
+    """Kanarek na blad, ktory ten wydruk mial juz raz.
+
+    Pierwsza wersja mnozyla `w_rynku` przez `srednio_pozycji` - a ta druga jest
+    JUZ usredniona po swiecach pustych, wiec czynnik "ile czasu w rynku" wchodzil
+    do iloczynu dwa razy. Zmierzone 1,29% wychodzilo z wydruku jako 0,56%,
+    a linia czytala sie jak wyjasnienie.
+
+    Do iloczynu wchodzi `pozycji_w_rynku` - liczba pozycji na swiece, w ktorej
+    cokolwiek jest otwarte.
+    """
+    panele = {f"I{i}": panel(60, 100.0, 130.0) for i in range(6)}
+    limity = LIMITY_LUZNE | {
+        "max_total_exposure": {"value": Decimal("15000"), "action": "block"}}
+    m = metrics(uruchom(panele, limity), min_trades=1)
+    assert m["n_trades"], "test bez transakcji nie mierzy rozkladu"
+
+    # Tolerancja z zaokraglenia w `metrics` (szesc miejsc), nie z niepewnosci
+    # rachunku - w PortfolioResult tozsamosc jest dokladna i pilnuje jej
+    # osobny test. Blad podwojnego liczenia myli sie o 2,5 raza, wiec ta
+    # tolerancja go nie przepusci.
+    iloczyn = m["w_rynku"] * m["pozycji_w_rynku"] * m["notional_na_pozycje"]
+    assert iloczyn == pytest.approx(m["avg_exposure"], rel=1e-4), (
+        f"{m['w_rynku']:.4f} x {m['pozycji_w_rynku']:.4f} x "
+        f"{m['notional_na_pozycje']:.6f} = {iloczyn:.6f}, "
+        f"a średnia to {m['avg_exposure']:.6f}")
+
+    # I wprost: uzycie `srednio_pozycji` w tym miejscu MA byc bledem, dopoki
+    # portfel bywa poza rynkiem. Bez tego warunku test przechodzilby takze dla
+    # zlej wersji na panelu, ktory nigdy z rynku nie wychodzi.
+    assert m["w_rynku"] < 1.0, "panel testowy ma miec swiece bez pozycji"
+    zle = m["w_rynku"] * m["srednio_pozycji"] * m["notional_na_pozycje"]
+    assert zle < m["avg_exposure"] * 0.99, (
+        "zla wersja iloczynu ma dawac WYRAZNIE mniej - inaczej ten test "
+        "nie odroznia jej od dobrej")
+
+
+def test_wydruk_rozkladu_mnozy_sie_do_ZMIERZONEJ_sredniej():
+    """Test na SKLEJENIE miar, nie na same miary.
+
+    Poprzedni test pilnuje tozsamosci wewnatrz `metrics`. Ten pilnuje, ze
+    trener sklada z tych miar wlasciwy iloczyn - a to osobna rzecz: wstawienie
+    bledu podwojnego liczenia z powrotem do `train.py` przechodzilo caly zestaw
+    testow symulacji, bo pomylka nie siedziala w symulacji.
+    """
+    from services.engine.train import opis_rozkladu, probka_rozkladu
+
+    panele = {f"I{i}": panel(60, 100.0, 130.0, okres=3) for i in range(6)}
+    limity = LIMITY_LUZNE | {
+        "max_total_exposure": {"value": Decimal("15000"), "action": "block"}}
+    m = metrics(uruchom(panele, limity), min_trades=1)
+    assert m["n_trades"] and 0 < m["w_rynku"] < 1.0
+
+    linie, iloczyn = opis_rozkladu([probka_rozkladu(m, instrumentow=6)])
+    assert iloczyn == pytest.approx(m["avg_exposure"], rel=1e-4), (
+        f"iloczyn z wydruku {iloczyn:.6f} != zmierzona średnia {m['avg_exposure']:.6f}")
+    assert linie and "w rynku" in linie[0]
+
+
+def test_wydruk_rozkladu_bez_probek_nie_wywraca_przebiegu():
+    from services.engine.train import opis_rozkladu
+
+    linie, iloczyn = opis_rozkladu([])
+    assert linie == [] and iloczyn == 0.0
