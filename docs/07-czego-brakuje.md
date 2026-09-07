@@ -52,7 +52,7 @@ zaprojektowana na wypełnienia całkowite musi wiedzieć, co zrobić z połową.
 giełda faktycznie trzyma. Na rachunku papierowym to tautologia; na żywym jest
 jedyną obroną przed cichym rozjazdem stanu.
 
-### 2. Wpłaty i wypłaty nie istnieją w modelu kapitału
+### 2. Wpłaty i wypłaty nie istnieją w modelu kapitału — **ZROBIONE 2026-09-07**
 
 ```python
 # services/engine/loop.py
@@ -71,6 +71,14 @@ wypłata jak strata. Uderza to jednocześnie w **cztery** mechanizmy:
 - krzywa kapitału w interfejsie miesza wynik strategii z ruchami gotówki.
 
 To jest luka **przed** wpłatą realnych środków, nie po niej.
+
+**Zamknięte migracją 0031.** `exec.cash_flow` trzyma przepływy, a `equity`
+liczy się z ich sumy zamiast ze stałej. Doszło pojęcie **jednostki
+uczestnictwa** (`nav`): wpłata kupuje jednostki po bieżącym `nav`, wypłata je
+umarza, a `nav` się przy tym nie rusza — więc obsunięcie i strata dzienna
+mierzą wyłącznie handel. Próg kapitału może być teraz ułamkiem wpłat netto
+(`pct_wplat`), żeby wypłata nie uruchamiała go bez powodu. Zweryfikowane na
+produkcji: kapitał 100 073,19 przy 100 000 jednostek daje `nav` 1,000732.
 
 ### 3. Poślizg jest ZAŁOŻONY, nie mierzony
 
@@ -93,16 +101,22 @@ z limitem wykonuje się dokładnie po cenie limitu. Jest to prawda z definicji
 **wtedy, gdy się wykona** — a model wypełnień to obsługuje. Ale nie obejmuje
 przypadku, w którym część zlecenia wchodzi po cenie gorszej.
 
-### 4. Ponawianie u giełdy jest zadeklarowane, ale nikt go nie robi
+### 4. Ponawianie u giełdy jest zadeklarowane, ale nikt go nie robi — **ZROBIONE 2026-09-07**
 
 `ExchangeError` niesie flagę `retryable`, ustawianą poprawnie dla przekroczeń
 czasu, błędów połączenia i HTTP 429. Czyta ją **dokładnie dwóch** odbiorców:
 `backfill.py` i `funding.py`, i to tylko po to, żeby przerwać pętlę.
 
-Nie ma nigdzie wykładniczego odczekania ani ponowienia. Flaga opisuje intencję,
-której nikt nie wykonuje — dokładnie ten sam kształt, co niedawno naprawiony
-brak ponawiania u dostawcy analizy wiadomości, gdzie objawiało się to jako
-„błędów 7" i cisza.
+Nie było nigdzie wykładniczego odczekania ani ponowienia. Flaga opisywała
+intencję, której nikt nie wykonywał — dokładnie ten sam kształt, co niedawno
+naprawiony brak ponawiania u dostawcy analizy wiadomości, gdzie objawiało się
+to jako „błędów 7" i cisza.
+
+**Zamknięte.** Trzy próby z odstępem 1 s i 2 s, wyłącznie dla stanów
+przejściowych; zły klucz i zły endpoint idą bez ponawiania. **Podpis jest
+odnawiany przy każdej próbie** — zawiera znacznik czasu, a `recv_window` to
+pięć sekund, więc ponowienie ze starym podpisem zostałoby odrzucone jako błąd
+uwierzytelnienia i skierowało szukanie na klucz zamiast na sieć.
 
 ### 5. Brak eksportu transakcji
 
@@ -151,9 +165,8 @@ Nie każda luka jest brakiem.
 
 ## Kolejność, gdyby robić to jutro
 
-1. **Wpłaty i wypłaty w modelu kapitału** — jedyna luka, która psuje działające
-   dziś zabezpieczenie (`min_equity`), i to zanim ktokolwiek wpłaci pieniądze.
-2. **Eksport transakcji** — tani, niezależny od egzekucji, rośnie z czasem.
-3. **Ponawianie u giełdy** — flaga już jest, brakuje pętli.
+1. ~~Wpłaty i wypłaty w modelu kapitału~~ — **zrobione**, migracja 0031.
+2. ~~Ponawianie u giełdy~~ — **zrobione**, trzy próby z odnawianym podpisem.
+3. **Eksport transakcji** — tani, niezależny od egzekucji, rośnie z czasem.
 4. **Sprawdzenie zegara przy starcie** — jedno zapytanie.
 5. Reszta wchodzi razem z egzekucją i nie ma sensu wcześniej.

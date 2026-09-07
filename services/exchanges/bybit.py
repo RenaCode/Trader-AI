@@ -39,6 +39,15 @@ i nie da sie go podniesc.
 """
 from __future__ import annotations
 
+# Ponawianie stanow przejsciowych. Trzy proby z odstepem 1 s, 2 s - lacznie
+# najwyzej trzy sekundy zwloki. Dluzej nie ma sensu przy danych rynkowych:
+# swieca sprzed pieciu sekund opisuje juz inny rynek, a proces i tak wroci
+# po nia w nastepnym cyklu.
+PROBY = 3
+ODSTEP_BAZA_S = 1.0
+ODSTEP_MAX_S = 8.0
+
+import asyncio
 import hashlib
 import hmac
 import json
@@ -97,6 +106,37 @@ class BybitAdapter:
 
     async def _get(self, path: str, params: dict | None = None, *, private: bool = True,
                    host: str | None = None) -> dict:
+        """Zapytanie z PONAWIANIEM stanow przejsciowych.
+
+        DLACZEGO TO TU JEST
+
+        `ExchangeError` niosl flage `retryable` od poczatku, ustawiana poprawnie
+        dla przekroczen czasu, bledow polaczenia, HTTP 429 i 5xx. Czytali ja
+        DOKLADNIE DWAJ odbiorcy - backfill i funding - i tylko po to, zeby
+        przerwac wlasna petle. Nigdzie nie bylo odczekania ani ponowienia.
+
+        Flaga opisywala wiec intencje, ktorej nikt nie wykonywal. Ten sam ksztalt
+        co brak ponawiania u dostawcy analizy wiadomosci, gdzie objawialo sie to
+        jako "bledow 7" i cisza.
+
+        PODPIS JEST ODNAWIANY PRZY KAZDEJ PROBIE. Zawiera znacznik czasu, a
+        `recv_window` u Bybita to piec sekund - ponowienie ze starym podpisem
+        po odczekaniu kilku sekund zostaloby odrzucone jako blad
+        uwierzytelnienia, czyli skierowaloby szukanie na klucz zamiast na siec.
+        """
+        ostatni: ExchangeError | None = None
+        for proba in range(1, PROBY + 1):
+            try:
+                return await self._get_raz(path, params, private=private, host=host)
+            except ExchangeError as e:
+                if not e.retryable or proba == PROBY:
+                    raise
+                ostatni = e
+                await asyncio.sleep(min(ODSTEP_MAX_S, ODSTEP_BAZA_S * 2 ** (proba - 1)))
+        raise ostatni  # nieosiagalne, ale czytelniejsze niz milczaca sciezka
+
+    async def _get_raz(self, path: str, params: dict | None = None, *, private: bool = True,
+                       host: str | None = None) -> dict:
         params = params or {}
         # Kolejnosc parametrow MUSI byc identyczna w podpisie i w zapytaniu,
         # inaczej Bybit odrzuci podpis. httpx zachowuje kolejnosc dict-a.
