@@ -43,6 +43,10 @@ z osobnymi modelami, osobnym ryzykiem i osobnymi zakładkami w UI.
       cyklu, zero błędów); artykuły zapisują się **bez** klucza
 - [x] Porównanie z kup-i-trzymaj **przy tej samej ekspozycji** — warunek
       w starej postaci mierzył znak rynku, nie strategię (patrz `docs/03`)
+- [x] Analiza wiadomości **działa na produkcji** (Gemini, ~0,5 USD/dobę)
+- [ ] **Ekspozycja 1,28% przy limicie 15%** — strategia ma przewagę na jednostkę
+      kapitału (30/39 okien), ale angażuje jedną dwunastą własnego budżetu
+      ryzyka; wynik ~3% rocznie. Kryteria nie mierzą skali (patrz `docs/03`)
 - [x] Dwa dostawcy analizy wiadomości: Anthropic (docelowy) i Google Gemini
       (zapasowy). Wybiera się sam po tym, który klucz jest ustawiony
 - [ ] Analiza wiadomości włączona na produkcji; do tego czasu `news_shock`

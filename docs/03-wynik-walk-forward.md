@@ -1324,3 +1324,71 @@ właściwa liczba.** Suma zwrotów strategii przez 39 okien to +9,99% wobec
 Przy dodatniej przewadze na jednostkę kapitału to jest pytanie o wielkość
 pozycji, nie o sygnały. Ale odpowiedź wymaga pomiaru, nie decyzji — bo
 ekspozycja wchodzi też do obsunięcia i do limitu straty dziennej.
+
+---
+
+# Pomiar po poprawce: przewaga jest, kapitału nie ma
+
+Pierwszy przebieg po naprawie warunku odniesienia, 2026-09-07, horyzont 4 h,
+`spot_eu` ze zleceniami z limitem, 39 okien.
+
+## Liczby
+
+| | |
+|---|---|
+| średnia ekspozycja | **1,28% kapitału** |
+| mediana ekspozycji | 1,00% |
+| maksimum | 3,50% |
+| okien z ekspozycją poniżej 1% | 19 z 39 |
+| limit łącznej ekspozycji | 15 000 z 100 000, czyli **15%** |
+| suma zwrotów z okien | +10,07% przez 3,2 roku (**~3% rocznie**) |
+| suma kup-i-trzymaj | +99,67% |
+| mediana zwrotu na jednostkę ekspozycji | **+0,15 na okno** |
+| pokonane odniesienie przy tej samej ekspozycji | **30/39 (76,9%)**, przedział 61,7%–87,4% |
+| pokonane odniesienie zaangażowane w 100% | 17/39 (43,6%) — funkcja znaku rynku |
+| status | **`validated`** |
+
+## Co z tego wynika
+
+Dwie rzeczy naraz, i trzeba je czytać razem.
+
+**Strategia ma przewagę.** Mediana zwrotu na jednostkę zaangażowanego kapitału
+to +0,15 na okno — złotówka włożona przez strategię pracuje wyraźnie lepiej niż
+złotówka w koszyku. Dolna granica przedziału ufności (61,7%) jest powyżej 50%,
+więc to nie jest rzut monetą.
+
+**Strategia nie angażuje kapitału.** 1,28% średnio, przy własnym limicie 15% —
+używa **jednej dwunastej swojego budżetu ryzyka**. Wynik w złotówkach jest
+w efekcie bliski zeru: 3% rocznie to poniżej stopy wolnej od ryzyka.
+
+## Dziura w kryteriach, którą to odsłoniło
+
+Kryteria przejścia na live mierzą **umiejętność**. Nie mierzą, czy
+zaangażowanych złotówek jest na tyle dużo, żeby wynik cokolwiek znaczył.
+
+Dopóki warunek odniesienia był nieosiągalny przez konstrukcję, nikt nie mógł tej
+dziury zobaczyć — status nigdy nie dochodził do `validated`. Jeden błąd pomiaru
+zasłaniał drugi brak.
+
+Statusu nie zmieniono: to decyzja o polityce przejścia na live, a nie o pomiarze.
+Zmieniono **komunikat** — skala wyniku idzie teraz razem ze statusem, z tego
+samego powodu, dla którego przedział ufności idzie razem z odsetkiem.
+„Kryteria spełnione" bez liczby 1,28% obok czyta się jak zielone światło do
+handlu prawdziwymi pieniędzmi.
+
+## Pytanie otwarte
+
+Dlaczego ekspozycja jest dwunastokrotnie niższa od limitu. Kandydaci, w kolejności
+łatwości sprawdzenia:
+
+1. **Próg wejścia** (`MIN_CONFIDENCE = 0,25`, plus percentylowa bramka liczona na
+   oknie treningowym) przepuszcza za mało świec — 30–70 transakcji na okno przy
+   10 instrumentach i 180 świecach.
+2. **`udzial_budzetu(score) = min(1, |score| × 2)`** — przy typowym score bliskim
+   progu udział wynosi ~0,5, czyli połowę i tak małego budżetu.
+3. **Horyzont 4 h** zamyka pozycje szybko, więc kapitał pracuje krótko; średnia
+   po wszystkich świecach spada nawet przy sensownej wielkości pojedynczej pozycji.
+
+Każdy z nich jest sprawdzalny osobno przebiegiem `--sucho`. Żadnego nie wolno
+zmienić „bo wygląda na za ostry" — podniesienie ekspozycji podnosi też obsunięcie
+i limit straty dziennej, a te są mierzone tą samą symulacją.
