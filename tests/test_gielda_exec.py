@@ -246,7 +246,7 @@ def test_nieudane_anulowanie_zostawia_SLAD_a_nie_cisze():
     cur = Kursor([{"client_order_id": "tai-p1", "symbol": "SOLUSDC",
                    "planned_order_id": 1}])
     g = Gielda(blad_anulowania=ExchangeError("nie poszlo"))
-    zdjete = asyncio.run(anuluj_wejscia(cur, g, kategoria="spot", powod="test"))
+    zdjete, _ = asyncio.run(anuluj_wejscia(cur, g, kategoria="spot", powod="test"))
     assert zdjete == 0
     assert any("anulowanie po kill-switchu nie powiodlo sie" in str(p)
                for _, p in cur.sql if p)
@@ -408,3 +408,44 @@ def test_pelne_wypelnienie_NIE_jest_zapisywane_jako_czesciowe():
         stan, plan=plan, wiersze=[{"id": 1, "qty": wyslano}, {"id": 1}])
     assert rodzaj == "pelne"
     assert g.anulowane == []                    # nie ma czego anulować
+
+
+def test_killswitch_NIE_anuluje_zlecenia_ktore_sie_juz_wypelnilo():
+    """Nasz status jest stary: wiersz siedzi na `new` przez całe dwie świece,
+    bo nikt go nie odświeża między złożeniem a rozstrzygnięciem.
+
+    Zapisanie takiego zlecenia jako anulowanego GUBI WYPEŁNIENIE BEZPOWROTNIE —
+    rozstrzyganie szuka planów o statusie `pending`, więc już nigdy go nie
+    zaksięguje. Trzymalibyśmy aktywo, którego dziennik nie widzi, a po
+    zwolnieniu kill-switcha sygnał dałby DRUGIE wejście: na giełdzie dwie
+    pozycje, w dzienniku jedna.
+    """
+    from services.engine.gielda_exec import anuluj_wejscia
+
+    cur = Kursor([{"client_order_id": "tai-p1", "symbol": "SOLUSDC",
+                   "planned_order_id": 1}])
+    g = Gielda(stan=_stan(D("10"), status="filled"))
+    zdjete, wypelnione = asyncio.run(
+        anuluj_wejscia(cur, g, kategoria="spot", powod="test"))
+
+    assert (zdjete, wypelnione) == (0, 1)
+    # PLAN NIETKNIETY — inaczej rozstrzygniecie juz go nie znajdzie.
+    #
+    # Szukamy ZAPISU, nie wzmianki: sam SELECT dolacza journal.planned_order
+    # przez LEFT JOIN, wiec dopasowanie po nazwie tabeli trafialoby w zapytanie
+    # odczytujace i test przechodzilby zawsze.
+    assert not any("UPDATE journal.planned_order" in s for s, _ in cur.sql)
+    assert not any("UPDATE exec.order" in s for s, _ in cur.sql)
+
+
+def test_killswitch_filtruje_po_silniku_i_trybie():
+    """Dziś jest jeden silnik i jeden tryb, więc bez skutku. Po dołożeniu `live`
+    kill-switch na demo wołałby anulowanie zleceń produkcyjnych adapterem demo."""
+    from services.engine.gielda_exec import anuluj_wejscia
+
+    cur = Kursor()
+    asyncio.run(anuluj_wejscia(cur, Gielda(), kategoria="spot", powod="t",
+                               engine="crypto", mode="demo"))
+    (sql, params), = [(s, p) for s, p in cur.sql if "SELECT o.client_order_id" in s]
+    assert "o.engine::text = %s AND o.mode::text = %s" in sql
+    assert params == ("crypto", "demo")

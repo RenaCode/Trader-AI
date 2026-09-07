@@ -97,3 +97,23 @@ def test_zasiew_kapitalu_dotyczy_TYLKO_demo():
     c = Kursor()
     seed_equity(c, "crypto", "demo")
     assert any("INSERT INTO exec.equity_point" in s for s in c.sql)
+
+
+def test_wynik_wyjscia_czesciowego_WCHODZI_do_kapitalu():
+    """Wyjście częściowe księguje `realized_pnl` na wierszu, który POZOSTAJE
+    otwarty: zmniejsza się `qty`, a `closed_at` jest nadal puste.
+
+    Warunek `closed_at IS NOT NULL` pomijał ten wynik całkowicie, a `unrealized`
+    liczy się już z pomniejszonej ilości — strata na sprzedanej części znikała
+    z krzywej kapitału. Kierunek błędu jest najgorszy z możliwych: obsunięcie
+    było zaniżone, więc kill-switch nie strzelał w sytuacji, dla której istnieje.
+    """
+    from pathlib import Path
+
+    zrodlo = Path("services/engine/loop.py").read_text(encoding="utf-8")
+    kod = "\n".join(w for w in zrodlo.splitlines()
+                    if not w.lstrip().startswith("#"))
+    zapytanie = kod.split("AS realized FROM exec.position")[1].split(")")[0]
+    assert "closed_at" not in zapytanie, (
+        "wynik zrealizowany liczony tylko z pozycji zamkniętych pomija "
+        "wyjścia częściowe i zaniża obsunięcie")

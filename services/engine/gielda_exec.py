@@ -286,7 +286,8 @@ async def rozstrzygnij_oczekujace(cur, adapter, *, engine: str, mode: str,
     return st
 
 
-async def anuluj_wejscia(cur, adapter, *, kategoria: str, powod: str) -> int:
+async def anuluj_wejscia(cur, adapter, *, kategoria: str, powod: str,
+                         engine: str = "crypto", mode: str = "demo") -> tuple[int, int]:
     """Zdejmuje z giełdy oczekujące zlecenia WEJŚCIA. Wyjścia zostawia.
 
     KILL-SWITCH, KTORY ZOSTAWIA ZLECENIA NA GIELDZIE, NIE JEST KILL-SWITCHEM.
@@ -307,9 +308,43 @@ async def anuluj_wejscia(cur, adapter, *, kategoria: str, powod: str) -> int:
         "  LEFT JOIN journal.planned_order p ON p.id = o.planned_order_id"
         " WHERE o.status IN ('new','partial','unknown')"
         "   AND o.client_order_id IS NOT NULL"
-        "   AND coalesce(p.trigger->>'rodzaj', 'wejscie') <> 'wyjscie'")
-    zdjete = 0
+        "   AND o.engine::text = %s AND o.mode::text = %s"
+        "   AND coalesce(p.trigger->>'rodzaj', 'wejscie') <> 'wyjscie'",
+        (engine, mode))
+    zdjete, wypelnione = 0, 0
     for o in cur.fetchall():
+        # NAJPIERW PYTAMY GIELDE, POTEM ANULUJEMY.
+        #
+        # Nasz status jest stary: wiersz siedzi na 'new' przez cale dwie swiece,
+        # bo nikt go nie odswieza miedzy zlozeniem a rozstrzygnieciem. Zlecenie
+        # moglo sie w tym czasie wypelnic.
+        #
+        # Zapisanie takiego zlecenia jako anulowanego GUBI WYPELNIENIE
+        # BEZPOWROTNIE: rozstrzyganie szuka planow o statusie 'pending', wiec
+        # juz nigdy go nie zaksieguje. Trzymalibysmy aktywo, ktorego dziennik
+        # nie widzi - a po zwolnieniu kill-switcha sygnal nadal dodatni dalby
+        # DRUGIE wejscie. Na gieldzie dwie pozycje, w dzienniku jedna.
+        #
+        # Nie mozna tez polegac na odpowiedzi samego anulowania: Bybit na
+        # zlecenie juz wypelnione odpowiada kodem 110001, ktory adapter
+        # traktuje jako "nie bylo czego zdejmowac" - nie do odroznienia od
+        # zlecenia, ktorego nigdy nie bylo.
+        try:
+            stan = await adapter.stan_zlecenia(o["client_order_id"],
+                                               kategoria=kategoria)
+        except ExchangeError:
+            stan = None
+        if stan is not None and stan.wypelniono > 0:
+            # Reszte i tak zdejmujemy, zeby nie doszlo wiecej - ale planu NIE
+            # ruszamy, zeby rozstrzygniecie zaksiegowalo to, co weszlo.
+            try:
+                await adapter.anuluj_zlecenie(symbol=o["symbol"],
+                                              id_wlasne=o["client_order_id"],
+                                              kategoria=kategoria)
+            except ExchangeError:
+                pass
+            wypelnione += 1
+            continue
         try:
             await adapter.anuluj_zlecenie(symbol=o["symbol"],
                                           id_wlasne=o["client_order_id"],
@@ -330,4 +365,4 @@ async def anuluj_wejscia(cur, adapter, *, kategoria: str, powod: str) -> int:
             cur.execute("UPDATE journal.planned_order SET status='cancelled',"
                         " resolved_at=now() WHERE id=%s", (o["planned_order_id"],))
         zdjete += 1
-    return zdjete
+    return zdjete, wypelnione

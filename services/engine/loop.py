@@ -244,10 +244,28 @@ def przeplywy(cur, engine: str, mode: str) -> tuple[Decimal, Decimal]:
 
 
 def update_equity(cur, engine: str, mode: str, as_of: datetime) -> None:
-    """Przelicza kapital: gotowka + niezrealizowany wynik otwartych pozycji."""
+    """Przelicza kapital: gotowka + niezrealizowany wynik otwartych pozycji.
+
+    WYNIK ZREALIZOWANY LICZYMY Z POZYCJI OTWARTYCH TAKZE, nie tylko zamknietych.
+
+    Wyjscie czesciowe ksieguje `realized_pnl` na wierszu, ktory POZOSTAJE
+    otwarty - zmniejsza sie `qty`, a `closed_at` jest nadal puste. Warunek
+    `closed_at IS NOT NULL` pomijal wiec ten wynik calkowicie, a `unrealized`
+    liczy sie juz z pomniejszonej ilosci. Strata na sprzedanej czesci znikala
+    z krzywej kapitalu.
+
+    Kierunek bledu jest najgorszy z mozliwych: OBSUNIECIE BYLO ZANIZONE, wiec
+    kill-switch nie strzelal w sytuacji, dla ktorej istnieje. Pozycja 10 sztuk
+    po 200, wyjscie przy 150 wypelnione w 6 - realizacja -300 nie wchodzila
+    do kapitalu, a niezrealizowane pokazywalo -200 zamiast -500.
+
+    Przy okazji domyka to drugi ubytek: prowizja WEJSCIA na pozycji otwartej
+    tez nie wchodzila do kapitalu, wiec byl on zawyzony o koszt kazdego
+    trwajacego wejscia.
+    """
     cur.execute(
         "SELECT COALESCE(sum(realized_pnl - fees_paid), 0) AS realized FROM exec.position"
-        " WHERE engine=%s AND mode=%s AND closed_at IS NOT NULL", (engine, mode))
+        " WHERE engine=%s AND mode=%s", (engine, mode))
     realized = Decimal(cur.fetchone()["realized"] or 0)
 
     cur.execute(
@@ -822,11 +840,18 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
     # wbrew dzialajacemu zabezpieczeniu i bez zadnej decyzji za soba.
     if wejscia_wstrzymane and gielda is not None:
         from services.engine.gielda_exec import anuluj_wejscia
-        zdjete = await anuluj_wejscia(cur, gielda, kategoria=kategoria,
-                                      powod=f"kill-switch: {konto.reason}")
+        zdjete, wypelnione = await anuluj_wejscia(
+            cur, gielda, kategoria=kategoria, engine=engine, mode=mode,
+            powod=f"kill-switch: {konto.reason}")
         conn.commit()
-        if zdjete and verbose:
-            print(f"  kill-switch: zdjęto z giełdy {zdjete} zleceń")
+        # KOMUNIKAT ZAWSZE, TAKZE PRZY ZERZE. Wczesniej pojawial sie wylacznie
+        # przy `zdjete > 0`, wiec kill-switch, ktoremu NIE UDALO SIE zdjac ani
+        # jednego zlecenia, wygladal identycznie jak kill-switch, ktory nie mial
+        # czego zdejmowac.
+        if verbose:
+            print(f"  kill-switch: zdjęto z giełdy {zdjete} zleceń"
+                  + (f", {wypelnione} było już wypełnionych — zostają "
+                     f"do zaksięgowania" if wypelnione else ""))
 
     now = datetime.now(timezone.utc)
     bar_start = current_bar(now, h)
