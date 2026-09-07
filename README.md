@@ -17,6 +17,7 @@ z osobnymi modelami, osobnym ryzykiem i osobnymi zakładkami w UI.
 | [`docs/01-data-architecture.md`](docs/01-data-architecture.md) | Wybór bazy, bitemporalność, feature store, rejestr modeli, retencja |
 | [`docs/05-ochrona-kapitalu.md`](docs/05-ochrona-kapitalu.md) | **Czy rachunek może wyjść na minus** — go/no-go przed wpłatą realnych środków |
 | [`docs/06-architektura-bezpiecznika.md`](docs/06-architektura-bezpiecznika.md) | **Kto pilnuje pilnującego** — dlaczego dozorca ryzyka jest osobnym podem |
+| [`docs/07-czego-brakuje.md`](docs/07-czego-brakuje.md) | **Przegląd luk** wobec działających botów — co sprawdzone w kodzie, nie w dokumentacji |
 
 ## Stan projektu
 
