@@ -4,6 +4,7 @@ from decimal import Decimal as D
 
 import pytest
 
+from atrapa_bazy import CHECKI, KOLUMNY, UNIKALNE, Kursor, NaruszenieBazy
 from services.engine.gielda_exec import id_zlecenia, rozstrzygnij_plan, zloz_plan
 from services.engine.zlecenia import Filtry
 from services.exchanges.base import ExchangeError, StanZlecenia, ZlozoneZlecenie
@@ -15,27 +16,6 @@ BEZ_REGUL = Filtry()
 PLAN = {"id": 42, "decision_id": 7, "instrument_id": 3, "side": "buy",
         "qty": D("10"), "limit_price": D("100"), "symbol": "SOLUSDC",
         "quote_ccy": "USDC", "trigger": {"rodzaj": "wejscie", "bar": "x"}}
-
-
-class Kursor:
-    """Atrapa kursora: zapamiętuje SQL, oddaje z góry zadane wiersze."""
-
-    def __init__(self, wiersze=None):
-        self.sql = []
-        self._wiersze = list(wiersze or [])
-
-    def execute(self, sql, params=None):
-        self.sql.append((" ".join(sql.split()), params))
-
-    def fetchone(self):
-        return self._wiersze.pop(0) if self._wiersze else None
-
-    def fetchall(self):
-        w, self._wiersze = self._wiersze, []
-        return w
-
-    def zawiera(self, fragment):
-        return any(fragment in s for s, _ in self.sql)
 
 
 class Gielda:
