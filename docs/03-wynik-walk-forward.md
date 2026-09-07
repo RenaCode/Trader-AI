@@ -1641,3 +1641,64 @@ zawyża mianownik drugiej.
 Do tego czasu wniosek operacyjny zostaje bez zmian: **uniwersum zostaje przy
 dziesięciu parach USDC.** Nie dlatego, że rozumiemy dlaczego — dlatego, że
 zmierzone alternatywy są gorsze.
+
+---
+
+# Rozstrzygnięcie: nie miara, tylko jedna grupa traci przewagę w towarzystwie
+
+Poprzednia sekcja zawęziła mechanizm do sposobu, w jaki zwroty z transakcji
+składają się na wynik okna, i postawiła pytanie rozstrzygające: czy przy
+połączeniu załamuje się **miara**, czy **strategia**.
+
+Pomiar liczy `Sharpe/transakcję` osobno dla każdej grupy, **w tym samym oknie
+i tym samym przebiegu** (grupowanie po walucie kwotowanej — dokładnie ta sama
+linia, która dzieli uniwersum decyzyjne od reszty historii):
+
+```
+przebieg na 24 instrumentach, budżet jak w produkcji
+    USDC (10):  mediana Sharpe  +0.111   przez 37 okien
+    USDT (14):  mediana Sharpe  −0.015   przez 40 okien
+    łącznie:    mediana Sharpe  +0.011
+```
+
+Dla porównania, te same grupy uruchomione **osobno**:
+
+```
+    USDC (10) osobno:  +0.111
+    USDT (14) osobno:  +0.112
+```
+
+## Co to znaczy
+
+**Miara jest w porządku.** Dziesiątka zachowuje w przebiegu łączonym dokładnie
+ten sam wynik co samodzielnie — +0,111 wobec +0,111. Gdyby problemem było
+wrzucanie grup o różnej zmienności do jednej statystyki, ucierpiałyby obie.
+
+**Czternastka traci całą przewagę wyłącznie w towarzystwie**: +0,112 samodzielnie,
+−0,015 obok dziesiątki. Te same instrumenty, te same świece, ta sama historia.
+
+Połączenie nie uśrednia więc dwóch dobrych wyników w mierny. Zostawia jeden
+nietknięty i **zabija drugi**.
+
+## Konsekwencja dla wniosku operacyjnego
+
+Zmienia się jego treść, nie sam wniosek. Do tej pory brzmiał „uniwersum zostaje
+przy dziesiątce, bo alternatywy są gorsze". Teraz wiadomo, dlaczego są gorsze:
+czternastka dołożona do dziesiątki **nie jest utraconą szansą, tylko strumieniem
+transakcji o ujemnej przewadze**. Tłumaczy to też wszystko pozostałe — mediana
+łączna ląduje między +0,111 a −0,015, a rozrzut rośnie, bo dokładany strumień
+nie niesie przewagi, za to niesie zmienność.
+
+## Pytanie, które z tego zostaje
+
+Dlaczego czternastka traci przewagę tylko w towarzystwie. Sygnały mają w obu
+grupach **ten sam znak** (sekcja wyżej), więc to nie jest sprzeczność kierunku.
+Ale zgodność znaków nie znaczy zgodności **wielkości**: optymalne proporcje wag
+mogą się różnić mocno przy identycznych kierunkach, a wagi są dopasowywane
+wspólnie dla całego uniwersum.
+
+Co ważne, czternastka wnosi **więcej obserwacji** do tego dopasowania niż
+dziesiątka (113 tys. wobec 77 tys.), więc to ona dominuje wektor wag — i mimo to
+ona traci. Wskazuje to, że dziesiątka jest po prostu **odporna na złe wagi**,
+a czternastka nie. To jest hipoteza sprawdzalna: wystarczy zmierzyć, jak wynik
+każdej grupy reaguje na wagi dopasowane do tej drugiej.
