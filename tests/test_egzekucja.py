@@ -163,3 +163,61 @@ def test_identyfikator_wlasny_musi_byc_WYPROWADZONY_z_decyzji():
     fragment = zrodlo.split("async def zloz_zlecenie")[1].split("async def")[0]
     assert "uuid" not in fragment and "time.time()" not in fragment, (
         "identyfikator własny nie może powstawać w adapterze — musi przyjść z decyzji")
+
+
+# ------------------------------------------------------ uzgodnienie z giełdą
+
+from services.engine.uzgodnienie import rozjazdy  # noqa: E402
+
+
+def test_zgodny_stan_nie_daje_rozjazdow():
+    assert rozjazdy({"BTC": Decimal("1.5")}, {"BTC": Decimal("1.5")}) == []
+
+
+def test_POZYCJA_WIDMO_jest_rozpoznawana():
+    """Groźniejsza z dwóch. Risk kernel liczy z niej ekspozycję, więc blokuje
+    wejścia, których nic nie blokuje — system stoi i nie ma o tym pojęcia."""
+    r = rozjazdy({"BTC": Decimal("1.0")}, {"BTC": Decimal("0.2")})
+    assert len(r) == 1 and r[0]["rodzaj"] == "pozycja-widmo"
+    assert r[0]["roznica"] < 0
+
+
+def test_SALDO_NIEZNANE_jest_rozpoznawane():
+    """Druga strona: ekspozycja, o której limity nie wiedzą."""
+    r = rozjazdy({"BTC": Decimal("0.2")}, {"BTC": Decimal("1.0")})
+    assert len(r) == 1 and r[0]["rodzaj"] == "saldo-nieznane"
+    assert r[0]["roznica"] > 0
+
+
+def test_aktywo_znane_TYLKO_JEDNEJ_stronie_tez_jest_rozjazdem():
+    """Brak wpisu to nie to samo co zero. Pozycja, o której giełda nic nie wie,
+    i saldo, o którym my nic nie wiemy, są oba rozjazdami — a naiwne
+    porównanie po kluczach wspólnych przemilczałoby oba."""
+    assert len(rozjazdy({"BTC": Decimal("1")}, {})) == 1
+    assert len(rozjazdy({}, {"ETH": Decimal("3")})) == 1
+
+
+def test_tolerancja_przepuszcza_zaokraglenia_ale_nie_wiecej():
+    """Giełda zaokrągla do kroku instrumentu, a prowizja bywa pobierana
+    w kupionym aktywie. Porównanie na dokładną równość zgłaszałoby rozjazd
+    przy każdej transakcji — ale tolerancja za duża przepuszczałaby realne
+    różnice, więc test pilnuje obu stron."""
+    assert rozjazdy({"BTC": Decimal("1")}, {"BTC": Decimal("1.0009")}) == []
+    assert len(rozjazdy({"BTC": Decimal("1")}, {"BTC": Decimal("1.01")})) == 1
+
+
+def test_porownanie_jest_CZYSTA_funkcja():
+    """Bez bazy i bez sieci. Inaczej test tej logiki wymagałby giełdy,
+    a giełda w teście to już nie jest test tej logiki."""
+    import inspect
+
+    zrodlo = inspect.getsource(rozjazdy)
+    for zakazane in ("await", "fetch_", "adapter", "conn"):
+        assert zakazane not in zrodlo, f"porównanie sięga po {zakazane}"
+
+
+def test_brak_klucza_NIE_jest_zgodnoscia():
+    """Milczące zero powiedziałoby 'sprawdzone i w porządku' o czymś, czego
+    nie sprawdzono."""
+    zrodlo = Path("services/engine/uzgodnienie.py").read_text(encoding="utf-8")
+    assert "nie ma z czym porównać" in zrodlo

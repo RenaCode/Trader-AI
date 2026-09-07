@@ -48,6 +48,13 @@ spec:
                   python services/engine/dozor.py --co zywotnosc || RC=$?
                   python services/engine/dozor.py --co ryzyko    || RC=$?
                   python services/engine/dozor.py --co kopie     || RC=$?
+                  # UZGODNIENIE Z GIELDA. Nasz obraz stanu i obraz gieldy to dwa
+                  # rozne stany, ktore moga sie rozjechac - i zaden ze sposobow
+                  # nie objawia sie awaria. Pozycja-widmo blokuje wejscia,
+                  # ktorych nic nie blokuje; saldo nieznane to ekspozycja poza
+                  # limitami. Na rachunku papierowym sprawdzenie jest tanie
+                  # i milczace, a przy wlaczeniu egzekucji dziala od pierwszego dnia.
+                  python services/engine/uzgodnienie.py          || RC=$?
                   exit $RC
               env:
                 - name: APP_DB_PASSWORD
