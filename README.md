@@ -272,6 +272,45 @@ klucza, więc `news_shock` jest martwy we wszystkich oknach historycznych. Wchod
 do wag produkcyjnych dopiero po `MIN_OKIEN_ZYWEGO = 5` oknach, w których żyje —
 przy kroku 30 dni to około pięciu miesięcy od dziś.
 
+## Kill-switch: próba pożarowa
+
+Kill-switch jest jedynym mechanizmem w tym systemie, którego awaria **nie
+objawia się niczym**. Silnik po jego zadziałaniu wygląda dokładnie tak samo jak
+silnik bez sygnału do wejścia: zero decyzji `enter`, żaden błąd w logu,
+heartbeat bije dalej.
+
+Łańcuch ma pięć ogniw i testy jednostkowe pokrywają tylko pierwsze:
+
+| ogniwo | co się dzieje | gdzie sprawdzane |
+|---|---|---|
+| 1 | limit przekroczony → werdykt żąda zatrzymania | `tests/test_killswitch.py` |
+| 2 | żądanie → wiersz w `risk.killswitch_event` | próba pożarowa |
+| 3 | aktywny → wejścia wstrzymane, **wyjścia nadal działają** | oba |
+| 4 | dozór → powiadomienie krytyczne | próba pożarowa |
+| 5 | człowiek → zwolnienie z powodem i śladem w audycie | interfejs |
+
+```bash
+# Podnosi próg kapitału powyżej bieżącego stanu, czeka aż silnik SAM wykryje
+# przekroczenie, sprawdza wszystkie ogniwa i przywraca próg.
+ssh root@185.201.112.104 'bash -s' < scripts/proba-killswitcha.sh
+```
+
+Próg wraca przez `trap EXIT`, więc także po przerwaniu i po błędzie —
+zostawiony podniesiony zatrzymałby silnik na stałe, czyli spowodowałby
+dokładnie tę awarię, przed którą kill-switch ma chronić. Skrypt odmawia
+startu, gdy jakiś kill-switch jest już aktywny: nie odróżniłby wtedy swojego
+zdarzenia od zastanego.
+
+**Brak powiadomienia to NIEZALICZONA próba**, nie drobiazg. Cichy kill-switch
+jest gorszy niż jego brak, bo daje złudzenie kontroli.
+
+Ogniwa 5 nie było do 2026-09-07: kolumny `released_at`, `released_by`
+i `release_note` istniały od migracji 0007, ale router ryzyka miał wyłącznie
+`GET`. Kill-switch działał, zatrzymywał silnik i nie dawało się go zwolnić
+inaczej niż ręcznym SQL-em — a powiadomienie odsyłało do zakładki, która
+pokazywała komunikat „odblokowanie wymaga ręcznego potwierdzenia" i nie dawała
+czym potwierdzić.
+
 ## Dozór stanu nauki
 
 Po każdym nocnym treningu uruchamia się `services/engine/dozor.py`. Odzywa się

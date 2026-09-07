@@ -154,3 +154,40 @@ def test_nowy_limit_ma_nazwe_w_interfejsie():
     usterka — a to jedyne miejsce, w którym widać, gdzie stoi podłoga."""
     zrodlo = Path("web/src/components/Risk.jsx").read_text(encoding="utf-8")
     assert "min_equity:" in zrodlo, "próg kapitału bez nazwy w interfejsie"
+
+
+# ------------------------------------------------------------ próba pożarowa
+
+def test_proba_pozarowa_przywraca_prog_w_pulapce_a_nie_na_koncu():
+    """Skrypt próby podnosi próg kapitału powyżej bieżącego stanu, żeby wywołać
+    prawdziwe zadziałanie. Zostawiony podniesiony próg zatrzymałby silnik
+    NA STAŁE - czyli spowodowałby dokładnie tę awarię, przed którą kill-switch
+    ma chronić.
+
+    Przywracanie musi więc iść przez `trap EXIT`, a nie przez ostatnią linię:
+    inaczej przerwanie skryptu albo błąd w połowie zostawia produkcję
+    zatrzymaną.
+    """
+    zrodlo = Path("scripts/proba-killswitcha.sh").read_text(encoding="utf-8")
+    assert "trap przywroc EXIT" in zrodlo, "przywracanie progu poza pułapką EXIT"
+    # Pułapka musi być ustawiona PRZED podniesieniem progu.
+    assert zrodlo.index("trap przywroc EXIT") < zrodlo.index("podnoszę próg"), (
+        "pułapka ustawiona po zmianie progu — przerwanie w tym oknie zostawia "
+        "silnik zatrzymany")
+
+
+def test_proba_pozarowa_odmawia_przy_juz_aktywnym_killswitchu():
+    """Gdyby próba ruszyła przy zastanym zdarzeniu, nie odróżniłaby swojego od
+    cudzego i zwolniłaby cudze z notatką 'PRÓBA POŻAROWA'."""
+    zrodlo = Path("scripts/proba-killswitcha.sh").read_text(encoding="utf-8")
+    assert "kill-switch jest już aktywny" in zrodlo
+
+
+def test_proba_pozarowa_traktuje_brak_powiadomienia_jako_NIEZALICZONE():
+    """Cichy kill-switch jest gorszy niż jego brak, bo daje złudzenie kontroli.
+    Próba, która kończy się sukcesem mimo braku powiadomienia, sprawdzałaby
+    połowę mechanizmu i raportowała całość."""
+    zrodlo = Path("scripts/proba-killswitcha.sh").read_text(encoding="utf-8")
+    assert "nikt się o tym nie dowiedział" in zrodlo
+    assert zrodlo.count("NIEZALICZONE") >= 2, (
+        "brak zadziałania i brak powiadomienia to dwa osobne niepowodzenia")
