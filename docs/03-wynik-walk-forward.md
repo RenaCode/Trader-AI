@@ -1454,3 +1454,80 @@ większych pozycji. W kolejności, w jakiej da się to sprawdzić:
 
 Pierwsza z nich już biegnie i nic nie kosztuje. Druga jest sprawdzalna jednym
 przebiegiem `--sucho --instrumenty`.
+
+---
+
+# Dwa dobre uniwersa dają jedno złe. Wynik, którego nie zakładała żadna hipoteza
+
+Poprzednia sekcja przekierowała pracę na gęstość sygnału: strategia stoi poza
+rynkiem 57% czasu i znajduje 2,5 okazji na 10 możliwych, więc naturalnym ruchem
+jest **więcej instrumentów**. Baza ma historię szerszą, niż handlujemy — 24 pary
+USDT zarejestrowane w 0020, z pełnymi cechami.
+
+Zmierzone 2026-09-07, horyzont 4 h, `spot_eu` ze zleceniami z limitem:
+
+| wariant | instr. | ekspozycja | w rynku | pozycji | zwrot | mediana Sharpe | dodatnie okna | status |
+|---|---|---|---|---|---|---|---|---|
+| **produkcja** | 10 | 1,29% | 43% | 2,57 | **+9,6%** | +0,111 | 30/39 (77%) | `validated` |
+| budżet ÷6 | 10 | 1,92% | 42% | 2,47 | +11,0% | +0,086 | 28/39 (72%) | `validated` |
+| budżet ÷3 | 10 | 3,01% | 43% | 1,92 | +6,0% | +0,042 | 23/38 (61%) | `learning` |
+| **tylko 14 nowych** | 14 | 1,10% | 44% | 2,98 | +4,1% | **+0,129** | 24/39 (62%) | `learning` |
+| 24, budżet ÷23 | 24 | 1,28% | 59% | 4,47 | +3,7% | +0,038 | 22/40 (55%) | `learning` |
+| 24, budżet ÷10 | 24 | **2,53%** | 58% | 3,99 | **+1,7%** | +0,020 | 21/40 (52%) | `learning` |
+
+## Co zadziałało dokładnie tak, jak miało
+
+Szersze uniwersum **rozwiązuje problem gęstości sygnału**. Czas w rynku rośnie
+z 43% do 59%, liczba pozycji jednocześnie z 2,57 do 4,47. Przy zachowanej
+wielkości pozycji ekspozycja podwaja się: 1,29% → 2,53%.
+
+Uwaga metodologiczna do wiersza „24, budżet ÷23": tam ekspozycja **nie drgnęła**,
+bo `position_budget` dzieli limit przez liczbę instrumentów — pozycje zmalały
+dokładnie o tyle, o ile przybyło okazji. Ten przebieg zmieniał więc dwie rzeczy
+naraz i sam z siebie niczego nie rozstrzyga. Rozdziela je dopiero wiersz
+„budżet ÷10".
+
+## Czego nie zakładała żadna hipoteza
+
+**Każda z dwóch grup osobno ma przewagę. Ich suma jej nie ma.**
+
+```
+10 par USDC        mediana Sharpe +0,111   dodatnie 77%
+14 par USDT        mediana Sharpe +0,129   dodatnie 62%
+24 razem           mediana Sharpe +0,020   dodatnie 52%
+```
+
+To nie jest własność dołożonych aktywów — osobno mają **najwyższą jakość na
+transakcję ze wszystkich sześciu przebiegów**. Coś psuje się dopiero przy
+połączeniu.
+
+## Kandydaci, w kolejności prawdopodobieństwa
+
+1. **Wagi kalibrowane wspólnie.** Trener dopasowuje jeden wektor wag na regim
+   dla całego uniwersum. Dwie grupy o różnej charakterystyce dostają kompromis,
+   który jest gorszy dla obu niż wagi dopasowane osobno. To tłumaczyłoby wynik
+   bez odwoływania się do czegokolwiek innego — i jest sprawdzalne.
+2. **`rel_strength` jest cechą przekrojową.** Ranking liczy się po uniwersum
+   decyzyjnym, więc zmiana uniwersum zmienia wartość tej cechy dla **każdego**
+   instrumentu. Zastrzeżenie do wszystkich sześciu wierszy tabeli: wartości
+   w bazie pochodzą z rankingu po 24 instrumentach (sprzed 0023), więc także
+   przebieg produkcyjny czyta cechę policzoną dla innego zbioru niż ten, którym
+   handluje. Rozjazd jest symetryczny, więc nie tłumaczy różnicy sam z siebie —
+   ale zaniża wiarygodność porównania.
+3. **Korelacja.** Pozycje w 24 skorelowanych aktywach to mniej niezależnych
+   zakładów, niż sugeruje ich liczba. Zastrzeżenie o efektywnej liczbie
+   obserwacji, opisane wyżej przy transakcjach, dotyczy tu wprost ekspozycji.
+
+## Wniosek operacyjny
+
+Uniwersum zostaje przy dziesięciu parach USDC. Trzy kierunki sprawdzone,
+wszystkie gorsze od stanu obecnego:
+
+- większe pozycje → obsunięcie rośnie szybciej niż zwrot,
+- szersze uniwersum → więcej okazji, mniej przewagi,
+- jedno i drugie naraz → najgorszy wynik z sześciu.
+
+Konfiguracja produkcyjna jest **zmierzonym optimum lokalnym**, a nie wartością
+domyślną, której nikt nie sprawdził. Następne pytanie nie brzmi „ile
+instrumentów", tylko „czy wagi mają być wspólne dla całego uniwersum" — i to
+jest hipoteza dla osobnego przebiegu, nie dla zmiany w produkcji.
