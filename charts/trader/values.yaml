@@ -212,10 +212,14 @@ workers:
     # (225 z 476 artykulow w ciagu dwoch dob, glownie zgloszenia 8-K). Przy
     # limicie 5 USD na dobe silnik krypto placilby za filtrowanie material,
     # ktory nie moze go dotyczyc. Do listy wrocic, gdy ruszy drugi silnik.
-    # Petla w serwisie, bez `|| true` i bez `--quiet` - patrz komentarz przy
-    # silniku. `--quiet` wyciszal tu opisy bledow tak skutecznie, ze cykl
-    # raportowal "bledow 11" bez ani jednego slowa o tym, czym byly.
-    command: ["sh", "-c", "exec python services/ingest/news_worker.py --auto --silniki crypto --interval 300"]
+    # Petla w serwisie, bez `|| true` - patrz komentarz przy silniku.
+    #
+    # `--quiet` WROCILO, ale znaczy juz co innego. Wczesniej wyciszalo takze
+    # opisy bledow i cykl raportowal "bledow 11" bez ani jednego slowa o tym,
+    # czym byly. Teraz opisy bledow ida ZAWSZE, poza tym przelacznikiem, a
+    # `--quiet` wycisza wylacznie rutynowy postep - w tym uzasadnienie odsiania
+    # kazdego pojedynczego artykulu, ktorego bywa kilkadziesiat na cykl.
+    command: ["sh", "-c", "exec python services/ingest/news_worker.py --auto --quiet --silniki crypto --interval 300"]
     resources:
       limits:   { cpu: 1000m, memory: 512Mi }
       requests: { cpu: 50m,   memory: 128Mi }
