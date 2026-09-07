@@ -41,6 +41,44 @@ REPO_DIR=/opt/trader-ai
 REGISTRY=ghcr.io/renacode
 ZOSTAW=${ZOSTAW:-5}
 
+# ---------------------------------------------------------------- narzedzia
+#
+# Skrypt potrzebuje CZTERECH rzeczy i kazda moze zniknac przy sprzataniu
+# infrastruktury - a bez tego sprawdzenia znika w polowie budowania, z
+# komunikatem powloki w rodzaju "docker: command not found" i bez podpowiedzi,
+# co z tym zrobic.
+#
+# DOCKER JEST TU NAJKRUCHSZY. Maszyna ma dwa srodowiska uruchomieniowe: docker
+# do budowania i containerd k3s do uruchamiania. Docker nie jest potrzebny do
+# niczego innego, wiec przy porzadkach jest naturalnym kandydatem do usuniecia -
+# i wtedy przestaje dzialac cale wdrazanie, mimo ze klaster ma sie dobrze.
+#
+# Jesli tak sie stanie, zamiennikiem jest `nerdctl`, ktory buduje wprost do
+# containerd i nie wymaga kroku save/import:
+#
+#     nerdctl --namespace k8s.io build -f docker/api.Dockerfile -t "$TAG" .
+#
+# Skrypt uzyje go SAM, gdy dockera nie bedzie, a nerdctl bedzie.
+for narzedzie in k3s kubectl git; do
+  command -v "$narzedzie" > /dev/null || {
+    echo "BRAK: $narzedzie. Bez niego ten skrypt nie ma jak zadzialac." >&2
+    exit 1
+  }
+done
+
+if command -v docker > /dev/null; then
+  BUDOWNICZY=docker
+elif command -v nerdctl > /dev/null; then
+  BUDOWNICZY=nerdctl
+else
+  echo "BRAK dockera i nerdctl - nie ma czym zbudowac obrazu." >&2
+  echo "Zainstaluj jedno z nich albo wroc do pobierania z rejestru:" >&2
+  echo "  sekret ghcr-pull + imagePullSecrets + pullPolicy: Always" >&2
+  echo "  (opisane w charts/trader/values.yaml)" >&2
+  exit 1
+fi
+echo "==> buduje przez: $BUDOWNICZY"
+
 export GIT_SSH_COMMAND="ssh -i /root/.ssh/argocd_trader -o StrictHostKeyChecking=accept-new"
 
 if [ -d "$REPO_DIR/.git" ]; then
@@ -57,9 +95,15 @@ echo "==> budowanie z commita $SHA"
 for svc in api web; do
   TAG="$REGISTRY/trader-ai-$svc:sha-$SHA"
   echo "==> $svc"
-  docker build -q -f "docker/$svc.Dockerfile" -t "$TAG" . > /dev/null
-  # Import do przestrzeni nazw k8s.io - tam containerd szuka obrazow dla podow.
-  docker save "$TAG" | k3s ctr -n k8s.io images import - > /dev/null
+  if [ "$BUDOWNICZY" = "nerdctl" ]; then
+    # nerdctl buduje WPROST do containerd, w podanej przestrzeni nazw -
+    # krok save/import odpada w calosci.
+    nerdctl --namespace k8s.io build -q -f "docker/$svc.Dockerfile" -t "$TAG" . > /dev/null
+  else
+    docker build -q -f "docker/$svc.Dockerfile" -t "$TAG" . > /dev/null
+    # Import do przestrzeni nazw k8s.io - tam containerd szuka obrazow dla podow.
+    docker save "$TAG" | k3s ctr -n k8s.io images import - > /dev/null
+  fi
 
   # SPRAWDZENIE, ZE OBRAZ TAM JEST.
   #
@@ -127,14 +171,17 @@ for svc in api web; do
   DO_USUNIECIA=$(printf '%s\n' "$POSIADANE" | grep -vxF -f "$CHRONIONE" || true)
   for obraz in $DO_USUNIECIA; do
     k3s ctr -n k8s.io images rm "$obraz" > /dev/null 2>&1 || true
-    docker rmi -f "$obraz" > /dev/null 2>&1 || true
+    "$BUDOWNICZY" rmi -f "$obraz" > /dev/null 2>&1 || true
     echo "    usuniety: $obraz"
   done
   echo "    $svc: zachowane $(printf '%s\n' "$POSIADANE" | grep -cxF -f "$CHRONIONE" || true), usuniete $(printf '%s\n' "$DO_USUNIECIA" | grep -c . || true)"
 done
 
-# Cache builda rosnie osobno i nie jest niczyim obrazem.
+# Cache builda rosnie osobno i nie jest niczyim obrazem. nerdctl buduje
+# przez BuildKit i ma wlasna komende, wiec probujemy obu i ignorujemy
+# nieudana - to sprzatanie, nie warunek powodzenia wdrozenia.
 docker builder prune -f --filter until=168h > /dev/null 2>&1 || true
+nerdctl --namespace k8s.io system prune -f > /dev/null 2>&1 || true
 
 echo "    wolne na /: $(df -h / | awk 'NR==2 {print $4}')"
 
