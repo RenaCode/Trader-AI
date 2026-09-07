@@ -1392,3 +1392,65 @@ Dlaczego ekspozycja jest dwunastokrotnie niższa od limitu. Kandydaci, w kolejno
 Każdy z nich jest sprawdzalny osobno przebiegiem `--sucho`. Żadnego nie wolno
 zmienić „bo wygląda na za ostry" — podniesienie ekspozycji podnosi też obsunięcie
 i limit straty dziennej, a te są mierzone tą samą symulacją.
+
+---
+
+# Podniesienie ekspozycji nie kupuje zwrotu. Kupuje obsunięcie
+
+Hipoteza z poprzedniej sekcji brzmiała: budżet na pozycję dzieli limit przez
+**10 instrumentów**, zakładając, że zapełnią się wszystkie, a zapełnia się 2,57 —
+więc budżet jest liczony pod portfel, który nie powstaje. Wygląda na darmowe
+czterokrotne podniesienie zwrotu przy tym samym twardym limicie.
+
+**Jest odwrotnie.** Zmierzone 2026-09-07, ten sam przebieg, zmieniony wyłącznie
+dzielnik budżetu (`--zakladane-pozycje`, wymaga `--sucho`):
+
+| dzielnik | ekspozycja | pozycji w rynku | suma zwrotów | mediana Sharpe | dodatnie okna | obsunięcie | status |
+|---|---|---|---|---|---|---|---|
+| **10** (produkcja) | 1,29% | 2,57 | +9,6% | +0,111 | 30/39 (77%) | **−2,85%** | `validated` |
+| 6 | 1,92% | 2,47 | +11,0% | +0,086 | 28/39 (72%) | −4,21% | `validated` |
+| 3 | 3,01% | 1,92 | **+6,0%** | +0,042 | 23/38 (61%) | −4,50% | `learning` |
+
+## Co się psuje
+
+**Większe pozycje wypychają się nawzajem z portfela.** Przy dzielniku 3 budżet
+na pozycję to 5% kapitału, więc trzy pozycje wypełniają limit łącznej ekspozycji
+w całości. Dalsze wejścia są blokowane — w oknach widać `odrzuconych wejść: 17`.
+Liczba pozycji jednocześnie **spada** z 2,57 do 1,92, mimo że kapitału jest
+więcej.
+
+A to właśnie rozproszenie na kilka instrumentów zamienia mały, zaszumiony zysk
+na transakcję w **konsekwentnie dodatnie okno**. Skoncentrowany portfel ma tę
+samą przewagę na jednostkę kapitału, ale wariancję na tyle większą, że odsetek
+dodatnich okien spada z 77% do 61%, a status wraca do `learning`.
+
+## Czego ten pomiar NIE mówi
+
+Że dzielnik 6 jest lepszy od 10. Różnica zwrotu (+11,0% wobec +9,6% przez
+3,2 roku) mieści się w szumie między przebiegami — ten sam wariant uruchomiony
+godzinę wcześniej dał 28/39 i +10,07% zamiast 30/39 i +9,6%. Różnica obsunięcia
+(−4,21% wobec −2,85%) jest za to duża i idzie konsekwentnie w jedną stronę.
+
+Wniosek uczciwy brzmi więc: **podniesienie ekspozycji kupuje mierzalne obsunięcie
+za zwrot nieodróżnialny od szumu.**
+
+## Dokąd to przekierowuje pracę
+
+Ekspozycja 1,29% nie jest błędem konfiguracji. Jest tym, na co pozwala gęstość
+sygnału. Wąskim gardłem nie jest wielkość pozycji — jest to, że strategia
+**stoi poza rynkiem przez 57% czasu i znajduje 2,5 okazji jednocześnie na
+dziesięć możliwych**.
+
+Żeby wynik zaczął cokolwiek znaczyć w złotówkach, potrzeba więcej sygnału, nie
+większych pozycji. W kolejności, w jakiej da się to sprawdzić:
+
+1. **Analiza wiadomości** — od 2026-09-07 działa na produkcji i jest dokładnie
+   tym: nowym źródłem wejść. Wchodzi do wag po pięciu żywych oknach.
+2. **Szersze uniwersum** — 10 instrumentów to sufit liczby jednoczesnych pozycji.
+   Podmiot unijny ma 113 par USDC; próg `MIN_INSTRUMENTS` to 8.
+3. **Krótszy horyzont** — 1 h daje więcej świec decyzyjnych, ale przy koszcie
+   rundy 0,200% amplituda świecy przestaje go pokrywać (patrz sekcja o wyborze
+   horyzontu wyżej).
+
+Pierwsza z nich już biegnie i nic nie kosztuje. Druga jest sprawdzalna jednym
+przebiegiem `--sucho --instrumenty`.

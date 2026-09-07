@@ -44,9 +44,12 @@ z osobnymi modelami, osobnym ryzykiem i osobnymi zakładkami w UI.
 - [x] Porównanie z kup-i-trzymaj **przy tej samej ekspozycji** — warunek
       w starej postaci mierzył znak rynku, nie strategię (patrz `docs/03`)
 - [x] Analiza wiadomości **działa na produkcji** (Gemini, ~0,5 USD/dobę)
-- [ ] **Ekspozycja 1,28% przy limicie 15%** — strategia ma przewagę na jednostkę
-      kapitału (30/39 okien), ale angażuje jedną dwunastą własnego budżetu
-      ryzyka; wynik ~3% rocznie. Kryteria nie mierzą skali (patrz `docs/03`)
+- [x] **Ekspozycja rozłożona na czynniki** — 1,29% = 43% świec w rynku × 2,57
+      pozycji × 1,16% na pozycję. Podniesienie jej zmierzone i **odrzucone**:
+      kupuje obsunięcie za zwrot nieodróżnialny od szumu (patrz `docs/03`)
+- [ ] **Wąskie gardło to gęstość sygnału, nie wielkość pozycji.** Strategia stoi
+      poza rynkiem 57% czasu i znajduje 2,5 okazji na 10 możliwych; wynik ~3%
+      rocznie. Kryteria mierzą przewagę na jednostkę kapitału, nie skalę
 - [x] Dwa dostawcy analizy wiadomości: Anthropic (docelowy) i Google Gemini
       (zapasowy). Wybiera się sam po tym, który klucz jest ustawiony
 - [ ] Analiza wiadomości włączona na produkcji; do tego czasu `news_shock`
