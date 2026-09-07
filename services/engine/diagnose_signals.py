@@ -42,6 +42,7 @@ from psycopg.rows import dict_row
 
 from services.engine.horizons import DEFAULT_BAR, HORIZONS, get as get_horizon
 from services.engine.statystyka import spearman
+from services.engine.uniwersum import odcisk
 from services.engine.portfolio import precompute_panels
 from services.engine.train import atr_threshold, load_panel
 
@@ -70,6 +71,12 @@ def main() -> int:
     ap.add_argument("--bar", default=DEFAULT_BAR, choices=sorted(HORIZONS))
     ap.add_argument("--days", type=int, default=1400)
     ap.add_argument("--engine", default="crypto")
+    ap.add_argument("--instrumenty", default="",
+                    help="lista symboli po przecinku - zawezenie do zbioru. "
+                         "Do porownania IC MIEDZY uniwersami: gdy dwie grupy maja "
+                         "osobno przewage, a razem nie, przyczyna musi byc widoczna "
+                         "w tym, ze ten sam sygnal ma w nich rozny znak. Puste = "
+                         "wszystkie aktywne")
     args = ap.parse_args()
 
     url = os.environ.get("DATABASE_URL")
@@ -81,9 +88,22 @@ def main() -> int:
 
     with psycopg.connect(url, row_factory=dict_row) as conn:
         cur = conn.cursor()
+        tylko = [x.strip().upper() for x in args.instrumenty.split(",") if x.strip()]
         cur.execute("SELECT id, symbol FROM ref.instrument WHERE engine=%s AND active"
-                    " AND kind <> 'perp' ORDER BY symbol", (args.engine,))
+                    " AND kind <> 'perp'"
+                    " AND (%s::text[] IS NULL OR symbol = ANY(%s))"
+                    " ORDER BY symbol", (args.engine, tylko or None, tylko or None))
         instrumenty = cur.fetchall()
+        brak = sorted(set(tylko) - {i["symbol"] for i in instrumenty})
+        if brak:
+            sys.exit(f"nie ma w bazie albo nieaktywne: {', '.join(brak)}")
+
+        # ODCISK UNIWERSUM dla cechy przekrojowej. Bez niego sila wzgledna byla by
+        # martwa w calej diagnostyce, a jej IC - jedynego sygnalu patrzacego na
+        # instrument PRZEZ PRYZMAT pozostalych - nie dalo by sie porownac miedzy
+        # zbiorami. Czyli akurat tej liczby, po ktora sie tu przychodzi.
+        fp = odcisk([i["symbol"] for i in instrumenty])
+        print(f"Uniwersum: {len(instrumenty)} instrumentów, odcisk {fp}")
 
         # {sygnal: {horyzont: ([wyniki], [zwroty])}}
         zebrane: dict[str, dict[int, tuple[list, list]]] = {}
@@ -91,7 +111,8 @@ def main() -> int:
         MIN_PANEL = 500
         pominiete: list[tuple[str, int]] = []
         for inst in instrumenty:
-            panel = load_panel(cur, inst["id"], h, now - timedelta(days=args.days), now)
+            panel = load_panel(cur, inst["id"], h,
+                               now - timedelta(days=args.days), now, fp=fp)
             if len(panel) < MIN_PANEL:
                 # POMINIECIE JEST WYNIKIEM, NIE MILCZENIEM.
                 #
