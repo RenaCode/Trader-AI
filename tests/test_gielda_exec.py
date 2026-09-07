@@ -274,3 +274,69 @@ def test_petla_NIE_bramkuje_wysylki_stanem_killswitcha():
     ostatni_if = warunek.rstrip().splitlines()[-1]
     assert "gielda is not None" in ostatni_if
     assert "wejscia_wstrzymane" not in ostatni_if
+
+
+# ------------------------------------------------------- próba ścieżki egzekucji
+
+def test_proba_egzekucji_ANULUJE_takze_po_bledzie():
+    """Próba, która przy błędzie zostawia zlecenie w arkuszu, jest gorsza niż
+    jej brak — zwłaszcza że jej celem jest sprawdzenie, czy anulowanie działa."""
+    from services.engine.proba_egzekucji import Niezaliczona, przebieg
+    from services.engine.zlecenia import Filtry
+
+    f = Filtry(krok_ilosci=D("0.01"), min_ilosc=D("0.01"),
+               min_wartosc=D("5"), krok_ceny=D("0.01"))
+
+    class GieldaBezOdczytu(Gielda):
+        async def stan_zlecenia(self, id_wlasne, kategoria="spot"):
+            return None                       # gielda nie zna wlasnego id
+
+    g = GieldaBezOdczytu()
+    with pytest.raises(Niezaliczona):
+        asyncio.run(przebieg(g, symbol="SOLUSDC", f=f,
+                             cena_rynkowa=D("200"), znacznik="t"))
+    assert len(g.anulowane) == 1              # mimo bledu
+
+
+def test_proba_egzekucji_ODRZUCA_wypelnienie():
+    """Wypełnienie utworzyłoby pozycję, której żadna decyzja nie popiera —
+    zaśmieciłoby dziennik i uzgodnienie z giełdą."""
+    from services.engine.proba_egzekucji import Niezaliczona, przebieg
+    from services.engine.zlecenia import Filtry
+
+    f = Filtry(krok_ilosci=D("0.01"), min_ilosc=D("0.01"),
+               min_wartosc=D("5"), krok_ceny=D("0.01"))
+    g = Gielda(stan=StanZlecenia(id_wlasne="x", id_gieldy="G", status="filled",
+                                 ilosc=D("1"), wypelniono=D("1"),
+                                 srednia_cena=D("50"), prowizja=D("0")))
+    with pytest.raises(Niezaliczona) as exc:
+        asyncio.run(przebieg(g, symbol="SOLUSDC", f=f,
+                             cena_rynkowa=D("200"), znacznik="t"))
+    assert "WYPEŁNIŁO SIĘ" in str(exc.value)
+    assert len(g.anulowane) == 1
+
+
+def test_proba_egzekucji_WYKRYWA_brak_idempotencji():
+    """Drugie złożenie tego samego identyfikatora ma odnaleźć pierwsze.
+    Utworzenie drugiego zlecenia to mechanizm powstawania podwójnej pozycji —
+    i jedyna rzecz, której atrapa nie potwierdzi za prawdziwą giełdę."""
+    from services.engine.proba_egzekucji import Niezaliczona, przebieg
+    from services.engine.zlecenia import Filtry
+
+    f = Filtry(krok_ilosci=D("0.01"), min_ilosc=D("0.01"),
+               min_wartosc=D("5"), krok_ceny=D("0.01"))
+    g = Gielda(stan=StanZlecenia(id_wlasne="x", id_gieldy="G", status="new",
+                                 ilosc=D("1"), wypelniono=D("0"),
+                                 srednia_cena=None, prowizja=D("0")))
+    # zloz_zlecenie w atrapie zawsze zwraca juz_istnialo=False
+    with pytest.raises(Niezaliczona) as exc:
+        asyncio.run(przebieg(g, symbol="SOLUSDC", f=f,
+                             cena_rynkowa=D("200"), znacznik="t"))
+    assert "UTWORZYŁO DRUGIE" in str(exc.value)
+
+
+def test_proba_egzekucji_stawia_limit_POZA_ZASIEGIEM():
+    """Limit blisko rynku wypełniłby się i zrobił z próby transakcję."""
+    from services.engine.proba_egzekucji import UDZIAL_CENY
+
+    assert UDZIAL_CENY < D("0.5")
