@@ -500,3 +500,72 @@ def test_prog_rozjazdu_ignoruje_zaokraglenia_ale_nie_zmiane_stawki():
     wyraznie = {"maker": Decimal("0.0013"), "taker": Decimal("0.0025")}
     assert rozjazd_stawek(ledwie, k) == []
     assert len(rozjazd_stawek(wyraznie, k)) == 1
+
+
+def test_uzgodnienie_WIDZI_aktywo_ktorego_nie_ma_w_dzienniku():
+    """Kierunek „saldo-nieznane": giełda trzyma coś, o czym system nie wie.
+
+    To jest pozycja, której nikt nie pilnuje — risk kernel nie liczy z niej
+    ekspozycji, stop na obsunięciu jej nie widzi. Filtr zbudowany z naszych
+    własnych pozycji wycinał ją, zanim porównanie ją zobaczyło, więc
+    uzgodnienie meldowało zgodność, mając przed sobą dokładnie ten przypadek,
+    dla którego istnieje.
+    """
+    import asyncio
+
+    from services.engine.uzgodnienie import uzgodnij
+
+    class Gielda:
+        async def fetch_balances(self):
+            from services.exchanges.base import Balance
+            return [Balance(currency="SOL", total=Decimal("4"),
+                            available=Decimal("4"))]
+
+    async def fetch_all(sql, params=None):
+        if "sum(p.qty)" in sql:
+            return []                       # nasz dziennik jest PUSTY
+        if "DISTINCT base_ccy" in sql:
+            return [{"base_ccy": "SOL"}, {"base_ccy": "XRP"}]
+        if "min(p.opened_at)" in sql:
+            return [{"od": None}]
+        return [{"id": 1}]
+
+    zgloszone = []
+
+    async def notify(uid, kod, tytul, tresc, **kw):
+        zgloszone.append((kod, tytul))
+
+    n = asyncio.run(uzgodnij(fetch_all, notify, Gielda()))
+    assert n == 1
+    assert zgloszone, "rozjazd musi trafić do powiadomienia, nie tylko na ekran"
+
+
+def test_uzgodnienie_nadal_pomija_walute_kwotowana():
+    """Giełda trzyma USDC i resztki po operacjach spoza uniwersum. To nie są
+    pozycje i ich obecność nie jest rozjazdem — inaczej alarm brzmiałby
+    przy każdym uruchomieniu."""
+    import asyncio
+
+    from services.engine.uzgodnienie import uzgodnij
+
+    class Gielda:
+        async def fetch_balances(self):
+            from services.exchanges.base import Balance
+            return [Balance(currency="USDC", total=Decimal("100000"),
+                            available=Decimal("100000")),
+                    Balance(currency="DOGE", total=Decimal("7"),
+                            available=Decimal("7"))]
+
+    async def fetch_all(sql, params=None):
+        if "sum(p.qty)" in sql:
+            return []
+        if "DISTINCT base_ccy" in sql:
+            return [{"base_ccy": "SOL"}]
+        if "min(p.opened_at)" in sql:
+            return [{"od": None}]
+        return [{"id": 1}]
+
+    async def notify(*a, **k):
+        raise AssertionError("waluta kwotowana nie jest rozjazdem")
+
+    assert asyncio.run(uzgodnij(fetch_all, notify, Gielda())) == 0

@@ -144,6 +144,30 @@ def pokrycie_wypelnien(wypelnienia, najstarsze_otwarcie) -> str | None:
                 "pokrywa naszej historii, wiec odtworzona pozycja bylaby zanizona")
     return None
 
+async def aktywa_uniwersum(fetch_all, engine: str) -> set[str]:
+    """Aktywa bazowe WSZYSTKICH instrumentow silnika, nie tylko trzymanych.
+
+    DLACZEGO NIE WYSTARCZY LISTA NASZYCH POZYCJI
+
+    Filtr zbudowany z tego, co mamy w dzienniku, wycina dokladnie ten przypadek,
+    dla ktorego uzgodnienie istnieje: aktywo, o ktorym gielda wie, a my NIE.
+    A to jest wlasnie kierunek "saldo-nieznane" - pozycja, ktorej nikt nie
+    pilnuje, bo system o niej nie slyszal.
+
+    `rozjazdy()` obsluguje ten przypadek poprawnie i jej docstring mowi wprost,
+    ze aktywo znane jednej stronie tez jest rozjazdem. Wywolujacy to
+    uniewazniał, wycinajac je dwie linijki wczesniej.
+
+    Nadal NIE porownujemy wszystkiego, co gielda trzyma: waluta kwotowana
+    i resztki po operacjach spoza naszego uniwersum nie sa pozycjami i ich
+    obecnosc nie jest rozjazdem.
+    """
+    rows = await fetch_all(
+        "SELECT DISTINCT base_ccy FROM ref.instrument"
+        " WHERE active AND engine::text = %s", (engine,))
+    return {r["base_ccy"].upper() for r in rows if r["base_ccy"]}
+
+
 async def nasze_pozycje(fetch_all, engine: str, mode: str) -> dict[str, Decimal]:
     """Ile którego aktywa trzymamy według naszego dziennika."""
     rows = await fetch_all(
@@ -203,10 +227,16 @@ async def uzgodnij(fetch_all, notify, adapter, engine: str = "crypto",
         salda = pozycje_z_wypelnien(wyp, baza)
         zrodlo = "wypelnienia"
 
-    # Porównujemy WYŁĄCZNIE aktywa, które którakolwiek strona uważa za nasze
-    # pozycje. Giełda trzyma też walutę kwotowaną i resztki po innych operacjach,
-    # a te nie są pozycjami i ich obecność nie jest rozjazdem.
-    interesujace = set(nasze)
+    # ZAKRES Z UNIWERSUM, NIE Z DZIENNIKA.
+    #
+    # Pierwsza wersja filtrowała po `set(nasze)`, czyli po aktywach, które JUŻ
+    # znamy — i wycinała przez to dokładnie ten przypadek, dla którego całe
+    # uzgodnienie istnieje: aktywo, o którym giełda wie, a my nie. Sprawdzenie
+    # meldowało wtedy zgodność, mając przed sobą pozycję-widmo.
+    #
+    # Waluta kwotowana i resztki spoza uniwersum nadal odpadają — nie są
+    # pozycjami i ich obecność nie jest rozjazdem.
+    interesujace = (await aktywa_uniwersum(fetch_all, engine)) | set(nasze)
     salda = {k: v for k, v in salda.items() if k in interesujace}
 
     r = rozjazdy(nasze, salda)
