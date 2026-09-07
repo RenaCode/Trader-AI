@@ -317,6 +317,11 @@ def ocen_kopie(biezaca: dict, poprzednia: dict | None,
 # dlugiej swiecy, albo bezuzyteczna przy krotkiej.
 SWIEC_ZWLOKI = 2
 
+# Dlugosc timeframe'u w minutach. Nieznany timeframe NIE dostaje wartosci
+# domyslnej: prog wyliczony ze zgadnietej dlugosci albo krzyczy bez powodu,
+# albo milczy, gdy powinien krzyknac - a oba psuja czujke.
+MINUT_TIMEFRAME = {"1m": 1, "5m": 5, "15m": 15, "1h": 60, "4h": 240, "1d": 1440}
+
 
 def ocen_swiezosc(wiersze: list[dict], swiec_zwloki: int = SWIEC_ZWLOKI) -> list[tuple[str, str]]:
     """Ktore zrodla danych sa nieswieze. CZYSTA FUNKCJA.
@@ -356,20 +361,41 @@ async def sprawdz_swiezosc(fetch_all, notify, sucho: bool = False,
     do niedawna mialy w komendzie `|| true`, ktore polykalo kazda awarie.
     Martwe pobieranie wygladalo wiec dokladnie tak samo jak rynek bez zmian.
 
+    PYTAMY O TIMEFRAME ZRODLOWY, NIE O SWIECE DOCELOWA
+
+    Swieca 4h nie istnieje w `market.candle` - jest skladana ze swiec 1h.
+    Pierwsza wersja tego sprawdzenia pytala o timeframe "4h" i dostala "brak
+    danych" przy w pelni zdrowym potoku. Falszywy alarm psuje czujke
+    SKUTECZNIEJ niz jej brak: uczy odbiorce, ze mozna ja pomijac.
+
+    Prog liczy sie tez od swiecy ZRODLOWEJ. Przy swiecach 1h sprzed trzech
+    godzin swieca 4h jest juz niepelna, choc osiem godzin nie minelo - a to
+    swieca zrodlowa decyduje, czy da sie ja zlozyc.
+
     SPRAWDZAMY STAN, NIE ZDARZENIE - tak samo jak przy kopii zapasowej. Stan
     jest odporny na kazdy sposob, w jaki dane moga sie nie pojawic: padniety
     pod, zawieszony harmonogram, blad polaczenia z gielda, skasowany Deployment.
     """
-    minuty = {"1h": 60, "4h": 240, "1d": 1440}.get(bar, 240)
+    from services.engine.horizons import get as get_horizon
+
+    h = get_horizon(bar)
+    minut_zrodla = MINUT_TIMEFRAME.get(h.source_timeframe)
+    if minut_zrodla is None:
+        print(f"świeżość: nieznany timeframe źródłowy {h.source_timeframe!r} — "
+              f"nie ma z czym porównać wieku danych")
+        return 0
+
     wiersze = await fetch_all(
-        "SELECT 'market.candle (' || %(bar)s || ')' AS co, %(min)s::numeric AS minut_swiecy,"
+        "SELECT 'market.candle (' || %(tf)s || ', źródło świecy ' || %(bar)s || ')' AS co,"
+        "       %(min)s::numeric AS minut_swiecy,"
         "       round(extract(epoch from (now() - max(event_time)))/60) AS wiek_min"
-        "  FROM market.candle WHERE timeframe::text = %(bar)s"
+        "  FROM market.candle WHERE timeframe::text = %(tf)s"
         " UNION ALL"
-        " SELECT 'feat.feature_value', %(min)s::numeric,"
+        " SELECT 'feat.feature_value', %(min_bar)s::numeric,"
         "        round(extract(epoch from (now() - max(event_time)))/60)"
         "   FROM feat.feature_value",
-        {"bar": bar, "min": minuty})
+        {"tf": h.source_timeframe, "bar": bar, "min": minut_zrodla,
+         "min_bar": h.bar_minutes})
 
     for w in wiersze:
         wiek = "brak danych" if w["wiek_min"] is None else f"{w['wiek_min']:.0f} min temu"

@@ -371,3 +371,54 @@ def test_swiezosc_sprawdza_KAZDE_zrodlo_a_nie_pierwsze_z_brzegu():
     ])
     assert len(powody) == 1
     assert "feat.feature_value" in powody[0][0]
+
+
+def test_swiezosc_pyta_o_timeframe_ZRODLOWY_a_nie_o_swiece_docelowa():
+    """Świeca 4h nie istnieje w `market.candle` — jest składana ze świec 1h.
+
+    Pierwsza wersja pytała o timeframe „4h" i dostała „brak danych" przy
+    w pełni zdrowym potoku. Fałszywy alarm psuje czujkę skuteczniej niż jej
+    brak: uczy odbiorcę, że można ją pomijać.
+    """
+    import asyncio
+
+    zapytania = []
+
+    async def fetch_all(sql, params=None):
+        zapytania.append(params)
+        return [{"co": "market.candle", "minut_swiecy": 60, "wiek_min": 30},
+                {"co": "feat.feature_value", "minut_swiecy": 240, "wiek_min": 30}]
+
+    async def notify(*a, **k):
+        raise AssertionError("nie alarmujemy przy zdrowym potoku")
+
+    from services.engine.dozor import sprawdz_swiezosc
+
+    assert asyncio.run(sprawdz_swiezosc(fetch_all, notify, sucho=True, bar="4h")) == 0
+    assert zapytania[0]["tf"] == "1h"          # zrodlo, nie swieca docelowa
+    assert zapytania[0]["min"] == 60           # prog od zrodla, nie od 4h
+
+
+def test_nieznany_timeframe_nie_dostaje_progu_ZGADNIETEGO(monkeypatch):
+    """Próg wyliczony ze zgadniętej długości albo krzyczy bez powodu, albo
+    milczy, gdy powinien krzyknąć.
+
+    Test idzie CAŁĄ ŚCIEŻKĄ, a nie sprawdza samego słownika: pierwsza wersja
+    asertowała `MINUT_TIMEFRAME.get(...) is None` i przechodziła także wtedy,
+    gdy funkcja dokładała sobie wartość domyślną przy odczycie.
+    """
+    import asyncio
+
+    from services.engine import dozor, horizons
+
+    dziwny = horizons.Horizon(**{**vars(horizons.HORIZONS["4h"]),
+                                 "source_timeframe": "7h"})
+    monkeypatch.setattr(horizons, "get", lambda bar: dziwny)
+
+    async def fetch_all(sql, params=None):
+        raise AssertionError("nie pytamy bazy, gdy nie wiemy, z czym porównać wiek")
+
+    async def notify(*a, **k):
+        raise AssertionError("nie alarmujemy na podstawie zgadniętego progu")
+
+    assert asyncio.run(dozor.sprawdz_swiezosc(fetch_all, notify, sucho=True)) == 0
