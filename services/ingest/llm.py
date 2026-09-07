@@ -47,6 +47,16 @@ class BladOdpowiedzi(RuntimeError):
         self.usage = usage or {"input": 0, "output": 0, "cache_read": 0}
 
 
+class Przeciazony(RuntimeError):
+    """Dostawca odmawia z powodu LIMITU, nie z powodu bledu w zapytaniu.
+
+    Osobna klasa, a nie goly RuntimeError, bo to jedyny wyjatek, po ktorym wolno
+    siegnac po drugiego dostawce. Lapanie RuntimeError zamiotlo by przy okazji
+    kazdy blad w naszym kodzie - i zamiast awarii dostalibysmy ciche zejscie
+    na dostawce zapasowego, z rachunkiem, ktory rosnie bez powodu.
+    """
+
+
 class Odmowa(BladOdpowiedzi):
     """Model odmowil odpowiedzi. Nie jest to awaria - jest to odpowiedz."""
 
@@ -96,6 +106,16 @@ class Dostawca:
     async def zapytaj(self, *, model: str, system: str, user: str,
                       schema: dict, max_tokens: int) -> tuple[dict, dict]:
         raise NotImplementedError
+
+    def uzyty_model(self, model: str, usage: dict) -> str:
+        """Model, ktory NAPRAWDE obsluzyl zapytanie.
+
+        Zwykle ten, o ktory prosilismy. Mieszanka dostawcow moze jednak zejsc
+        na zapasowego przy limicie - a wtedy i cena, i wpis w dzienniku wydatkow
+        musza dotyczyc modelu, ktory faktycznie pracowal. Inaczej dziennik
+        pokazuje tanszy model i tansza stawke za prace, ktorej on nie wykonal.
+        """
+        return usage.get("model_uzyty") or model
 
     def koszt(self, model: str, usage: dict) -> float:
         inp, out = self.CENNIK.get(model, self.CENNIK_DOMYSLNY)
@@ -236,7 +256,7 @@ class DostawcaGemini(Dostawca):
         # Wyczerpane proby. Komunikat mowi WPROST, ze to limit, a nie zly klucz -
         # bez tego "429" w logu wyglada jak blad konfiguracji i kieruje szukanie
         # w zla strone.
-        raise RuntimeError(
+        raise Przeciazony(
             f"dostawca odrzucił {self.PROBY} kolejnych zapytań o model {model} "
             f"(HTTP {r.status_code}) — to limit tempa albo dobowy limit klucza, "
             f"nie błędny klucz. Odstęp między zapytaniami: {self.ODSTEP_S:.1f} s "
@@ -352,22 +372,49 @@ class DostawcaMieszany(Dostawca):
         """
         if model == self.model_triazu:
             return self._triaz
-        if model == self.model_analizy:
+        if model in (self.model_analizy, self._analiza.model_triazu):
             return self._analiza
         raise ValueError(f"model {model!r} nie nalezy do zadnego z dostawcow "
                          f"mieszanki ({self.model_triazu} / {self.model_analizy})")
 
     async def zapytaj(self, *, model: str, system: str, user: str,
                       schema: dict, max_tokens: int) -> tuple[dict, dict]:
-        return await self._dla(model).zapytaj(
-            model=model, system=system, user=user, schema=schema,
-            max_tokens=max_tokens)
+        try:
+            data, usage = await self._dla(model).zapytaj(
+                model=model, system=system, user=user, schema=schema,
+                max_tokens=max_tokens)
+            usage["model_uzyty"] = model
+            return data, usage
+        except Przeciazony:
+            if model != self.model_triazu:
+                # ANALIZA NIE MA ZEJSCIA AWARYJNEGO, i to jest decyzja.
+                #
+                # Analiza WYTWARZA wartosc cechy `news_sent`. Podmiana modelu
+                # w polowie doby wstawilaby w srodek szeregu uskok, ktorego
+                # kalibracja wagi nie zaklada - a brakujaca analiza to tylko
+                # brakujacy wiersz, ktory widac. Uskok jest gorszy niz dziura.
+                raise
+            # TRIAZ WOLNO PRZERZUCIC, bo on WYBIERA artykuly, a nie ocenia je.
+            # Zmiana modelu zmienia probke, nie wartosc cechy - a triaz, ktory
+            # padl, zatrzymuje CALA analize, co widac wlasnie na produkcji:
+            # darmowy klucz Gemini odbil 94% wywolan i potok stanal.
+            zapasowy = self._analiza.model_triazu
+            data, usage = await self._analiza.zapytaj(
+                model=zapasowy, system=system, user=user, schema=schema,
+                max_tokens=max_tokens)
+            usage["model_uzyty"] = zapasowy
+            return data, usage
 
     def koszt(self, model: str, usage: dict) -> float:
         # CENNIK BIERZE TEN DOSTAWCA, KTORY WYKONAL WYWOLANIE. Wspolna tablica
         # cen dawalaby liczbe wygladajaca poprawnie i bledna - a limit dobowy
-        # opiera sie wlasnie na niej.
-        return self._dla(model).koszt(model, usage)
+        # opiera sie wlasnie na niej. Po zejsciu awaryjnym model z `usage`
+        # rozni sie od tego, o ktory prosilismy.
+        faktyczny = self.uzyty_model(model, usage)
+        return self._dla(faktyczny).koszt(faktyczny, usage)
+
+    def _dla_triazu_zapasowy(self) -> str:
+        return self._analiza.model_triazu
 
     async def zamknij(self) -> None:
         for d in (self._triaz, self._analiza):

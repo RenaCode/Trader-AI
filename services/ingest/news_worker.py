@@ -394,8 +394,13 @@ async def nadrob_zaleglosci(conn, cur, ai: Dostawca, instruments: dict[str, int]
             if verbose:
                 print(f"    filtr padl: {type(e).__name__}: {e}")
             continue
-        tri_cost = ai.koszt(ai.model_triazu, tri_usage)
-        record_spend(cur, ai.model_triazu, "triage", tri_usage, tri_cost)
+        # MODEL, KTORY NAPRAWDE PRACOWAL, nie ten, o ktory prosilismy.
+        # Mieszanka schodzi na dostawce zapasowego przy limicie; wpisanie
+        # tanszego modelu pokazywaloby w dzienniku tansza stawke za prace,
+        # ktorej on nie wykonal - a limit dobowy liczy sie wlasnie stad.
+        model_tri = ai.uzyty_model(ai.model_triazu, tri_usage)
+        tri_cost = ai.koszt(model_tri, tri_usage)
+        record_spend(cur, model_tri, "triage", tri_usage, tri_cost)
         conn.commit()
         stats["koszt"] += tri_cost
         wydano += tri_cost
@@ -553,8 +558,13 @@ async def run_cycle(conn, ai: Dostawca | None, http: httpx.AsyncClient,
                     print(f"    filtr padl: {type(e).__name__}: {e}")
                 continue
 
-            tri_cost = ai.koszt(ai.model_triazu, tri_usage)
-            record_spend(cur, ai.model_triazu, "triage", tri_usage, tri_cost)
+            # MODEL, KTORY NAPRAWDE PRACOWAL, nie ten, o ktory prosilismy.
+            # Mieszanka schodzi na dostawce zapasowego przy limicie; wpisanie
+            # tanszego modelu pokazywaloby w dzienniku tansza stawke za prace,
+            # ktorej on nie wykonal - a limit dobowy liczy sie wlasnie stad.
+            model_tri = ai.uzyty_model(ai.model_triazu, tri_usage)
+            tri_cost = ai.koszt(model_tri, tri_usage)
+            record_spend(cur, model_tri, "triage", tri_usage, tri_cost)
             conn.commit()
             stats["koszt"] += tri_cost
             wydano += tri_cost
@@ -581,7 +591,7 @@ async def run_cycle(conn, ai: Dostawca | None, http: httpx.AsyncClient,
             if not data.get("relevant"):
                 continue
 
-            price = ai.koszt(ai.model_analizy, usage)
+            price = ai.koszt(ai.uzyty_model(ai.model_analizy, usage), usage)
             record_spend(cur, ai.model_analizy, "analysis", usage, price)
             conn.commit()
             stats["koszt"] += price

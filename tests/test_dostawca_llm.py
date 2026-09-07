@@ -385,3 +385,86 @@ def test_oba_klucze_daja_mieszanke_a_jeden_pojedynczego_dostawce():
     assert isinstance(mieszany, DostawcaMieszany)
     assert "gemini" in mieszany.model_triazu
     assert "claude" in mieszany.model_analizy
+
+
+def test_triaz_schodzi_na_zapasowego_przy_LIMICIE():
+    """Darmowy klucz Gemini odbił 94% wywołań i cały potok stanął — triaż,
+    który padł, zatrzymuje CAŁĄ analizę.
+
+    Przerzucenie triażu jest bezpieczne, bo on WYBIERA artykuły, a nie ocenia
+    je: zmiana modelu zmienia próbkę, nie wartość cechy.
+    """
+    import asyncio
+
+    from services.ingest.llm import DostawcaMieszany, Przeciazony
+
+    class Zajety(_Fałszywy):
+        async def zapytaj(self, **kw):
+            raise Przeciazony("429")
+
+    tani = Zajety("tani", "flash-lite", "flash", (0.3, 2.5))
+    drogi = _Fałszywy("drogi", "haiku", "opus", (5.0, 25.0))
+    m = DostawcaMieszany(triaz=tani, analiza=drogi)
+
+    _, usage = asyncio.run(m.zapytaj(model=m.model_triazu, system="", user="",
+                                     schema={}, max_tokens=1))
+    assert drogi.pytania == ["haiku"]
+    assert usage["model_uzyty"] == "haiku"
+    # Koszt liczy dostawca zapasowy, bo to on wykonal prace.
+    assert m.koszt(m.model_triazu, usage) == 42.0
+
+
+def test_ANALIZA_nie_ma_zejscia_awaryjnego():
+    """Analiza wytwarza wartość cechy `news_sent`. Podmiana modelu w połowie
+    doby wstawiłaby w środek szeregu uskok, którego kalibracja wagi nie zakłada.
+
+    Brakująca analiza to tylko brakujący wiersz, który widać. Uskok jest gorszy
+    niż dziura.
+    """
+    import asyncio
+
+    from services.ingest.llm import DostawcaMieszany, Przeciazony
+
+    class ZajetyNaAnalizie(_Fałszywy):
+        """Zapisuje, o co go pytano, ZANIM odmówi.
+
+        To jest sedno testu: bez zapisu nie da się odróżnić „nie ponowiono"
+        od „ponowiono i też się nie udało" — a pierwsza wersja tego testu
+        przechodziła w obu przypadkach.
+        """
+
+        async def zapytaj(self, *, model, **kw):
+            self.pytania.append(model)
+            raise Przeciazony("429")
+
+    drogi = ZajetyNaAnalizie("drogi", "haiku", "opus", (5.0, 25.0))
+    m = DostawcaMieszany(triaz=_Fałszywy("tani", "flash-lite", "flash", (0.3, 2.5)),
+                         analiza=drogi)
+    with pytest.raises(Przeciazony):
+        asyncio.run(m.zapytaj(model=m.model_analizy, system="", user="",
+                              schema={}, max_tokens=1))
+
+    # ANI RAZU modelem triażu. Ponowienie analizy modelem `haiku` byłoby cichą
+    # podmianą: wartość cechy wytworzyłby słabszy model, a dziennik pokazałby
+    # analizę jak każdą inną.
+    assert drogi.pytania == ["opus"]
+
+
+def test_zwykly_blad_NIE_uruchamia_dostawcy_zapasowego():
+    """Łapanie gołego RuntimeError zamiotłoby każdy błąd w naszym kodzie —
+    i zamiast awarii dałoby ciche zejście na droższego dostawcę."""
+    import asyncio
+
+    from services.ingest.llm import DostawcaMieszany
+
+    class Zepsuty(_Fałszywy):
+        async def zapytaj(self, **kw):
+            raise RuntimeError("blad w naszym kodzie")
+
+    tani = Zepsuty("tani", "flash-lite", "flash", (0.3, 2.5))
+    drogi = _Fałszywy("drogi", "haiku", "opus", (5.0, 25.0))
+    m = DostawcaMieszany(triaz=tani, analiza=drogi)
+    with pytest.raises(RuntimeError):
+        asyncio.run(m.zapytaj(model=m.model_triazu, system="", user="",
+                              schema={}, max_tokens=1))
+    assert drogi.pytania == []
