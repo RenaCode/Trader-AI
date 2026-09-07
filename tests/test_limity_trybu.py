@@ -117,3 +117,49 @@ def test_wynik_wyjscia_czesciowego_WCHODZI_do_kapitalu():
     assert "closed_at" not in zapytanie, (
         "wynik zrealizowany liczony tylko z pozycji zamkniętych pomija "
         "wyjścia częściowe i zaniża obsunięcie")
+
+
+def test_silnik_rozstrzyga_KAZDA_swiece_a_nie_co_druga():
+    """`decided_at` to czas zegarowy, a świeca, której decyzja dotyczy, zamyka
+    się o `bar_start + długość`. Decyzje dla świecy B zapadają więc w oknie
+    [B + długość, B + 2·długość).
+
+    Porównywanie z samym `bar_start` sprawiało, że decyzje dla świecy
+    POPRZEDNIEJ liczyły się jako decyzje dla bieżącej — silnik rozstrzygał
+    CO DRUGĄ świecę i handlował z połową częstotliwości, na której kalibrowano
+    walk-forward.
+
+    Zmierzone na produkcji: decyzje o 00:00, 08:00 i 16:00; świece 04:00, 12:00
+    i 20:00 pomijane. W logu wyglądało to na zdrowe odsiewanie duplikatów.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from services.engine.horizons import get
+    from services.engine.loop import current_bar, decided_for_bar, okno_decyzji
+
+    h = get("4h")
+    teraz = datetime(2026, 9, 7, 20, 12, tzinfo=timezone.utc)
+    bar = current_bar(teraz, h)
+    assert bar == datetime(2026, 9, 7, 16, 0, tzinfo=timezone.utc)
+
+    # Decyzje dla swiecy 16:00 zapadaja dopiero PO jej zamknieciu, o 20:00.
+    assert okno_decyzji(bar, h) == datetime(2026, 9, 7, 20, 0, tzinfo=timezone.utc)
+
+    class Kursor:
+        def __init__(self, ostatnia):
+            self.ostatnia, self.prog = ostatnia, None
+
+        def execute(self, sql, params):
+            self.prog = params[-1]
+
+        def fetchone(self):
+            return (1,) if self.ostatnia >= self.prog else None
+
+    # Decyzja dla swiecy POPRZEDNIEJ (12:00), podjeta o 16:05, NIE moze
+    # blokowac rozstrzygniecia swiecy 16:00.
+    poprzednia = Kursor(bar + timedelta(minutes=5))
+    assert decided_for_bar(poprzednia, "crypto", "demo", 1, bar, h) is False
+
+    # Decyzja dla TEJ swiecy, podjeta o 20:02, blokuje kolejna w tym samym oknie.
+    biezaca = Kursor(okno_decyzji(bar, h) + timedelta(minutes=2))
+    assert decided_for_bar(biezaca, "crypto", "demo", 1, bar, h) is True

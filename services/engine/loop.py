@@ -26,6 +26,7 @@ import os
 import sys
 import time
 import zlib
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -41,7 +42,8 @@ from services.engine.uniwersum import odcisk
 from services.engine.koszty import POSLIZG_MAKER, POSLIZG_TAKER, koszty
 from services.engine.portfolio import _wypelnione
 from services.engine.risk_rules import (
-    MIN_CONFIDENCE, START_EQUITY as START_EQUITY_WSPOLNY, position_budget, udzial_budzetu,
+    MIN_CONFIDENCE, START_EQUITY as START_EQUITY_WSPOLNY, RiskVerdict,
+    position_budget, udzial_budzetu,
 )
 from services.engine.signals import SIGNALS, classify_regime, evaluate
 
@@ -157,19 +159,44 @@ def current_bar(as_of: datetime, h: Horizon) -> datetime:
     return epoch + timedelta(seconds=(n - 1) * span)
 
 
+def okno_decyzji(bar_start: datetime, h: Horizon) -> datetime:
+    """Od kiedy zapadaja decyzje DLA TEJ swiecy. CZYSTA FUNKCJA.
+
+    Decyzja dla swiecy B zapada dopiero PO jej zamknieciu, czyli od chwili
+    B + dlugosc swiecy. Wczesniej silnik rozstrzyga swiece POPRZEDNIA.
+    """
+    return bar_start + timedelta(minutes=h.bar_minutes)
+
+
 def decided_for_bar(cur, engine: str, mode: str, instrument_id: int,
-                    bar_start: datetime) -> bool:
+                    bar_start: datetime, h: Horizon) -> bool:
     """Czy dla tej swiecy podjeto juz decyzje.
 
     Petla chodzi czesciej niz zamykaja sie swiece (co 5 minut przy swiecy
     4-godzinnej). Bez tego warunku silnik podjalby do 48 decyzji na jedna
     swiece, a symulacja, na ktorej byl kalibrowany, zaklada dokladnie jedna.
     Rozjazd trening-produkcja bralby sie wtedy z samego harmonogramu.
+
+    PROG LICZYMY OD ZAMKNIECIA SWIECY, NIE OD JEJ POCZATKU - i to jest tu cala
+    rzecz. `decided_at` to czas zegarowy, a swieca, ktorej decyzja dotyczy,
+    zamyka sie o `bar_start + dlugosc`. Decyzje dla swiecy B zapadaja wiec
+    w oknie [B + dlugosc, B + 2*dlugosc).
+
+    Pierwsza wersja porownywala z samym `bar_start`, przez co decyzje dla swiecy
+    POPRZEDNIEJ - podjete w oknie [B, B + dlugosc) - liczyly sie jako decyzje
+    dla biezacej. Silnik rozstrzygal wtedy CO DRUGA swiece.
+
+    Zmierzone na produkcji 2026-09-07: decyzje zapadaly o 00:00, 08:00 i 16:00,
+    a swiece 04:00, 12:00 i 20:00 byly pomijane. Silnik handlowal z POLOWA
+    czestotliwosci, na ktorej kalibrowano walk-forward - czyli dokladnie tym
+    rozjazdem z harmonogramu, przed ktorym ostrzega akapit wyzej. W logu
+    wygladalo to na zdrowe odsiewanie duplikatow: "juz rozstrzygniete w tej
+    swiecy 10".
     """
     cur.execute(
         "SELECT 1 FROM journal.decision WHERE engine=%s AND mode=%s AND instrument_id=%s"
         " AND decided_at >= %s LIMIT 1",
-        (engine, mode, instrument_id, bar_start))
+        (engine, mode, instrument_id, okno_decyzji(bar_start, h)))
     return cur.fetchone() is not None
 
 
@@ -194,12 +221,65 @@ def atr_percentile_80(cur, instrument_id: int, as_of: datetime,
     return float(row["p80"]) if row and row["p80"] is not None else None
 
 
-def mark_price(cur, instrument_id: int, as_of: datetime) -> Decimal | None:
+# Ile moze miec cena odniesienia, zanim przestaniemy nazywac ja CENA.
+#
+# `market_worker` dociaga swiece 1m co 60 s (charts/trader/values.yaml), wiec
+# najnowszy wiersz ma naturalnie do dwoch minut: jedna trwajaca swieca plus
+# jeden odstep pobierania. Petla decyzyjna budzi sie co 300 s, wiec 15 minut to
+# TRZY POMINIETE CYKLE - dokladnie ta sama logika, z ktorej wziete jest
+# MARTWY_PO_MIN w dozorze: jedno spoznienie to wahanie, trzy to sygnal.
+#
+# Zapas nad zmierzona norma jest siedmiokrotny i to jest celowe. Ten prog nie
+# tylko opisuje stan - on WSTRZYMUJE HANDEL, wiec prog, ktory miga, zatrzymywalby
+# silnik po kilka razy dziennie bez powodu. Bramka, ktora miga, konczy tak samo
+# jak czujka, ktora miga: ktos ja podniesie, zeby przestala przeszkadzac.
+#
+# ZASTRZEZENIE DLA SILNIKA GIELDOWEGO. Prog zaklada rynek dzialajacy bez przerwy.
+# Akcja poza sesja nie ma swiec 1m i KAZDA pozycja bedzie tu "bez swiezej ceny" -
+# co jest poprawne w tym sensie, ze wyceny naprawde nie ma, ale wstrzymanie wejsc
+# przez cala noc jest bez sensu. Zanim silnik `equity` ruszy, prog musi pochodzic
+# z kalendarza sesji, a nie z tej stalej. Do tego czasu zachowanie i tak jest
+# bezpieczne: pozycja zostaje w ekspozycji, a nie znika z niej.
+CENA_STARA_PO_MIN = 15
+
+
+def cena_odniesienia(cur, instrument_id: int, as_of: datetime,
+                     max_wiek_min: int = CENA_STARA_PO_MIN) -> dict:
+    """Ostatnia cena minutowa RAZEM Z JEJ WIEKIEM.
+
+    Wiek nie jest tu ozdoba. Zapytanie "ostatnia swieca <= as_of" odpowiada tak
+    samo chetnie dla feedu sprzed minuty, jak dla feedu, ktory stanal trzy dni
+    temu - i bez wieku tych dwoch przypadkow NIE DA SIE odroznic. Dopoki
+    istniala jakakolwiek stara swieca, kapital liczyl sie po cenie sprzed
+    dowolnie dlugiego czasu i wygladalo to na pomiar.
+
+    Zwracamy oba pola, zeby zaden wolajacy nie mogl przez przeoczenie wziac
+    starej ceny za biezaca: zeby dostac sama liczbe, trzeba jawnie przejsc przez
+    `swieza`.
+    """
     cur.execute(
-        "SELECT close FROM market.candle WHERE instrument_id = %s AND timeframe='1m'"
-        " AND event_time <= %s ORDER BY event_time DESC LIMIT 1", (instrument_id, as_of))
+        "SELECT close, EXTRACT(EPOCH FROM (%s - event_time)) / 60 AS wiek_min"
+        " FROM market.candle WHERE instrument_id = %s AND timeframe='1m'"
+        " AND event_time <= %s ORDER BY event_time DESC LIMIT 1",
+        (as_of, instrument_id, as_of))
     row = cur.fetchone()
-    return Decimal(row["close"]) if row else None
+    if not row:
+        return {"cena": None, "wiek_min": None, "swieza": False}
+    wiek = float(row["wiek_min"])
+    return {"cena": Decimal(row["close"]), "wiek_min": wiek,
+            "swieza": wiek <= max_wiek_min}
+
+
+def mark_price(cur, instrument_id: int, as_of: datetime,
+               max_wiek_min: int = CENA_STARA_PO_MIN) -> Decimal | None:
+    """Cena odniesienia, ale WYLACZNIE swieza. None znaczy "nie wiem".
+
+    Wersja bez limitu wieku byla cicha awaria najgorszego rodzaju: instrument
+    z zatrzymanym feedem dostawal cene sprzed doby i nikt sie o tym nie
+    dowiadywal, bo funkcja zwracala liczbe, a liczba wyglada jak pomiar.
+    """
+    c = cena_odniesienia(cur, instrument_id, as_of, max_wiek_min)
+    return c["cena"] if c["swieza"] else None
 
 
 def open_position(cur, engine: str, mode: str, instrument_id: int) -> dict | None:
@@ -243,7 +323,109 @@ def przeplywy(cur, engine: str, mode: str) -> tuple[Decimal, Decimal]:
     return Decimal(r["wplaty"] or 0), Decimal(r["units"] or 0)
 
 
-def update_equity(cur, engine: str, mode: str, as_of: datetime) -> None:
+@dataclass
+class Wycena:
+    """Wynik wyceny otwartych pozycji razem z JAKOSCIA tego pomiaru.
+
+    `bez_swiezej_ceny` nie jest dodatkiem informacyjnym - to jest powod, dla
+    ktorego caly ten obiekt istnieje zamiast pary liczb. Kapital policzony przy
+    niepustej liscie jest kapitalem NIEPELNIE ZMIERZONYM i wolajacy musi miec
+    jak sie tego dowiedziec, zamiast dostac liczbe nieodroznialna od dobrej.
+    """
+    unrealized: Decimal = Decimal(0)
+    exposure: Decimal = Decimal(0)
+    bez_swiezej_ceny: list[dict] = field(default_factory=list)
+
+    @property
+    def pomiar_pelny(self) -> bool:
+        return not self.bez_swiezej_ceny
+
+    def opis_brakow(self) -> str:
+        """Jednolinijkowy opis, gotowy do logu i do powodu wstrzymania."""
+        return "; ".join(
+            f"{p['symbol']}: {p['powod']}" for p in self.bez_swiezej_ceny)
+
+
+def wycen(pozycje: list[dict]) -> Wycena:
+    """Niezrealizowany wynik i ekspozycja otwartych pozycji. CZYSTA FUNKCJA.
+
+    NIE MA TU GALEZI, KTORA POMIJA POZYCJE - i to jest cala tresc tej funkcji.
+
+    Poprzednia wersja robila `if px is None: continue`, wiec pozycja bez ceny
+    nie wnosila ani niezrealizowanej straty, ani ekspozycji. Kierunek tego bledu
+    byl najgorszy z mozliwych i dzialal w obie strony naraz:
+
+      (a) obsuniecie i prog kapitalu przestawaly widziec strate na tej pozycji,
+          wiec kill-switch nie mial czym zadzialac;
+      (b) `exposure` spadala, wiec limit lacznej ekspozycji ZWALNIAL MIEJSCE na
+          kolejne zakupy.
+
+    Zatrzymany feed instrumentu, na ktorym siedzi stratna pozycja, zamienial
+    zabezpieczenie w akcelerator - przy kapitale stabilnym, ekspozycji niskiej
+    i bijacym heartbeacie. Brak pomiaru nie jest pomiarem zerowym.
+
+    CZYM WYCENIAMY, GDY NIE MA SWIEZEJ CENY
+
+      - jest cena stara -> bierzemy ja, bo to nadal NAJLEPSZE, co wiemy o tej
+        pozycji. Zamrozona strata jest blizej prawdy niz strata skasowana.
+      - nie ma zadnej swiecy -> bierzemy cene wejscia. Wynik niezrealizowany
+        wychodzi wtedy zero, ale EKSPOZYCJA zostaje: `qty x avg_price` to
+        kwota, ktora naprawde zostala zaangazowana, i nie przestaje byc
+        zaangazowana przez to, ze potok danych padl.
+
+    Ten sam wybor robi od zawsze symulacja walk-forward (portfolio.py: wycena
+    spada na `p.entry`, a ekspozycja liczy sie z `qty * p.entry`). Produkcja
+    pozycje po prostu wyrzucala - czyli obsuniecie mierzone bylo na innym
+    systemie niz ten, ktory naprawde handlowal.
+
+    ZADNA Z TYCH WYCEN NIE JEST POMIAREM i dlatego kazda z nich trafia na liste
+    `bez_swiezej_ceny`. Odpowiedz na "co zrobic z niepelnym pomiarem" nie nalezy
+    do tej funkcji - nalezy do tego, kto na jej podstawie chce handlowac.
+    """
+    w = Wycena()
+    for pos in pozycje:
+        qty, entry = Decimal(pos["qty"]), Decimal(pos["avg_price"])
+        cena, swieza = pos.get("cena"), pos.get("swieza", False)
+
+        if cena is None:
+            px = entry
+            powod = "brak jakiejkolwiek świecy — wycena po cenie wejścia"
+        else:
+            px = Decimal(cena)
+            powod = (f"cena sprzed {pos['wiek_min']:.0f} min "
+                     f"— wycena po cenie przeterminowanej")
+
+        diff = (px - entry) if pos["side"] == "long" else (entry - px)
+        w.unrealized += diff * qty
+        w.exposure += qty * px
+        if not swieza:
+            w.bez_swiezej_ceny.append({
+                "instrument_id": pos.get("instrument_id"),
+                "symbol": pos.get("symbol") or str(pos.get("instrument_id")),
+                "wiek_min": pos.get("wiek_min"),
+                "powod": powod,
+            })
+    return w
+
+
+def pozycje_do_wyceny(cur, engine: str, mode: str, as_of: datetime,
+                      max_wiek_min: int = CENA_STARA_PO_MIN) -> list[dict]:
+    """Otwarte pozycje wzbogacone o cene i JEJ WIEK. Wejscie dla `wycen()`.
+
+    Symbol dociagamy razem z pozycja, bo komunikat "3 pozycje bez świeżej ceny"
+    nie mowi nikomu, ktory potok danych naprawic.
+    """
+    cur.execute(
+        "SELECT p.id, p.instrument_id, p.side, p.qty, p.avg_price, i.symbol"
+        " FROM exec.position p JOIN ref.instrument i ON i.id = p.instrument_id"
+        " WHERE p.engine=%s AND p.mode=%s AND p.closed_at IS NULL", (engine, mode))
+    pozycje = cur.fetchall()
+    return [dict(p, **cena_odniesienia(cur, p["instrument_id"], as_of, max_wiek_min))
+            for p in pozycje]
+
+
+def update_equity(cur, engine: str, mode: str, as_of: datetime,
+                  max_wiek_min: int = CENA_STARA_PO_MIN) -> Wycena:
     """Przelicza kapital: gotowka + niezrealizowany wynik otwartych pozycji.
 
     WYNIK ZREALIZOWANY LICZYMY Z POZYCJI OTWARTYCH TAKZE, nie tylko zamknietych.
@@ -262,25 +444,19 @@ def update_equity(cur, engine: str, mode: str, as_of: datetime) -> None:
     Przy okazji domyka to drugi ubytek: prowizja WEJSCIA na pozycji otwartej
     tez nie wchodzila do kapitalu, wiec byl on zawyzony o koszt kazdego
     trwajacego wejscia.
+
+    POZYCJA BEZ SWIEZEJ CENY NIE ZNIKA - patrz `wycen()`. Zwracamy `Wycena`,
+    a nie None, zeby wolajacy dowiedzial sie, ze ten punkt krzywej kapitalu
+    powstal z NIEPELNEGO POMIARU. Sam wiersz w bazie tego nie powie: liczba
+    z zamrozonej ceny wyglada dokladnie tak samo jak liczba z ceny biezacej.
     """
     cur.execute(
         "SELECT COALESCE(sum(realized_pnl - fees_paid), 0) AS realized FROM exec.position"
         " WHERE engine=%s AND mode=%s", (engine, mode))
     realized = Decimal(cur.fetchone()["realized"] or 0)
 
-    cur.execute(
-        "SELECT p.id, p.instrument_id, p.side, p.qty, p.avg_price FROM exec.position p"
-        " WHERE p.engine=%s AND p.mode=%s AND p.closed_at IS NULL", (engine, mode))
-    unrealized = Decimal(0)
-    exposure = Decimal(0)
-    for pos in cur.fetchall():
-        px = mark_price(cur, pos["instrument_id"], as_of)
-        if px is None:
-            continue
-        qty, entry = Decimal(pos["qty"]), Decimal(pos["avg_price"])
-        diff = (px - entry) if pos["side"] == "long" else (entry - px)
-        unrealized += diff * qty
-        exposure += qty * px
+    w = wycen(pozycje_do_wyceny(cur, engine, mode, as_of, max_wiek_min))
+    unrealized, exposure = w.unrealized, w.exposure
 
     # KAPITAL Z PRZEPLYWOW, nie ze stalej. Brak wierszy w exec.cash_flow oznacza
     # rachunek, ktorego nikt nie zasilil - na demo spadamy wtedy na kapital
@@ -316,6 +492,7 @@ def update_equity(cur, engine: str, mode: str, as_of: datetime) -> None:
         (engine, mode, as_of.replace(second=0, microsecond=0),
          equity, equity - exposure, unrealized, realized, exposure,
          nav, units, wplaty))
+    return w
 
 
 def record_decision(cur, engine: str, mode: str, instrument_id: int, as_of: datetime,
@@ -704,10 +881,26 @@ async def sprawdz(conn, engine: str = "crypto", h: Horizon | None = None) -> int
     for inst in cur.fetchall():
         iid, sym = inst["id"], inst["symbol"]
         probuj(f"{sym}: decyzja w tej świecy?",
-               lambda i=iid: decided_for_bar(cur, engine, "demo", i, bar_start))
+               lambda i=iid: decided_for_bar(cur, engine, "demo", i, bar_start, h))
         f = probuj(f"{sym}: odczyt cech point-in-time",
                    lambda i=iid: latest_features(cur, i, now, h, ids or []))
-        probuj(f"{sym}: cena odniesienia", lambda i=iid: mark_price(cur, i, now))
+        # KONTROLA MOWI O WIEKU, nie tylko o tym, ze zapytanie sie wykonalo.
+        # `mark_price` przy przeterminowanej cenie zwraca None bez wyjatku, wiec
+        # sam `probuj` wypisalby [ok] dla instrumentu z martwym feedem - czyli
+        # dokladnie ten ksztalt awarii, ktory ta zmiana usuwa. Nie podnosimy
+        # tego do bledu: swiezo wdrozony pod nie ma jeszcze zadnej swiecy,
+        # a kontrola bramkuje start silnika (`--sprawdz && exec ...`).
+        def cena_kontrolna(i):
+            c = cena_odniesienia(cur, i, now)
+            if c["cena"] is None:
+                print("         UWAGA: brak jakiejkolwiek świecy 1m")
+            elif not c["swieza"]:
+                print(f"         UWAGA: cena sprzed {c['wiek_min']:.0f} min "
+                      f"(próg {CENA_STARA_PO_MIN} min) — pozycja na tym "
+                      f"instrumencie wstrzyma wejścia")
+            return c["cena"]
+
+        probuj(f"{sym}: cena odniesienia", lambda i=iid: cena_kontrolna(i))
         probuj(f"{sym}: próg zmienności", lambda i=iid: atr_percentile_80(cur, i, now, h))
         probuj(f"{sym}: otwarta pozycja", lambda i=iid: open_position(cur, engine, "demo", i))
         if f:
@@ -828,9 +1021,44 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
     # dla ktorej istnieje.
     konto = risk.check_account()
     conn.commit()
-    wejscia_wstrzymane = konto.verdict != "allow"
+
+    # POZYCJA BEZ SWIEZEJ CENY WSTRZYMUJE WEJSCIA - i to jest druga polowa
+    # naprawy z `wycen()`.
+    #
+    # Sama poprawna wycena nie wystarczy. Gdy feed instrumentu stanie, wszystkie
+    # limity procentowe (obsuniecie, strata dzienna, prog kapitalu, laczna
+    # ekspozycja) licza sie z liczby, ktorej NIKT NIE ZMIERZYL - z ceny
+    # zamrozonej albo z ceny wejscia. Wchodzenie w nowe pozycje na podstawie
+    # takiego stanu to handel z wylaczonym pomiarem ryzyka.
+    #
+    # DLACZEGO WSTRZYMANIE, A NIE KILL-SWITCH. Kill-switch wymaga recznego
+    # zwolnienia, bo opisuje strate, ktora sie wydarzyla. Martwy feed sam wraca
+    # razem z podem `market_worker` - zatrzymanie na stale wymagaloby wtedy
+    # czlowieka o trzeciej w nocy do awarii, ktora minela sama.
+    #
+    # WYJSCIA IDA DALEJ. Tak samo jak przy kill-switchu: bezpiecznik ma
+    # wyprowadzac z ryzyka, a nie zamykac w nim. Wyjscie z pozycji, ktorej nie
+    # umiemy wycenic, jest ruchem ZMNIEJSZAJACYM to, czego nie mierzymy.
+    pomiar = wycen(pozycje_do_wyceny(cur, engine, mode, datetime.now(timezone.utc)))
+
+    powody_wstrzymania = []
+    if konto.verdict != "allow":
+        powody_wstrzymania.append(konto.reason)
+    if not pomiar.pomiar_pelny:
+        powody_wstrzymania.append(
+            f"pomiar niepełny: {len(pomiar.bez_swiezej_ceny)} "
+            f"pozycji bez świeżej ceny ({pomiar.opis_brakow()})")
+
+    wejscia_wstrzymane = bool(powody_wstrzymania)
+    powod_wstrzymania = " | ".join(powody_wstrzymania)
+    # Werdykt zapisywany do dziennika musi mowic PRAWDE o tym, co zatrzymalo
+    # wejscie. Podstawienie tu `konto` (ktore przy samym niepelnym pomiarze ma
+    # verdict 'allow') opisywaloby w dzienniku decyzje jako dozwolona, choc
+    # system jej wlasnie odmowil - czyli ten sam ksztalt bledu, ktory naprawiamy.
+    werdykt_wstrzymania = konto if konto.verdict != "allow" else RiskVerdict(
+        verdict="block", reason=powod_wstrzymania)
     if wejscia_wstrzymane and verbose:
-        print(f"  UWAGA: wejścia wstrzymane — {konto.reason}")
+        print(f"  UWAGA: wejścia wstrzymane — {powod_wstrzymania}")
 
     # KILL-SWITCH ZDEJMUJE ZLECENIA Z GIELDY, a nie tylko wstrzymuje decyzje.
     #
@@ -842,14 +1070,14 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
         from services.engine.gielda_exec import anuluj_wejscia
         zdjete, wypelnione = await anuluj_wejscia(
             cur, gielda, kategoria=kategoria, engine=engine, mode=mode,
-            powod=f"kill-switch: {konto.reason}")
+            powod=f"wstrzymanie wejść: {powod_wstrzymania}")
         conn.commit()
         # KOMUNIKAT ZAWSZE, TAKZE PRZY ZERZE. Wczesniej pojawial sie wylacznie
         # przy `zdjete > 0`, wiec kill-switch, ktoremu NIE UDALO SIE zdjac ani
         # jednego zlecenia, wygladal identycznie jak kill-switch, ktory nie mial
         # czego zdejmowac.
         if verbose:
-            print(f"  kill-switch: zdjęto z giełdy {zdjete} zleceń"
+            print(f"  wstrzymanie wejść: zdjęto z giełdy {zdjete} zleceń"
                   + (f", {wypelnione} było już wypełnionych — zostają "
                      f"do zaksięgowania" if wypelnione else ""))
 
@@ -907,7 +1135,7 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
     oceny = []
     for inst in instrumenty:
         iid, symbol = inst["id"], inst["symbol"]
-        if decided_for_bar(cur, engine, mode, iid, bar_start):
+        if decided_for_bar(cur, engine, mode, iid, bar_start, h):
             stats["poza_swieca"] += 1
             continue
         features = latest_features(cur, iid, now, h, feature_ids)
@@ -1003,10 +1231,10 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
             qty = (notional / price).quantize(Decimal("0.000001"))
 
         if action.startswith("enter") and wejscia_wstrzymane:
-            # Kill-switch albo przekroczony limit konta - wejscie odpada,
-            # ale decyzje i tak zapisujemy, zeby dziennik pokazywal, ze system
-            # CHCIAL wejsc i co go zatrzymalo.
-            verdict = konto
+            # Kill-switch, przekroczony limit konta albo niepelny pomiar
+            # kapitalu - wejscie odpada, ale decyzje i tak zapisujemy, zeby
+            # dziennik pokazywal, ze system CHCIAL wejsc i co go zatrzymalo.
+            verdict = werdykt_wstrzymania
             action = "hold"
         elif action.startswith("enter"):
             verdict = risk.check(iid, notional, qty)
@@ -1092,7 +1320,17 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
             verbose=verbose, tylko_wyjscia=wejscia_wstrzymane))
         conn.commit()
 
-    update_equity(cur, engine, mode, now)
+    # LICZBA POZYCJI BEZ SWIEZEJ CENY IDZIE DO HEARTBEATU.
+    #
+    # `risk.engine_heartbeat.detail` jest jedynym miejscem, w ktorym stan
+    # przebiegu widac z zewnatrz procesu. Bez tej liczby silnik handlujacy na
+    # zamrozonych cenach bije dokladnie tak samo jak silnik zdrowy - a wlasnie
+    # o to, zeby awaria przestala wygladac jak spokoj, tu chodzi.
+    pomiar_koncowy = update_equity(cur, engine, mode, now)
+    stats["bez_swiezej_ceny"] = len(pomiar_koncowy.bez_swiezej_ceny)
+    if not pomiar_koncowy.pomiar_pelny and verbose:
+        print(f"  UWAGA: kapitał policzony z NIEPEŁNEGO pomiaru — "
+              f"{pomiar_koncowy.opis_brakow()}")
     cur.execute(
         "INSERT INTO risk.engine_heartbeat (engine, mode, last_beat_at, status, detail)"
         " VALUES (%s,%s, now(), 'running', %s)"
