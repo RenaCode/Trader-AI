@@ -142,7 +142,17 @@ workers:
     #
     # Teraz proces zyje wlasna petla, sam laczy sie na kazdy cykl i KONCZY SIE
     # po pieciu awariach pod rzad - bo restart poda widac, a wpis w logu nie.
-    command: ["sh", "-c", "sleep 90; python services/engine/loop.py --bar 4h --sprawdz && exec python services/engine/loop.py --bar 4h --interval 300 --kind spot_eu --limit"]
+    #
+    # EGZEKUCJA NA GIELDZIE, TRYB DEMO. Od tego przelacznika plan przestaje byc
+    # rozstrzygany przez swiece, a zaczyna przez gielde: ilosc, cena i prowizja
+    # przestaja byc naszym zalozeniem. Rachunek papierowy zakladal wypelnienie
+    # w CALOSCI zawsze, gdy cena dotknela limitu - optymistycznie w dwie strony
+    # naraz.
+    #
+    # Tryb demo wybrany swiadomie: konto jest odseparowane, a bez niego poslizg
+    # i ulamek wypelnienia pozostawalyby ZALOZENIEM. Blad o cztery punkty bazowe
+    # przesuwa wynik o tyle, ile cala zmierzona przewaga.
+    command: ["sh", "-c", "sleep 90; python services/engine/loop.py --bar 4h --sprawdz && exec python services/engine/loop.py --bar 4h --interval 300 --kind spot_eu --limit --egzekucja gielda --mode demo"]
     resources:
       limits:   { cpu: 1000m, memory: 512Mi }
       requests: { cpu: 100m,  memory: 128Mi }
