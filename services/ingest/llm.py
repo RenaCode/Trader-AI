@@ -23,8 +23,10 @@ KAZDYM wierszu i zmiana dostawcy jest w logu wykrzyczana, a nie cicha.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import os
+import time
 from typing import Any
 
 import httpx
@@ -172,12 +174,73 @@ class DostawcaGemini(Dostawca):
     # pozwala mu wydac wielokrotnosc limitu, zanim ktokolwiek to zauwazy.
     CENNIK_DOMYSLNY = (2.00, 12.00)
 
+    # TEMPO ZAPYTAN I PONAWIANIE
+    #
+    # Klient Anthropica ponawia sam - ten jest napisany na golym httpx i nie
+    # ponawial nic. Zmierzone na produkcji 2026-09-07, pierwszy cykl po wpieciu
+    # klucza: jedna analiza przeszla, siedem kolejnych zapytan dostalo 429.
+    # W logu widnialo "przeanalizowanych 0, bledow 7" i proces szedl dalej -
+    # potok wygladal na dzialajacy i milczal, a wiadomosci nie byly analizowane.
+    #
+    # Dwa mechanizmy, bo rozwiazuja dwie rozne rzeczy. PRZEPUSTNICA rozklada
+    # zapytania w czasie, zeby limit nie byl przekraczany; PONAWIANIE ratuje
+    # te, ktore mimo tego trafia na limit (inny proces, inny model, zmiana
+    # limitu po stronie dostawcy).
+    ODSTEP_S = float(os.environ.get("GEMINI_MIN_INTERVAL_S", "4.0"))
+    PROBY = 5
+    # 429 to limit, nie awaria. 5xx to awaria po stronie dostawcy - zmierzone
+    # 2026-09-07 na gemini-3.6-flash: 503 "high demand". Obie sa przejsciowe.
+    PONAWIALNE = (429, 500, 502, 503, 504)
+
     def __init__(self, klucz: str, http: httpx.AsyncClient | None = None):
         self._klucz = klucz
         self._http = http or httpx.AsyncClient(timeout=90.0)
         self._wlasny_http = http is None
+        self._ostatnie = 0.0
         self.model_analizy = os.environ.get("ANALYSIS_MODEL_GEMINI", "gemini-3.5-flash")
         self.model_triazu = os.environ.get("TRIAGE_MODEL_GEMINI", "gemini-3.5-flash-lite")
+
+    async def _przepustnica(self) -> None:
+        czekaj = self.ODSTEP_S - (time.monotonic() - self._ostatnie)
+        if czekaj > 0:
+            await asyncio.sleep(czekaj)
+        self._ostatnie = time.monotonic()
+
+    @staticmethod
+    def _ile_czekac(r: httpx.Response, proba: int) -> float:
+        """Ile odczekac przed kolejna proba.
+
+        `Retry-After` od dostawcy ma pierwszenstwo przed naszym zgadywaniem -
+        on wie, kiedy okno limitu sie odnowi, my nie.
+        """
+        naglowek = r.headers.get("Retry-After")
+        if naglowek:
+            try:
+                return min(90.0, max(1.0, float(naglowek)))
+            except ValueError:
+                pass
+        return min(60.0, 5.0 * (2 ** (proba - 1)))
+
+    async def _poslij(self, model: str, body: dict) -> httpx.Response:
+        for proba in range(1, self.PROBY + 1):
+            await self._przepustnica()
+            r = await self._http.post(f"{self.BAZA}/{model}:generateContent",
+                                      json=body,
+                                      headers={"x-goog-api-key": self._klucz})
+            if r.status_code not in self.PONAWIALNE:
+                r.raise_for_status()
+                return r
+            if proba == self.PROBY:
+                break
+            await asyncio.sleep(self._ile_czekac(r, proba))
+        # Wyczerpane proby. Komunikat mowi WPROST, ze to limit, a nie zly klucz -
+        # bez tego "429" w logu wyglada jak blad konfiguracji i kieruje szukanie
+        # w zla strone.
+        raise RuntimeError(
+            f"dostawca odrzucił {self.PROBY} kolejnych zapytań o model {model} "
+            f"(HTTP {r.status_code}) — to limit tempa albo dobowy limit klucza, "
+            f"nie błędny klucz. Odstęp między zapytaniami: {self.ODSTEP_S:.1f} s "
+            f"(GEMINI_MIN_INTERVAL_S)")
 
     async def zapytaj(self, *, model: str, system: str, user: str,
                       schema: dict, max_tokens: int) -> tuple[dict, dict]:
@@ -190,10 +253,7 @@ class DostawcaGemini(Dostawca):
                 "maxOutputTokens": max_tokens,
             },
         }
-        r = await self._http.post(f"{self.BAZA}/{model}:generateContent",
-                                  json=body,
-                                  headers={"x-goog-api-key": self._klucz})
-        r.raise_for_status()
+        r = await self._poslij(model, body)
         d = r.json()
         usage = self._uzycie(d.get("usageMetadata", {}))
 

@@ -187,3 +187,106 @@ def test_odmowa_jest_bledem_odpowiedzi():
     """Wspolna nadklasa, zeby strona wolajaca miala jeden warunek na
     'wywolanie kosztowalo, a nic nie dalo'."""
     assert issubclass(Odmowa, BladOdpowiedzi)
+
+
+# ------------------------------------------------------ limit tempa i ponawianie
+#
+# Zmierzone na produkcji 2026-09-07, pierwszy cykl po wpieciu klucza Gemini:
+# jedna analiza przeszla, siedem kolejnych zapytan dostalo 429. W logu widnialo
+# "przeanalizowanych 0, bledow 7" i proces szedl dalej - potok wygladal na
+# dzialajacy i milczal.
+
+def gemini_sekwencja(odpowiedzi: list, odstep: float = 0.0) -> tuple:
+    """Dostawca oddajacy kolejne odpowiedzi z listy. Zwraca (dostawca, licznik)."""
+    licznik = {"n": 0}
+
+    def handler(req):
+        i = min(licznik["n"], len(odpowiedzi) - 1)
+        licznik["n"] += 1
+        status, tresc, naglowki = odpowiedzi[i]
+        return httpx.Response(status, json=tresc, headers=naglowki or {})
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    d = DostawcaGemini("klucz-testowy", http=http)
+    d.ODSTEP_S = odstep          # bez czekania w tescie
+    return d, licznik
+
+
+def bez_czekania(monkeypatch):
+    """Usuwa realne spanie, zeby test odporny na 429 nie trwal minuty."""
+    async def natychmiast(_s):
+        return None
+    monkeypatch.setattr(asyncio, "sleep", natychmiast)
+
+
+DOBRA = (200, {"candidates": [{"finishReason": "STOP",
+                               "content": {"parts": [{"text": '{"worth_analyzing": true, "reason": "x"}'}]}}],
+               "usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 5}}, None)
+LIMIT = (429, {"error": {"code": 429, "message": "Too Many Requests"}}, None)
+
+
+def test_zapytanie_po_limicie_jest_PONAWIANE(monkeypatch):
+    """Kanarek na blad, ktory wlasnie zdarzyl sie na produkcji.
+
+    Bez ponawiania pierwsze 429 konczylo caly artykul i szlo dalej - a limit
+    tempa jest stanem PRZEJSCIOWYM, nie odmowa.
+    """
+    bez_czekania(monkeypatch)
+    d, licznik = gemini_sekwencja([LIMIT, LIMIT, DOBRA])
+    dane, _ = asyncio.run(d.zapytaj(model="m", system="s", user="u",
+                                    schema=TRIAGE_SCHEMA, max_tokens=100))
+    assert dane["worth_analyzing"] is True
+    assert licznik["n"] == 3, f"powinny byc trzy proby, bylo {licznik['n']}"
+
+
+def test_wyczerpane_proby_mowia_ZE_TO_LIMIT_a_nie_zly_klucz(monkeypatch):
+    """Sam kod 429 w logu wyglada jak blad konfiguracji i kieruje szukanie
+    w zla strone. Komunikat musi nazwac rzecz po imieniu."""
+    bez_czekania(monkeypatch)
+    d, licznik = gemini_sekwencja([LIMIT])
+    with pytest.raises(RuntimeError, match="limit tempa albo dobowy limit klucza"):
+        asyncio.run(d.zapytaj(model="m", system="s", user="u",
+                              schema=TRIAGE_SCHEMA, max_tokens=100))
+    assert licznik["n"] == d.PROBY, "ma probowac dokladnie PROBY razy, nie w nieskonczonosc"
+
+
+def test_blad_klienta_NIE_jest_ponawiany(monkeypatch):
+    """Kanarek do poprzednich. Zly klucz (401) albo zly schemat (400) to nie
+    stan przejsciowy - ponawianie ich tylko opoznia komunikat o prawdziwej
+    przyczynie i zuzywa limit."""
+    bez_czekania(monkeypatch)
+    d, licznik = gemini_sekwencja([(401, {"error": {"message": "bad key"}}, None)])
+    with pytest.raises(httpx.HTTPStatusError):
+        asyncio.run(d.zapytaj(model="m", system="s", user="u",
+                              schema=TRIAGE_SCHEMA, max_tokens=100))
+    assert licznik["n"] == 1, f"401 ma isc bez ponawiania, prob bylo {licznik['n']}"
+
+
+def test_retry_after_od_dostawcy_bije_nasze_zgadywanie():
+    """On wie, kiedy okno limitu sie odnowi, my nie."""
+    r = httpx.Response(429, headers={"Retry-After": "12"})
+    assert DostawcaGemini._ile_czekac(r, proba=1) == 12.0
+    # Bez naglowka - rosnace odstepy, z sufitem.
+    goly = httpx.Response(429)
+    kroki = [DostawcaGemini._ile_czekac(goly, p) for p in (1, 2, 3, 9)]
+    assert kroki[0] < kroki[1] < kroki[2], f"odstepy maja rosnac, sa {kroki}"
+    assert kroki[3] <= 60.0, "bez sufitu jedno zapytanie blokowaloby cykl na godziny"
+
+
+def test_przepustnica_rozklada_zapytania_w_czasie(monkeypatch):
+    """Ponawianie ratuje pojedyncze zapytanie; przepustnica sprawia, ze limit
+    nie jest przekraczany w ogole. Bez niej cykl z 20 zaleglosciami wystrzeliwuje
+    20 zapytan w sekunde i pierwsze kilkanascie wraca z 429."""
+    spane = []
+
+    async def zapisz(s):
+        spane.append(s)
+
+    monkeypatch.setattr(asyncio, "sleep", zapisz)
+    d, _ = gemini_sekwencja([DOBRA], odstep=4.0)
+    asyncio.run(d.zapytaj(model="m", system="s", user="u",
+                          schema=TRIAGE_SCHEMA, max_tokens=100))
+    asyncio.run(d.zapytaj(model="m", system="s", user="u",
+                          schema=TRIAGE_SCHEMA, max_tokens=100))
+    assert spane, "drugie zapytanie ma odczekac, pierwsze nie"
+    assert 0 < spane[-1] <= 4.0
