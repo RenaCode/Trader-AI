@@ -246,3 +246,53 @@ def test_kazdy_budowniczy_adaptera_bierze_HOST_Z_BAZY():
         assert "host=" in fragment, (
             f"{plik}: adapter budowany bez jawnego hosta — klucz z bybit.eu "
             f"odbije się od globalnego z kodem nie do odróżnienia od złego klucza")
+
+
+def test_brak_sald_to_NIEWYKONALNE_a_nie_zgodnosc():
+    """Najgroźniejsza możliwa odpowiedź uzgodnienia to ciche zero.
+
+    Host demo podmiotu unijnego zwraca 404 na `wallet-balance`. Gdyby
+    uzgodnienie potraktowało to jak pusty zestaw sald, porównałoby nasze
+    pozycje z niczym i zameldowało zgodność — czyli powiedziałoby
+    „sprawdzone i w porządku" o czymś, czego sprawdzić się nie da.
+    """
+    import asyncio
+
+    from services.engine.uzgodnienie import Nieuzgadnialne, uzgodnij
+    from services.exchanges.base import ExchangeError
+
+    class GieldaBezSald:
+        async def fetch_balances(self):
+            raise ExchangeError("endpoint niedostepny na tym hoscie", code="404")
+
+    async def fetch_all(sql, params=None):
+        return [{"aktywo": "BTC", "ilosc": Decimal("0.5")}]
+
+    async def notify(*a, **k):
+        raise AssertionError("nie powiadamiamy o rozjazdach, ktorych nie zmierzono")
+
+    with pytest.raises(Nieuzgadnialne) as exc:
+        asyncio.run(uzgodnij(fetch_all, notify, GieldaBezSald()))
+    assert "NIEWYKONALNE" in str(exc.value)
+
+
+def test_ocena_hosta_odrzuca_brak_kazdej_sciezki_do_salda():
+    """Sciezek do salda jest kilka; brak JEDNEJ nie przesądza, brak wszystkich tak."""
+    from services.exchanges.mozliwosci import SPRAWDZANE, ocena
+
+    pelne = {n: {"jest": True} for n, _, _, _ in SPRAWDZANE}
+    assert ocena(pelne) == (True, [])
+
+    # Sam UNIFIED niedostepny — SPOT wystarcza, wiec handel nadal dopuszczalny.
+    jedna_mniej = dict(pelne, saldo_unified={"jest": False})
+    assert ocena(jedna_mniej)[0] is True
+
+    bez_salda = dict(pelne)
+    for n in ("saldo_unified", "saldo_spot", "saldo_aktywa"):
+        bez_salda[n] = {"jest": False}
+    mozna, powody = ocena(bez_salda)
+    assert mozna is False
+    assert any("NIEWYKONALNE" in p for p in powody)
+
+    bez_historii = dict(pelne, zlecenia_historia={"jest": False})
+    assert ocena(bez_historii)[0] is False

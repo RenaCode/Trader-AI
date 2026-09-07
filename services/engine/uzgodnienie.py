@@ -36,9 +36,15 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from services.exchanges.base import ExchangeError  # noqa: E402
+
 # Względna różnica, poniżej której nie zgłaszamy nic. Zaokrąglenia kroku
 # instrumentu i prowizja pobierana w aktywie mieszczą się grubo poniżej.
 TOLERANCJA = Decimal(os.environ.get("UZGODNIENIE_TOLERANCJA", "0.001"))
+
+
+class Nieuzgadnialne(RuntimeError):
+    """Uzgodnienia nie da sie przeprowadzic — to NIE jest zgodnosc."""
 
 
 def rozjazdy(nasze: dict[str, Decimal], gieldy: dict[str, Decimal],
@@ -93,8 +99,18 @@ async def uzgodnij(fetch_all, notify, adapter, engine: str = "crypto",
     różnicę widać w komunikacie.
     """
     nasze = await nasze_pozycje(fetch_all, engine, mode)
-    salda = {b.currency.upper(): Decimal(str(b.total))
-             for b in await adapter.fetch_balances()}
+    try:
+        salda = {b.currency.upper(): Decimal(str(b.total))
+                 for b in await adapter.fetch_balances()}
+    except ExchangeError as e:
+        # HOST, KTORY NIE WYSTAWIA SALDA, CZYNI UZGODNIENIE NIEWYKONALNYM -
+        # a nie zgodnym. Roznica jest cala: zwrocenie zera powiedzialoby
+        # "sprawdzone i w porzadku" o czyms, czego sprawdzic sie nie da.
+        # Tak zachowuje sie demo podmiotu unijnego (404 na wallet-balance).
+        raise Nieuzgadnialne(
+            f"nie da sie odczytac sald na tym hoscie ({e}); uzgodnienie jest "
+            f"NIEWYKONALNE, wiec skladanie zlecen w tym trybie nie ma oslony "
+            f"przed rozjazdem stanu") from e
 
     # Porównujemy WYŁĄCZNIE aktywa, które którakolwiek strona uważa za nasze
     # pozycje. Giełda trzyma też walutę kwotowaną i resztki po innych operacjach,
@@ -173,6 +189,9 @@ async def main() -> int:
         try:
             return await uzgodnij(fetch_all, notify, adapter,
                                   engine=args.engine, mode=args.mode, sucho=args.sucho)
+        except Nieuzgadnialne as e:
+            print(f"uzgodnienie {args.engine}/{args.mode}: NIEWYKONALNE — {e}")
+            return 2
         finally:
             await adapter.close()
     finally:
