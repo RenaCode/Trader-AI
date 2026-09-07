@@ -318,3 +318,56 @@ def test_stara_I_skurczona_daje_dwa_powody():
     from services.engine.dozor import ocen_kopie
 
     assert len(ocen_kopie(_kopia(10, wiek_h=48), _kopia(149))) == 2
+
+
+# ---------------------------------------------------- świeżość danych
+
+def test_swiezosc_prog_wyprowadzony_z_DLUGOSCI_SWIECY():
+    """Stała liczba minut byłaby albo krzykliwa przy świecy 4h, albo
+    bezużyteczna przy 1h.
+
+    Dwie i pół godziny to norma przy świecy czterogodzinnej (pół świecy
+    zwłoki) i awaria przy godzinnej (dwie i pół świecy).
+    """
+    from services.engine.dozor import ocen_swiezosc
+
+    dla_4h = [{"co": "market.candle", "minut_swiecy": 240, "wiek_min": 150}]
+    dla_1h = [{"co": "market.candle", "minut_swiecy": 60, "wiek_min": 150}]
+    assert ocen_swiezosc(dla_4h) == []
+    assert len(ocen_swiezosc(dla_1h)) == 1
+
+
+def test_brak_danych_jest_NAZWANY_inaczej_niz_dane_stare():
+    """Pusta tabela i tabela z zaległościami wymagają różnych działań:
+    jedno to potok, który nigdy nie ruszył, drugie to potok, który stanął."""
+    from services.engine.dozor import ocen_swiezosc
+
+    (tytul_brak, _), = ocen_swiezosc(
+        [{"co": "feat.feature_value", "minut_swiecy": 240, "wiek_min": None}])
+    (tytul_stare, _), = ocen_swiezosc(
+        [{"co": "feat.feature_value", "minut_swiecy": 240, "wiek_min": 9999}])
+    assert "Brak danych" in tytul_brak
+    assert "nieświeże" in tytul_stare
+
+
+def test_swiezosc_mowi_WPROST_ze_petla_tego_nie_zglosi():
+    """To jest cały powód istnienia tej czujki: silnik bije dalej i handluje
+    na tym, co ma. Stare cechy nie wyglądają jak awaria."""
+    from services.engine.dozor import ocen_swiezosc
+
+    (_, tresc), = ocen_swiezosc(
+        [{"co": "feat.feature_value", "minut_swiecy": 240, "wiek_min": 9999}])
+    assert "NIE ZGŁASZA" in tresc
+
+
+def test_swiezosc_sprawdza_KAZDE_zrodlo_a_nie_pierwsze_z_brzegu():
+    """Świeże świece przy zamrożonych cechach to stan, w którym wszystko
+    wygląda dobrze z jednej strony i jest zepsute z drugiej."""
+    from services.engine.dozor import ocen_swiezosc
+
+    powody = ocen_swiezosc([
+        {"co": "market.candle", "minut_swiecy": 240, "wiek_min": 10},
+        {"co": "feat.feature_value", "minut_swiecy": 240, "wiek_min": 9999},
+    ])
+    assert len(powody) == 1
+    assert "feat.feature_value" in powody[0][0]

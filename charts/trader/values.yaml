@@ -129,7 +129,20 @@ workers:
     # kosztowac tyle, ile kosztuje strategia, ktora kalibrujemy. Do 2026-09-06
     # petla miala wlasna stala 0,055% - stawke perpetualow - i liczyla rundzie
     # 0,190% zamiast 0,200%, a przy zleceniach rynkowych na tej gieldzie 0,580%.
-    command: ["sh", "-c", "sleep 90; python services/engine/loop.py --bar 4h --sprawdz || exit 1; while true; do python services/engine/loop.py --bar 4h --once --quiet --kind spot_eu --limit || true; sleep 300; done"]
+    # PETLA JEST W SERWISIE, NIE W SHELLU.
+    #
+    # Wczesniej staly tu `while true ... || true; sleep 300`. Trzy skutki, kazdy
+    # zly i zaden widoczny:
+    #   * `|| true` polykal KAZDY niezerowy wynik, wiec awaria silnika nie
+    #     restartowala kontenera ani nie podnosila licznika restartow. Pod stal
+    #     "Running", k3s meldowal zdrowie, a silnik mogl nie handlowac od dni,
+    #   * `--quiet` wyciszal takze opisy bledow, zostawiajac sam licznik,
+    #   * `--once` w petli shella ukrywal, ze wewnetrzna petla trzymala jedno
+    #     polaczenie do bazy na caly proces.
+    #
+    # Teraz proces zyje wlasna petla, sam laczy sie na kazdy cykl i KONCZY SIE
+    # po pieciu awariach pod rzad - bo restart poda widac, a wpis w logu nie.
+    command: ["sh", "-c", "sleep 90; python services/engine/loop.py --bar 4h --sprawdz && exec python services/engine/loop.py --bar 4h --interval 300 --kind spot_eu --limit"]
     resources:
       limits:   { cpu: 1000m, memory: 512Mi }
       requests: { cpu: 100m,  memory: 128Mi }
@@ -189,7 +202,10 @@ workers:
     # (225 z 476 artykulow w ciagu dwoch dob, glownie zgloszenia 8-K). Przy
     # limicie 5 USD na dobe silnik krypto placilby za filtrowanie material,
     # ktory nie moze go dotyczyc. Do listy wrocic, gdy ruszy drugi silnik.
-    command: ["sh", "-c", "while true; do python services/ingest/news_worker.py --once --auto --quiet --silniki crypto || true; sleep 300; done"]
+    # Petla w serwisie, bez `|| true` i bez `--quiet` - patrz komentarz przy
+    # silniku. `--quiet` wyciszal tu opisy bledow tak skutecznie, ze cykl
+    # raportowal "bledow 11" bez ani jednego slowa o tym, czym byly.
+    command: ["sh", "-c", "exec python services/ingest/news_worker.py --auto --silniki crypto --interval 300"]
     resources:
       limits:   { cpu: 1000m, memory: 512Mi }
       requests: { cpu: 50m,   memory: 128Mi }

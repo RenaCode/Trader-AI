@@ -416,15 +416,38 @@ def zapisz_wejscie(cur, engine: str, mode: str, instrument_id: int, decision_id:
 
 
 def zapisz_wyjscie(cur, position: dict, cena: Decimal, prowizja: Decimal,
-                   as_of: datetime, decision_id: int) -> Decimal:
-    """Zamkniecie pozycji. Wspolne dla symulacji i produkcji - patrz wyzej."""
-    qty, entry = Decimal(position["qty"]), Decimal(position["avg_price"])
+                   as_of: datetime, decision_id: int,
+                   ilosc: Decimal | None = None) -> Decimal:
+    """Zamkniecie pozycji, w calosci albo w czesci. Wspolne dla obu zrodel.
+
+    WYJSCIE CZESCIOWE JEST NAJGORSZYM MOMENTEM NA UPROSZCZENIE. Zlecenie
+    sprzedazy, ktore weszlo w polowie, zostawia na gieldzie polowe pozycji.
+    Zamkniecie calego wiersza byloby wtedy zapisaniem, ze nie mamy niczego -
+    czyli stworzeniem pozycji-widma, i to najgorszego rodzaju, bo o pozycji,
+    ktorej przestalibysmy pilnowac. Risk kernel nie liczylby z niej ekspozycji,
+    a stop na obsunieciu nie zadzialalby na cos, czego nie widzi.
+
+    Czesc pozostala ZACHOWUJE `avg_price`. Cena wejscia nie zmienia sie od tego,
+    ze sprzedalismy polowe - zmienia sie tylko ilosc.
+    """
+    calosc = Decimal(position["qty"])
+    ile = calosc if ilosc is None else min(ilosc, calosc)
+    entry = Decimal(position["avg_price"])
     diff = (cena - entry) if position["side"] == "long" else (entry - cena)
-    pnl = diff * qty
-    cur.execute(
-        "UPDATE exec.position SET closed_at=%s, realized_pnl=%s,"
-        " fees_paid = fees_paid + %s, close_decision_id=%s WHERE id=%s",
-        (as_of, pnl, prowizja, decision_id, position["id"]))
+    pnl = diff * ile
+
+    if ile >= calosc:
+        cur.execute(
+            "UPDATE exec.position SET closed_at=%s,"
+            " realized_pnl = COALESCE(realized_pnl,0) + %s,"
+            " fees_paid = fees_paid + %s, close_decision_id=%s WHERE id=%s",
+            (as_of, pnl, prowizja, decision_id, position["id"]))
+    else:
+        cur.execute(
+            "UPDATE exec.position SET qty = qty - %s,"
+            " realized_pnl = COALESCE(realized_pnl,0) + %s,"
+            " fees_paid = fees_paid + %s WHERE id=%s",
+            (ile, pnl, prowizja, position["id"]))
     return pnl
 
 
@@ -991,27 +1014,48 @@ async def main() -> int:
     else:
         print()
 
-    with psycopg.connect(url, row_factory=dict_row) as conn:
-        while True:
-            t0 = datetime.now(timezone.utc)
-            try:
+    # POLACZENIE NA KAZDY CYKL, NIE NA CALY PROCES.
+    #
+    # Pierwsza wersja otwierala je raz, przed petla. Po restarcie bazy kazdy
+    # kolejny cykl padal na tym samym zerwanym polaczeniu, a proces szedl dalej
+    # w nieskonczonosc - silnik byl martwy i wygladal na zywy. Koszt jednego
+    # polaczenia na piec minut jest przy tym zaden.
+    #
+    # LICZNIK AWARII POD RZAD KONCZY PROCES. Wypisanie bledu do logu nie jest
+    # widocznoscia - logu poda nikt nie czyta o trzeciej w nocy. Restart poda
+    # jest widoczny: rosnie licznik restartow, pod wpada w CrashLoopBackOff
+    # i widac to bez zagladania do niczego.
+    POD_RZAD_MAX = 5
+    pod_rzad = 0
+    while True:
+        t0 = datetime.now(timezone.utc)
+        try:
+            with psycopg.connect(url, row_factory=dict_row) as conn:
                 s = await run_once(conn, args.engine, kind_kosztow=args.kind,
                                    limit=args.limit, verbose=not args.quiet, h=h)
-                plany = (f", plany: wypełnione {s['wypelnione']}, "
-                         f"niewypełnione {s['niewypelnione']}, czekają {s['czekaja']}"
-                         if args.limit else "")
-                if s.get("bez_swiecy"):
-                    plany += f", BEZ ŚWIECY {s['bez_swiecy']}"
-                print(f"[{t0:%H:%M:%S}] rozważone {s['rozwazone']}, wejścia {s['wejscia']}, "
-                      f"wyjścia {s['wyjscia']}, wstrzymane {s['wstrzymane']}, "
-                      f"zablokowane {s['zablokowane']}, "
-                      f"już rozstrzygnięte w tej świecy {s['poza_swieca']}{plany}")
-            except Exception as e:                            # noqa: BLE001
-                conn.rollback()
-                print(f"[{t0:%H:%M:%S}] przebieg przerwany: {type(e).__name__}: {e}")
-            if args.once:
-                return 0
-            await asyncio.sleep(args.interval)
+            plany = (f", plany: wypełnione {s['wypelnione']}, "
+                     f"niewypełnione {s['niewypelnione']}, czekają {s['czekaja']}"
+                     if args.limit else "")
+            if s.get("bez_swiecy"):
+                plany += f", BEZ ŚWIECY {s['bez_swiecy']}"
+            print(f"[{t0:%H:%M:%S}] rozważone {s['rozwazone']}, wejścia {s['wejscia']}, "
+                  f"wyjścia {s['wyjscia']}, wstrzymane {s['wstrzymane']}, "
+                  f"zablokowane {s['zablokowane']}, "
+                  f"już rozstrzygnięte w tej świecy {s['poza_swieca']}{plany}")
+            pod_rzad = 0
+        except Exception as e:                                # noqa: BLE001
+            pod_rzad += 1
+            # BLAD PRZEBIEGU WYPISUJEMY ZAWSZE, TAKZE PRZY --quiet. `--quiet`
+            # wycisza rutynowy postep, a nie awarie.
+            print(f"[{t0:%H:%M:%S}] przebieg przerwany ({pod_rzad}/{POD_RZAD_MAX}): "
+                  f"{type(e).__name__}: {e}")
+            if pod_rzad >= POD_RZAD_MAX:
+                print(f"{POD_RZAD_MAX} przebiegów pod rząd zakończonych błędem — "
+                      f"kończę proces, żeby restart był WIDOCZNY zamiast cichy")
+                return 1
+        if args.once:
+            return 0
+        await asyncio.sleep(args.interval)
 
 
 if __name__ == "__main__":

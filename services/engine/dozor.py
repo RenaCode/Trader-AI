@@ -311,6 +311,85 @@ def ocen_kopie(biezaca: dict, poprzednia: dict | None,
     return powody
 
 
+# Ile swiec wolno sie spoznic, zanim uznamy dane za nieswieze. Prog wyprowadzony
+# Z DLUGOSCI SWIECY, nie z liczby dobranej na oko: dla swiecy 4h dwie swiece to
+# osiem godzin, dla 1h - dwie. Stala liczba minut bylaby albo krzykliwa przy
+# dlugiej swiecy, albo bezuzyteczna przy krotkiej.
+SWIEC_ZWLOKI = 2
+
+
+def ocen_swiezosc(wiersze: list[dict], swiec_zwloki: int = SWIEC_ZWLOKI) -> list[tuple[str, str]]:
+    """Ktore zrodla danych sa nieswieze. CZYSTA FUNKCJA.
+
+    Zwraca listę (tytuł, treść) — pusta znaczy: wszystko świeże.
+    """
+    powody = []
+    for w in wiersze:
+        prog_min = w["minut_swiecy"] * swiec_zwloki
+        if w["wiek_min"] is None:
+            powody.append((
+                f"Brak danych: {w['co']}",
+                f"Tabela {w['co']} nie ma ANI JEDNEGO wiersza. Silnik nie ma na "
+                f"czym podejmować decyzji."))
+            continue
+        if w["wiek_min"] > prog_min:
+            powody.append((
+                f"Dane nieświeże: {w['co']}",
+                f"Najnowszy wpis sprzed {w['wiek_min']:.0f} min, próg to "
+                f"{prog_min:.0f} min ({swiec_zwloki} świece po "
+                f"{w['minut_swiecy']:.0f} min).\n\n"
+                f"Pętla decyzyjna NIE ZGŁASZA tego sama: bije dalej i podejmuje "
+                f"decyzje na tym, co ma. Stare cechy nie wyglądają jak awaria — "
+                f"wyglądają jak rynek, który przestał dawać sygnały."))
+    return powody
+
+
+async def sprawdz_swiezosc(fetch_all, notify, sucho: bool = False,
+                           bar: str = "4h") -> int:
+    """Czy dane, na ktorych silnik podejmuje decyzje, sa swieze.
+
+    DLACZEGO PULS SILNIKA TU NIE WYSTARCZA
+
+    `sprawdz_zywotnosc` pilnuje, czy silnik zyje. Silnik moze jednak zyc
+    doskonale i handlowac na cechach sprzed trzech dni - bo to nie on je liczy.
+    Pobieranie swiec, finansowanie i cechy chodza w OSOBNYCH podach, a te
+    do niedawna mialy w komendzie `|| true`, ktore polykalo kazda awarie.
+    Martwe pobieranie wygladalo wiec dokladnie tak samo jak rynek bez zmian.
+
+    SPRAWDZAMY STAN, NIE ZDARZENIE - tak samo jak przy kopii zapasowej. Stan
+    jest odporny na kazdy sposob, w jaki dane moga sie nie pojawic: padniety
+    pod, zawieszony harmonogram, blad polaczenia z gielda, skasowany Deployment.
+    """
+    minuty = {"1h": 60, "4h": 240, "1d": 1440}.get(bar, 240)
+    wiersze = await fetch_all(
+        "SELECT 'market.candle (' || %(bar)s || ')' AS co, %(min)s::numeric AS minut_swiecy,"
+        "       round(extract(epoch from (now() - max(event_time)))/60) AS wiek_min"
+        "  FROM market.candle WHERE timeframe::text = %(bar)s"
+        " UNION ALL"
+        " SELECT 'feat.feature_value', %(min)s::numeric,"
+        "        round(extract(epoch from (now() - max(event_time)))/60)"
+        "   FROM feat.feature_value",
+        {"bar": bar, "min": minuty})
+
+    for w in wiersze:
+        wiek = "brak danych" if w["wiek_min"] is None else f"{w['wiek_min']:.0f} min temu"
+        print(f"świeżość {w['co']}: {wiek}")
+
+    powody = ocen_swiezosc(wiersze)
+    if not powody:
+        print("  bez zastrzeżeń")
+        return 0
+
+    odbiorcy = await fetch_all('SELECT id FROM app."user" WHERE is_active')
+    for tytul, tresc in powody:
+        print(f"  {tytul}")
+        if sucho:
+            continue
+        for u in odbiorcy:
+            await notify(u["id"], "engine.down", tytul, tresc, severity="critical")
+    return len(powody)
+
+
 async def sprawdz_kopie(fetch_all, notify, sucho: bool = False) -> int:
     """Czy istnieje swieza, zweryfikowana kopia zapasowa.
 
@@ -364,11 +443,14 @@ async def sprawdz_kopie(fetch_all, notify, sucho: bool = False) -> int:
 async def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--co", default="stan-nauki",
-                    choices=("stan-nauki", "zywotnosc", "ryzyko", "kopie"),
+                    choices=("stan-nauki", "zywotnosc", "ryzyko", "kopie",
+                             "swiezosc"),
                     help="stan-nauki: czy wynik treningu sie zmienil; "
                          "zywotnosc: czy silniki bija; "
                          "ryzyko: czy kill-switch zadzialal; "
-                         "kopie: czy jest swieza kopia zapasowa")
+                         "kopie: czy jest swieza kopia zapasowa; "
+                         "swiezosc: czy dane, na ktorych silnik decyduje, "
+                         "nie sa przestarzale")
     ap.add_argument("--prog-min", type=int, default=None, dest="prog_min",
                     help="prog martwoty w minutach; do wywolania sciezki alarmowej "
                          "na zadanie. Domyslnie stala MARTWY_PO_MIN")
@@ -399,6 +481,9 @@ async def main() -> int:
             return await sprawdz_ryzyko(fetch_all, notify, sucho=args.sucho)
         if args.co == "kopie":
             return await sprawdz_kopie(fetch_all, notify, sucho=args.sucho)
+        if args.co == "swiezosc":
+            return await sprawdz_swiezosc(fetch_all, notify, sucho=args.sucho,
+                                          bar=args.bar)
 
         wiersze = await fetch_all(
             "SELECT status, windows_total, windows_positive, positive_ci_low,"

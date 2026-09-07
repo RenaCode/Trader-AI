@@ -387,6 +387,7 @@ async def nadrob_zaleglosci(conn, cur, ai: Dostawca, instruments: dict[str, int]
             worth, why, tri_usage = await triage(ai, a["title"], a["summary"] or "")
         except Exception as e:                                # noqa: BLE001
             stats["bledy"] += 1
+            stats["opisy_bledow"].append(f"triaż {ai.model_triazu}: {type(e).__name__}: {e}")
             stracone = zapisz_nieudane(cur, conn, ai, ai.model_triazu, "triage", e)
             stats["koszt"] += stracone
             wydano += stracone
@@ -406,6 +407,7 @@ async def nadrob_zaleglosci(conn, cur, ai: Dostawca, instruments: dict[str, int]
                                         a["event_time"], symbols)
         except Exception as e:                                # noqa: BLE001
             stats["bledy"] += 1
+            stats["opisy_bledow"].append(f"analiza {ai.model_analizy}: {type(e).__name__}: {e}")
             stracone = zapisz_nieudane(cur, conn, ai, ai.model_analizy, "analysis", e)
             stats["koszt"] += stracone
             wydano += stracone
@@ -483,13 +485,17 @@ async def run_cycle(conn, ai: Dostawca | None, http: httpx.AsyncClient,
 
     stats = {"kanaly": len(feeds), "pobrane": 0, "nowe": 0, "przeszly_filtr": 0,
              "przeanalizowane": 0, "zapisane": 0, "zaleglosci": 0,
-             "koszt": 0.0, "bledy": 0}
+             "koszt": 0.0, "bledy": 0, "opisy_bledow": []}
 
     for feed in feeds:
         entries, status = await fetch_feed(http, feed["url"])
         stats["pobrane"] += len(entries)
         if status != "ok":
+            # STATUS TRAFIA DO OPISU, nie tylko do licznika. Kanal, ktory
+            # przestal odpowiadac, jest nie do odroznienia od kanalu bez nowych
+            # wiadomosci, dopoki jedynym sladem jest liczba.
             stats["bledy"] += 1
+            stats["opisy_bledow"].append(f"kanał {feed['name']}: {status}")
 
         seen = kept = 0
         for entry in entries[:40]:
@@ -539,6 +545,7 @@ async def run_cycle(conn, ai: Dostawca | None, http: httpx.AsyncClient,
                 worth, why, tri_usage = await triage(ai, title, summary)
             except Exception as e:                            # noqa: BLE001
                 stats["bledy"] += 1
+                stats["opisy_bledow"].append(f"triaż {ai.model_triazu}: {type(e).__name__}: {e}")
                 stracone = zapisz_nieudane(cur, conn, ai, ai.model_triazu, "triage", e)
                 stats["koszt"] += stracone
                 wydano += stracone
@@ -563,6 +570,7 @@ async def run_cycle(conn, ai: Dostawca | None, http: httpx.AsyncClient,
                 data, usage = await analyze(ai, title, summary, feed["name"], published, symbols)
             except Exception as e:                            # noqa: BLE001
                 stats["bledy"] += 1
+                stats["opisy_bledow"].append(f"analiza {ai.model_analizy}: {type(e).__name__}: {e}")
                 stracone = zapisz_nieudane(cur, conn, ai, ai.model_analizy, "analysis", e)
                 stats["koszt"] += stracone
                 wydano += stracone
@@ -648,58 +656,79 @@ async def main() -> int:
               f"(oraz kanały makro bez przypisania)")
 
     async with httpx.AsyncClient(timeout=20.0) as http:
-        with psycopg.connect(url) as conn:
-            # TRYB WYBIERANY PRZY KAZDYM CYKLU, nie raz przy starcie.
-            #
-            # Klucz pojawia sie w bazie wtedy, gdy uzytkownik wpisze go w UI -
-            # a nie wtedy, gdy restartujemy poda. Sprawdzanie raz na starcie
-            # oznaczaloby, ze proces pobiera artykuly jeszcze dobe po tym, jak
-            # klucz juz jest.
-            def tryb() -> tuple[Dostawca | None, bool]:
-                if args.bez_analizy:
-                    return None, False
-                d = wybierz_dostawce(conn, wymagany=not args.auto)
-                if d is None:
-                    return None, False
-                return d, True
+        # POLACZENIE NA KAZDY CYKL, NIE NA CALY PROCES.
+        #
+        # Pierwsza wersja otwierala je raz, przed petla. Po restarcie bazy kazdy
+        # kolejny cykl padal na tym samym zerwanym polaczeniu, a proces szedl
+        # dalej w nieskonczonosc - potok byl martwy i wygladal na zywy.
+        POD_RZAD_MAX = 5
+        pod_rzad = 0
+        poprzedni_tryb: str | None = None
 
-            poprzedni_tryb: str | None = None
-            while True:
-                started = datetime.now(timezone.utc)
-                try:
-                    ai, analizuj = tryb()
+        while True:
+            started = datetime.now(timezone.utc)
+            try:
+                with psycopg.connect(url) as conn:
+                    # TRYB WYBIERANY PRZY KAZDYM CYKLU, nie raz przy starcie.
+                    #
+                    # Klucz pojawia sie w bazie wtedy, gdy uzytkownik wpisze go
+                    # w UI - a nie wtedy, gdy restartujemy poda. Sprawdzanie raz
+                    # na starcie oznaczaloby, ze proces pobiera artykuly jeszcze
+                    # dobe po tym, jak klucz juz jest.
+                    ai = (None if args.bez_analizy
+                          else wybierz_dostawce(conn, wymagany=not args.auto))
+                    analizuj = ai is not None
+
                     # ZMIANA DOSTAWCY JEST ZDARZENIEM, nie szczegolem. Oceny
                     # dwoch roznych modeli nie sa tym samym pomiarem, a cecha
                     # `news_sent` sklejona z obu ma w srodku uskok, ktorego
                     # kalibracja wagi nie zaklada. Musi byc widoczna w logu.
-                    opis = (f"pobieranie i ANALIZA ({ai.nazwa}: {ai.model_triazu} → "
-                            f"{ai.model_analizy})" if ai else
-                            "wylacznie pobieranie (brak klucza dostawcy)")
-                    if opis != poprzedni_tryb:
-                        print("Tryb: " + opis)
-                        poprzedni_tryb = opis
+                    tryb_opis = (f"pobieranie i ANALIZA ({ai.nazwa}: {ai.model_triazu} → "
+                                 f"{ai.model_analizy})" if ai else
+                                 "wylacznie pobieranie (brak klucza dostawcy)")
+                    if tryb_opis != poprzedni_tryb:
+                        print("Tryb: " + tryb_opis)
+                        poprzedni_tryb = tryb_opis
+
                     s = await run_cycle(conn, ai, http, verbose=not args.quiet,
                                         analizuj=analizuj, silniki=silniki)
-                    took = (datetime.now(timezone.utc) - started).total_seconds()
-                    # Podsumowanie musi rozrozniac ZAPISANE od PRZEANALIZOWANYCH.
-                    # Pierwsza wersja liczyla zapisane jako przeanalizowane, wiec
-                    # cykl bez klucza raportowal "zapisanych 0" po zapisaniu 234
-                    # artykulow - log gorszy niz zaden, bo wygladal na awarie.
-                    analiza = (f"przez filtr {s['przeszly_filtr']}, "
-                               f"przeanalizowanych {s['przeanalizowane']}"
-                               + (f", zaległych {s['zaleglosci']}" if s['zaleglosci'] else "")
-                               + f", koszt ${s['koszt']:.4f}"
-                               if analizuj else "bez analizy (brak klucza)")
-                    print(f"[{started:%H:%M:%S}] kanałów {s['kanaly']}, wpisów {s['pobrane']}, "
-                          f"nowych {s['nowe']}, zapisanych {s['zapisane']}, {analiza}, "
-                          f"błędów {s['bledy']}, {took:.0f} s")
-                except Exception as e:                        # noqa: BLE001
-                    print(f"[{started:%H:%M:%S}] cykl przerwany: {type(e).__name__}: {e}")
-                    conn.rollback()
+                took = (datetime.now(timezone.utc) - started).total_seconds()
+                # Podsumowanie musi rozrozniac ZAPISANE od PRZEANALIZOWANYCH.
+                # Pierwsza wersja liczyla zapisane jako przeanalizowane, wiec
+                # cykl bez klucza raportowal "zapisanych 0" po zapisaniu 234
+                # artykulow - log gorszy niz zaden, bo wygladal na awarie.
+                analiza = (f"przez filtr {s['przeszly_filtr']}, "
+                           f"przeanalizowanych {s['przeanalizowane']}"
+                           + (f", zaległych {s['zaleglosci']}" if s['zaleglosci'] else "")
+                           + f", koszt ${s['koszt']:.4f}"
+                           if analizuj else "bez analizy (brak klucza)")
+                print(f"[{started:%H:%M:%S}] kanałów {s['kanaly']}, wpisów {s['pobrane']}, "
+                      f"nowych {s['nowe']}, zapisanych {s['zapisane']}, {analiza}, "
+                      f"błędów {s['bledy']}, {took:.0f} s")
+                # BLEDY WYPISUJEMY ZAWSZE, TAKZE PRZY --quiet.
+                #
+                # `--quiet` istnieje po to, zeby wyciszyc rutynowy postep, a nie
+                # awarie. Na produkcji byl ustawiony w charcie i przez to cykl
+                # raportowal "bledow 11" bez ani jednego slowa o tym, czym byly -
+                # dokladnie ten sam ksztalt, ktory wczesniej ukryl serie odmow
+                # 429 u dostawcy analizy.
+                for blad in dict.fromkeys(s.get("opisy_bledow", [])):
+                    print(f"    BŁĄD {blad}")
+                pod_rzad = 0
+            except Exception as e:                            # noqa: BLE001
+                pod_rzad += 1
+                print(f"[{started:%H:%M:%S}] cykl przerwany "
+                      f"({pod_rzad}/{POD_RZAD_MAX}): {type(e).__name__}: {e}")
+                if pod_rzad >= POD_RZAD_MAX:
+                    # Wypisanie bledu do logu nie jest widocznoscia - logu poda
+                    # nikt nie czyta. Restart poda JEST widoczny.
+                    print(f"{POD_RZAD_MAX} cykli pod rząd zakończonych błędem — "
+                          f"kończę proces, żeby restart był WIDOCZNY zamiast cichy")
+                    return 1
 
-                if args.once:
-                    return 0
-                await asyncio.sleep(args.interval)
+            if args.once:
+                return 0
+            await asyncio.sleep(args.interval)
 
 
 if __name__ == "__main__":

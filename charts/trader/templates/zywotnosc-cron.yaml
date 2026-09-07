@@ -48,6 +48,12 @@ spec:
                   python services/engine/dozor.py --co zywotnosc || RC=$?
                   python services/engine/dozor.py --co ryzyko    || RC=$?
                   python services/engine/dozor.py --co kopie     || RC=$?
+                  # SWIEZOSC DANYCH. Puls silnika mowi, ze silnik zyje - nie mowi,
+                  # na czym decyduje. Pobieranie swiec i liczenie cech chodza
+                  # w OSOBNYCH podach; gdy stana, silnik bije dalej i handluje na
+                  # cechach sprzed trzech dni. Stare cechy nie wygladaja jak
+                  # awaria, tylko jak rynek, ktory przestal dawac sygnaly.
+                  python services/engine/dozor.py --co swiezosc  || RC=$?
                   # UZGODNIENIE Z GIELDA. Nasz obraz stanu i obraz gieldy to dwa
                   # rozne stany, ktore moga sie rozjechac - i zaden ze sposobow
                   # nie objawia sie awaria. Pozycja-widmo blokuje wejscia,
