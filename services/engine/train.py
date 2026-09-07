@@ -101,6 +101,13 @@ def opis_rozkladu(probki: list[dict]) -> tuple[list[str], float]:
     Zwracamy iloczyn osobno, zeby test mogl porownac go ze srednia ekspozycja
     policzona niezaleznie - bez tego "iloczyn zgadza sie sam ze soba" i nie
     dowodzi niczego.
+
+    ILOCZYN NIE JEST DOKLADNIE ROWNY sredniej ekspozycji z wielu okien i tak ma
+    byc: srednia iloczynow nie rowna sie iloczynowi srednich, a czynniki
+    usredniamy po oknach osobno. Zmierzona roznica to okolo 1,5% wartosci
+    (1,27% wobec 1,29%). Obie liczby stoja w raporcie obok siebie - rozbieznosc
+    ma byc widoczna, a nie zasypana. Na POJEDYNCZYM oknie tozsamosc jest
+    dokladna i pilnuje jej test.
     """
     if not probki:
         return [], 0.0
@@ -408,7 +415,8 @@ def random_weights(rng: random.Random) -> dict[str, dict[str, float]]:
 def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
           kind: str = "spot", egzekucja: Egzekucja | None = None,
           sucho: bool = False, wybor: str = "argmax",
-          tylko: set[str] | None = None) -> None:
+          tylko: set[str] | None = None,
+          zakladane_pozycje: int | None = None) -> None:
     cur = conn.cursor()
     rng = random.Random(SEED)
     now = datetime.now(timezone.utc)
@@ -624,7 +632,8 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
         def ocen(w, sl, c):
             res = simulate_portfolio(sl, w, thresholds, gates, h, MIN_CONF,
                                      instrument_ids=inst_ids, cache=c,
-                                     kind=kind, egzekucja=egzekucja)
+                                     kind=kind, egzekucja=egzekucja,
+                                     zakladane_pozycje=zakladane_pozycje)
             return portfolio_metrics(res, h.min_trades)
 
         def zapisz_hipoteze(cand):
@@ -681,7 +690,7 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
         oos_res = simulate_portfolio(
             {s: v for s, v in test_slices.items() if v}, best_w, thresholds, gates, h,
             MIN_CONF, instrument_ids=inst_ids, cache=cache_te,
-            kind=kind, egzekucja=egzekucja)
+            kind=kind, egzekucja=egzekucja, zakladane_pozycje=zakladane_pozycje)
         oos_m = portfolio_metrics(oos_res, h.min_trades)
         if not oos_res.equity_curve:
             start += timedelta(days=h.step_days)
@@ -1101,6 +1110,16 @@ def main() -> int:
                          "ic = wylacznie wagi wyliczone z IC, "
                          "bazowe = wylacznie zalozenia poczatkowe. "
                          "Warianty inne niz domyslny wymagaja --sucho")
+    ap.add_argument("--zakladane-pozycje", type=int, default=0,
+                    dest="zakladane_pozycje",
+                    help="ile pozycji JEDNOCZESNIE zaklada budzet na pozycje. "
+                         "Domyslnie liczba obserwowanych instrumentow - czyli "
+                         "zalozenie, ze zapelnia sie wszystkie. Pomiar mowi, ze "
+                         "zapelnia sie 2,6 z 10, wiec budzet jest liczony pod "
+                         "portfel, ktory nie powstaje. Limit lacznej ekspozycji "
+                         "jest sprawdzany osobno w kazdej swiecy, wiec mniejszy "
+                         "dzielnik go NIE PODNOSI - zmienia tylko rozklad ryzyka "
+                         "na mniej, wiekszych pozycji. Wymaga --sucho")
     args = ap.parse_args()
 
     # Wariant eksperymentalny NIE MOZE promowac wersji modelu ani nadpisywac
@@ -1116,6 +1135,9 @@ def main() -> int:
     # Ten sam powod: uniwersum produkcyjne zmienia sie migracja, nie flaga.
     if args.instrumenty and not args.sucho:
         sys.exit("--instrumenty nadpisuje uniwersum decyzyjne i wymaga --sucho")
+    # I ten sam: wielkosc pozycji jest decyzja o ryzyku, nie parametrem przebiegu.
+    if args.zakladane_pozycje and not args.sucho:
+        sys.exit("--zakladane-pozycje zmienia wielkosc pozycji i wymaga --sucho")
 
     url = os.environ.get("DATABASE_URL")
     if not url:
@@ -1133,8 +1155,12 @@ def main() -> int:
         print(f"Wybór wag na oknie treningowym: {args.wybor}"
               f"{f' ({args.trials} losowań + założenia + IC)' if args.wybor == 'argmax' else ' (bez losowania)'}\n")
         tylko = {s.strip().upper() for s in args.instrumenty.split(",") if s.strip()}
+        if args.zakladane_pozycje:
+            print(f"Budżet na pozycję liczony pod {args.zakladane_pozycje} "
+                  f"pozycji jednocześnie (wariant, nie produkcja)")
         train(conn, args.engine, args.days, args.trials, h, args.kind, egz,
-              sucho=args.sucho, wybor=args.wybor, tylko=tylko or None)
+              sucho=args.sucho, wybor=args.wybor, tylko=tylko or None,
+              zakladane_pozycje=args.zakladane_pozycje or None)
     return 0
 
 

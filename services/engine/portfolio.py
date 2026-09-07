@@ -177,7 +177,8 @@ def simulate_portfolio(panels: dict[str, list[dict]],
                        instrument_ids: dict[str, int] | None = None,
                        cache: dict[str, list[tuple]] | None = None,
                        kind: str = "spot",
-                       egzekucja: Egzekucja | None = None) -> PortfolioResult:
+                       egzekucja: Egzekucja | None = None,
+                       zakladane_pozycje: int | None = None) -> PortfolioResult:
     """Jedno konto, wszystkie instrumenty, wspolne limity.
 
     Wejscie i wyjscie po cenie NASTEPNEJ swiecy - decyzja z zamkniecia swiecy T
@@ -194,7 +195,15 @@ def simulate_portfolio(panels: dict[str, list[dict]],
     # wlasnie krotkie sprzedaze na spocie.
     wolno_short = k.krotka_pozycja
     ids = instrument_ids or {s: i for i, s in enumerate(sorted(panels), start=1)}
-    baza = float(position_budget(limits, len(panels)))
+    # `zakladane_pozycje` nadpisuje liczbe instrumentow w dzielniku budzetu.
+    #
+    # Domyslnie budzet to limit lacznej ekspozycji podzielony przez liczbe
+    # obserwowanych instrumentow - zalozenie, ze zapelnia sie WSZYSTKIE. Pomiar
+    # z 2026-09-07 mowi, ze zapelnia sie 2,57 z 10, wiec budzet jest liczony pod
+    # portfel, ktory nigdy nie powstaje. To pole sluzy do zmierzenia, co sie
+    # stanie przy innym zalozeniu; limit lacznej ekspozycji i tak jest
+    # sprawdzany osobno w kazdej swiecy, wiec przekroczyc go sie nie da.
+    baza = float(position_budget(limits, zakladane_pozycje or len(panels)))
     # Bez podanej pamieci podrecznej liczymy ja tutaj - wygodne przy pojedynczym
     # wywolaniu, kosztowne przy dziesiatkach prob na tym samym oknie.
     cache = cache if cache is not None else precompute_panels(panels, atr_thresholds, h)
