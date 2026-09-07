@@ -216,8 +216,22 @@ def seed_equity(cur, engine: str, mode: str) -> None:
     if not cur.fetchone():
         cur.execute(
             "INSERT INTO exec.equity_point (engine, mode, event_time, equity, cash,"
-            " unrealized, realized_cum, exposure) VALUES (%s,%s, now(), %s, %s, 0, 0, 0)",
-            (engine, mode, START_EQUITY, START_EQUITY))
+            " unrealized, realized_cum, exposure, nav, units, wplaty_netto)"
+            " VALUES (%s,%s, now(), %s, %s, 0, 0, 0, 1.0, %s, %s)",
+            (engine, mode, START_EQUITY, START_EQUITY, START_EQUITY, START_EQUITY))
+
+
+def przeplywy(cur, engine: str, mode: str) -> tuple[Decimal, Decimal]:
+    """Wplaty netto i liczba jednostek. Zrodlo prawdy o KAPITALE, nie o wyniku.
+
+    Do 2026-09-07 kapital byl stala plus wynik handlu, wiec kazde dolozenie
+    srodkow wygladalo jak zysk. Teraz stala nie ma - jest suma przeplywow.
+    """
+    cur.execute(
+        "SELECT COALESCE(sum(amount), 0) AS wplaty, COALESCE(sum(units), 0) AS units"
+        " FROM exec.cash_flow WHERE engine=%s AND mode=%s", (engine, mode))
+    r = cur.fetchone()
+    return Decimal(r["wplaty"] or 0), Decimal(r["units"] or 0)
 
 
 def update_equity(cur, engine: str, mode: str, as_of: datetime) -> None:
@@ -241,13 +255,26 @@ def update_equity(cur, engine: str, mode: str, as_of: datetime) -> None:
         unrealized += diff * qty
         exposure += qty * px
 
-    equity = START_EQUITY + realized + unrealized
+    # KAPITAL Z PRZEPLYWOW, nie ze stalej. Brak wierszy w exec.cash_flow oznacza
+    # rachunek, ktorego nikt nie zasilil - wtedy spadamy na kapital startowy,
+    # zeby proces nie wywracal sie na swiezej bazie przed migracja zasiewajaca.
+    wplaty, units = przeplywy(cur, engine, mode)
+    if wplaty == 0:
+        wplaty, units = START_EQUITY, START_EQUITY
+
+    equity = wplaty + realized + unrealized
+    # WARTOSC JEDNOSTKI. Wplata kupuje jednostki po biezacym nav i nav sie nie
+    # rusza; wynik handlu rusza nav i nie rusza liczby jednostek. Dzieki temu
+    # obsuniecie mierzy strategie, a nie przelewy.
+    nav = (equity / units) if units > 0 else Decimal(1)
     cur.execute(
         "INSERT INTO exec.equity_point (engine, mode, event_time, equity, cash, unrealized,"
-        " realized_cum, exposure) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)"
+        " realized_cum, exposure, nav, units, wplaty_netto)"
+        " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)"
         " ON CONFLICT (engine, mode, event_time) DO NOTHING",
         (engine, mode, as_of.replace(second=0, microsecond=0),
-         equity, equity - exposure, unrealized, realized, exposure))
+         equity, equity - exposure, unrealized, realized, exposure,
+         nav, units, wplaty))
 
 
 def record_decision(cur, engine: str, mode: str, instrument_id: int, as_of: datetime,

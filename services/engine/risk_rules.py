@@ -28,7 +28,22 @@ from decimal import Decimal
 
 @dataclass
 class RiskState:
-    """Stan konta w chwili decyzji. Zrodlo (baza / pamiec) nie ma znaczenia."""
+    """Stan konta w chwili decyzji. Zrodlo (baza / pamiec) nie ma znaczenia.
+
+    DWA POJECIA KAPITALU, i to jest cala tresc tej klasy.
+
+    `equity` to PIENIADZE na rachunku - rosna od wplat, spadaja od wyplat. Nimi
+    mierzy sie wielkosc pozycji i prog kapitalu, bo one dotycza pieniedzy.
+
+    `nav` to wartosc jednostki uczestnictwa: startuje od 1.0 i zmienia sie
+    WYLACZNIE od wyniku handlu. Nia mierzy sie obsuniecie i strate dzienna,
+    bo one dotycza umiejetnosci.
+
+    Do 2026-09-07 istnialo tylko pierwsze. Wplata wygladala wiec jak zysk,
+    a wyplata jak strata - i obsuniecie liczylo sie od szczytu, ktory podniosl
+    przelew, a nie handel. Na rachunku papierowym roznicy nie bylo, bo przeplyw
+    jest jeden. Przy realnych srodkach jest to blad w kazdym limicie naraz.
+    """
     equity: Decimal
     peak: Decimal
     day_ago: Decimal
@@ -36,6 +51,33 @@ class RiskState:
     per_instrument: dict[int, Decimal]
     orders_last_hour: int
     killswitch: dict | None = None
+    # Wartosc jednostki: biezaca, szczytowa i sprzed doby. Domysl None znaczy
+    # "brak przeplywow" - wtedy nav jest proporcjonalne do equity i reguly
+    # spadaja z powrotem na equity. Dzieki temu symulacja walk-forward, ktora
+    # przeplywow nie zna, nie musi o nich wiedziec.
+    nav: Decimal | None = None
+    nav_peak: Decimal | None = None
+    nav_day_ago: Decimal | None = None
+    # Suma wplat pomniejszona o wyplaty. Odniesienie dla progu kapitalu
+    # wyrazonego ulamkiem (`pct_wplat`).
+    wplaty_netto: Decimal | None = None
+
+    # --- widoki uzywane przez reguly -------------------------------------
+    #
+    # Reguly pytaja o "wynik", a nie o "kapital". Te trzy wlasnosci decyduja
+    # RAZ, ktora liczba jest wynikiem - zamiast powtarzac ten wybor przy kazdym
+    # limicie, gdzie predzej czy pozniej jeden z nich zostalby pominiety.
+    @property
+    def wynik(self) -> Decimal:
+        return self.nav if self.nav is not None else self.equity
+
+    @property
+    def wynik_szczyt(self) -> Decimal:
+        return self.nav_peak if self.nav_peak is not None else self.peak
+
+    @property
+    def wynik_doba(self) -> Decimal:
+        return self.nav_day_ago if self.nav_day_ago is not None else self.day_ago
 
 
 @dataclass
@@ -112,8 +154,10 @@ def evaluate_account(state: RiskState, limits: dict[str, dict]) -> RiskVerdict:
 
     # 2. Strata dzienna.
     lim = limits.get("max_daily_loss")
-    if lim and state.day_ago > 0:
-        loss_pct = float((state.day_ago - state.equity) / state.day_ago * 100)
+    if lim and state.wynik_doba > 0:
+        # Z WYNIKU, nie z kapitalu: wyplata obniza kapital zgodnie z wola
+        # wlasciciela i nie jest strata dzienna.
+        loss_pct = float((state.wynik_doba - state.wynik) / state.wynik_doba * 100)
         usage.append({"name": "max_daily_loss", "used": max(0.0, loss_pct),
                       "threshold": float(lim["value"])})
         if loss_pct >= float(lim["value"]):
@@ -146,12 +190,19 @@ def evaluate_account(state: RiskState, limits: dict[str, dict]) -> RiskVerdict:
     # Ogranicza to, ILE SYSTEM ZARYZYKUJE DALEJ, a nie to, ile juz stracil.
     lim = limits.get("min_equity")
     if lim:
-        # ZAWSZE KWOTOWO, nigdy procentowo. Prog wyrazony jako procent szczytu
-        # jest DOKLADNIE limitem obsuniecia, ktory stoi punkt nizej - czyli
+        # NIGDY PROCENTOWO OD SZCZYTU. Prog wyrazony jako procent szczytu jest
+        # DOKLADNIE limitem obsuniecia, ktory stoi punkt nizej - czyli
         # duplikatem, ktory wyglada na dodatkowe zabezpieczenie i nim nie jest.
-        # Ten limit ma odpowiadac na pytanie "ile z WPLACONYCH pieniedzy moze
-        # zniknac", a wplata jest kwota.
-        prog = Decimal(lim["value"])
+        #
+        # Dopuszczalne sa dwie postacie. Kwotowa jest prosta, ale przestaje
+        # dzialac po wyplacie: rachunek spada zgodnie z wola wlasciciela,
+        # a prog zostaje w miejscu i zatrzymuje silnik bez powodu. `pct_wplat`
+        # przesuwa sie razem z wplatami netto i wyraza to, o co chodzi:
+        # "nie strac wiecej niz tyle z tego, co wlozylem".
+        if lim.get("unit") == "pct_wplat" and state.wplaty_netto is not None:
+            prog = Decimal(lim["value"]) / Decimal(100) * state.wplaty_netto
+        else:
+            prog = Decimal(lim["value"])
         usage.append({"name": "min_equity", "used": float(state.equity),
                       "threshold": float(prog)})
         if state.equity <= prog:
@@ -166,8 +217,10 @@ def evaluate_account(state: RiskState, limits: dict[str, dict]) -> RiskVerdict:
 
     # 4. Obsuniecie od szczytu.
     lim = limits.get("max_drawdown")
-    if lim and state.peak > 0:
-        dd_pct = float((state.peak - state.equity) / state.peak * 100)
+    if lim and state.wynik_szczyt > 0:
+        # Z WYNIKU, nie z kapitalu: wplata podnosi kapital i szczyt, a nie jest
+        # zyskiem - obsuniecie liczone od takiego szczytu mierzyloby przelew.
+        dd_pct = float((state.wynik_szczyt - state.wynik) / state.wynik_szczyt * 100)
         usage.append({"name": "max_drawdown", "used": max(0.0, dd_pct),
                       "threshold": float(lim["value"])})
         if dd_pct >= float(lim["value"]):

@@ -38,7 +38,12 @@ class RiskKernel:
 
     # ------------------------------------------------------------- stan konta
     def _equity(self) -> tuple[Decimal, Decimal, Decimal]:
-        """Zwraca (kapital biezacy, szczyt, kapital sprzed doby)."""
+        """Zwraca (kapital biezacy, szczyt, kapital sprzed doby) - W PIENIADZACH.
+
+        Do oceny WYNIKU sluzy `_wynik()`: kapital rosnie od wplat, wiec liczony
+        z niego szczyt podnosi sie po kazdym przelewie, a obsuniecie od takiego
+        szczytu mierzy przelew, nie strategie.
+        """
         cur = self.conn.cursor()
         cur.execute(
             "SELECT equity FROM exec.equity_point WHERE engine=%s AND mode=%s"
@@ -58,6 +63,38 @@ class RiskKernel:
         row = cur.fetchone()
         day_ago = Decimal(row["equity"]) if row else current
         return current, peak, day_ago
+
+    def _wynik(self) -> tuple[Decimal | None, Decimal | None, Decimal | None, Decimal | None]:
+        """Wartosc jednostki: biezaca, szczytowa, sprzed doby, plus wplaty netto.
+
+        None w kazdym miejscu, gdzie danych nie ma - reguly spadaja wtedy na
+        kapital, czyli na zachowanie sprzed migracji 0031. Dzieki temu proces
+        nie wywraca sie na bazie, w ktorej krzywej jeszcze nie przeliczono.
+        """
+        cur = self.conn.cursor()
+        cur.execute(
+            "SELECT nav, wplaty_netto FROM exec.equity_point WHERE engine=%s AND mode=%s"
+            "   AND nav IS NOT NULL ORDER BY event_time DESC LIMIT 1",
+            (self.engine, self.mode))
+        biez = cur.fetchone()
+        if not biez:
+            return None, None, None, None
+
+        cur.execute("SELECT max(nav) AS szczyt FROM exec.equity_point"
+                    " WHERE engine=%s AND mode=%s", (self.engine, self.mode))
+        szczyt = (cur.fetchone() or {}).get("szczyt")
+
+        cur.execute(
+            "SELECT nav FROM exec.equity_point WHERE engine=%s AND mode=%s"
+            "   AND nav IS NOT NULL AND event_time <= now() - interval '24 hours'"
+            " ORDER BY event_time DESC LIMIT 1", (self.engine, self.mode))
+        doba = cur.fetchone()
+
+        nav = Decimal(biez["nav"])
+        return (nav,
+                Decimal(szczyt) if szczyt is not None else nav,
+                Decimal(doba["nav"]) if doba else nav,
+                Decimal(biez["wplaty_netto"]) if biez["wplaty_netto"] is not None else None)
 
     def _open_exposure(self) -> tuple[Decimal, dict[int, Decimal]]:
         cur = self.conn.cursor()
@@ -98,11 +135,14 @@ class RiskKernel:
         evaluate_account().
         """
         equity, peak, day_ago = self._equity()
+        nav, nav_szczyt, nav_doba, wplaty = self._wynik()
         exposure, per_instrument = self._open_exposure()
         state = RiskState(
             equity=equity, peak=peak, day_ago=day_ago, exposure=exposure,
             per_instrument=per_instrument, orders_last_hour=0,
             killswitch=self.killswitch_active(),
+            nav=nav, nav_peak=nav_szczyt, nav_day_ago=nav_doba,
+            wplaty_netto=wplaty,
         )
         verdict = evaluate_account(state, self._limits)
         if verdict.trigger_killswitch:
@@ -119,6 +159,7 @@ class RiskKernel:
         moze mierzyc innego systemu niz ten, ktory naprawde handluje.
         """
         equity, peak, day_ago = self._equity()
+        nav, nav_szczyt, nav_doba, wplaty = self._wynik()
         exposure, per_instrument = self._open_exposure()
 
         state = RiskState(
@@ -126,6 +167,8 @@ class RiskKernel:
             exposure=exposure, per_instrument=per_instrument,
             orders_last_hour=self._orders_last_hour(),
             killswitch=self.killswitch_active(),
+            nav=nav, nav_peak=nav_szczyt, nav_day_ago=nav_doba,
+            wplaty_netto=wplaty,
         )
         verdict = evaluate_limits(state, self._limits, instrument_id, notional, qty)
         if verdict.trigger_killswitch:
