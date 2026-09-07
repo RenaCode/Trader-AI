@@ -98,6 +98,22 @@ def _status_bybita(status: str) -> str:
     return _STATUSY.get(status, f"nieznany:{status}")
 
 
+
+def _dec_albo_nic(v) -> Decimal | None:
+    """Pusty string i brak pola znacza to samo: gielda tego nie podaje.
+
+    Zamiana ich na Decimal("0") bylaby gorsza niz None, bo zero jako krok
+    ilosci przechodzi przez kazde sprawdzenie i wywraca sie dopiero przy
+    dzieleniu - daleko od miejsca, w ktorym powstalo.
+    """
+    if v in (None, "", "0"):
+        return None
+    try:
+        return Decimal(str(v))
+    except Exception:                                        # noqa: BLE001
+        return None
+
+
 class BybitAdapter:
     venue_code = "bybit"
 
@@ -339,6 +355,39 @@ class BybitAdapter:
             kursor = res.get("nextPageCursor") or None
             if not kursor:
                 break
+        return out
+
+    async def filtry_instrumentow(self, kategoria: str | None = None) -> dict[str, dict]:
+        """Reguly, ktorych gielda pilnuje przy KAZDYM zleceniu.
+
+        Krok ilosci, krok ceny i minimalna wartosc zlecenia nie sa szczegolem
+        technicznym - sa warunkiem przyjecia zlecenia. Bez nich:
+
+          * ilosc niezaokraglona do kroku zostaje ODRZUCONA, a odrzucone
+            zlecenie wyglada w logu jak brak sygnalu, nie jak blad,
+          * zlecenie ponizej minimalnej wartosci tez zostaje odrzucone - i to
+            jest przypadek drogi, bo gdy odrzucone jest WYJSCIE, pozycja
+            zostaje otwarta wbrew decyzji.
+
+        Endpoint jest PUBLICZNY, wiec czytamy go z hosta globalnego: to ten sam
+        rejestr instrumentow, na ktorym trenowany byl model.
+        """
+        res = await self._get("/v5/market/instruments-info",
+                              {"category": kategoria or self._category},
+                              private=False, host=PUBLIC_HOST)
+        out: dict[str, dict] = {}
+        for i in res.get("list", []):
+            lot = i.get("lotSizeFilter") or {}
+            price = i.get("priceFilter") or {}
+            out[i.get("symbol", "")] = {
+                "krok_ilosci": _dec_albo_nic(lot.get("basePrecision")
+                                             or lot.get("qtyStep")),
+                "min_ilosc": _dec_albo_nic(lot.get("minOrderQty")),
+                "min_wartosc": _dec_albo_nic(lot.get("minOrderAmt")
+                                             or lot.get("minNotionalValue")),
+                "krok_ceny": _dec_albo_nic(price.get("tickSize")),
+                "status": i.get("status"),
+            }
         return out
 
     async def dryf_zegara(self) -> tuple[int, str | None]:

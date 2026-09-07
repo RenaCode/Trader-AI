@@ -1,0 +1,125 @@
+"""Reguły giełdy przy składaniu zlecenia — i to, ile kosztuje ich złamanie."""
+from decimal import Decimal as D
+
+import pytest
+
+from services.engine.zlecenia import (
+    Filtry, cena_do_kroku, czy_zamykalna, do_kroku_w_dol, sprawdz_zlecenie,
+)
+
+PELNE = Filtry(krok_ilosci=D("0.001"), min_ilosc=D("0.001"),
+               min_wartosc=D("5"), krok_ceny=D("0.01"))
+
+
+def test_ilosc_zaokraglana_ZAWSZE_W_DOL():
+    """W górę dałoby pozycję większą, niż zatwierdził risk kernel — najcichszy
+    możliwy sposób złamania limitu, bo nie ma po nim żadnego śladu błędu."""
+    assert do_kroku_w_dol(D("1.2349"), D("0.001")) == D("1.234")
+    assert do_kroku_w_dol(D("1.2351"), D("0.001")) == D("1.235")
+    i, _, powod = sprawdz_zlecenie(D("1.99999"), D("50000"), PELNE,
+                                   kupno=True, wyjscie=False)
+    assert powod is None
+    assert i == D("1.999")
+
+
+def test_cena_przyciagana_na_NASZA_korzysc_po_obu_stronach():
+    """Przeciwny kierunek płaci o jeden krok więcej za każdym razem."""
+    assert cena_do_kroku(D("100.007"), D("0.01"), kupno=True) == D("100.00")
+    assert cena_do_kroku(D("100.003"), D("0.01"), kupno=False) == D("100.01")
+    # Cena juz na siatce nie jest przesuwana w zadna strone.
+    assert cena_do_kroku(D("100.00"), D("0.01"), kupno=False) == D("100.00")
+
+
+def test_wyjscie_z_pozycji_krotkiej_to_KUPNO_a_nie_sprzedaz():
+    """Sklejenie „wyjście = sprzedaż" jest prawdą tylko dla pozycji długiej.
+
+    Wyprowadzenie strony z roli przyciągałoby limit w złą stronę przy każdym
+    zamknięciu shorta — koszt mały, systematyczny i niewidoczny w wyniku.
+    """
+    _, c_kupno, _ = sprawdz_zlecenie(D("1"), D("100.003"), PELNE,
+                                     kupno=True, wyjscie=True)
+    _, c_sprzedaz, _ = sprawdz_zlecenie(D("1"), D("100.003"), PELNE,
+                                        kupno=False, wyjscie=True)
+    assert c_kupno == D("100.00")
+    assert c_sprzedaz == D("100.01")
+
+
+def test_BRAK_reguly_blokuje_tak_samo_jak_regula_zlamana():
+    """„Giełda nie podała, więc pewnie dowolna precyzja" kończy się odrzuceniem
+    pierwszego zlecenia na produkcji — w logu nie do odróżnienia od braku sygnału.
+
+    Dziś dotyczy to 10 z 12 instrumentów dopuszczonych do handlu.
+    """
+    for brakujace in ("krok_ilosci", "krok_ceny", "min_wartosc"):
+        f = Filtry(**{**{"krok_ilosci": D("0.001"), "krok_ceny": D("0.01"),
+                         "min_wartosc": D("5")}, brakujace: None})
+        _, _, powod = sprawdz_zlecenie(D("1"), D("100"), f, kupno=True, wyjscie=False)
+        assert powod is not None and "nie podała reguł" in powod
+
+
+def test_odmowa_WYJSCIA_jest_nazwana_inaczej_niz_odmowa_wejscia():
+    """Odrzucone wejście kosztuje okazję. Odrzucone wyjście zostawia otwartą
+    pozycję wbrew decyzji — i risk kernel liczy z niej ekspozycję."""
+    _, _, wejscie = sprawdz_zlecenie(D("0.001"), D("100"), PELNE,
+                                     kupno=True, wyjscie=False)
+    _, _, wyjscie = sprawdz_zlecenie(D("0.001"), D("100"), PELNE,
+                                     kupno=False, wyjscie=True)
+    assert "wejście" in wejscie
+    assert "WYJŚCIE" in wyjscie
+
+
+def test_pozycja_ponizej_minimum_jest_NIE_DO_ZAMKNIECIA():
+    """Najgorszy skutek wypełnienia częściowego: zlecenie na 100 weszło w 3,
+    a reszty nie da się sprzedać. Nie boli, dopóki rynek nie spadnie."""
+    assert czy_zamykalna(D("1"), D("50000"), PELNE) is True
+    assert czy_zamykalna(D("0.00001"), D("50000"), PELNE) is False
+
+
+def test_krok_zerowy_nie_przechodzi_po_cichu():
+    """Zero jako krok przeszłoby każde sprawdzenie i wywróciło się dopiero
+    przy dzieleniu — daleko od miejsca, w którym powstało."""
+    with pytest.raises(ValueError):
+        do_kroku_w_dol(D("1"), D("0"))
+
+
+# ------------------------------------------------- uzupelnianie regul z gieldy
+
+def test_instrument_nieznany_gieldzie_to_BRAK_a_nie_zerowe_reguly():
+    """Zero jako krok przeszłoby każde sprawdzenie i wywróciło się dopiero przy
+    dzieleniu — daleko od miejsca, w którym powstało."""
+    from services.ingest.instrumenty import rozbieznosci
+
+    baza = [{"id": 7, "symbol": "NIEISTNIEJE", "lot_size": None, "tick_size": None,
+             "min_notional": None, "tradeable": True, "min_ilosc_meta": None}]
+    (z,) = rozbieznosci(baza, {})
+    assert z["brak_u_gieldy"] is True
+    assert "zmiany" not in z
+
+
+def test_niekompletne_liczy_TYLKO_dopuszczone_do_handlu():
+    """Instrument wyłączony z handlu bez reguł nikomu nie szkodzi; blokowanie
+    egzekucji z jego powodu zablokowałoby ją na zawsze."""
+    from services.ingest.instrumenty import niekompletne
+
+    baza = [
+        {"symbol": "GOTOWY", "lot_size": D("1"), "tick_size": D("1"),
+         "min_notional": D("5"), "tradeable": True},
+        {"symbol": "NIEPELNY", "lot_size": None, "tick_size": D("1"),
+         "min_notional": D("5"), "tradeable": True},
+        {"symbol": "WYLACZONY", "lot_size": None, "tick_size": None,
+         "min_notional": None, "tradeable": False},
+    ]
+    assert niekompletne(baza) == ["NIEPELNY"]
+
+
+def test_rozbieznosci_nie_nadpisuja_regul_wartoscia_pusta():
+    """Giełda potrafi nie podać pola. Wpisanie None na istniejącą regułę
+    skasowałoby wiedzę, którą już mamy."""
+    from services.ingest.instrumenty import rozbieznosci
+
+    baza = [{"id": 1, "symbol": "SOLUSDC", "lot_size": D("0.01"),
+             "tick_size": D("0.001"), "min_notional": D("1"),
+             "tradeable": True, "min_ilosc_meta": "0.01"}]
+    g = {"SOLUSDC": {"krok_ilosci": None, "krok_ceny": None, "min_wartosc": None,
+                     "min_ilosc": D("0.01"), "status": "Trading"}}
+    assert rozbieznosci(baza, g) == []

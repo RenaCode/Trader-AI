@@ -210,6 +210,14 @@ async def uzgodnij(fetch_all, notify, adapter, engine: str = "crypto",
     salda = {k: v for k, v in salda.items() if k in interesujace}
 
     r = rozjazdy(nasze, salda)
+    if not r and not nasze and not salda:
+        # PUSTO PO OBU STRONACH TO NIE JEST UZGODNIENIE. Zgadzaja sie dwa puste
+        # zbiory, czyli nie porownano niczego. Komunikat "zgodne" powiedzialby
+        # o tym stanie dokladnie tyle samo, co o stanie faktycznie sprawdzonym -
+        # a to na jego podstawie decydujemy o dopuszczeniu trybu do handlu.
+        print(f"uzgodnienie {engine}/{mode}: brak otwartych pozycji po obu "
+              f"stronach — ścieżka działa, ale NIC NIE ZOSTAŁO PORÓWNANE")
+        return 0
     if not r:
         if zrodlo == "salda":
             print(f"uzgodnienie {engine}/{mode}: zgodne z saldami giełdy "

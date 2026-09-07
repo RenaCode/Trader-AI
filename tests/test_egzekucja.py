@@ -431,3 +431,25 @@ def test_urwana_paginacja_KONCZY_SIE_BLEDEM_a_nie_krotsza_lista():
     with pytest.raises(ExchangeError) as exc:
         asyncio.run(a.wypelnienia())
     assert "niepelna" in str(exc.value)
+
+
+def test_pusto_po_obu_stronach_NIE_jest_nazywane_zgodnoscia(capsys):
+    """Zgadzają się dwa puste zbiory — czyli nie porównano niczego.
+
+    Na tym właśnie komunikacie opiera się decyzja o dopuszczeniu trybu do
+    handlu. „Zgodne" przy zerze pozycji brzmi tak samo mocno jak „zgodne" po
+    realnym porównaniu, a znaczy nieporównanie mniej.
+    """
+    import asyncio
+
+    from services.engine.uzgodnienie import uzgodnij
+
+    class PusteSalda:
+        async def fetch_balances(self):
+            return []
+
+    n = asyncio.run(uzgodnij(_fetch_all_stub([]), _notify_zabroniony, PusteSalda()))
+    assert n == 0
+    out = capsys.readouterr().out
+    assert "NIC NIE ZOSTAŁO PORÓWNANE" in out
+    assert "zgodne" not in out.lower()
