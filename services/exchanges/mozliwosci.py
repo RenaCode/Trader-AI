@@ -140,6 +140,30 @@ async def main() -> int:
                 print(f"  JEST     {nazwa:18s} {w['sciezka']}")
             else:
                 print(f"  BRAK     {nazwa:18s} {w['sciezka']} — kod {w['kod']}")
+        # STAWKI TEZ SA MOZLIWOSCIA HOSTA, i to najdrozsza w skutkach.
+        if wynik.get("prowizje", {}).get("jest"):
+            from services.engine.koszty import koszty
+            cur = await fetch_one(
+                "SELECT symbol FROM ref.instrument WHERE active AND tradeable"
+                "   AND engine::text = 'crypto' ORDER BY symbol LIMIT 1")
+            if cur:
+                adapter2 = BybitAdapter(
+                    api_key=box.decrypt(bytes(cred["key_enc"])),
+                    api_secret=box.decrypt(bytes(cred["secret_enc"])),
+                    mode=args.mode, host=host)
+                try:
+                    zmierzone = await stawki_gieldy(adapter2, cur["symbol"])
+                finally:
+                    await adapter2.close()
+                rozjazdy_stawek = rozjazd_stawek(zmierzone, koszty("spot_eu"))
+                if zmierzone:
+                    print(f"\nstawki dla {cur['symbol']}: maker "
+                          f"{zmierzone['maker']:.4%}, taker {zmierzone['taker']:.4%}")
+                for r in rozjazdy_stawek:
+                    print(f"  ROZJAZD STAWEK {r}")
+                if rozjazdy_stawek:
+                    return 1
+
         mozna, powody = ocena(wynik)
         print("\nhandel na tym hoscie:", "dopuszczalny" if mozna else "NIEDOPUSZCZALNY")
         for p in powody:
@@ -151,3 +175,61 @@ async def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(asyncio.run(main()))
+
+async def stawki_gieldy(adapter, symbol: str, kategoria: str = "spot") -> dict:
+    """Prowizje, ktore gielda NAPRAWDE nalicza dla tego konta.
+
+    Zwraca {"maker": Decimal, "taker": Decimal} albo pusty slownik, gdy host
+    tego nie wystawia.
+    """
+    from decimal import Decimal
+
+    res = await adapter._get("/v5/account/fee-rate",
+                            {"category": kategoria, "symbol": symbol})
+    lista = res.get("list") or []
+    if not lista:
+        return {}
+    r = lista[0]
+    return {"maker": Decimal(r.get("makerFeeRate") or "0"),
+            "taker": Decimal(r.get("takerFeeRate") or "0")}
+
+
+def rozjazd_stawek(zmierzone: dict, modelowane, prog=None) -> list[str]:
+    """Czy cennik w kodzie zgadza sie z tym, co nalicza gielda. CZYSTA FUNKCJA.
+
+    DLACZEGO TO MA ZNACZENIE WIEKSZE, NIZ WYGLADA
+
+    Runda kosztuje 0,200%, a zmierzona mediana zwrotu na transakcje jest rzedu
+    dziesiatych procenta. Cala przewaga strategii miesci sie wiec w kilku
+    punktach bazowych - a stawki nie sa stale: zmienia je progi VIP, promocje
+    i zmiany regulaminu podmiotu.
+
+    ROZJAZD NIE OBJAWIA SIE NICZYM. Rachunek papierowy dalej liczy po starej
+    stawce, backtest dalej pokazuje przewage, a prawdziwy wynik po prostu jest
+    inny - i wyglada jak pech albo jak zmiana rynku. To jedna z niewielu
+    pomylek, ktore falszuja WSZYSTKIE liczby naraz, wlacznie z tymi, ktorymi
+    sprawdzalibysmy pomylke.
+
+    Prog domyslny to jeden punkt bazowy: mniejsza roznica nie zmienia wnioskow,
+    a wieksza zmienia je natychmiast.
+    """
+    from decimal import Decimal
+
+    if prog is None:
+        prog = Decimal("0.0001")
+    if not zmierzone:
+        # BRAK ODCZYTU TO NIE ZGODNOSC. Milczace zero powiedzialoby "sprawdzone
+        # i w porzadku" o czyms, czego nie sprawdzono.
+        return ["host nie wystawia stawek — cennik w kodzie pozostaje "
+                "NIESPRAWDZONY, a to on wyznacza cały modelowany wynik"]
+    out = []
+    for nazwa, w_kodzie in (("maker", modelowane.maker), ("taker", modelowane.taker)):
+        z_gieldy = zmierzone[nazwa]
+        roznica = abs(z_gieldy - Decimal(str(w_kodzie)))
+        if roznica > prog:
+            out.append(
+                f"{nazwa}: giełda nalicza {z_gieldy:.4%}, kod zakłada "
+                f"{Decimal(str(w_kodzie)):.4%} (różnica {roznica:.4%}) — "
+                f"rachunek papierowy i backtest liczą po nieprawdziwej stawce")
+    return out
+

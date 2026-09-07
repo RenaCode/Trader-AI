@@ -453,3 +453,50 @@ def test_pusto_po_obu_stronach_NIE_jest_nazywane_zgodnoscia(capsys):
     out = capsys.readouterr().out
     assert "NIC NIE ZOSTAŁO PORÓWNANE" in out
     assert "zgodne" not in out.lower()
+
+
+# --------------------------------------------- cennik: kod kontra giełda
+
+def test_rozjazd_stawek_lapie_zmiane_cennika_gieldy():
+    """Cała przewaga strategii mieści się w kilku punktach bazowych, a stawki
+    nie są stałe: zmieniają je progi VIP, promocje i regulamin podmiotu.
+
+    ROZJAZD NIE OBJAWIA SIĘ NICZYM. Rachunek papierowy dalej liczy po starej
+    stawce, backtest dalej pokazuje przewagę, a prawdziwy wynik po prostu jest
+    inny — i wygląda jak pech albo zmiana rynku.
+    """
+    from services.engine.koszty import koszty
+    from services.exchanges.mozliwosci import rozjazd_stawek
+
+    k = koszty("spot_eu")
+    # Zmierzone na produkcji 2026-09-07: maker 0.0010, taker 0.0025.
+    assert rozjazd_stawek({"maker": Decimal("0.001"),
+                           "taker": Decimal("0.0025")}, k) == []
+
+    (opis,) = rozjazd_stawek({"maker": Decimal("0.002"),
+                              "taker": Decimal("0.0025")}, k)
+    assert "maker" in opis
+    assert "0.2000%" in opis and "0.1000%" in opis   # obie liczby, nie sama roznica
+
+
+def test_brak_odczytu_stawek_to_NIE_jest_zgodnosc():
+    """Milczące zero powiedziałoby „sprawdzone i w porządku" o czymś, czego
+    sprawdzić się nie da — a cennik wyznacza cały modelowany wynik."""
+    from services.engine.koszty import koszty
+    from services.exchanges.mozliwosci import rozjazd_stawek
+
+    (opis,) = rozjazd_stawek({}, koszty("spot_eu"))
+    assert "NIESPRAWDZONY" in opis
+
+
+def test_prog_rozjazdu_ignoruje_zaokraglenia_ale_nie_zmiane_stawki():
+    """Poniżej punktu bazowego różnica nie zmienia wniosków; powyżej zmienia
+    je natychmiast, bo mediana zwrotu na transakcję jest tego samego rzędu."""
+    from services.engine.koszty import koszty
+    from services.exchanges.mozliwosci import rozjazd_stawek
+
+    k = koszty("spot_eu")
+    ledwie = {"maker": Decimal("0.00105"), "taker": Decimal("0.0025")}
+    wyraznie = {"maker": Decimal("0.0013"), "taker": Decimal("0.0025")}
+    assert rozjazd_stawek(ledwie, k) == []
+    assert len(rozjazd_stawek(wyraznie, k)) == 1
