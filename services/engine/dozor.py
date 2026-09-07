@@ -128,10 +128,25 @@ async def sprawdz_zywotnosc(fetch_all, notify, sucho: bool = False,
     # silnika na produkcji - czyli sciezka, ktora ma zadzialac raz na rok
     # w najgorszym momencie, nie bylaby przetestowana nigdy.
     prog = MARTWY_PO_MIN if prog_min is None else prog_min
+    # DWA ZRODLA PULSU, bo nadzorca tez moze umrzec.
+    #
+    # Dozorca ryzyka (services/engine/dozorca.py) ocenia limity konta niezaleznie
+    # od silnika - po to, zeby kill-switch dzialal takze wtedy, gdy silnik zyje
+    # i nic nie robi. Ale nadzorca, ktorego nikt nie nadzoruje, jest tylko
+    # przesunieciem tego samego problemu o jeden poziom: martwy dozorca wyglada
+    # dokladnie jak dozorca, ktory nie ma co zglaszac.
+    #
+    # Status `running` na sztywno: dozorca nie ma stanu posredniego. Albo bije,
+    # albo go nie ma.
     silniki = await fetch_all(
         "SELECT engine::text AS engine, mode::text AS mode, status, last_beat_at,"
         " round(extract(epoch from (now() - last_beat_at))/60) AS wiek_min"
-        " FROM risk.engine_heartbeat ORDER BY engine")
+        " FROM risk.engine_heartbeat"
+        " UNION ALL"
+        " SELECT nazwa AS engine, 'nadzor' AS mode, 'running' AS status, last_beat_at,"
+        " round(extract(epoch from (now() - last_beat_at))/60) AS wiek_min"
+        " FROM risk.dozorca_heartbeat"
+        " ORDER BY engine")
     if not silniki:
         print("brak wpisow o zywotnosci silnikow")
         return 0

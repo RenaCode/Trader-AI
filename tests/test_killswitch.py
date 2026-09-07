@@ -157,70 +157,144 @@ def test_nowy_limit_ma_nazwe_w_interfejsie():
 
 
 # ------------------------------------------------------------ próba pożarowa
+#
+# Skrypt .sh na VPS-ie zastąpiony modułem w obrazie (2026-09-07). Plik na dysku
+# rozjeżdża się z kodem, który testuje: obraz idzie przez wdrożenie, plik nie
+# idzie nigdzie. Do tego próba uruchamiana ręcznie zostanie uruchomiona raz.
 
-def test_proba_pozarowa_przywraca_prog_w_pulapce_a_nie_na_koncu():
-    """Skrypt próby podnosi próg kapitału powyżej bieżącego stanu, żeby wywołać
+def test_proba_przywraca_prog_w_FINALLY_a_nie_na_koncu_bloku():
+    """Próba podnosi próg kapitału powyżej bieżącego stanu, żeby wywołać
     prawdziwe zadziałanie. Zostawiony podniesiony próg zatrzymałby silnik
-    NA STAŁE - czyli spowodowałby dokładnie tę awarię, przed którą kill-switch
+    NA STAŁE — czyli spowodowałby dokładnie tę awarię, przed którą kill-switch
     ma chronić.
 
-    Przywracanie musi więc iść przez `trap EXIT`, a nie przez ostatnią linię:
-    inaczej przerwanie skryptu albo błąd w połowie zostawia produkcję
-    zatrzymaną.
+    Przywracanie musi więc iść przez `finally`: przerwanie, wyjątek i sukces
+    prowadzą wtedy do tej samej ścieżki wyjścia.
     """
-    zrodlo = Path("scripts/proba-killswitcha.sh").read_text(encoding="utf-8")
-    assert "trap przywroc EXIT" in zrodlo, "przywracanie progu poza pułapką EXIT"
-    # Pułapka musi być ustawiona PRZED podniesieniem progu.
-    assert zrodlo.index("trap przywroc EXIT") < zrodlo.index("podnoszę próg"), (
-        "pułapka ustawiona po zmianie progu — przerwanie w tym oknie zostawia "
+    zrodlo = Path("services/engine/proba_killswitcha.py").read_text(encoding="utf-8")
+    assert "finally:" in zrodlo
+    assert zrodlo.index("try:") < zrodlo.index("podnoszę"), (
+        "podniesienie progu poza blokiem try — wyjątek w tym oknie zostawia "
         "silnik zatrzymany")
 
 
-def test_proba_pozarowa_odmawia_przy_juz_aktywnym_killswitchu():
-    """Gdyby próba ruszyła przy zastanym zdarzeniu, nie odróżniłaby swojego od
-    cudzego i zwolniłaby cudze z notatką 'PRÓBA POŻAROWA'."""
-    zrodlo = Path("scripts/proba-killswitcha.sh").read_text(encoding="utf-8")
-    assert "kill-switch jest już aktywny" in zrodlo
+def test_proba_odmawia_przy_juz_aktywnym_killswitchu():
+    """Gdyby ruszyła przy zastanym zdarzeniu, nie odróżniłaby swojego od cudzego
+    i zwolniłaby cudze z notatką o próbie."""
+    zrodlo = Path("services/engine/proba_killswitcha.py").read_text(encoding="utf-8")
+    assert "jest już aktywny" in zrodlo
 
 
-def test_proba_pozarowa_traktuje_brak_powiadomienia_jako_NIEZALICZONE():
+def test_proba_traktuje_brak_powiadomienia_jako_NIEZALICZONA():
     """Cichy kill-switch jest gorszy niż jego brak, bo daje złudzenie kontroli.
-    Próba, która kończy się sukcesem mimo braku powiadomienia, sprawdzałaby
-    połowę mechanizmu i raportowała całość."""
-    zrodlo = Path("scripts/proba-killswitcha.sh").read_text(encoding="utf-8")
+    Próba kończąca się sukcesem mimo braku powiadomienia sprawdzałaby połowę
+    mechanizmu i raportowała całość."""
+    zrodlo = Path("services/engine/proba_killswitcha.py").read_text(encoding="utf-8")
     assert "nikt się o tym nie dowiedział" in zrodlo
-    assert zrodlo.count("NIEZALICZONE") >= 2, (
-        "brak zadziałania i brak powiadomienia to dwa osobne niepowodzenia")
+    assert zrodlo.count("raise Niezaliczona") >= 4, (
+        "każde ogniwo ma mieć własne niepowodzenie, nie jedno zbiorcze")
 
 
-def test_proba_pozarowa_nie_zjada_wlasnego_zrodla():
-    """Skrypt uruchamia się przez `ssh host 'bash -s' < skrypt`, czyli bash
-    czyta GO SAMEGO ze standardowego wejścia. Każde polecenie w środku, które
-    też czyta stdin — a `kubectl exec -i` czyta — zjada resztę skryptu.
+def test_proba_uzywa_limitu_o_regule_RECZNEJ():
+    """Próba mierzy czas od zadziałania do powiadomienia. Gdyby użyła limitu
+    wznawianego automatycznie, dozorca zwolniłby zdarzenie w połowie pomiaru
+    i próba mierzyłaby własny wyścig."""
+    from services.engine.proba_killswitcha import LIMIT_PROBY
 
-    Objaw: próba kończy się w losowym miejscu, bez błędu i z kodem 0, czyli
-    WYGLĄDA NA ZALICZONĄ. Dla skryptu, którego jedynym zadaniem jest orzec,
-    czy poduszka bezpieczeństwa działa, to najgorszy możliwy tryb awarii.
-    """
-    # WYLACZNIE kod, bez komentarzy. Pierwsza wersja tego testu padala na
-    # wlasnym komentarzu, w ktorym cytowane jest `kubectl exec -i` - ten sam
-    # ksztalt bledu co test szukajacy ciagu "409" obok komentarza z ta liczba.
-    kod = [l for l in Path("scripts/proba-killswitcha.sh")
-           .read_text(encoding="utf-8").splitlines()
-           if l.strip() and not l.strip().startswith("#")]
+    assert LIMIT_PROBY == "min_equity"
+    migracja = Path("db/migrations/0029_wznowienie_killswitcha.sql").read_text(encoding="utf-8")
+    assert "wznowienie = 'reczne'" in migracja and "min_equity" in migracja
 
-    assert not any("kubectl exec -i" in l for l in kod), (
-        "kubectl exec -i podłącza stdin i zje resztę skryptu")
 
-    # Wywolanie kubectl albo samo odcina stdin, albo jest kontynuowane w linii
-    # nastepnej - wtedy odciecie stoi na koncu polecenia.
-    for i, linia in enumerate(kod):
-        if "kubectl" not in linia:
-            continue
-        pelne = linia
-        j = i
-        while pelne.rstrip().endswith("\\") and j + 1 < len(kod):
-            j += 1
-            pelne += kod[j]
-        assert "< /dev/null" in pelne, (
-            f"wywołanie kubectl bez odciętego stdin: {linia.strip()}")
+def test_proba_na_koncie_innym_niz_demo_wymaga_zgody():
+    zrodlo = Path("services/engine/proba_killswitcha.py").read_text(encoding="utf-8")
+    assert "PROBA_NA_LIVE" in zrodlo
+
+
+# ============================================================ dozorca i wznowienie
+
+def test_kazdy_limit_krytyczny_niesie_SWOJA_NAZWE():
+    """Reguła wznowienia musi wiedzieć, KTÓRY limit zadziałał. Powód jest
+    zdaniem po polsku i zmienia się razem z liczbami — wyciąganie z niego nazwy
+    działałoby do pierwszej zmiany sformułowania."""
+    assert evaluate_account(konto(97_000, 100_000, day_ago=100_000),
+                            DEFAULT_LIMITS).trigger_limit == "max_daily_loss"
+    assert evaluate_account(konto(94_000, 96_000),
+                            DEFAULT_LIMITS).trigger_limit == "min_equity"
+    bez_progu = {k: v for k, v in DEFAULT_LIMITS.items() if k != "min_equity"}
+    assert evaluate_account(konto(85_000, 100_000),
+                            bez_progu).trigger_limit == "max_drawdown"
+
+
+@pytest.mark.parametrize("limit,limit_pct,stan,oczekiwane", [
+    # Histereza: wznowienie przy POŁOWIE limitu, nie na jego granicy.
+    ("max_drawdown", 10.0, {"equity": 96_000, "peak": 100_000, "day_ago": 96_000}, True),
+    ("max_drawdown", 10.0, {"equity": 94_000, "peak": 100_000, "day_ago": 94_000}, False),
+    ("max_daily_loss", 2.0, {"equity": 99_500, "peak": 100_000, "day_ago": 100_000}, True),
+    ("max_daily_loss", 2.0, {"equity": 98_800, "peak": 100_000, "day_ago": 100_000}, False),
+])
+def test_histereza_wznawia_ciasniej_niz_zatrzymuje(limit, limit_pct, stan, oczekiwane):
+    """Bez histerezy system oscylowałby wokół granicy: wznowienie przy tym samym
+    progu, przy którym zatrzymuje, znaczy zatrzymanie i wznowienie przy każdym
+    drgnięciu kapitału."""
+    from services.engine.wznowienie import warunek_ustal
+
+    ustal, dowod = warunek_ustal(limit, limit_pct, stan)
+    assert ustal is oczekiwane, f"{limit}: {dowod}"
+
+
+def test_nieznany_limit_NIE_jest_wznawiany():
+    """Domysł zachowawczy. Nowy limit krytyczny, o którym reguła nie wie, ma
+    zatrzymać system do czasu, aż ktoś świadomie dopisze jego regułę — a nie
+    wrócić do handlu dlatego, że nie było warunku, który by go zatrzymał."""
+    from services.engine.wznowienie import warunek_ustal
+
+    ustal, dowod = warunek_ustal("cos_nowego", 10.0,
+                                 {"equity": 100_000, "peak": 100_000, "day_ago": 100_000})
+    assert ustal is False and "brak reguły" in dowod
+
+
+def test_prog_kapitalu_ma_regule_RECZNA_i_to_jest_decyzja():
+    """Przekroczenie progu kapitału znaczy, że system złamał jedyną obietnicę,
+    która była warunkiem wpłaty (docs/05). Wznowienie tego automatem czyniłoby
+    próg ozdobą."""
+    migracja = Path("db/migrations/0029_wznowienie_killswitcha.sql").read_text(encoding="utf-8")
+    assert "po_ustaniu" in migracja and "max_daily_loss" in migracja
+    assert "po_odbudowie" in migracja and "max_drawdown" in migracja
+    linie = [l for l in migracja.splitlines() if "min_equity" in l and "UPDATE" not in l]
+    assert any("reczne" in l for l in migracja.splitlines()), "brak reguły ręcznej"
+
+
+def test_licznik_wznowien_idzie_PRZED_warunkiem():
+    """Gdyby licznik szedł po warunku, system przy trwającym problemie wznawiałby
+    i zatrzymywał się w kółko, a licznik tylko opisywałby tę pętlę zamiast ją
+    przerwać."""
+    zrodlo = Path("services/engine/wznowienie.py").read_text(encoding="utf-8")
+    assert zrodlo.index("max_wznowien") < zrodlo.index("ustal, dowod = warunek_ustal")
+
+
+def test_dozorca_nie_ginie_od_pojedynczego_bledu():
+    """Dozorca jest ostatnią linią. Wyjątek w jednym cyklu nie może zabić pętli —
+    ale nie może też zostać przemilczany: gdy błąd jest trwały, heartbeat
+    przestaje się odświeżać i czujka żywotności zgłasza martwego dozorcę."""
+    zrodlo = Path("services/engine/dozorca.py").read_text(encoding="utf-8")
+    assert "except Exception" in zrodlo and "conn.rollback()" in zrodlo
+    assert "bij_heartbeat" in zrodlo
+
+
+def test_czujka_zywotnosci_pilnuje_TAKZE_dozorcy():
+    """Nadzorca, którego nikt nie nadzoruje, jest tylko przesunięciem problemu
+    o jeden poziom: martwy dozorca wygląda dokładnie jak dozorca, który nie ma
+    co zgłaszać."""
+    zrodlo = Path("services/engine/dozor.py").read_text(encoding="utf-8")
+    assert "risk.dozorca_heartbeat" in zrodlo, (
+        "czujka żywotności nie sprawdza pulsu dozorcy")
+
+
+def test_dozorca_uzywa_TEGO_SAMEGO_risk_kernela_co_silnik():
+    """Druga implementacja reguł 'na potrzeby dozorcy' byłaby gwarancją rozjazdu
+    przy pierwszej zmianie limitu — ten sam błąd, przed którym broni wspólny
+    risk_rules między produkcją a symulacją."""
+    zrodlo = Path("services/engine/dozorca.py").read_text(encoding="utf-8")
+    assert "from services.engine.risk import RiskKernel" in zrodlo
+    assert "check_account()" in zrodlo

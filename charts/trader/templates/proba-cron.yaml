@@ -1,0 +1,63 @@
+{{- if .Values.probaCron.enabled }}
+# PROBA POZAROWA KILL-SWITCHA.
+#
+# Kill-switch jest jedynym mechanizmem w tym systemie, ktorego awaria nie
+# objawia sie niczym: silnik po jego zadzialaniu wyglada tak samo jak silnik bez
+# sygnalu do wejscia. Testy jednostkowe sprawdzaja regule; nie sprawdzaja, czy
+# silnik ja wola, czy wiersz dociera do bazy i czy powiadomienie wychodzi.
+#
+# Zadanie doprowadza do PRAWDZIWEGO zadzialania - podnosi prog kapitalu powyzej
+# biezacego stanu i czeka, az silnik sam wykryje przekroczenie. Prog wraca
+# w bloku `finally`, wiec takze po bledzie i po przerwaniu.
+#
+# DLACZEGO NIE PLIK .sh NA SERWERZE: skrypt na dysku rozjezdza sie z kodem,
+# ktory testuje - obraz idzie przez wdrozenie, plik nie idzie nigdzie. Ten modul
+# jedzie w tym samym obrazie co silnik, wiec sprawdza dokladnie ten kod, ktory
+# handluje.
+#
+# CZESTOTLIWOSC: raz w tygodniu. Proba wstrzymuje wejscia na kilkanascie minut,
+# wiec czesciej byloby kosztem bez tresci - a rzadziej znaczyloby, ze o awarii
+# zabezpieczenia dowiadujemy sie po miesiacu.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: trader-proba-killswitcha
+  labels: {{- include "trader.labels" . | nindent 4 }}
+spec:
+  schedule: {{ .Values.probaCron.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  startingDeadlineSeconds: 600
+  jobTemplate:
+    spec:
+      # Bez ponawiania. Powtorzenie proby po niepowodzeniu podnioslo by prog
+      # jeszcze raz, a przy trwajacej awarii lancucha zatrzymywaloby silnik
+      # w kolko - czyli samo stalo by sie ta awaria, ktorej szuka.
+      backoffLimit: 0
+      # Twardy limit czasu: proba czeka na cykl silnika i na dozor, razem okolo
+      # 18 minut. Zadanie wiszace dluzej znaczy, ze cos jest nie tak z nim samym.
+      activeDeadlineSeconds: 1500
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: proba
+              image: "{{ .Values.api.image.repository }}:{{ .Values.api.image.tag }}"
+              imagePullPolicy: {{ .Values.api.image.pullPolicy }}
+              command: ["python", "services/engine/proba_killswitcha.py"]
+              env:
+                - name: APP_DB_PASSWORD
+                  valueFrom:
+                    secretKeyRef: { name: {{ .Values.secretName }}, key: APP_DB_PASSWORD }
+                - name: DATABASE_URL
+                  value: "postgresql://{{ .Values.db.appUsername }}:$(APP_DB_PASSWORD)@trader-db:5432/{{ .Values.db.database }}"
+                - name: SECRETS_KEY
+                  valueFrom:
+                    secretKeyRef: { name: {{ .Values.secretName }}, key: SECRETS_KEY }
+                - name: PYTHONUNBUFFERED
+                  value: "1"
+              resources:
+                limits:   { cpu: 200m, memory: 256Mi }
+                requests: { cpu: 20m,  memory: 64Mi }
+{{- end }}

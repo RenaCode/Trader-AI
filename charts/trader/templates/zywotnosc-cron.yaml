@@ -31,10 +31,15 @@ spec:
             - name: zywotnosc
               image: "{{ .Values.api.image.repository }}:{{ .Values.api.image.tag }}"
               imagePullPolicy: {{ .Values.api.image.pullPolicy }}
-              # Dwie czujki w jednym zadaniu: zywotnosc silnikow i kill-switch.
-              # Obie odpowiadaja na to samo pytanie - czy system jest w stanie,
-              # o ktorym czlowiek MUSI wiedziec - i obie musza dzialac w procesie
-              # innym niz obserwowany.
+              # Czujki odpowiadaja na pytanie, czy system jest w stanie,
+              # o ktorym czlowiek MUSI wiedziec, i musza dzialac w procesie innym
+              # niz obserwowany.
+              #
+              # WZNOWIENIE TU NIE NALEZY. Siedzi w dozorcy (osobny pod, petla
+              # co 60 s), bo jest czescia nadzoru ciaglego, a nie okresowego
+              # sprawdzenia. To zadanie ma pilnowac takze SAMEGO DOZORCY -
+              # nadzorca, ktorego nikt nie nadzoruje, jest tylko przesunieciem
+              # problemu o jeden poziom.
               command:
                 - sh
                 - -c

@@ -149,6 +149,26 @@ workers:
       limits:   { cpu: 2000m, memory: 2Gi }
       requests: { cpu: 100m,  memory: 256Mi }
 
+  # DOZORCA RYZYKA - nadzorca, ktory nie dzieli losu z nadzorowanym.
+  #
+  # Ocena limitow konta byla wolana WYLACZNIE w petli silnika, wiec gdy silnik
+  # przestawal dzialac, przestawala tez dzialac ocena ryzyka. Nie chodzi
+  # o awarie, po ktorej proces ginie - chodzi o proces, ktory ZYJE I NIC NIE
+  # ROBI: zawieszony na zapytaniu, w petli po wyjatku. Pozycje zostaja otwarte,
+  # kapital moze obsuwac sie dalej, a obsuniecia nikt nie liczy.
+  #
+  # Osobny pod, petla co 60 s. CronJob dalby najmniej 10 minut, a limit straty
+  # dziennej 2% oceniany co 10 minut ma dziesieciominutowe okno slepoty.
+  #
+  # replicas i strategia: patrz templates/workers.yaml - dwie repliki oceniałyby
+  # ten sam stan i moglyby zwolnic to samo zdarzenie dwukrotnie.
+  dozorca:
+    enabled: true
+    command: ["python", "services/engine/dozorca.py", "--engine", "crypto", "--mode", "demo"]
+    resources:
+      limits:   { cpu: 200m, memory: 256Mi }
+      requests: { cpu: 20m,  memory: 64Mi }
+
   # Skaner wiadomosci. Bez klucza Anthropic konczy sie natychmiast z komunikatem -
   # dlatego wlaczony dopiero wtedy, gdy klucz jest w bazie.
   news:
@@ -187,6 +207,13 @@ backup:
 zywotnoscCron:
   enabled: true
   schedule: "*/10 * * * *"
+
+# Proba pozarowa kill-switcha. Doprowadza do PRAWDZIWEGO zadzialania i sprawdza
+# caly lancuch: zadanie -> wiersz w bazie -> wstrzymanie wejsc -> powiadomienie.
+# Raz w tygodniu, bo wstrzymuje wejscia na kilkanascie minut.
+probaCron:
+  enabled: true
+  schedule: "20 5 * * 0"        # niedziela 05:20 UTC, po treningu i kopii
 
 # Trener walk-forward. Zadanie cykliczne, nie proces w Deploymencie - dlugie
 # obliczenia nie moga ginac przy wdrozeniach.

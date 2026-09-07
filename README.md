@@ -16,6 +16,7 @@ z osobnymi modelami, osobnym ryzykiem i osobnymi zakładkami w UI.
 | [`docs/00-research.md`](docs/00-research.md) | Wybór giełd, architektura, warstwa uczenia, ryzyko, plan wdrożenia |
 | [`docs/01-data-architecture.md`](docs/01-data-architecture.md) | Wybór bazy, bitemporalność, feature store, rejestr modeli, retencja |
 | [`docs/05-ochrona-kapitalu.md`](docs/05-ochrona-kapitalu.md) | **Czy rachunek może wyjść na minus** — go/no-go przed wpłatą realnych środków |
+| [`docs/06-architektura-bezpiecznika.md`](docs/06-architektura-bezpiecznika.md) | **Kto pilnuje pilnującego** — dlaczego dozorca ryzyka jest osobnym podem |
 
 ## Stan projektu
 
@@ -185,6 +186,7 @@ kasuje wszystko, co wygenerował, zostawiając realne dane rynkowe.
 | `engine` | pętla decyzyjna: reżim → sygnały → risk kernel → dziennik | cechy |
 | `trainer` | walk-forward, raz na dobę, po nim **dozór** | cechy |
 | `news` | RSS → zapis; z kluczem także filtr → analiza, co 5 min | klucz dostawcy |
+| `dozorca` | **ocena limitów konta NIEZALEŻNIE od silnika**, wyzwolenie i wznowienie kill-switcha, co 60 s | — |
 
 ## Niezmiennik danych rynkowych
 

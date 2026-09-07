@@ -45,8 +45,17 @@ class RiskVerdict:
     qty: Decimal | None = None        # wielkosc po ewentualnym obcieciu
     violations: list[dict] = field(default_factory=list)
     usage: list[dict] = field(default_factory=list)
-    # Nazwa limitu, ktory zada uruchomienia kill-switcha (albo None).
+    # Powod uruchomienia kill-switcha, gotowy do pokazania czlowiekowi.
     trigger_killswitch: str | None = None
+    # NAZWA limitu, ktory go zazadal - osobno od powodu.
+    #
+    # Powod jest zdaniem po polsku i zmienia sie razem z liczbami. Regula
+    # wznowienia musi wiedziec, KTORY limit zadzialal, bo trzy limity krytyczne
+    # znacza trzy rozne rzeczy: strata dzienna mija razem z doba, obsuniecie
+    # wymaga odbudowy kapitalu, a prog kapitalu jest granica, ktorej system nie
+    # przekracza sam. Wyciaganie tego z tekstu powodu dzialaloby do pierwszej
+    # zmiany sformulowania.
+    trigger_limit: str | None = None
 
 
 def wartosc_limitu(lim: dict, kapital: Decimal) -> Decimal:
@@ -114,7 +123,8 @@ def evaluate_account(state: RiskState, limits: dict[str, dict]) -> RiskVerdict:
                 "block", f"Strata dzienna {loss_pct:.2f}% osiągnęła limit {lim['value']}%",
                 violations=violations, usage=usage,
                 trigger_killswitch=(f"Strata dzienna {loss_pct:.2f}% przekroczyła limit "
-                                    f"{lim['value']}%") if lim["action"] == "killswitch" else None)
+                                    f"{lim['value']}%") if lim["action"] == "killswitch" else None,
+                trigger_limit="max_daily_loss" if lim["action"] == "killswitch" else None)
 
     # 3. PROG KAPITALU - twarda podloga w walucie, nie w procentach od szczytu.
     #
@@ -151,7 +161,8 @@ def evaluate_account(state: RiskState, limits: dict[str, dict]) -> RiskVerdict:
                 "block", f"Kapitał {state.equity:.2f} spadł do progu {prog:.2f}",
                 violations=violations, usage=usage,
                 trigger_killswitch=(f"Kapitał {state.equity:.2f} spadł do progu "
-                                    f"{prog:.2f}") if lim["action"] == "killswitch" else None)
+                                    f"{prog:.2f}") if lim["action"] == "killswitch" else None,
+                trigger_limit="min_equity" if lim["action"] == "killswitch" else None)
 
     # 4. Obsuniecie od szczytu.
     lim = limits.get("max_drawdown")
@@ -166,7 +177,8 @@ def evaluate_account(state: RiskState, limits: dict[str, dict]) -> RiskVerdict:
                 "block", f"Obsunięcie {dd_pct:.2f}% osiągnęło limit {lim['value']}%",
                 violations=violations, usage=usage,
                 trigger_killswitch=(f"Obsunięcie kapitału {dd_pct:.2f}% przekroczyło limit "
-                                    f"{lim['value']}%") if lim["action"] == "killswitch" else None)
+                                    f"{lim['value']}%") if lim["action"] == "killswitch" else None,
+                trigger_limit="max_drawdown" if lim["action"] == "killswitch" else None)
 
     return RiskVerdict("allow", usage=usage)
 

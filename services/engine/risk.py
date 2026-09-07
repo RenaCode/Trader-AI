@@ -106,7 +106,7 @@ class RiskKernel:
         )
         verdict = evaluate_account(state, self._limits)
         if verdict.trigger_killswitch:
-            self._trigger_killswitch(verdict.trigger_killswitch)
+            self._trigger_killswitch(verdict.trigger_killswitch, verdict.trigger_limit)
         return verdict
 
     def check(self, instrument_id: int, notional: Decimal,
@@ -129,18 +129,25 @@ class RiskKernel:
         )
         verdict = evaluate_limits(state, self._limits, instrument_id, notional, qty)
         if verdict.trigger_killswitch:
-            self._trigger_killswitch(verdict.trigger_killswitch)
+            self._trigger_killswitch(verdict.trigger_killswitch, verdict.trigger_limit)
         return verdict
 
-    def _trigger_killswitch(self, reason: str) -> None:
-        """Kill-switch wymaga RECZNEGO odblokowania.
+    def _trigger_killswitch(self, reason: str, limit_name: str | None = None) -> None:
+        """Zapis zatrzymania. Tu nie ma zadnego wygasania ani licznika.
 
-        Automatyczne wznowienie po obsunieciu to najprostsza droga do powtorzenia
-        tej samej straty - dlatego tu nie ma zadnego licznika ani wygasania.
+        Kill-switch nie zwalnia sie w tym miejscu i nie zwalnia sie sam z uplywu
+        czasu. Robi to osobna usluga (services/engine/wznowienie.py) i WYLACZNIE
+        na dowodzie, ze warunek ustal - z histereza, karencja i licznikiem
+        wznowien. Limity z regula `reczne` nie sa przez nia ruszane wcale.
+
+        `limit_name` jest zapisywana, bo bez niej regula wznowienia musialaby
+        zgadywac z tekstu powodu, ktory jest zdaniem po polsku i zmienia sie
+        razem z liczbami.
         """
         self.conn.cursor().execute(
-            "INSERT INTO risk.killswitch_event (engine, mode, reason) VALUES (%s,%s,%s)",
-            (self.engine, self.mode, reason))
+            "INSERT INTO risk.killswitch_event (engine, mode, reason, limit_name)"
+            " VALUES (%s,%s,%s,%s)",
+            (self.engine, self.mode, reason, limit_name))
 
     def record_usage(self, usage: list[dict]) -> None:
         cur = self.conn.cursor()
