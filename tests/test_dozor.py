@@ -326,13 +326,14 @@ def test_swiezosc_prog_wyprowadzony_z_DLUGOSCI_SWIECY():
     """Stała liczba minut byłaby albo krzykliwa przy świecy 4h, albo
     bezużyteczna przy 1h.
 
-    Dwie i pół godziny to norma przy świecy czterogodzinnej (pół świecy
-    zwłoki) i awaria przy godzinnej (dwie i pół świecy).
+    Pięć godzin to norma przy świecy czterogodzinnej (niecałe dwie świece,
+    a więc jeszcze w granicach oczekiwanego opóźnienia) i awaria przy godzinnej
+    (pięć świec).
     """
     from services.engine.dozor import ocen_swiezosc
 
-    dla_4h = [{"co": "market.candle", "minut_swiecy": 240, "wiek_min": 150}]
-    dla_1h = [{"co": "market.candle", "minut_swiecy": 60, "wiek_min": 150}]
+    dla_4h = [{"co": "market.candle", "minut_swiecy": 240, "wiek_min": 300}]
+    dla_1h = [{"co": "market.candle", "minut_swiecy": 60, "wiek_min": 300}]
     assert ocen_swiezosc(dla_4h) == []
     assert len(ocen_swiezosc(dla_1h)) == 1
 
@@ -422,3 +423,23 @@ def test_nieznany_timeframe_nie_dostaje_progu_ZGADNIETEGO(monkeypatch):
         raise AssertionError("nie alarmujemy na podstawie zgadniętego progu")
 
     assert asyncio.run(dozor.sprawdz_swiezosc(fetch_all, notify, sucho=True)) == 0
+
+
+def test_prog_swiezosci_lezy_POWYZEJ_naturalnego_maksimum():
+    """`event_time` to czas OTWARCIA świecy, a zapisujemy tylko świece kompletne.
+
+    Zmierzone na produkcji: o 15:50 najnowsza świeca 1h ma znacznik 14:00, czyli
+    110 minut — bo ta z 15:00 jeszcze trwa. Próg dwóch świec (120 min) leżałby
+    dokładnie na górnej granicy normy i migałby kilka razy dziennie.
+
+    Czujka, która miga, jest tak samo bezużyteczna jak fałszywa: obie uczą
+    odbiorcę, że można je pomijać.
+    """
+    from services.engine.dozor import ocen_swiezosc
+
+    def wiek(minut):
+        return [{"co": "market.candle", "minut_swiecy": 60, "wiek_min": minut}]
+
+    assert ocen_swiezosc(wiek(110)) == []      # zmierzona norma
+    assert ocen_swiezosc(wiek(140)) == []      # norma + pelny odstep pobierania
+    assert len(ocen_swiezosc(wiek(200))) == 1  # ponad trzy swiece — potok stanal

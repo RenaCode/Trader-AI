@@ -312,10 +312,19 @@ def ocen_kopie(biezaca: dict, poprzednia: dict | None,
 
 
 # Ile swiec wolno sie spoznic, zanim uznamy dane za nieswieze. Prog wyprowadzony
-# Z DLUGOSCI SWIECY, nie z liczby dobranej na oko: dla swiecy 4h dwie swiece to
-# osiem godzin, dla 1h - dwie. Stala liczba minut bylaby albo krzykliwa przy
-# dlugiej swiecy, albo bezuzyteczna przy krotkiej.
-SWIEC_ZWLOKI = 2
+# Z DLUGOSCI SWIECY, nie z liczby dobranej na oko: stala liczba minut bylaby albo
+# krzykliwa przy dlugiej swiecy, albo bezuzyteczna przy krotkiej.
+#
+# DLACZEGO TRZY, A NIE DWIE. `event_time` to czas OTWARCIA swiecy, a zapisujemy
+# wylacznie swiece KOMPLETNE. Najnowszy wiersz ma wiec naturalnie od jednej do
+# dwoch dlugosci swiecy - o 15:50 najnowsza swieca 1h ma znacznik 14:00, bo ta
+# z 15:00 jeszcze trwa. Do tego dochodzi odstep pobierania (20 min).
+#
+# Prog dwoch swiec lezalby dokladnie na gornej granicy NORMY i migalby kilka razy
+# dziennie. Czujka, ktora miga, jest tak samo bezuzyteczna jak czujka falszywa:
+# obie ucza odbiorce, ze mozna je pomijac. Trzy swiece daja przy 1h czterdziesci
+# minut zapasu ponad zmierzone maksimum.
+SWIEC_ZWLOKI = 3
 
 # Dlugosc timeframe'u w minutach. Nieznany timeframe NIE dostaje wartosci
 # domyslnej: prog wyliczony ze zgadnietej dlugosci albo krzyczy bez powodu,
