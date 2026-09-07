@@ -55,3 +55,22 @@ def test_wolane_skrypty_node_istnieja(wf):
     brakujace = [s for s in sorted(set(wzor.findall(tresc)))
                  if not (KORZEN / s).is_file()]
     assert not brakujace, f"{wf.name} woła nieistniejące pliki: {brakujace}"
+
+
+# --- proxy /api musi działać także w podglądzie produkcyjnego bundla --------
+def test_proxy_api_dziala_takze_w_preview():
+    """Test dymny celowo używa `vite preview`, żeby sprawdzać ten bundle, który
+    pójdzie na serwer — a nie wersję deweloperską z innym kodem.
+
+    Proxy zdefiniowane wyłącznie w `server` działa tylko przy `vite dev`. Bez
+    niego w `preview` front woła /api pod portem podglądu, gdzie nic nie
+    odpowiada: logowanie kończy się niczym, a dashboard nigdy się nie renderuje.
+    """
+    cfg = (KORZEN / "web" / "vite.config.js").read_text()
+    assert re.search(r"preview:\s*\{[^}]*proxy", cfg), \
+        "vite.config.js nie ustawia proxy dla `preview` — test dymny nie dosięgnie API"
+    assert re.search(r"server:\s*\{[^}]*proxy", cfg), \
+        "vite.config.js nie ustawia proxy dla `server`"
+    # Jeden obiekt, nie dwie kopie: rozjazd byłby niewidoczny do następnej awarii CI.
+    assert len(re.findall(r"'/api':\s*\{\s*target", cfg)) == 1, \
+        "proxy zdefiniowane dwa razy — kopie się rozjadą"
