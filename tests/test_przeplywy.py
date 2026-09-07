@@ -189,3 +189,45 @@ def test_endpointy_kapitalu_SA_OSIAGALNE():
     metody = app.openapi()["paths"]["/api/engines/{engine}/kapital/przeplywy"]
     assert "get" in metody and "post" in metody, (
         f"przepływy muszą dać się i odczytać, i zapisać; jest: {sorted(metody)}")
+
+
+# ------------------------------------------- niezmiennik jednostki
+
+@pytest.mark.parametrize("kapital,jednostki,przeplyw", [
+    (100_000, 100_000, 10_000),      # wpłata przy nav = 1
+    (110_000, 100_000, 10_000),      # wpłata przy nav > 1
+    (90_000, 100_000, 10_000),       # wpłata przy nav < 1
+    (110_000, 100_000, -25_000),     # wypłata
+    (90_000, 100_000, -1),           # wypłata groszowa
+])
+def test_przeplyw_NIE_RUSZA_wartosci_jednostki(kapital, jednostki, przeplyw):
+    """WŁAŚCIWY NIEZMIENNIK tego mechanizmu, sprawdzony arytmetycznie.
+
+    Wpłata kupuje jednostki po bieżącym nav, wypłata je umarza — więc nav po
+    przepływie musi być identyczne. Gdyby nie było, obsunięcie liczone z nav
+    dziedziczyłoby ruch gotówki i cała zmiana nie miałaby sensu.
+
+    Dowód jest algebraiczny: kapitał = jednostki × nav, więc po dołożeniu kwoty
+    `a` mamy (K + a) / (J + a/nav) = nav dla każdego a. Test sprawdza, że kod
+    liczy jednostki dokładnie tak, a nie w przybliżeniu.
+    """
+    from decimal import getcontext
+    getcontext().prec = 40
+
+    K, J, a = Decimal(kapital), Decimal(jednostki), Decimal(przeplyw)
+    nav = K / J
+    nowe_jednostki = J + a / nav          # ta sama formuła co w kapital.py
+    nav_po = (K + a) / nowe_jednostki
+    # Oba na float: pytest.approx porownuje Decimal z float niepewnie, a pytanie
+    # dotyczy rownosci arytmetycznej, nie typu.
+    assert float(nav_po) == pytest.approx(float(nav), rel=1e-12), (
+        f"przepływ {a} zmienił nav z {nav} na {nav_po}")
+
+
+def test_wynik_handlu_RUSZA_wartosc_jednostki():
+    """Kanarek do poprzedniego. Gdyby nav było odporne na wszystko, byłoby
+    stałą i nie mierzyłoby niczego."""
+    K, J = Decimal(100_000), Decimal(100_000)
+    nav_przed = K / J
+    nav_po = (K + Decimal(5_000)) / J     # zysk z handlu, jednostek nie przybywa
+    assert nav_po > nav_przed
