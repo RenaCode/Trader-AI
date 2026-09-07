@@ -99,7 +99,11 @@ def missing_ranges(lo: datetime | None, hi: datetime | None, since: datetime,
 
 
 async def backfill(adapter, conn, perp_id: int, symbol: str, since: datetime) -> int:
-    cur = conn.cursor()
+    # Kursor z wlasnym ksztaltem wiersza: ponizej czytamy po nazwie kolumny,
+    # a polaczenie moze przyjsc od wywolujacego (history_worker) z dowolna
+    # fabryka. Odziedziczenie krotek zamienialoby ten odczyt w TypeError
+    # dopiero na produkcji.
+    cur = conn.cursor(row_factory=dict_row)
     cur.execute("SELECT min(event_time) AS lo, max(event_time) AS hi"
                 " FROM market.funding_rate WHERE instrument_id=%s", (perp_id,))
     row = cur.fetchone()
@@ -146,6 +150,48 @@ async def _fetch_range(adapter, conn, cur, perp_id: int, symbol: str,
     return total
 
 
+async def przebieg(conn, *, engine: str, since: datetime) -> tuple[int, int, list[str]]:
+    """Jeden pelny przebieg pobierania stawek na GOTOWYM polaczeniu.
+
+    Zwraca (stawki, liczba rynkow, opisy bledow). Bledy WRACAJA do
+    wywolujacego zamiast byc tylko wypisane: proces tla musi umiec policzyc
+    nieudane cykle pod rzad, a licznik zbudowany na tresci logu nie istnieje.
+    """
+    cur = conn.cursor(row_factory=dict_row)
+    cur.execute(
+        "SELECT i.id, i.venue_id, i.symbol, i.engine, i.base_ccy, i.quote_ccy"
+        " FROM ref.instrument i JOIN ref.venue v ON v.id=i.venue_id"
+        " WHERE i.engine=%s AND i.active AND i.kind='spot' AND v.code='bybit'"
+        " ORDER BY i.symbol", (engine,))
+    spots = cur.fetchall()
+
+    adapter = BybitAdapter(api_key="", api_secret="", mode="demo", category="linear")
+    grand = 0
+    bledy: list[str] = []
+    # Po aktywie, nie po instrumencie: BTCUSDT i BTCUSDC dziela jedno zrodlo
+    # finansowania, wiec pobieranie go dwa razy byloby ta sama praca dwukrotnie
+    # i drugim zapisem tej samej prawdy.
+    zrobione: set[str] = set()
+    try:
+        for spot in spots:
+            perp_id, rynek = ensure_perp(cur, spot)
+            conn.commit()
+            if rynek in zrobione:
+                continue
+            zrobione.add(rynek)
+            # Blad JEDNEGO rynku nie moze zatrzymac pozostalych. Poprzednia
+            # wersja przepuszczala wyjatek w gore i jeden nowy instrument
+            # kasowal caly przebieg.
+            try:
+                grand += await backfill(adapter, conn, perp_id, rynek, since)
+            except ExchangeError as e:
+                bledy.append(f"{rynek}: {e}")
+    finally:
+        await adapter.close()
+
+    return grand, len(zrobione), bledy
+
+
 async def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--days", type=int, default=1460)
@@ -160,42 +206,15 @@ async def main() -> int:
     print(f"Funding od {since:%Y-%m-%d}\n")
 
     with psycopg.connect(url, row_factory=dict_row) as conn:
-        cur = conn.cursor()
-        cur.execute(
-            "SELECT i.id, i.venue_id, i.symbol, i.engine, i.base_ccy, i.quote_ccy"
-            " FROM ref.instrument i JOIN ref.venue v ON v.id=i.venue_id"
-            " WHERE i.engine=%s AND i.active AND i.kind='spot' AND v.code='bybit'"
-            " ORDER BY i.symbol", (args.engine,))
-        spots = cur.fetchall()
+        grand, rynkow, bledy = await przebieg(conn, engine=args.engine, since=since)
 
-        adapter = BybitAdapter(api_key="", api_secret="", mode="demo", category="linear")
-        grand = 0
-        bledy: list[str] = []
-        # Po aktywie, nie po instrumencie: BTCUSDT i BTCUSDC dziela jedno zrodlo
-        # finansowania, wiec pobieranie go dwa razy byloby ta sama praca dwukrotnie
-        # i drugim zapisem tej samej prawdy.
-        zrobione: set[str] = set()
-        try:
-            for spot in spots:
-                perp_id, rynek = ensure_perp(cur, spot)
-                conn.commit()
-                if rynek in zrobione:
-                    continue
-                zrobione.add(rynek)
-                # Blad JEDNEGO rynku nie moze zatrzymac pozostalych. Poprzednia
-                # wersja przepuszczala wyjatek w gore i jeden nowy instrument
-                # kasowal caly przebieg.
-                try:
-                    grand += await backfill(adapter, conn, perp_id, rynek, since)
-                except ExchangeError as e:
-                    bledy.append(f"{rynek}: {e}")
-        finally:
-            await adapter.close()
-
-    print(f"\nRazem: {grand:,} stawek z {len(zrobione)} rynków")
+    print(f"\nRazem: {grand:,} stawek z {rynkow} rynków")
     if bledy:
         print(f"Nieudane ({len(bledy)}): " + "; ".join(bledy))
-    return 0
+    # NIEUDANY RYNEK MUSI DAC NIEZEROWY KOD WYJSCIA. Do 2026-09-07 przebieg,
+    # w ktorym kazdy rynek zawiodl, konczyl sie zerem - a wolajacy go shell
+    # i tak polykal wynik przez `|| true`. Teraz kod wyjscia cos znaczy.
+    return 1 if bledy else 0
 
 
 if __name__ == "__main__":

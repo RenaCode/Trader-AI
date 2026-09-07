@@ -21,6 +21,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import psycopg
+from psycopg.rows import tuple_row
 
 from services.exchanges.base import ExchangeError
 from services.exchanges.bybit import BybitAdapter
@@ -80,7 +81,15 @@ async def backfill_symbol(adapter, conn, instrument_id: int, symbol: str,
                           timeframe: str, since: datetime,
                           napraw: bool = False) -> int:
     step = timedelta(minutes=TF_MINUTES[timeframe])
-    cur = conn.cursor()
+    # KSZTALT WIERSZA PRZYPIETY DO KURSORA, nie odziedziczony po polaczeniu.
+    #
+    # Ponizej rozpakowujemy krotke (`have_from, have_until = ...`). Gdyby
+    # wywolujacy otworzyl polaczenie z `dict_row` - a tak robi kazdy inny modul
+    # w tym katalogu - rozpakowanie udaloby sie BEZ BLEDU, tyle ze na NAZWACH
+    # kolumn zamiast na wartosciach. Backfill zaczynalby wtedy od "daty" bedacej
+    # napisem i wywracal sie dopiero w gleboko schowanym porownaniu, albo, gorzej,
+    # milczaco pobieral zly zakres.
+    cur = conn.cursor(row_factory=tuple_row)
 
     # Nie sciagamy tego, co juz mamy - ale sprawdzamy OBA brzegi. Wznawianie
     # wylacznie od najnowszej posiadanej swiecy nie potrafi dociagnac historii
@@ -196,6 +205,46 @@ async def _fetch_range(adapter, conn, cur, instrument_id: int, symbol: str,
     return total
 
 
+async def przebieg(conn, *, engine: str, timeframe: str, since: datetime,
+                   symbol: str | None = None, napraw: bool = False) -> int:
+    """Jeden pelny przebieg backfillu na GOTOWYM polaczeniu.
+
+    Wydzielone z `main`, zeby `history_worker` mogl wolac to samo, co reczne
+    uruchomienie z terminala. Polaczenie przychodzi z zewnatrz, bo w petli
+    procesu tla musi byc otwierane NA KAZDY CYKL - trzymane na caly proces
+    padaloby po restarcie bazy przy kazdym kolejnym cyklu, w nieskonczonosc.
+    """
+    cur = conn.cursor(row_factory=tuple_row)
+    cur.execute(
+        """
+        SELECT i.id, i.symbol, v.code
+        FROM ref.instrument i JOIN ref.venue v ON v.id = i.venue_id
+        WHERE i.engine = %s AND i.active AND (%s::text IS NULL OR i.symbol = %s)
+        ORDER BY i.symbol
+        """,
+        (engine, symbol, symbol),
+    )
+    instruments = cur.fetchall()
+    if not instruments:
+        # BRAK INSTRUMENTOW TO BLAD, nie pusty przebieg. Cichy zwrot zera
+        # wygladalby w logu identycznie jak "wszystko juz aktualne".
+        raise RuntimeError(f"brak pasujacych instrumentow (engine={engine},"
+                           f" symbol={symbol})")
+
+    adapter = BybitAdapter(api_key="", api_secret="", mode="demo")
+    grand = 0
+    try:
+        for iid, sym, venue in instruments:
+            if venue != "bybit":
+                print(f"  {sym:10s} pominiete ({venue} nieobslugiwany w backfillu)")
+                continue
+            grand += await backfill_symbol(adapter, conn, iid, sym, timeframe,
+                                           since, napraw=napraw)
+    finally:
+        await adapter.close()
+    return grand
+
+
 async def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--days", type=int, default=90)
@@ -216,31 +265,11 @@ async def main() -> int:
     print(f"Backfill {args.timeframe} od {since:%Y-%m-%d} ({args.days} dni)\n")
 
     with psycopg.connect(url) as conn:
-        cur = conn.cursor()
-        cur.execute(
-            """
-            SELECT i.id, i.symbol, v.code
-            FROM ref.instrument i JOIN ref.venue v ON v.id = i.venue_id
-            WHERE i.engine = %s AND i.active AND (%s::text IS NULL OR i.symbol = %s)
-            ORDER BY i.symbol
-            """,
-            (args.engine, args.symbol, args.symbol),
-        )
-        instruments = cur.fetchall()
-        if not instruments:
-            sys.exit("brak pasujacych instrumentow")
-
-        adapter = BybitAdapter(api_key="", api_secret="", mode="demo")
-        grand = 0
         try:
-            for iid, symbol, venue in instruments:
-                if venue != "bybit":
-                    print(f"  {symbol:10s} pominiete ({venue} nieobslugiwany w backfillu)")
-                    continue
-                grand += await backfill_symbol(adapter, conn, iid, symbol, args.timeframe,
-                                               since, napraw=args.napraw)
-        finally:
-            await adapter.close()
+            grand = await przebieg(conn, engine=args.engine, timeframe=args.timeframe,
+                                   since=since, symbol=args.symbol, napraw=args.napraw)
+        except RuntimeError as e:
+            sys.exit(str(e))
 
     print(f"\nRazem: {grand} swiec")
     return 0

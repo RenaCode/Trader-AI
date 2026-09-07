@@ -68,6 +68,17 @@ spec:
                   # limitami. Na rachunku papierowym sprawdzenie jest tanie
                   # i milczace, a przy wlaczeniu egzekucji dziala od pierwszego dnia.
                   python services/engine/uzgodnienie.py          || RC=$?
+                  # POSLIZG I ULAMEK WYPELNIENIA. To jedyna linia tego zadania,
+                  # ktora nie jest czujka, tylko POMIAREM - i dlatego nie dopisuje
+                  # sie do RC. POSLIZG_TAKER = 0,0004 i POSLIZG_MAKER = 0 sa
+                  # zalozeniami, a runda kosztuje 0,200% przy medianie zwrotu rzedu
+                  # dziesiatych procenta: blad o cztery punkty bazowe przesuwa wynik
+                  # o tyle, ile cala zmierzona przewaga. Liczba, ktorej nikt nie
+                  # widzi, nie zmieni zadnej decyzji, wiec pomiar ma ladowac tam,
+                  # gdzie i tak codziennie sie zaglada. Dopoki nie ma wypelnien,
+                  # wypisuje wprost "NIE ZMIERZONO" - a to jest inna informacja
+                  # niz zmierzone zero.
+                  python services/engine/dozor.py --co poslizg
                   exit $RC
               env:
                 - name: APP_DB_PASSWORD

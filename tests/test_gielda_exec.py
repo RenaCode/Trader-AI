@@ -136,7 +136,11 @@ def _stan(wypelniono, ilosc=D("10"), status="filled"):
 
 
 def _rozstrzygnij(stan, plan=PLAN, gielda=None, wiersze=None):
-    cur = Kursor(wiersze or [{"id": 1}])
+    # Pierwszy wiersz to ZLECENIE ZLOZONE WCZESNIEJ: jego `qty` jest podstawa
+    # ulamka wypelnienia, bo to ona poszla na gielde. Ilosc z planu jest sprzed
+    # zaokraglenia do kroku i uzycie jej robi z kazdego pelnego wypelnienia
+    # czesciowe.
+    cur = Kursor(wiersze or [{"id": 1, "qty": D("10")}, {"id": 1}])
     g = gielda or Gielda(stan=stan)
     rodzaj, msg = asyncio.run(rozstrzygnij_plan(
         cur, g, plan, F, engine="crypto", mode="demo", kategoria="spot",
@@ -352,7 +356,7 @@ def test_jeden_plan_daje_JEDEN_wiersz_zlecenia():
     zdrowia egzekucji widzi dwa razy więcej przyjęć, niż było — czyli myli się
     dokładnie w tę stronę, w którą nie wolno.
     """
-    cur = Kursor([{"id": 501}, {"id": 1}])
+    cur = Kursor([{"id": 501, "qty": D("10")}, {"id": 1}])
     g = Gielda(stan=_stan(D("10")))
     asyncio.run(rozstrzygnij_plan(cur, g, PLAN, F, engine="crypto", mode="demo",
                                   kategoria="spot",
@@ -382,3 +386,25 @@ def test_rachunek_papierowy_NADAL_zaklada_wlasny_wiersz():
                        2026, 9, 7, tzinfo=__import__("datetime").timezone.utc),
                    "USDC", {"execution": "internal_paper", "order": "limit"})
     assert any("INSERT INTO exec.order" in s for s, _ in cur.sql)
+
+
+def test_pelne_wypelnienie_NIE_jest_zapisywane_jako_czesciowe():
+    """Plan trzyma ilość SPRZED zaokrąglenia do kroku giełdy; na giełdę poszła
+    ilość zaokrąglona w dół. Giełda nigdy nie odda więcej, niż zamówiono.
+
+    Liczenie ułamka od ilości z planu sprawiało, że warunek „wypełniono ≥
+    planowano" nie był spełniony NIGDY — każde pełne wypełnienie zapisywało się
+    jako częściowe. Skutki: zbędne anulowanie przy każdym wejściu, wyjście
+    z całej pozycji zostawiające pyłek (bo wiersz nie był zamykany) i
+    systematycznie fałszywy `ulamek_wypelnienia` — jedyna deklarowana miara
+    rozjazdu backtestu z produkcją.
+    """
+    plan = dict(PLAN, qty=D("10.567890"))       # przed zaokrągleniem
+    wyslano = D("10.56")                        # po zaokrągleniu do kroku 0.01
+    stan = StanZlecenia(id_wlasne="tai-p42", id_gieldy="G1", status="filled",
+                        ilosc=wyslano, wypelniono=wyslano,
+                        srednia_cena=D("100"), prowizja=D("0.1"))
+    cur, g, rodzaj, _ = _rozstrzygnij(
+        stan, plan=plan, wiersze=[{"id": 1, "qty": wyslano}, {"id": 1}])
+    assert rodzaj == "pelne"
+    assert g.anulowane == []                    # nie ma czego anulować

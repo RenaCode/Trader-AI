@@ -543,6 +543,42 @@ async def sprawdz_egzekucje(fetch_all, notify, sucho: bool = False,
     return len(powody)
 
 
+async def sprawdz_poslizg(fetch_all, *, engine: str = "crypto",
+                          mode: str = "demo", okno_h: int | None = None) -> int:
+    """Ile naprawde kosztuje egzekucja. RAPORT, NIE CZUJKA.
+
+    DLACZEGO TO TU SIEDZI
+
+    `POSLIZG_TAKER = 0.0004` i `POSLIZG_MAKER = 0.0` sa zalozeniami, a runda
+    kosztuje 0,200% przy medianie zwrotu rzedu dziesiatych procenta - blad
+    o cztery punkty bazowe przesuwa wynik o tyle, ile cala zmierzona przewaga.
+    Liczba, ktora da sie policzyc, ale ktorej nikt nie widzi, nie zmieni zadnej
+    decyzji; dlatego pomiar wchodzi tam, gdzie i tak codziennie zaglada
+    zadanie cykliczne.
+
+    DLACZEGO NIE WYSYLA POWIADOMIENIA
+
+    Reszta tego pliku odzywa sie o STANACH, ktore trzeba naprawic teraz: martwy
+    silnik, brak kopii, zlecenia, ktore nie przechodza. Poslizg wiekszy od
+    zalozonego nie jest awaria do naprawienia o trzeciej w nocy - jest liczba
+    do wpisania w wycene strategii. Alarm zaprojektowany zanim padla pierwsza
+    obserwacja mialby i tak prog wziety z sufitu, a alarm, ktorego nie da sie
+    uzasadnic, uczy odbiorce pomijac wszystkie pozostale.
+
+    Zwraca zawsze 0 z tego samego powodu: niezerowy kod zapalilby zadanie
+    cykliczne na czerwono, czyli podnioslby alarm bez tresci.
+    """
+    from services.engine.poslizg import opis, pobierz, pomiar
+
+    wiersze = await pobierz(fetch_all, engine=engine, mode=mode, okno_h=okno_h)
+    okno = "od poczatku" if okno_h is None else f"{okno_h} h"
+    print(f"poślizg ({engine}/{mode}, {okno}), "
+          f"wypełnień w rejestrze: {len(wiersze)}")
+    for linia in opis(pomiar(wiersze)):
+        print(f"  {linia}")
+    return 0
+
+
 async def sprawdz_kopie(fetch_all, notify, sucho: bool = False) -> int:
     """Czy istnieje swieza, zweryfikowana kopia zapasowa.
 
@@ -597,18 +633,26 @@ async def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--co", default="stan-nauki",
                     choices=("stan-nauki", "zywotnosc", "ryzyko", "kopie",
-                             "swiezosc", "egzekucja"),
+                             "swiezosc", "egzekucja", "poslizg"),
                     help="stan-nauki: czy wynik treningu sie zmienil; "
                          "zywotnosc: czy silniki bija; "
                          "ryzyko: czy kill-switch zadzialal; "
                          "kopie: czy jest swieza kopia zapasowa; "
                          "swiezosc: czy dane, na ktorych silnik decyduje, "
                          "nie sa przestarzale; "
-                         "egzekucja: czy zlecenia dochodza do gieldy")
+                         "egzekucja: czy zlecenia dochodza do gieldy; "
+                         "poslizg: ile NAPRAWDE kosztuje egzekucja - raport, "
+                         "nie czujka")
     ap.add_argument("--prog-min", type=int, default=None, dest="prog_min",
                     help="prog martwoty w minutach; do wywolania sciezki alarmowej "
                          "na zadanie. Domyslnie stala MARTWY_PO_MIN")
     ap.add_argument("--engine", default="crypto")
+    ap.add_argument("--mode", default="demo",
+                    help="tryb rachunku; dotyczy sprawdzen czytajacych egzekucje")
+    ap.add_argument("--okno-h", type=int, default=None, dest="okno_h",
+                    help="okno w godzinach dla --co poslizg; domyslnie od poczatku, "
+                         "bo przy probie rzedu kilku wypelnien kazde okno wyrzuca "
+                         "czesc jedynych obserwacji, jakie sa")
     # Domyslnie horyzont, ktorym handluje silnik. Tory porownawcze (np. 1h) maja
     # wlasny stan, ale NIE podnosza alarmu - inaczej powiadomienie mowiloby
     # o modelu, ktorym nikt nie handluje.
@@ -640,6 +684,9 @@ async def main() -> int:
                                           bar=args.bar)
         if args.co == "egzekucja":
             return await sprawdz_egzekucje(fetch_all, notify, sucho=args.sucho)
+        if args.co == "poslizg":
+            return await sprawdz_poslizg(fetch_all, engine=args.engine,
+                                         mode=args.mode, okno_h=args.okno_h)
 
         wiersze = await fetch_all(
             "SELECT status, windows_total, windows_positive, positive_ci_low,"

@@ -53,9 +53,33 @@ Waga tego jest policzalna. Runda kosztuje 0,200%, a zmierzona mediana zwrotu na
 transakcję jest rzędu dziesiątych procenta. **Błąd o 4 punkty bazowe w tę czy
 w tamtą przesuwa wynik o tyle, ile cała zmierzona przewaga.**
 
-Ułamek wypełnienia symulacja przyjmuje jako 1.0. `rozjazd_z_symulacja` policzy
-go z produkcji, gdy tylko będzie co liczyć — a do tego czasu **backtest zawyża
-wielkość pozycji o nieznaną wartość**.
+Ułamek wypełnienia symulacja przyjmuje jako 1.0 — a do czasu pierwszego pomiaru
+**backtest zawyża wielkość pozycji o nieznaną wartość**.
+
+**Narzędzie pomiarowe jest gotowe i czeka na dane** (`services/engine/poslizg.py`).
+Liczy poślizg jako odległość między ceną, na której oparta była decyzja, a ceną
+z `exec.fill` — osobno dla makera i takera, bo obie stałe dotyczą czego innego.
+Ceną odniesienia jest `journal.planned_order.limit_price`, a dla zleceń bez
+limitu `journal.decision.target_price`. Znak jest znormalizowany tak, że dodatni
+zawsze znaczy „na naszą niekorzyść"; bez tego kupna i sprzedaże kasowałyby się
+w średniej. Ułamek wypełnienia idzie tą samą funkcją co w cyklu
+(`rozjazd_z_ulamkow`), odczytany z `exec.order.raw`.
+
+Trzy rzeczy, które ten pomiar robi celowo inaczej, niż wyglądałby najprościej:
+
+- **mierzy wyłącznie wiersze z giełdy.** Rachunek papierowy zapisuje cenę jako
+  `cena * (1 ± POSLIZG)`, więc policzenie z nich poślizgu oddałoby dokładnie
+  założoną stałą i wyglądało na jej świetne potwierdzenie, będąc echem,
+- **odróżnia „nie zmierzono" od „zmierzono zero".** Pusta próba zwraca `None`
+  i wypisuje `NIE ZMIERZONO`, nigdy `0,00 pb` — zero czytałoby się jak
+  potwierdzenie założenia makera z zera obserwacji,
+- **progiem jest przedział ufności, nie różnica.** Dopóki przedział obejmuje
+  stałą, werdykt brzmi „nieodróżnialne od założenia", a nie „zmierzone".
+  Przy próbie jednocyfrowej używany jest rozkład t, nie 1,96.
+
+Wynik jest wypisywany codziennie przez `dozor.py --co poslizg`, wpięty
+w `zywotnosc-cron`. Nie wysyła powiadomienia i nie zmienia żadnej stałej:
+zamiana jednego zgadywania na inne nie byłaby poprawką.
 
 ## 2. Demo podmiotu unijnego nie uzgodni sald
 

@@ -183,9 +183,22 @@ kasuje wszystko, co wygenerował, zostawiając realne dane rynkowe.
 | Proces | Co robi | Zależność |
 |---|---|---|
 | `market` | świece 1 m i snapshoty orderbooka, co 60 s | — |
-| `features` | cechy z realnych świec, co 5 min | — |
+| `history` | świece 1 h i stawki finansowania, co 20 min | — |
+| `features` | cechy na obu horyzontach (`4h,1h`), co 15 min | historia |
 | `engine` | pętla decyzyjna: reżim → sygnały → risk kernel → dziennik | cechy |
-| `trainer` | walk-forward, raz na dobę, po nim **dozór** | cechy |
+| `trainer` | walk-forward, raz na dobę, po nim **dozór**; **CronJob, nie worker** | cechy |
+
+Każdy z tych procesów ma **pętlę we własnym module**, a nie w komendzie powłoki.
+`sh -c "while true; do ... || true; sleep N; done"` połykał każdy niezerowy wynik:
+awaria nie restartowała kontenera i nie podnosiła licznika restartów, więc pod
+stał „Running" i mógł nie robić nic od dni. Pętla w module łączy się z bazą **na
+każdy cykl** (jedno połączenie na cały proces po restarcie bazy zrywa się raz
+i już się nie naprawia) i **kończy proces po pięciu awariach pod rząd** — wpis
+w logu nie jest widocznością, restart poda jest.
+
+Trener jest wyjątkiem i pętli nie dostaje: trwa dziesiątki minut i musi dobiec
+końca niezależnie od wdrożeń, dlatego jest zadaniem cyklicznym
+(`templates/trainer-cron.yaml`).
 | `news` | RSS → zapis; z kluczem także filtr → analiza, co 5 min | klucz dostawcy |
 | `dozorca` | **ocena limitów konta NIEZALEŻNIE od silnika**, wyzwolenie i wznowienie kill-switcha, co 60 s | — |
 

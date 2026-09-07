@@ -137,12 +137,26 @@ async def rozstrzygnij_plan(cur, adapter, plan: dict, f: Filtry, *, engine: str,
     # `zapisz_wejscie` zalozylby drugi i jeden plan mialby w exec.order dwa
     # zlecenia: tabela przestalaby znaczyc "jedno zlecenie", a czujka zdrowia
     # egzekucji widzialaby dwa razy wiecej przyjec, niz bylo.
-    cur.execute("SELECT id FROM exec.order WHERE planned_order_id = %s"
+    cur.execute("SELECT id, qty FROM exec.order WHERE planned_order_id = %s"
                 " ORDER BY id LIMIT 1", (plan["id"],))
     wiersz = cur.fetchone()
     id_zlecenia_w_bazie = wiersz["id"] if wiersz else None
 
-    r = co_z_wypelnieniem(stan.wypelniono, Decimal(plan["qty"]),
+    # ULAMEK LICZYMY OD ILOSCI FAKTYCZNIE WYSLANEJ, nie od ilosci z planu.
+    #
+    # Plan trzyma ilosc SPRZED zaokraglenia do kroku gieldy, a na gielde poszla
+    # ilosc zaokraglona w dol. Gielda nigdy nie odda wiecej, niz zamowiono, wiec
+    # warunek "wypelniono >= planowano" nie bylby spelniony NIGDY - kazde pelne
+    # wypelnienie zapisywaloby sie jako czesciowe.
+    #
+    # Skutki tego byly trzy i kazdy inny: zbedne anulowanie przy kazdym wejsciu,
+    # wyjscie z calej pozycji zostawiajace pylek (bo zapisz_wyjscie dostawaloby
+    # ilosc mniejsza niz qty i nie zamykalo wiersza), oraz systematycznie
+    # falszywy `ulamek_wypelnienia` - czyli jedyna deklarowana miara rozjazdu
+    # backtestu z produkcja.
+    wyslano = Decimal(wiersz["qty"]) if wiersz else Decimal(plan["qty"])
+
+    r = co_z_wypelnieniem(stan.wypelniono, wyslano,
                           Decimal(plan["limit_price"]), f)
 
     if r.anuluj_reszte and stan.status not in ("filled", "cancelled", "rejected"):

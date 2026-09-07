@@ -96,9 +96,22 @@ workers:
   # z agregacji 1h, wiec bez tego procesu horyzont domyslny stanalby w miejscu.
   # Backfill jest idempotentny i wznawia od ostatniej posiadanej swiecy, wiec
   # czestsze uruchomienie nic nie psuje - dociaga tylko to, czego brakuje.
+  #
+  # PETLA JEST W SERWISIE, NIE W SHELLU.
+  #
+  # Wczesniej stalo tu `while true; do backfill || true; funding || true;
+  # sleep 1200; done`. `|| true` polykal KAZDY niezerowy wynik, wiec awaria
+  # pobierania nie restartowala kontenera ani nie podnosila licznika restartow:
+  # pod stal "Running", k3s meldowal zdrowie, a historia mogla stac od dni.
+  # Proces startowal przy tym od nowa co cykl, wiec nie mial pojecia o awariach
+  # poprzednich - piec padnietych cykli z rzedu wygladalo jak piec udanych.
+  #
+  # Oba zadania sa teraz jednym procesem (history_worker), ktory laczy sie
+  # z baza na kazdy cykl i KONCZY SIE po pieciu awariach pod rzad - bo restart
+  # poda widac, a wpis w logu nie.
   history:
     enabled: true
-    command: ["sh", "-c", "while true; do python services/ingest/backfill.py --timeframe 1h --days 3 || true; python services/ingest/funding.py --days 3 || true; sleep 1200; done"]
+    command: ["python", "services/ingest/history_worker.py", "--interval", "1200", "--days", "3", "--timeframe", "1h"]
     resources:
       limits:   { cpu: 500m, memory: 384Mi }
       requests: { cpu: 50m,  memory: 96Mi }
@@ -110,9 +123,21 @@ workers:
   # a wynik degraduje sie po cichu z kazda doba. Zdarzylo sie to 2026-09-04 -
   # drugi horyzont doszedl do trenera, a nie doszedl tutaj, i cechy 1h stanely
   # na 21 godzin, zanim ktos spojrzal.
+  #
+  # PETLA JEST W SERWISIE, NIE W SHELLU.
+  #
+  # Wczesniej stalo tu `while true; do for B in 4h 1h; do features.py --bar $B
+  # --once || true; done; sleep 900; done`. `|| true` polykal KAZDY niezerowy
+  # wynik, wiec cichy zanik cech nie restartowal kontenera ani nie podnosil
+  # licznika restartow. `--once` bylo w tamtej komendzie flaga MARTWA: modul
+  # nigdzie jej nie czytal, a jej opis ("tylko ostatnia doba") opisywal
+  # zachowanie domyslne - wygladala wiec jak "jeden cykl", a nie robila nic.
+  #
+  # Lista horyzontow idzie teraz jednym argumentem: jeden proces, jedna petla,
+  # polaczenie z baza na kazdy cykl, koniec procesu po pieciu awariach pod rzad.
   features:
     enabled: true
-    command: ["sh", "-c", "while true; do for B in 4h 1h; do python services/ingest/features.py --bar $B --once || true; done; sleep 900; done"]
+    command: ["python", "services/ingest/features.py", "--bar", "4h,1h", "--interval", "900"]
     resources:
       limits:   { cpu: 1000m, memory: 768Mi }
       requests: { cpu: 100m,  memory: 192Mi }
@@ -165,9 +190,24 @@ workers:
   # WYLACZONY: zastapiony zadaniem cyklicznym (templates/trainer-cron.yaml).
   # Petla w Deploymencie ginela przy kazdym wdrozeniu, takze takim, ktore
   # trenera nie dotyczylo - patrz komentarz w tamtym pliku.
+  #
+  # TRENER NIE DOSTAJE WLASNEJ PETLI W SERWISIE, I NIE MA JEJ DOSTAC.
+  #
+  # Pozostale procesy tla przenioslyby petle z shella do modulu, bo maja chodzic
+  # bez konca. Trening jest czym innym: trwa dziesiatki minut, chodzi raz na
+  # dobe i MUSI dobiec konca niezaleznie od wdrozen. Wlasnie dlatego jest
+  # CronJobem - `concurrencyPolicy: Forbid` pilnuje, zeby dwa treningi nie
+  # policzyly sie rownolegle na tej samej wersji modelu, a raz uruchomione
+  # zadanie przezywa restart Deploymentow. Petla `--interval 86400` w Deploymencie
+  # odtworzylaby dokladnie usterke, ktora CronJob naprawil.
+  #
+  # Komenda ponizej zostaje POJEDYNCZYM przebiegiem, bez `while true` i bez
+  # `|| true`: wpis jest martwy (enabled: false), a martwy wpis z zla petla
+  # w srodku to zaproszenie do jej przywrocenia. Zrodlem prawdy o parametrach
+  # treningu jest `trainerCron` nizej, nie ta linia.
   trainer:
     enabled: false
-    command: ["sh", "-c", "sleep 300; while true; do python services/engine/train.py --bar 4h --days 1400 --trials 60 || true; sleep 86400; done"]
+    command: ["python", "services/engine/train.py", "--bar", "4h", "--days", "1400", "--trials", "60"]
     resources:
       limits:   { cpu: 2000m, memory: 2Gi }
       requests: { cpu: 100m,  memory: 256Mi }

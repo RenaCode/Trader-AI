@@ -70,3 +70,43 @@ def wilson(k: int, n: int, z: float = 1.96) -> tuple[float, float]:
     srodek = (p + z * z / (2 * n)) / d
     polowa = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / d
     return (max(0.0, srodek - polowa), min(1.0, srodek + polowa))
+
+
+# Wartosci krytyczne rozkladu t Studenta, dwustronnie, poziom 95%, wedlug
+# stopni swobody. Tablica, a NIE stale 1,96, bo proby, ktore ten projekt liczy,
+# bywaja jednocyfrowe: przy trzech obserwacjach przedzial normalny jest ponad
+# dwa razy za waski. Za waski przedzial nie jest drobna niescisloscia - mowi
+# "zmierzone i rozne od zalozenia" o czyms, czego jeszcze nie widac.
+T95 = {1: 12.706, 2: 4.303, 3: 3.182, 4: 2.776, 5: 2.571, 6: 2.447, 7: 2.365,
+       8: 2.306, 9: 2.262, 10: 2.228, 12: 2.179, 15: 2.131, 20: 2.086,
+       25: 2.060, 30: 2.042, 40: 2.021, 60: 2.000, 120: 1.980}
+
+
+def t95(df: int) -> float:
+    """Wartosc krytyczna t dla podanej liczby stopni swobody.
+
+    Miedzy wpisami tablicy bierzemy wartosc dla NAJBLIZSZEGO WIEKSZEGO df, czyli
+    zawsze ostrozniejsza (szersza) z dwoch. Interpolacja bylaby dokladniejsza
+    i bez znaczenia: roznica miedzy 2,086 a 2,060 jest o rzad wielkosci mniejsza
+    niz rozrzut, ktory tym mierzymy.
+    """
+    for k in sorted(T95):
+        if df <= k:
+            return T95[k]
+    return 1.96
+
+
+def przedzial_sredniej(xs: list[float]) -> tuple[float, float] | None:
+    """Przedzial ufnosci 95% dla SREDNIEJ z proby. None, gdy nie ma czego liczyc.
+
+    None, a nie (x, x), przy jednej obserwacji. Przedzial o zerowej szerokosci
+    wygladalby jak pomiar idealnie precyzyjny, a jedna obserwacja nie mowi
+    o rozrzucie NIC. To ta sama zasada, przez ktora rozjazd_z_symulacja zwraca
+    None zamiast zera: brak pomiaru musi wygladac inaczej niz pomiar.
+    """
+    n = len(xs)
+    if n < 2:
+        return None
+    m = statistics.fmean(xs)
+    polowa = t95(n - 1) * statistics.stdev(xs) / math.sqrt(n)
+    return (m - polowa, m + polowa)

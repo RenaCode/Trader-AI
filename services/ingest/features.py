@@ -27,6 +27,7 @@ analizy gotowe przed T. Dopiero to uprawnia do datowania jej wstecz.
 Uzycie:
     DATABASE_URL=... python services/ingest/features.py --bar 4h --backfill --days 1400
     DATABASE_URL=... python services/ingest/features.py --bar 4h --once
+    DATABASE_URL=... python services/ingest/features.py --bar 4h,1h --interval 900
 """
 from __future__ import annotations
 
@@ -35,6 +36,7 @@ import json
 import math
 import os
 import sys
+import time
 from collections import deque
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -616,12 +618,134 @@ def insert_values(cur, rows: list[tuple]) -> int:
     return len(rows)
 
 
+# Ile cykli pod rzad zakonczonych bledem konczy proces. Wpis w logu NIE JEST
+# widocznoscia - logu poda nikt nie czyta. Restart poda jest: rosnie licznik
+# restartow i pod wpada w CrashLoopBackOff.
+POD_RZAD_MAX = 5
+
+
+def parsuj_bary(spec: str) -> list[str]:
+    """Jedna swieca albo lista po przecinku - JEDEN PROCES liczy wszystkie.
+
+    Chart wolal dotad `for B in 4h 1h; do ... --bar $B --once || true; done`,
+    czyli petle po horyzontach w shellu. Lista wchodzi tu, zeby pod mial jeden
+    proces z jedna petla, a nie skrypt uruchamiajacy Pythona dwa razy na cykl.
+
+    Nieznana swieca konczy proces OD RAZU: to blad konfiguracji, a nie awaria
+    przebiegu, wiec ponawianie go w petli tylko odsuwaloby moment, w ktorym
+    ktos to zobaczy.
+    """
+    bary = [s.strip() for s in spec.split(",") if s.strip()]
+    if not bary:
+        sys.exit("--bar nie moze byc puste")
+    zle = [b for b in bary if b not in HORIZONS]
+    if zle:
+        sys.exit(f"nieznane swiece: {', '.join(zle)}; "
+                 f"dostepne: {', '.join(sorted(HORIZONS))}")
+    return list(dict.fromkeys(bary))     # kolejnosc zachowana, bez powtorzen
+
+
+def przebieg(conn, h: Horizon, *, engine: str, tylko: list[str],
+             tylko_przekroj: bool, since: datetime, now: datetime,
+             verbose: bool = True) -> int:
+    """Policzenie cech JEDNEGO horyzontu na GOTOWYM polaczeniu.
+
+    Polaczenie przychodzi z zewnatrz, bo petla w `main` otwiera je na kazdy
+    cykl - patrz komentarz tamze.
+    """
+    cur = conn.cursor(row_factory=dict_row)
+    cur.execute(
+        "SELECT id, symbol FROM ref.instrument WHERE engine = %s AND active"
+        " AND kind <> 'perp' AND (%s::text[] IS NULL OR symbol = ANY(%s))"
+        " ORDER BY symbol", (engine, tylko or None, tylko or None))
+    instruments = cur.fetchall()
+    if not instruments:
+        sys.exit(f"brak instrumentów: {', '.join(tylko) or engine}")
+    brak = sorted(set(tylko) - {i["symbol"] for i in instruments})
+    if brak:
+        sys.exit(f"nie ma w bazie albo nieaktywne: {', '.join(brak)}")
+
+    # UNIWERSUM PRZEKROJOWE to nie to samo co lista liczonych instrumentow.
+    #
+    # Bez --instrumenty petla per instrument idzie po WSZYSTKICH aktywnych
+    # (historie zbieramy szerzej, niz handlujemy), ale ranking liczy sie
+    # wylacznie po uniwersum decyzyjnym - to samo `tradeable`, ktore czyta
+    # silnik. Odcisk musi opisywac ten drugi zbior, inaczej produkcja
+    # szukalaby cechy pod nazwa, ktorej nikt nie zapisal.
+    if tylko:
+        uniwersum = sorted(tylko)
+    else:
+        cur.execute(
+            "SELECT symbol FROM ref.instrument WHERE engine = %s AND active"
+            " AND tradeable AND kind <> 'perp' ORDER BY symbol", (engine,))
+        uniwersum = [r["symbol"] for r in cur.fetchall()]
+
+    feat_ids = ensure_definitions(cur, h, uniwersum or None)
+    conn.commit()
+
+    total = 0
+    for inst in instruments:
+        if tylko_przekroj:
+            break
+        n = compute_prices(cur, inst["id"], h, feat_ids, since, now)
+        conn.commit()
+        m = compute_news(cur, inst["id"], h, feat_ids["news_sent"], since, now)
+        conn.commit()
+        f = compute_funding(cur, inst["id"], h, feat_ids, since, now)
+        conn.commit()
+        b = compute_orderbook(cur, inst["id"], h, feat_ids, since, now)
+        conn.commit()
+        total += n + m + f + b
+        if verbose:
+            print(f"  {inst['symbol']:10s} {n:>9,} cen  {m:>7,} news  {f:>7,} funding"
+                  f"  {b:>5,} arkusz")
+
+    # Przekrojowosc liczymy RAZ, po policzeniu zwrotow - z natury potrzebuje
+    # wszystkich instrumentow zbioru naraz.
+    #
+    # Zbiorem jest UNIWERSUM DECYZYJNE albo, przy --instrumenty, dokladnie
+    # podana lista. To drugie jest konieczne, zeby przygotowac uniwersum
+    # kandydujace PRZED jego wlaczeniem: bez sily wzglednej porownanie
+    # szloby na siedmiu sygnalach zamiast osmiu, czyli mierzyloby inna
+    # strategie, a nie inne uniwersum.
+    # PROG DOTYCZY ZBIORU RANKINGU, nie listy liczonych instrumentow.
+    #
+    # Bez --instrumenty `instruments` to wszystkie aktywne (34), a ranking
+    # idzie po uniwersum decyzyjnym (10). Sprawdzanie tej pierwszej liczby
+    # przepuszczaloby ranking po trzech parach, dopoki w bazie lezy historia
+    # trzydziestu czterech - czyli dokladnie wtedy, gdy prog jest potrzebny.
+    if len(uniwersum) < MIN_UNIVERSE:
+        print(f"\n  siła względna: pominięta, {len(uniwersum)} instrumentów "
+              f"w uniwersum przy progu {MIN_UNIVERSE}")
+    else:
+        if "rel_strength" not in feat_ids:
+            sys.exit("brak definicji cechy przekrojowej — uniwersum puste?")
+        x = compute_cross_section(cur, h, feat_ids, since, now,
+                                  [i["id"] for i in instruments] if tylko else None)
+        conn.commit()
+        total += x
+        zbior = (f"podany zbiór, odcisk {odcisk(uniwersum)}" if tylko
+                 else f"uniwersum decyzyjne, odcisk {odcisk(uniwersum)}")
+        if verbose:
+            print(f"\n  siła względna ({zbior}): {x:>9,}")
+
+    return total
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--bar", default=DEFAULT_BAR, choices=sorted(HORIZONS))
+    # Bez `choices`, bo wartoscia moze byc LISTA po przecinku; sprawdza
+    # `parsuj_bary`, ktore wypisuje dostepne swiece tak samo jak argparse.
+    ap.add_argument("--bar", default=DEFAULT_BAR,
+                    help="świeca albo lista po przecinku (np. 4h,1h) — jeden proces "
+                         f"liczy wszystkie. Dostępne: {', '.join(sorted(HORIZONS))}")
     ap.add_argument("--backfill", action="store_true")
     ap.add_argument("--days", type=int, default=90)
-    ap.add_argument("--once", action="store_true", help="tylko ostatnia doba")
+    ap.add_argument("--once", action="store_true", help="jeden cykl zamiast pętli")
+    ap.add_argument("--interval", type=int, default=900,
+                    help="przerwa między cyklami (s)")
+    ap.add_argument("--quiet", action="store_true",
+                    help="wycisz rutynowy postęp; OPISY BŁĘDÓW idą zawsze")
     ap.add_argument("--engine", default="crypto")
     ap.add_argument("--tylko-przekroj", action="store_true", dest="tylko_przekroj",
                     help="przelicz WYLACZNIE sile wzgledna, pomijajac cechy "
@@ -641,89 +765,82 @@ def main() -> int:
     if not url:
         sys.exit("DATABASE_URL nie jest ustawiony")
 
-    h = get_horizon(args.bar)
-    now = datetime.now(timezone.utc)
-    since = now - timedelta(days=args.days if args.backfill else 1)
-    print(f"Cechy na świecach {h.bar} od {since:%Y-%m-%d}\n")
+    bary = parsuj_bary(args.bar)
+    tylko = [s.strip().upper() for s in args.instrumenty.split(",") if s.strip()]
 
-    with psycopg.connect(url, row_factory=dict_row) as conn:
-        cur = conn.cursor()
-        tylko = [s.strip().upper() for s in args.instrumenty.split(",") if s.strip()]
-        cur.execute(
-            "SELECT id, symbol FROM ref.instrument WHERE engine = %s AND active"
-            " AND kind <> 'perp' AND (%s::text[] IS NULL OR symbol = ANY(%s))"
-            " ORDER BY symbol", (args.engine, tylko or None, tylko or None))
-        instruments = cur.fetchall()
-        if not instruments:
-            sys.exit(f"brak instrumentów: {args.instrumenty}")
-        brak = sorted(set(tylko) - {i["symbol"] for i in instruments})
-        if brak:
-            sys.exit(f"nie ma w bazie albo nieaktywne: {', '.join(brak)}")
+    # --backfill KONCZY SIE PO JEDNYM PRZEBIEGU, nawet bez --once.
+    #
+    # To operacja reczna na 1400 dniach, trwajaca dziesiatki minut. Wpadniecie
+    # z nia w petle domyslna oznaczaloby przeliczanie calej historii w kolko,
+    # az ktos to zauwazy - a w logu wyglada to dokladnie jak dlugo trwajacy
+    # backfill.
+    jednorazowo = args.once or args.backfill
 
-        # UNIWERSUM PRZEKROJOWE to nie to samo co lista liczonych instrumentow.
-        #
-        # Bez --instrumenty petla per instrument idzie po WSZYSTKICH aktywnych
-        # (historie zbieramy szerzej, niz handlujemy), ale ranking liczy sie
-        # wylacznie po uniwersum decyzyjnym - to samo `tradeable`, ktore czyta
-        # silnik. Odcisk musi opisywac ten drugi zbior, inaczej produkcja
-        # szukalaby cechy pod nazwa, ktorej nikt nie zapisal.
-        if tylko:
-            uniwersum = sorted(tylko)
-        else:
-            cur.execute(
-                "SELECT symbol FROM ref.instrument WHERE engine = %s AND active"
-                " AND tradeable AND kind <> 'perp' ORDER BY symbol", (args.engine,))
-            uniwersum = [r["symbol"] for r in cur.fetchall()]
+    print(f"Cechy na świecach {', '.join(bary)}"
+          + ("" if jednorazowo else f", cykl co {args.interval} s"))
 
-        feat_ids = ensure_definitions(cur, h, uniwersum or None)
-        conn.commit()
-
+    # PETLA JEST TUTAJ, NIE W SHELLU, A POLACZENIE OTWIERA SIE NA KAZDY CYKL.
+    #
+    # Do 2026-09-07 pod chodzil na `while true; do for B in 4h 1h; do
+    # features.py --bar $B --once || true; done; sleep 900; done`. `|| true`
+    # polykal KAZDY niezerowy wynik, wiec cechy mogly stac od dni, a pod stal
+    # "Running" z zerowym licznikiem restartow. Przy okazji: `--once` w tamtej
+    # komendzie NIC NIE ROBILO - flaga byla martwa (`args.once` nie bylo nigdzie
+    # czytane), a jej opis "tylko ostatnia doba" opisywal zachowanie domyslne.
+    #
+    # Polaczenie trzymane na caly proces byloby zmiana NA GORSZE: po restarcie
+    # bazy kazdy kolejny cykl padalby na tym samym zerwanym gniezdzie,
+    # w nieskonczonosc - martwy proces wygladajacy na zywy.
+    pod_rzad = 0
+    while True:
+        t0 = datetime.now(timezone.utc)
+        # OKNO LICZONE NA KAZDY CYKL. Wyliczone raz przed petla zamarzloby
+        # w chwili startu procesu i po tygodniu pracy proces liczylby cechy
+        # dla doby sprzed tygodnia.
+        now = datetime.now(timezone.utc)
+        since = now - timedelta(days=args.days if args.backfill else 1)
+        bledy: list[str] = []
         total = 0
-        for inst in instruments:
-            if args.tylko_przekroj:
-                break
-            n = compute_prices(cur, inst["id"], h, feat_ids, since, now)
-            conn.commit()
-            m = compute_news(cur, inst["id"], h, feat_ids["news_sent"], since, now)
-            conn.commit()
-            f = compute_funding(cur, inst["id"], h, feat_ids, since, now)
-            conn.commit()
-            b = compute_orderbook(cur, inst["id"], h, feat_ids, since, now)
-            conn.commit()
-            total += n + m + f + b
-            print(f"  {inst['symbol']:10s} {n:>9,} cen  {m:>7,} news  {f:>7,} funding"
-                  f"  {b:>5,} arkusz")
+        try:
+            with psycopg.connect(url, row_factory=dict_row) as conn:
+                for bar in bary:
+                    # Awaria jednego horyzontu nie moze pominac pozostalych
+                    # w tym samym cyklu - to jedyne, co bylo dobrego w `|| true`.
+                    try:
+                        n = przebieg(conn, get_horizon(bar), engine=args.engine,
+                                     tylko=tylko, tylko_przekroj=args.tylko_przekroj,
+                                     since=since, now=now, verbose=not args.quiet)
+                        total += n
+                        if not args.quiet:
+                            print(f"  [{bar}] {n:,} wartości cech")
+                    except Exception as e:                    # noqa: BLE001
+                        conn.rollback()
+                        bledy.append(f"{bar}: {type(e).__name__}: {e}")
+        except Exception as e:                                # noqa: BLE001
+            # Tu wpada przede wszystkim nieudane POLACZENIE z baza.
+            bledy.append(f"{type(e).__name__}: {e}")
 
-        # Przekrojowosc liczymy RAZ, po policzeniu zwrotow - z natury potrzebuje
-        # wszystkich instrumentow zbioru naraz.
-        #
-        # Zbiorem jest UNIWERSUM DECYZYJNE albo, przy --instrumenty, dokladnie
-        # podana lista. To drugie jest konieczne, zeby przygotowac uniwersum
-        # kandydujace PRZED jego wlaczeniem: bez sily wzglednej porownanie
-        # szloby na siedmiu sygnalach zamiast osmiu, czyli mierzyloby inna
-        # strategie, a nie inne uniwersum.
-        # PROG DOTYCZY ZBIORU RANKINGU, nie listy liczonych instrumentow.
-        #
-        # Bez --instrumenty `instruments` to wszystkie aktywne (34), a ranking
-        # idzie po uniwersum decyzyjnym (10). Sprawdzanie tej pierwszej liczby
-        # przepuszczaloby ranking po trzech parach, dopoki w bazie lezy historia
-        # trzydziestu czterech - czyli dokladnie wtedy, gdy prog jest potrzebny.
-        if len(uniwersum) < MIN_UNIVERSE:
-            print(f"\n  siła względna: pominięta, {len(uniwersum)} instrumentów "
-                  f"w uniwersum przy progu {MIN_UNIVERSE}")
+        if not args.quiet:
+            print(f"[{t0:%H:%M:%S}] razem {total:,} wartości cech, "
+                  f"błędów {len(bledy)}")
+        # OPISY BLEDOW WYPISUJEMY ZAWSZE, TAKZE PRZY --quiet: `--quiet` wycisza
+        # rutynowy postep, a nie awarie.
+        for blad in dict.fromkeys(bledy):
+            print(f"    BŁĄD {blad}")
+
+        if bledy:
+            pod_rzad += 1
+            print(f"[{t0:%H:%M:%S}] cykl nieudany ({pod_rzad}/{POD_RZAD_MAX})")
+            if pod_rzad >= POD_RZAD_MAX:
+                print(f"{POD_RZAD_MAX} cykli pod rząd zakończonych błędem — "
+                      f"kończę proces, żeby restart był WIDOCZNY zamiast cichy")
+                return 1
         else:
-            if "rel_strength" not in feat_ids:
-                sys.exit("brak definicji cechy przekrojowej — uniwersum puste?")
-            x = compute_cross_section(cur, h, feat_ids, since, now,
-                                      [i["id"] for i in instruments] if tylko else None)
-            conn.commit()
-            total += x
-            zbior = (f"podany zbiór, odcisk {odcisk(uniwersum)}" if tylko
-                     else f"uniwersum decyzyjne, odcisk {odcisk(uniwersum)}")
-            print(f"\n  siła względna ({zbior}): {x:>9,}")
+            pod_rzad = 0
 
-        print(f"\nRazem {total:,} wartości cech")
-    return 0
+        if jednorazowo:
+            return 1 if bledy else 0
+        time.sleep(args.interval)
 
 
 if __name__ == "__main__":

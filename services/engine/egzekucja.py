@@ -30,9 +30,11 @@ giełdy daje pozycję NIE DO ZAMKNIĘCIA. Nie boli, dopóki rynek nie spadnie.
 """
 from __future__ import annotations
 
+import statistics
 from dataclasses import dataclass
 from decimal import Decimal
 
+from services.engine.statystyka import przedzial_sredniej
 from services.engine.zlecenia import Filtry, czy_zamykalna
 
 
@@ -91,13 +93,41 @@ def rozjazd_z_symulacja(rozstrzygniecia: list[Rozstrzygniecie]) -> dict:
     i jedyną uczciwą drogą do poprawienia symulacji, bo bierze się z pomiaru,
     a nie z założenia o kolejce w arkuszu.
     """
-    weszly = [r for r in rozstrzygniecia if r.rodzaj != "brak"]
+    return rozjazd_z_ulamkow([(r.rodzaj, r.ulamek) for r in rozstrzygniecia])
+
+
+def rozjazd_z_ulamkow(pary: list[tuple[str, Decimal]]) -> dict:
+    """Rdzeń tego rachunku, na parach (rodzaj, ułamek). CZYSTA FUNKCJA.
+
+    DLACZEGO WYDZIELONE Z `rozjazd_z_symulacja`
+
+    Ten sam rachunek jest potrzebny w dwóch chwilach, które nigdy się nie
+    spotykają: w trakcie cyklu, gdy rozstrzygnięcia są jeszcze obiektami
+    w pamięci, i PO FAKCIE, gdy ułamki da się odczytać wyłącznie
+    z `exec.order.raw`. Druga implementacja tej samej średniej rozjechałaby się
+    przy pierwszej zmianie — i to niewidocznie, bo obie wyglądałyby poprawnie.
+
+    ZERO OBSERWACJI ZWRACA None, NIE ZERO. Zero znaczyłoby „zmierzyliśmy i nic
+    nie wchodzi", czyli katastrofalną jakość egzekucji. Brak pomiaru musi
+    wyglądać inaczej niż pomiar, bo prowadzi do zupełnie innej decyzji.
+
+    ROZRZUT OBOK ŚREDNIEJ, bo średnia z trzech wypełnień bez przedziału jest
+    myląca dokładnie w tę stronę, w którą kosztuje: wygląda na wynik.
+    """
+    weszly = [(r, u) for r, u in pary if r != "brak"]
     if not weszly:
-        return {"n": 0, "sredni_ulamek": None, "czesciowych": 0,
-                "nie_do_zamkniecia": 0}
+        return {"n": 0, "sredni_ulamek": None, "odchylenie": None,
+                "przedzial": None, "czesciowych": 0, "nie_do_zamkniecia": 0}
+    n = len(weszly)
+    ulamki = [u for _, u in weszly]
+    jako_float = [float(u) for u in ulamki]
     return {
-        "n": len(weszly),
-        "sredni_ulamek": sum(r.ulamek for r in weszly) / len(weszly),
-        "czesciowych": sum(1 for r in weszly if r.rodzaj == "czesciowe"),
-        "nie_do_zamkniecia": sum(1 for r in weszly if r.rodzaj == "nie_do_zamkniecia"),
+        "n": n,
+        # Średnia zostaje w Decimalu — ułamek jest ilorazem ilości, a te
+        # przychodzą z giełdy jako liczby dziesiętne i nie ma powodu ich psuć.
+        "sredni_ulamek": sum(ulamki) / n,
+        "odchylenie": statistics.stdev(jako_float) if n > 1 else None,
+        "przedzial": przedzial_sredniej(jako_float),
+        "czesciowych": sum(1 for r, _ in weszly if r == "czesciowe"),
+        "nie_do_zamkniecia": sum(1 for r, _ in weszly if r == "nie_do_zamkniecia"),
     }
