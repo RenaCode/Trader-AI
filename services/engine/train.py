@@ -504,6 +504,7 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
     pokonane_odniesienie = 0
     pokonane_pelne = 0        # przy odniesieniu 100% zaangazowanym - do raportu
     ekspozycje: list[float] = []
+    zwroty_okien: list[float] = []
     porownywalne = 0
     all_sharpes: list[float] = []
     worst_dd = 0.0
@@ -717,6 +718,7 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
         if porownywalne_okno:
             porownywalne += 1
             ekspozycje.append(ekspozycja)
+            zwroty_okien.append(oos_m["total_return"])
             if oos_m["total_return"] > odniesienie_dop:
                 pokonane_odniesienie += 1
             if oos_m["total_return"] > odniesienie:
@@ -866,11 +868,33 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
                              f"{pokonane_odniesienie}/{porownywalne} okien "
                              f"({odn_lo:.0%}–{odn_hi:.0%}) — to nie jest przewaga, "
                              f"więc kryteria NIE są spełnione mimo odsetka powyżej progu.")
+        # SKALA WYNIKU IDZIE RAZEM ZE STATUSEM, z tego samego powodu, dla ktorego
+        # przedzial idzie razem z odsetkiem.
+        #
+        # Kryteria mierza UMIEJETNOSC: czy zloty zaangazowany przez strategie
+        # zarabia wiecej niz zloty w koszyku. Nie mierza, czy zaangazowanych
+        # zlotowek jest na tyle duzo, zeby wynik cokolwiek znaczyl. Pomiar
+        # z 2026-09-07: srednia ekspozycja 1,28% kapitalu przy limicie 15%,
+        # suma zwrotow z 39 okien +10,07% przez 3,2 roku - okolo 3% rocznie,
+        # ponizej stopy wolnej od ryzyka.
+        #
+        # "Kryteria spelnione" bez tych liczb obok czyta sie jak zielone swiatlo
+        # do handlu prawdziwymi pieniedzmi. Z nimi widac, ze to zielone swiatlo
+        # dla SYGNALU, a nie dla wielkosci pozycji.
+        srednia_eksp = statistics.fmean(ekspozycje) if ekspozycje else 0.0
+        suma_zwrotow = sum(zwroty_okien)
+        skala = (f" Średnia ekspozycja {srednia_eksp:.2%} kapitału przy limicie "
+                 f"{float(DEFAULT_LIMITS['max_total_exposure']['value']) / START_EQUITY:.0%}; "
+                 f"suma zwrotów z {porownywalne} okien {suma_zwrotow:+.1f}%.")
         reason = {
-            "validated": f"Dodatnie {positive}/{total} okien out-of-sample ({pct:.0f}%).{ci} Kryteria spełnione.",
+            "validated": f"Dodatnie {positive}/{total} okien out-of-sample ({pct:.0f}%).{ci}"
+                         f" Kryteria spełnione — strategia ma przewagę NA JEDNOSTKĘ "
+                         f"zaangażowanego kapitału.{skala} O tym, czy ta przewaga jest "
+                         f"warta handlowania, kryteria nie mówią nic.",
             "learning": f"Dodatnie {positive}/{total} okien out-of-sample ({pct:.0f}%).{ci}"
-                        + (brak_przewagi or " Próg przejścia na live: 70%."),
-            "degraded": f"Dodatnie tylko {positive}/{total} okien ({pct:.0f}%).{ci} Strategia nie wykazuje przewagi.",
+                        + (brak_przewagi or " Próg przejścia na live: 70%.") + skala,
+            "degraded": f"Dodatnie tylko {positive}/{total} okien ({pct:.0f}%).{ci} "
+                        f"Strategia nie wykazuje przewagi.{skala}",
         }[status]
 
     # Progi obowiazujace produkcje - mediana z okien. Petla decyzyjna czyta je
