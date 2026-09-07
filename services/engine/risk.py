@@ -20,6 +20,28 @@ from services.engine.risk_rules import (
 )
 
 
+class BrakLimitow(RuntimeError):
+    """Silnik nie ma limitow, ktore musi miec. To nie jest stan do obejscia."""
+
+
+# Limity, bez ktorych handel nie ma prawa ruszyc. Wszystkie trzy koncza sie
+# kill-switchem, czyli to one stanowia PODLOGE KAPITALU - a wlasnie o nia
+# wlascicielowi chodzi. Limity o dzialaniu `block` i `downsize` ograniczaja
+# wielkosc pojedynczej decyzji i ich brak jest kosztowny, ale nie grozny tak
+# samo: bez podlogi nie ma czego bronic.
+LIMITY_KONIECZNE = ("max_daily_loss", "max_drawdown", "min_equity")
+
+
+def sprawdz_komplet(limity: dict) -> list[str]:
+    """Ktorych koniecznych limitow brakuje. CZYSTA FUNKCJA.
+
+    Sprawdzamy KONKRETNE NAZWY, nie samo "czy cokolwiek jest". Zasianie dla
+    nowego trybu jednego limitu na liczbe zlecen wygladaloby jak komplet,
+    a zostawialoby rachunek bez podlogi.
+    """
+    return [n for n in LIMITY_KONIECZNE if n not in limity]
+
+
 class RiskKernel:
     def __init__(self, conn, engine: str, mode: str = "demo"):
         self.conn = conn
@@ -34,7 +56,26 @@ class RiskKernel:
             " WHERE engine = %s AND mode = %s AND enabled",
             (self.engine, self.mode),
         )
-        return {r["name"]: dict(r) for r in cur.fetchall()}
+        limity = {r["name"]: dict(r) for r in cur.fetchall()}
+        brakujace = sprawdz_komplet(limity)
+        if brakujace:
+            # BRAK LIMITU NIE ZNACZY "BEZ OGRANICZEN", TYLKO "NIE WIADOMO".
+            #
+            # Zapytanie filtruje po `mode`, a limity byly zasiane WYLACZNIE dla
+            # trybu demo. Przelaczenie na `live` zwracalo wiec pusty slownik,
+            # a `evaluate_account` przechodzilo przez wszystkie `if lim:` i
+            # oddawalo werdykt `allow`. Znaczylo to, ze pierwszy dzien
+            # z prawdziwymi pieniedzmi jest dokladnie tym dniem, w ktorym cala
+            # architektura bezpiecznika jest wylaczona - bez zadnego bledu,
+            # z bijacym heartbeatem i zielonym statusem.
+            #
+            # Dozorca buduje ten sam obiekt, wiec niezalezny nadzorca milczalby
+            # tak samo. Dlatego to wyjatek, a nie ostrzezenie.
+            raise BrakLimitow(
+                f"silnik {self.engine}/{self.mode} nie ma limitow: "
+                f"{', '.join(brakujace)}. Handel bez nich nie jest handlem "
+                f"z wiekszym ryzykiem - jest handlem BEZ OCENY ryzyka")
+        return limity
 
     # ------------------------------------------------------------- stan konta
     def _equity(self) -> tuple[Decimal, Decimal, Decimal]:

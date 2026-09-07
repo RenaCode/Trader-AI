@@ -210,7 +210,16 @@ def open_position(cur, engine: str, mode: str, instrument_id: int) -> dict | Non
     return cur.fetchone()
 
 
+class BrakKapitalu(RuntimeError):
+    """Nie wiadomo, ile jest na rachunku. Zgadywanie jest tu gorsze niz postoj."""
+
+
 def seed_equity(cur, engine: str, mode: str) -> None:
+    # ZASIEW TYLKO DLA DEMO. Na zywym rachunku wpisanie 100 000 jako punktu
+    # wyjscia jest fikcja, od ktorej liczone sa potem wszystkie limity
+    # procentowe i cale obsuniecie.
+    if mode != "demo":
+        return
     cur.execute("SELECT 1 FROM exec.equity_point WHERE engine=%s AND mode=%s LIMIT 1",
                 (engine, mode))
     if not cur.fetchone():
@@ -256,10 +265,24 @@ def update_equity(cur, engine: str, mode: str, as_of: datetime) -> None:
         exposure += qty * px
 
     # KAPITAL Z PRZEPLYWOW, nie ze stalej. Brak wierszy w exec.cash_flow oznacza
-    # rachunek, ktorego nikt nie zasilil - wtedy spadamy na kapital startowy,
-    # zeby proces nie wywracal sie na swiezej bazie przed migracja zasiewajaca.
+    # rachunek, ktorego nikt nie zasilil - na demo spadamy wtedy na kapital
+    # startowy, zeby proces nie wywracal sie na swiezej bazie przed migracja
+    # zasiewajaca.
+    #
+    # NA ZYWYM RACHUNKU TAKIEGO DOMYSLU BYC NIE MOZE. Kolejnosc zdarzen jest
+    # naturalna: silnik startuje, wlasciciel przelewa 10 000, nikt jeszcze nie
+    # zarejestrowal wplaty - i system przyjmuje 100 000. Limity sa procentowe,
+    # wiec pozycja "5% kapitalu" staje sie polowa rachunku, a prog min_equity
+    # 95 000 nie zadziala nigdy, bo equity "wynosi" 100 000. Jest to dokladnie
+    # ta awaria, przed ktora powstala migracja 0028, wprowadzona z powrotem
+    # tylnymi drzwiami przez wartosc domyslna.
     wplaty, units = przeplywy(cur, engine, mode)
     if wplaty == 0:
+        if mode != "demo":
+            raise BrakKapitalu(
+                f"tryb {mode} nie ma zadnego przeplywu w exec.cash_flow — "
+                f"zamiast zgadywac kapital 100 000, zatrzymuje sie. Zarejestruj "
+                f"wplate przed uruchomieniem handlu")
         wplaty, units = START_EQUITY, START_EQUITY
 
     equity = wplaty + realized + unrealized
