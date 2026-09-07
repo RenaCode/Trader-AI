@@ -15,6 +15,7 @@ z osobnymi modelami, osobnym ryzykiem i osobnymi zakładkami w UI.
 |---|---|
 | [`docs/00-research.md`](docs/00-research.md) | Wybór giełd, architektura, warstwa uczenia, ryzyko, plan wdrożenia |
 | [`docs/01-data-architecture.md`](docs/01-data-architecture.md) | Wybór bazy, bitemporalność, feature store, rejestr modeli, retencja |
+| [`docs/05-ochrona-kapitalu.md`](docs/05-ochrona-kapitalu.md) | **Czy rachunek może wyjść na minus** — go/no-go przed wpłatą realnych środków |
 
 ## Stan projektu
 
@@ -47,6 +48,10 @@ z osobnymi modelami, osobnym ryzykiem i osobnymi zakładkami w UI.
 - [x] **Ekspozycja rozłożona na czynniki** — 1,29% = 43% świec w rynku × 2,57
       pozycji × 1,16% na pozycję. Podniesienie jej zmierzone i **odrzucone**:
       kupuje obsunięcie za zwrot nieodróżnialny od szumu (patrz `docs/03`)
+- [x] Limity ryzyka wyrażone **ułamkiem kapitału**, nie kwotą — te same trzy
+      limity na rachunku 10 000 znaczyły 50%, 150% i 15% zamiast 5%, 15% i 1,5%
+- [x] **Próg kapitału** (`min_equity`) — twarda podłoga kwotowa, osobna od
+      obsunięcia liczonego od szczytu
 - [ ] **Wąskie gardło to gęstość sygnału, nie wielkość pozycji.** Strategia stoi
       poza rynkiem 57% czasu i znajduje 2,5 okazji na 10 możliwych; wynik ~3%
       rocznie. Kryteria mierzą przewagę na jednostkę kapitału, nie skalę
