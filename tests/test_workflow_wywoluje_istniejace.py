@@ -100,3 +100,16 @@ def test_podbijanie_tagow_wylaczone_dopoki_brak_poswiadczen_do_rejestru():
         assert warunek is False, (
             "CI podbija tagi obrazów, a klaster nie ma poświadczeń do ghcr.io — "
             "pierwszy push kodu skończy się ImagePullBackOff")
+
+
+def test_zmiana_workflow_uruchamia_workflow():
+    """Filtr ścieżek musi obejmować sam plik workflow.
+
+    Bez tego edycja definicji CI kończy się zielonym przebiegiem, w którym
+    wszystkie joby zostały pominięte — czyli poprawka CI nie jest przez CI
+    sprawdzana. Tak przeżył 11 dni krok wołający usunięty plik.
+    """
+    tresc = (KORZEN / ".github/workflows/docker-publish.yml").read_text()
+    filtr = tresc[tresc.index("filters: |"):tresc.index("verify-migrations")]
+    assert ".github/workflows/docker-publish.yml" in filtr, \
+        "zmiana workflow nie uruchamia workflow — jego własna poprawka nie będzie sprawdzona"

@@ -35,6 +35,14 @@ jobs:
               - 'services/**'
               - 'db/**'
               - 'docker/api.Dockerfile'
+              # Zmiana samego workflow MUSI go uruchomic.
+              #
+              # Bez tego wpisu edycja definicji CI nie jest przez CI sprawdzana:
+              # przebieg konczy sie zielono, bo wszystkie joby sa pomijane przez
+              # filtr sciezek. Tak wlasnie przezyl 11 dni krok wolajacy usuniety
+              # plik - a takze poprawka tego kroku, ktora sama nie zostala
+              # zweryfikowana i wymagala recznego workflow_dispatch.
+              - '.github/workflows/docker-publish.yml'
             web:
               - 'web/**'
               - 'docker/web.Dockerfile'
