@@ -133,6 +133,15 @@ async def rozstrzygnij_plan(cur, adapter, plan: dict, f: Filtry, *, engine: str,
                     " resolved_at=%s WHERE id=%s", (teraz, plan["id"]))
         return "brak", "giełda nie zna tego zlecenia — plan wygasa"
 
+    # WIERSZ ZLECENIA JUZ ISTNIEJE - powstal przy zlozeniu. Bez tego odczytu
+    # `zapisz_wejscie` zalozylby drugi i jeden plan mialby w exec.order dwa
+    # zlecenia: tabela przestalaby znaczyc "jedno zlecenie", a czujka zdrowia
+    # egzekucji widzialaby dwa razy wiecej przyjec, niz bylo.
+    cur.execute("SELECT id FROM exec.order WHERE planned_order_id = %s"
+                " ORDER BY id LIMIT 1", (plan["id"],))
+    wiersz = cur.fetchone()
+    id_zlecenia_w_bazie = wiersz["id"] if wiersz else None
+
     r = co_z_wypelnieniem(stan.wypelniono, Decimal(plan["qty"]),
                           Decimal(plan["limit_price"]), f)
 
@@ -171,13 +180,15 @@ async def rozstrzygnij_plan(cur, adapter, plan: dict, f: Filtry, *, engine: str,
                        plan["side"], r.ilosc, cena, prowizja, teraz,
                        plan["quote_ccy"], meta, planned_order_id=plan["id"],
                        venue_order_id=stan.id_gieldy, client_order_id=id_w,
-                       venue_fill_id=f"{stan.id_gieldy}")
+                       venue_fill_id=f"{stan.id_gieldy}",
+                       order_id=id_zlecenia_w_bazie)
 
     cur.execute("UPDATE journal.planned_order SET status='triggered',"
                 " resolved_at=%s WHERE id=%s", (teraz, plan["id"]))
     cur.execute("UPDATE exec.order SET status=%s, updated_at=%s, raw = raw || %s"
                 " WHERE planned_order_id=%s",
                 (stan.status, teraz, json.dumps(meta), plan["id"]))
+
     return r.rodzaj, r.powod
 
 

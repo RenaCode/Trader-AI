@@ -379,7 +379,8 @@ def zapisz_wejscie(cur, engine: str, mode: str, instrument_id: int, decision_id:
                    planned_order_id: int | None = None,
                    venue_order_id: str | None = None,
                    client_order_id: str | None = None,
-                   venue_fill_id: str | None = None) -> int:
+                   venue_fill_id: str | None = None,
+                   order_id: int | None = None) -> int:
     """Zapis wejscia w pozycje. JEDEN ZAPIS DLA OBU ZRODEL.
 
     DLACZEGO TO JEST WSPOLNE, A NIE SKOPIOWANE
@@ -393,16 +394,32 @@ def zapisz_wejscie(cur, engine: str, mode: str, instrument_id: int, decision_id:
     `meta` niesie, ktore zrodlo wpisalo ten wiersz. Bez tego pierwsze pytanie
     przy analizie wyniku - "czy to bylo naprawde, czy policzone" - nie ma
     odpowiedzi w danych.
+
+    `order_id` PODAJEMY, GDY ZLECENIE JUZ ISTNIEJE. Na gieldzie wiersz zlecenia
+    powstaje przy ZLOZENIU, a ta funkcja jest wolana dopiero przy rozstrzygnieciu
+    - wiec bez tego parametru jeden plan zostawialby DWA wiersze w exec.order.
+    Nie jest to szczegol ksiegowy: `exec.order` przestaje wtedy znaczyc "jedno
+    zlecenie", uzgodnienie liczy podwojnie, a czujka zdrowia egzekucji widzi
+    dwa razy wiecej przyjec, niz bylo. Rachunek papierowy zadnego zlecenia
+    wczesniej nie sklada, wiec tam wiersz powstaje tutaj.
     """
-    cur.execute(
-        "INSERT INTO exec.order (decision_id, planned_order_id, engine, mode, instrument_id,"
-        " venue_order_id, client_order_id, side, order_type, qty, limit_price, status,"
-        " submitted_at, raw)"
-        " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'filled',%s,%s) RETURNING id",
-        (decision_id, planned_order_id, engine, mode, instrument_id,
-         venue_order_id, client_order_id or f"tai-{decision_id}", side,
-         meta.get("order", "market"), qty, cena, as_of, json.dumps(meta)))
-    oid = cur.fetchone()["id"]
+    if order_id is None:
+        cur.execute(
+            "INSERT INTO exec.order (decision_id, planned_order_id, engine, mode,"
+            " instrument_id, venue_order_id, client_order_id, side, order_type, qty,"
+            " limit_price, status, submitted_at, raw)"
+            " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'filled',%s,%s) RETURNING id",
+            (decision_id, planned_order_id, engine, mode, instrument_id,
+             venue_order_id, client_order_id or f"tai-{decision_id}", side,
+             meta.get("order", "market"), qty, cena, as_of, json.dumps(meta)))
+        oid = cur.fetchone()["id"]
+    else:
+        oid = order_id
+        cur.execute(
+            "UPDATE exec.order SET status='filled', qty=%s, limit_price=%s,"
+            " venue_order_id = COALESCE(%s, venue_order_id), updated_at=%s,"
+            " raw = raw || %s WHERE id=%s",
+            (qty, cena, venue_order_id, as_of, json.dumps(meta), oid))
     cur.execute(
         "INSERT INTO exec.fill (order_id, venue_fill_id, qty, price, fee, fee_ccy, event_time)"
         " VALUES (%s,%s,%s,%s,%s,%s,%s)",

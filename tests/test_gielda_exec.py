@@ -340,3 +340,45 @@ def test_proba_egzekucji_stawia_limit_POZA_ZASIEGIEM():
     from services.engine.proba_egzekucji import UDZIAL_CENY
 
     assert UDZIAL_CENY < D("0.5")
+
+
+def test_jeden_plan_daje_JEDEN_wiersz_zlecenia():
+    """Wiersz zlecenia powstaje przy ZŁOŻENIU, a rozstrzygnięcie przychodzi
+    cykl później.
+
+    Bez przekazania istniejącego identyfikatora `zapisz_wejscie` zakładałby
+    drugi wiersz i jeden plan miałby w `exec.order` dwa zlecenia. Nie jest to
+    szczegół księgowy: tabela przestaje znaczyć „jedno zlecenie", a czujka
+    zdrowia egzekucji widzi dwa razy więcej przyjęć, niż było — czyli myli się
+    dokładnie w tę stronę, w którą nie wolno.
+    """
+    cur = Kursor([{"id": 501}, {"id": 1}])
+    g = Gielda(stan=_stan(D("10")))
+    asyncio.run(rozstrzygnij_plan(cur, g, PLAN, F, engine="crypto", mode="demo",
+                                  kategoria="spot",
+                                  teraz=__import__("datetime").datetime(
+                                      2026, 9, 7,
+                                      tzinfo=__import__("datetime").timezone.utc),
+                                  kind="spot"))
+    wstawienia = [s for s, _ in cur.sql if "INSERT INTO exec.order" in s]
+    assert wstawienia == []                     # ani jednego nowego wiersza
+
+    # ...a istniejacy zostal oznaczony jako wypelniony, z ilościa z gieldy.
+    aktualizacje = [(s, p) for s, p in cur.sql
+                    if "UPDATE exec.order SET status='filled'" in s]
+    assert len(aktualizacje) == 1
+    assert 501 in aktualizacje[0][1]
+
+
+def test_rachunek_papierowy_NADAL_zaklada_wlasny_wiersz():
+    """Symulacja nie składa wcześniej żadnego zlecenia, więc tam wiersz musi
+    powstać przy zapisie wejścia — inaczej transakcja papierowa nie miałaby
+    zlecenia w ogóle."""
+    from services.engine.loop import zapisz_wejscie
+
+    cur = Kursor([{"id": 77}])
+    zapisz_wejscie(cur, "crypto", "demo", 3, 7, "buy", D("1"), D("100"), D("0.1"),
+                   __import__("datetime").datetime(
+                       2026, 9, 7, tzinfo=__import__("datetime").timezone.utc),
+                   "USDC", {"execution": "internal_paper", "order": "limit"})
+    assert any("INSERT INTO exec.order" in s for s, _ in cur.sql)
