@@ -240,10 +240,30 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           cache-from: type=gha,scope=${{ matrix.name }}
 
+  # WYLACZONY, DOPOKI KLASTER NIE POTRAFI POBIERAC Z ghcr.io.
+  #
+  # Ten krok podbija tag obrazu w charts/trader/values.yaml, a ArgoCD to
+  # synchronizuje. Wskazywalby wiec produkcje na obraz z prywatnego rejestru,
+  # do ktorego klaster NIE MA POSWIADCZEN: `imagePullSecrets: []`, zaden sekret
+  # typu dockerconfig w namespace nie istnieje (sprawdzone 2026-09-07). Efektem
+  # bylby ImagePullBackOff przy pierwszym pushu kodu.
+  #
+  # Do tej pory nie bylo tego widac, bo krok NIGDY sie nie wykonal - caly
+  # workflow padal wczesniej na tescie dymnym, ktory z kolei padal na wywolaniu
+  # usunietego pliku. Naprawa CI odblokowala wiec uspiony problem.
+  #
+  # Obrazy powstaja obecnie NA VPS (scripts/build-on-vps.sh) i sa importowane
+  # wprost do containerd, a `pullPolicy: IfNotPresent` sprawia, ze kubelet ich
+  # nie szuka w rejestrze. Tag w values.yaml podbijany jest recznie, po zbudowaniu.
+  #
+  # ZEBY TO WLACZYC: utworzyc sekret `ghcr-pull` z tokenem majacym read:packages,
+  # odkomentowac imagePullSecrets w charts/trader/values.yaml, przywrocic
+  # pullPolicy: Always - i dopiero wtedy zdjac ten warunek. Kolejnosc ma
+  # znaczenie: zdjecie warunku jako pierwsze zatrzymuje produkcje.
   update-git:
     name: Aktualizacja tagow w values.yaml
     needs: [changes, build]
-    if: always() && needs.build.result == 'success'
+    if: false
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
