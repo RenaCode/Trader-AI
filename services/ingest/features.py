@@ -599,6 +599,13 @@ def main() -> int:
     ap.add_argument("--days", type=int, default=90)
     ap.add_argument("--once", action="store_true", help="tylko ostatnia doba")
     ap.add_argument("--engine", default="crypto")
+    ap.add_argument("--tylko-przekroj", action="store_true", dest="tylko_przekroj",
+                    help="przelicz WYLACZNIE sile wzgledna, pomijajac cechy "
+                         "per instrument. Do naprawy rozjazdu po zmianie "
+                         "uniwersum: ranking przekrojowy zalezy od ZBIORU, wiec "
+                         "zmiana uniwersum zmienia historyczne wartosci tej "
+                         "cechy - a pozostale sa od zbioru niezalezne i ich "
+                         "przeliczanie tylko kosztuje")
     ap.add_argument("--instrumenty", default="",
                     help="lista symboli po przecinku - liczy cechy WYLACZNIE dla nich, "
                          "a sile wzgledna w obrebie dokladnie tego zbioru. Sluzy "
@@ -634,6 +641,8 @@ def main() -> int:
 
         total = 0
         for inst in instruments:
+            if args.tylko_przekroj:
+                break
             n = compute_prices(cur, inst["id"], h, feat_ids, since, now)
             conn.commit()
             m = compute_news(cur, inst["id"], h, feat_ids["news_sent"], since, now)

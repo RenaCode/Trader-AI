@@ -210,10 +210,16 @@ zywotnoscCron:
 
 # Proba pozarowa kill-switcha. Doprowadza do PRAWDZIWEGO zadzialania i sprawdza
 # caly lancuch: zadanie -> wiersz w bazie -> wstrzymanie wejsc -> powiadomienie.
-# Raz w tygodniu, bo wstrzymuje wejscia na kilkanascie minut.
+#
+# CODZIENNIE, nie raz w tygodniu. Cena to kilkanascie minut wstrzymanych wejsc
+# na dobe - przy sredniej ekspozycji 1,3% i 2,6 pozycji naraz to jest ulamek
+# jednego okna decyzyjnego (swieca 4h). Zysk: o awarii bezpiecznika dowiadujemy
+# sie nastepnego dnia, a nie po tygodniu.
+#
+# Godzina dobrana tak, zeby nie kolidowac z trenerem (04:40) ani z kopia (03:17).
 probaCron:
   enabled: true
-  schedule: "20 5 * * 0"        # niedziela 05:20 UTC, po treningu i kopii
+  schedule: "20 5 * * *"        # codziennie 05:20 UTC, po treningu i kopii
 
 # Trener walk-forward. Zadanie cykliczne, nie proces w Deploymencie - dlugie
 # obliczenia nie moga ginac przy wdrozeniach.

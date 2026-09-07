@@ -15,9 +15,11 @@
 # jedzie w tym samym obrazie co silnik, wiec sprawdza dokladnie ten kod, ktory
 # handluje.
 #
-# CZESTOTLIWOSC: raz w tygodniu. Proba wstrzymuje wejscia na kilkanascie minut,
-# wiec czesciej byloby kosztem bez tresci - a rzadziej znaczyloby, ze o awarii
-# zabezpieczenia dowiadujemy sie po miesiacu.
+# CZESTOTLIWOSC: codziennie. Proba wstrzymuje wejscia na kilkanascie minut, co
+# przy swiecy 4h jest ulamkiem jednego okna decyzyjnego - a przy sredniej
+# ekspozycji 1,3% kosztem, ktorego nie widac w wyniku. Bezpiecznik sprawdzany raz
+# w tygodniu oznacza, ze o jego awarii dowiadujemy sie srednio po trzech i pol
+# dnia; przy dobowej probie - nastepnego ranka.
 apiVersion: batch/v1
 kind: CronJob
 metadata:
