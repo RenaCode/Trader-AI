@@ -78,6 +78,17 @@ MIN_WINDOWS_FOR_VALIDATION = 20
 # Minimalna liczba instrumentow, ktore musza byc notowane w danym oknie.
 # Portfel z garstki rynkow to inna strategia niz portfel z dwudziestu czterech.
 MIN_INSTRUMENTS = 8
+
+# Ile okien musi widziec sygnal ZYWY, zanim dostanie wage produkcyjna.
+#
+# Mediana po oknach, w ktorych sygnal zyl, rozwiazuje problem "brak danych
+# liczony jako zero" - ale wprowadza drugi: sygnal zywy w JEDNYM oknie
+# dostalby wage z tego jednego okna, czyli z jednego losowania.
+#
+# Piec okien to przy kroku 30 dni okolo pieciu miesiecy niezaleznych okresow
+# testowych - miesci sie w szesciomiesiecznej fazie demonstracyjnej i jest
+# wystarczajaco duzo, zeby mediana nie byla pojedynczym pomiarem.
+MIN_OKIEN_ZYWEGO = 5
 FEE = 0.00055
 SLIP = 0.0004
 
@@ -483,6 +494,9 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
     positive = 0
     gate_history: list[float] = []
     weight_history: list[dict] = []
+    # Rownolegla do weight_history: ktore sygnaly byly martwe w danym oknie.
+    # Bez tego zero po martwym sygnale nie da sie odroznic od zera zmierzonego.
+    martwe_w_oknie: list[set[str]] = []
     wybrane_ic = 0
     # Porownanie z nierobieniem niczego. Bez tego odsetek dodatnich okien nie
     # mowi, czy strategia jest LEPSZA od kupienia i trzymania - a strategia
@@ -666,6 +680,7 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
 
         gate_history.extend(g[0] for g in gates.values())
         weight_history.append(best_w)
+        martwe_w_oknie.append(martwe)
 
         odniesienie = kup_i_trzymaj({s: v for s, v in test_slices.items() if v}, kind)
         if informative:
@@ -801,13 +816,33 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
     # okno to jedno losowanie; mediana po kilkudziesieciu jest odporna na to,
     # ze akurat ostatnie wypadlo nietypowo. Suma po wartosciach bezwzglednych,
     # bo wagi moga byc ujemne.
+    #
+    # MEDIANA LICZONA WYLACZNIE PO OKNACH, W KTORYCH SYGNAL ZYL.
+    #
+    # Sygnal martwy na oknie dostaje w nim wage zero - ale to zero nie jest
+    # pomiarem "waga powinna byc zerowa", tylko BRAKIEM POMIARU. Wliczanie go
+    # do mediany jest tym samym, co usrednianie brakow danych jako zer.
+    #
+    # Skutek byl konkretny i policzalny. `news_shock` bez klucza Anthropic byl
+    # martwy we wszystkich oknach; po wpieciu klucza ozywa najpierw w jednym,
+    # potem w kolejnych. Zeby MEDIANA z 39 okien przestala byc zerem, sygnal
+    # musialby zyc w 20 z nich - czyli potrzebowalby 600 dni historii newsow.
+    # Dwadziescia miesiecy, przy szesciomiesiecznej fazie demonstracyjnej.
+    #
+    # Sygnal, ktorego dane zaczely istniec dzis, nie mogl wiec wejsc do modelu
+    # NIGDY w horyzoncie tego projektu - niezaleznie od tego, ile informacji
+    # niesie.
     prod_weights = {}
     if weight_history:
         for regime in REGIMES:
-            per_signal = {
-                name: statistics.median([w[regime].get(name, 0.0) for w in weight_history])
-                for name in SIGNALS
-            }
+            per_signal = {}
+            for name in SIGNALS:
+                # Rownolegle listy, nie wyszukiwanie po wartosci: dwa okna moga
+                # dac identyczny zestaw wag, a wtedy `index()` wskazalby zle okno.
+                zywe = [w[regime][name]
+                        for w, martwe_okna in zip(weight_history, martwe_w_oknie)
+                        if name in w[regime] and name not in martwe_okna]
+                per_signal[name] = statistics.median(zywe) if len(zywe) >= MIN_OKIEN_ZYWEGO else 0.0
             total_w = sum(abs(v) for v in per_signal.values()) or 1.0
             prod_weights[regime] = {k: round(v / total_w, 4) for k, v in per_signal.items()}
 

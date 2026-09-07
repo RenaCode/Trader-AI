@@ -306,3 +306,37 @@ def test_nadpisanie_uniwersum_wymaga_trybu_suchego(monkeypatch):
     with pytest.raises(SystemExit) as e:
         modul.main()
     assert "--sucho" in str(e.value)
+
+
+# --- brak pomiaru to nie jest pomiar rowny zeru -----------------------------
+def test_waga_produkcyjna_liczona_tylko_z_okien_gdzie_sygnal_zyl():
+    """Sygnał martwy na oknie dostaje w nim zero — ale to nie jest pomiar
+    „waga powinna być zerowa", tylko BRAK POMIARU.
+
+    Wliczanie go do mediany jest tym samym, co uśrednianie braków danych jako
+    zer. Skutek był policzalny: `news_shock` ożywa najpierw w jednym oknie,
+    potem w kolejnych, a mediana z 39 okien przestałaby być zerem dopiero przy
+    20 żywych — czyli po 600 dniach historii newsów. Dwadzieścia miesięcy,
+    przy sześciomiesięcznej fazie demonstracyjnej.
+
+    Sygnał, którego dane zaczęły istnieć dziś, nie mógł więc wejść do modelu
+    nigdy w horyzoncie tego projektu — niezależnie od tego, ile informacji niesie.
+    """
+    from pathlib import Path
+
+    zrodlo = Path("services/engine/train.py").read_text()
+    assert "martwe_w_oknie" in zrodlo, "brak śladu, które sygnały były martwe w którym oknie"
+    assert "zip(weight_history, martwe_w_oknie)" in zrodlo, \
+        "mediana nadal liczona po wszystkich oknach"
+
+
+def test_prog_zywych_okien_miesci_sie_w_fazie_demo():
+    """Mediana z jednego okna to jedno losowanie, nie pomiar. Ale próg zbyt
+    wysoki cofa problem, który ta zmiana rozwiązuje."""
+    from services.engine.train import MIN_OKIEN_ZYWEGO
+
+    KROK_DNI = 30
+    assert MIN_OKIEN_ZYWEGO >= 3, "za mało okien — waga byłaby pojedynczym pomiarem"
+    assert MIN_OKIEN_ZYWEGO * KROK_DNI <= 180, (
+        f"próg {MIN_OKIEN_ZYWEGO} okien to {MIN_OKIEN_ZYWEGO * KROK_DNI} dni — "
+        f"więcej niż sześciomiesięczna faza demonstracyjna")

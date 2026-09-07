@@ -1187,3 +1187,65 @@ Narzędzie liczy to samo i wypisuje werdykt, zamiast zostawiać liczbę czytelni
 Bez tego „43,3" zachęca do wniosku „gorzej niż losowo", który przy trzydziestu
 kilku oknach nie jest uprawniony — ten sam błąd, który tego samego dnia zamienił
 mikrostrukturę w pozorne odkrycie.
+
+
+---
+
+# Nowy sygnał nie mógł wejść do modelu przez dwadzieścia miesięcy
+
+Znalezione przy przygotowaniu kanału newsowego, zanim klucz Anthropic
+w ogóle dotarł.
+
+## Mechanizm
+
+Wagi produkcyjne to **mediana po wszystkich oknach** walk-forward. Sygnał
+uznany za martwy na danym oknie (`martwe_sygnaly` — niezerowy wynik rzadziej
+niż w 1% świec) jest z kalibracji wykluczany i dostaje w tym oknie **zero**.
+
+To zero trafiało do mediany na równi z wagami zmierzonymi. Ale ono nie jest
+pomiarem „waga powinna być zerowa" — jest **brakiem pomiaru**. Wliczanie go
+do mediany to uśrednianie braków danych jako zer.
+
+## Skutek, policzalny co do dnia
+
+`news_shock` bez klucza jest martwy we wszystkich oknach. Po wpięciu klucza
+ożywa najpierw w jednym oknie, potem w kolejnych — w tempie jednego okna na
+30 dni. Żeby **mediana** z 39 okien przestała być zerem, musiałby żyć w 20
+z nich:
+
+```
+20 okien × 30 dni = 600 dni ≈ 19,7 miesiąca
+```
+
+Faza demonstracyjna trwa sześć miesięcy. **Sygnał, którego dane zaczęły
+istnieć dziś, nie mógł wejść do modelu nigdy w horyzoncie tego projektu** —
+niezależnie od tego, ile informacji niesie.
+
+Dotyczyło to każdego przyszłego sygnału na nowych danych, nie tylko newsów:
+mikrostruktura arkusza trafiłaby dokładnie na to samo.
+
+## Poprawka
+
+Mediana liczona **wyłącznie po oknach, w których sygnał żył**. Okna, gdzie był
+martwy, nie głosują — bo nie mają czym.
+
+To wprowadza drugi problem: sygnał żywy w jednym oknie dostałby wagę z jednego
+losowania. Stąd próg `MIN_OKIEN_ZYWEGO = 5` — pięć niezależnych okresów
+testowych, czyli około pięciu miesięcy przy kroku 30 dni. Mieści się w fazie
+demonstracyjnej i jest wystarczająco dużo, żeby mediana nie była pojedynczym
+pomiarem.
+
+| próg | historia potrzebna |
+|---|---|
+| mediana po wszystkich oknach (przed) | 600 dni ≈ 19,7 mies. |
+| 5 żywych okien (po) | 150 dni ≈ 4,9 mies. |
+
+## Wpływ na dzisiejszy wynik: żaden
+
+28/39 dodatnich okien (71,8%) wobec 29/39 (74,4%) w przebiegu nocnym, mediana
+Sharpe +0,126 wobec +0,100 — różnice w granicach zmierzonego szumu. Dziś
+jedynym martwym sygnałem jest `news_shock`, martwy we **wszystkich** oknach,
+więc poniżej progu pięciu i tak dostaje zero.
+
+Zmiana nie poprawia wyniku. Odblokowuje możliwość, żeby nowy sygnał kiedykolwiek
+go poprawił.
