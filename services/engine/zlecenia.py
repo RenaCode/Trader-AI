@@ -44,6 +44,26 @@ class Filtry:
         return None not in (self.krok_ilosci, self.krok_ceny, self.min_wartosc)
 
 
+def bez_ogona(d: Decimal) -> Decimal:
+    """Ta sama liczba bez końcowych zer. Kształt, nie wartość.
+
+    DLACZEGO TO W OGÓLE MA ZNACZENIE
+
+    `lot_size` wraca z bazy jako NUMERIC, czyli `Decimal("0.001000000000")` —
+    z zachowaną skalą kolumny. Mnożenie przenosi te dwanaście miejsc do wyniku,
+    więc ilość `1.234` jedzie do giełdy jako `1.234000000000`, a Bybit odrzuca
+    ją: „Order quantity has too many decimals" (170137).
+
+    Wartość jest przy tym POPRAWNA — błędny jest sam zapis. Objaw nie wskazuje
+    więc na przyczynę: wygląda na złe zaokrąglenie, a jest kwestią skali kolumny.
+
+    `normalize()` samo nie wystarcza: dla liczb całkowitych daje postać
+    wykładniczą (`2000` → `2E+3`), którą giełda też odrzuci.
+    """
+    d = d.normalize()
+    return d.quantize(Decimal(1)) if d == d.to_integral_value() else d
+
+
 def do_kroku_w_dol(wartosc: Decimal, krok: Decimal) -> Decimal:
     """Zaokrąglenie W DÓŁ do wielokrotności kroku.
 
@@ -53,7 +73,7 @@ def do_kroku_w_dol(wartosc: Decimal, krok: Decimal) -> Decimal:
     """
     if krok <= 0:
         raise ValueError("krok musi byc dodatni")
-    return (wartosc / krok).to_integral_value(rounding=ROUND_DOWN) * krok
+    return bez_ogona((wartosc / krok).to_integral_value(rounding=ROUND_DOWN) * krok)
 
 
 def cena_do_kroku(cena: Decimal, krok: Decimal, kupno: bool) -> Decimal:
@@ -68,7 +88,7 @@ def cena_do_kroku(cena: Decimal, krok: Decimal, kupno: bool) -> Decimal:
     w_dol = do_kroku_w_dol(cena, krok)
     if kupno or w_dol == cena:
         return w_dol
-    return w_dol + krok
+    return bez_ogona(w_dol + krok)
 
 
 def sprawdz_zlecenie(ilosc: Decimal, cena: Decimal, f: Filtry, *,

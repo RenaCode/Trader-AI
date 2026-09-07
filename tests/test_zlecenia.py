@@ -123,3 +123,38 @@ def test_rozbieznosci_nie_nadpisuja_regul_wartoscia_pusta():
     g = {"SOLUSDC": {"krok_ilosci": None, "krok_ceny": None, "min_wartosc": None,
                      "min_ilosc": D("0.01"), "status": "Trading"}}
     assert rozbieznosci(baza, g) == []
+
+
+def test_krok_z_bazy_NIE_wnosi_swojej_skali_do_ilosci():
+    """`lot_size` wraca z NUMERIC jako Decimal("0.001000000000").
+
+    Mnożenie przenosi te dwanaście miejsc do wyniku i giełda odrzuca zlecenie:
+    „Order quantity has too many decimals" (Bybit 170137). Wartość jest przy tym
+    POPRAWNA — błędny jest sam zapis, więc objaw nie wskazuje na przyczynę.
+
+    Wykryte próbą na prawdziwej giełdzie; testy tego nie łapały, bo zapisywały
+    krok jako `0.001`, bez skali kolumny.
+    """
+    z_bazy = Filtry(krok_ilosci=D("0.001000000000"), min_ilosc=D("0.001000000000"),
+                    min_wartosc=D("5.00000000"), krok_ceny=D("0.010000000000"))
+    ilosc, cena, powod = sprawdz_zlecenie(D("1.2349"), D("50000.007"), z_bazy,
+                                          kupno=True, wyjscie=False)
+    assert powod is None
+    assert str(ilosc) == "1.234"
+    assert str(cena) == "50000"
+    assert ilosc == D("1.234")                 # wartosc bez zmian
+
+
+def test_bez_ogona_nie_robi_z_calkowitych_postaci_wykladniczej():
+    """`normalize()` samo daje `2000` → `2E+3`, co giełda też odrzuci."""
+    from services.engine.zlecenia import bez_ogona
+
+    assert str(bez_ogona(D("2000.000"))) == "2000"
+    assert str(bez_ogona(D("1.234000000"))) == "1.234"
+    assert str(bez_ogona(D("0.010000000"))) == "0.01"
+
+
+def test_cena_w_gore_takze_bez_ogona():
+    """Dodanie kroku po zaokrągleniu wnosi skalę kroku z powrotem."""
+    krok = D("0.010000000000")
+    assert str(cena_do_kroku(D("100.003"), krok, kupno=False)) == "100.01"
