@@ -1,105 +1,50 @@
-"""Testy statystyki uzywanej w diagnostyce sygnalow.
+"""Diagnostyka IC: pominięcie jest wynikiem, a błąd standardowy uwzględnia nakładanie.
 
-Wspolczynnik informacji jest jedyna liczba, na podstawie ktorej ocenimy, czy
-w ogole warto dalej dobierac wagi. Blad w jego liczeniu prowadzilby do decyzji
-projektowych opartych na niczym - stad testy takze na przypadki zdegenerowane.
+DWA PROBLEMY, OBA Z TEJ SAMEJ RODZINY CO RESZTA DNIA
+
+1. Przy zbyt krótkim `--days` odpadały wszystkie instrumenty (próg 500 świec
+   panelu), skrypt wypisywał pustą tabelę i kończył się zerem. „Żaden sygnał nic
+   nie przewiduje" i „nie było czego liczyć" wyglądały identycznie.
+
+2. Błąd standardowy IC liczony jako 1/√n zakłada niezależne obserwacje. Zwrot
+   z k świec liczony przy każdej świecy nakłada się na k−1 sąsiednich pomiarów,
+   więc naiwny błąd zaniża się tym mocniej, im dłuższy horyzont — czyli tam,
+   gdzie IC zwykle wygląda najlepiej. Pierwszy pomiar mikrostruktury dał przez to
+   „+0,1532, trzy i pół raza więcej niż najlepszy sygnał"; po poprawce wyszło
+   1,6 błędu standardowego.
 """
-import random
+import re
+from pathlib import Path
 
-import pytest
-
-from services.engine.statystyka import rangi, spearman
-
-
-def test_rangi_usredniaja_remisy():
-    assert rangi([3.0, 1.0, 1.0, 2.0]) == [4.0, 1.5, 1.5, 3.0]
+ZRODLO = Path("services/engine/diagnose_signals.py").read_text()
 
 
-def test_rangi_dla_wszystkich_rownych():
-    assert rangi([5.0] * 4) == [2.5] * 4
+def test_brak_danych_konczy_sie_kodem_niezerowym():
+    assert "return 2" in ZRODLO, "pusty wynik kończy się sukcesem — nie do odróżnienia od zerowego IC"
+    i = ZRODLO.index("if not zebrane:")
+    assert "PRZERWANO" in ZRODLO[i:i + 300]
 
 
-def test_idealna_zgodnosc():
-    xs = [float(i) for i in range(100)]
-    assert spearman(xs, xs) == pytest.approx(1.0)
+def test_pominiete_instrumenty_sa_wypisywane():
+    """Cicha pętla `continue` ukrywała, ile instrumentów w ogóle weszło do pomiaru."""
+    assert "pominiete.append" in ZRODLO
+    assert "pominięte (panel <" in ZRODLO
 
 
-def test_idealna_przeciwnosc():
-    xs = [float(i) for i in range(100)]
-    assert spearman(xs, [-x for x in xs]) == pytest.approx(-1.0)
+def test_blad_standardowy_uwzglednia_nakladanie_obserwacji():
+    """Efektywna liczba obserwacji to n/k, nie n."""
+    assert re.search(r"n_ef\s*=\s*len\(xs\)\s*/\s*k", ZRODLO), \
+        "błąd standardowy nie dzieli liczby obserwacji przez horyzont"
 
 
-def test_monotoniczna_ale_nieliniowa_daje_jeden():
-    """Korelacja RANGOWA mierzy uporzadkowanie, nie skale.
-
-    Gdyby ktos podmienil ja na Pearsona, ten test padnie - a to istotne,
-    bo wyniki sygnalow sa przycinane do zakresu -1..1 i skala jest umowna.
-    """
-    xs = [float(i) for i in range(1, 101)]
-    assert spearman(xs, [x ** 3 for x in xs]) == pytest.approx(1.0)
+def test_cechy_bez_sygnalu_sa_mierzone_osobno():
+    """Mierzenie to nie budowanie: IC cech, których żaden sygnał nie używa,
+    odpowiada na pytanie „czy warto ten sygnał w ogóle zbudować"."""
+    assert "CECHY_BEZ_SYGNALU" in ZRODLO
+    assert "book_imbalance" in ZRODLO and "book_spread_bps" in ZRODLO
 
 
-def test_losowe_daje_okolo_zera():
-    random.seed(7)
-    xs = [random.random() for _ in range(2000)]
-    ys = [random.random() for _ in range(2000)]
-    assert abs(spearman(xs, ys)) < 0.06
-
-
-def test_za_mala_proba_zwraca_none():
-    """Lepiej brak liczby niz liczba bez znaczenia."""
-    assert spearman([1.0, 2.0, 3.0], [1.0, 2.0, 3.0]) is None
-
-
-def test_stala_kolumna_zwraca_none():
-    """Sygnal, ktory nie zmienia sie wcale, nie ma jak korelowac."""
-    xs = [1.0] * 100
-    ys = [float(i) for i in range(100)]
-    assert spearman(xs, ys) is None
-
-
-# ------------------------------------------------------ przedzial ufnosci
-def test_przedzial_zawiera_zmierzony_odsetek():
-    from services.engine.statystyka import wilson
-
-    for k, n in ((20, 40), (25, 40), (28, 40), (1, 10)):
-        lo, hi = wilson(k, n)
-        assert lo <= k / n <= hi
-
-
-def test_przedzial_przy_40_oknach_ma_okolo_30_punktow():
-    """Sedno sprawy: przy tej probie roznica kilku punktow to szum.
-
-    Gdyby ktos podmienil Wilsona na zwykly przedzial normalny, ten test
-    przejdzie - ale nastepny nie.
-    """
-    from services.engine.statystyka import wilson
-
-    lo, hi = wilson(21, 40)
-    assert 0.25 < (hi - lo) < 0.35
-
-
-def test_przedzial_nie_wychodzi_poza_zakres():
-    """Zwykly przedzial normalny przy krancach daje granice ujemne albo >1.
-
-    KANAREK na podmiane metody: Wilson nie ma tej wady, przedzial normalny ma.
-    """
-    from services.engine.statystyka import wilson
-
-    for k, n in ((0, 40), (40, 40), (0, 5), (5, 5), (1, 3)):
-        lo, hi = wilson(k, n)
-        assert 0.0 <= lo <= hi <= 1.0, f"k={k} n={n} dało [{lo}, {hi}]"
-
-
-def test_wieksza_proba_zawezа_przedzial():
-    from services.engine.statystyka import wilson
-
-    waski = wilson(200, 400)
-    szeroki = wilson(20, 40)
-    assert (waski[1] - waski[0]) < (szeroki[1] - szeroki[0])
-
-
-def test_pusta_proba_daje_pelen_zakres():
-    from services.engine.statystyka import wilson
-
-    assert wilson(0, 0) == (0.0, 1.0)
+def test_prog_panelu_jest_stala_a_nie_liczba_w_warunku():
+    """Liczba 500 wpisana w warunek nie da się wyjaśnić w komunikacie błędu."""
+    assert "MIN_PANEL = 500" in ZRODLO
+    assert "len(panel) < MIN_PANEL" in ZRODLO

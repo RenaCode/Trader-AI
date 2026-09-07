@@ -88,9 +88,18 @@ def main() -> int:
         # {sygnal: {horyzont: ([wyniki], [zwroty])}}
         zebrane: dict[str, dict[int, tuple[list, list]]] = {}
         cechy: dict[str, dict[int, tuple[list, list]]] = {}
+        MIN_PANEL = 500
+        pominiete: list[tuple[str, int]] = []
         for inst in instrumenty:
             panel = load_panel(cur, inst["id"], h, now - timedelta(days=args.days), now)
-            if len(panel) < 500:
+            if len(panel) < MIN_PANEL:
+                # POMINIECIE JEST WYNIKIEM, NIE MILCZENIEM.
+                #
+                # Przy zbyt krotkim `--days` odpadaja WSZYSTKIE instrumenty
+                # i skrypt wypisywal pusta tabele, konczac sie zerem. Wygladalo
+                # to jak "zaden sygnal nic nie przewiduje", a znaczylo "nie bylo
+                # czego liczyc" - dwie rzeczy nie do odroznienia z wydruku.
+                pominiete.append((inst["symbol"], len(panel)))
                 continue
             cache = precompute_panels({inst["symbol"]: panel},
                                       {inst["symbol"]: atr_threshold(panel)},
@@ -121,6 +130,18 @@ def main() -> int:
                         w[0].append(float(wartosc))
                         w[1].append(zwrot)
             print(f"  {inst['symbol']:10s} {len(panel):>6,} świec", flush=True)
+
+    if pominiete:
+        print(f"\n  pominięte (panel < {MIN_PANEL} świec): "
+              + ", ".join(f"{s} ({n})" for s, n in pominiete[:8])
+              + (f" i {len(pominiete) - 8} więcej" if len(pominiete) > 8 else ""))
+    if not zebrane:
+        print(f"\nPRZERWANO: żaden instrument nie ma panelu dłuższego niż {MIN_PANEL} świec.")
+        print(f"  --days {args.days} daje przy świecy {h.bar} około "
+              f"{args.days * 1440 // h.bar_minutes} świec na instrument.")
+        print(f"  Potrzeba co najmniej {MIN_PANEL}, czyli --days "
+              f"{MIN_PANEL * h.bar_minutes // 1440 + 1} lub więcej.")
+        return 2
 
     print()
     naglowek = "sygnał".ljust(20) + "".join(f"{k:>4} św.".rjust(11) for k in HORYZONTY) + "   n"
