@@ -443,3 +443,60 @@ def test_prog_swiezosci_lezy_POWYZEJ_naturalnego_maksimum():
     assert ocen_swiezosc(wiek(110)) == []      # zmierzona norma
     assert ocen_swiezosc(wiek(140)) == []      # norma + pelny odstep pobierania
     assert len(ocen_swiezosc(wiek(200))) == 1  # ponad trzy swiece — potok stanal
+
+
+# ---------------------------------------------------- zdrowie egzekucji
+
+def _stan_egz(**kw):
+    baza = dict(przyjete=0, odrzucone=0, nieznane=0, id_nieznanych=[],
+                powody=[], zawieszone_plany=0)
+    return {**baza, **kw}
+
+
+def test_JEDNO_odrzucenie_nie_budzi_nikogo():
+    """Zlecenie poniżej minimalnej wartości albo chwilowy limit konta zdarzają
+    się. Alarm przy każdym z nich uczyłby odbiorcę, że można je pomijać."""
+    from services.engine.dozor import ocen_egzekucje
+
+    assert ocen_egzekucje(_stan_egz(przyjete=10, odrzucone=1, powody=["x"])) == []
+
+
+def test_gdy_NIC_NIE_PRZECHODZI_alarm_jest_natychmiast():
+    """System stoi, a wygląda dokładnie jak system bez sygnałów: silnik bije,
+    dane świeże, kill-switch milczy."""
+    from services.engine.dozor import ocen_egzekucje
+
+    (kod, tytul, tresc), = ocen_egzekucje(
+        _stan_egz(przyjete=0, odrzucone=3, powody=["za mała wartość"]))
+    assert kod == "order.rejected"
+    assert "ANI JEDNEGO" in tresc
+    assert "za mała wartość" in tresc          # powód, nie tylko liczba
+
+
+def test_prog_to_STOSUNEK_a_nie_liczba_odrzucen():
+    """Sto odrzuceń przy tysiącu przyjęć to inny stan niż sto przy dwóch."""
+    from services.engine.dozor import ocen_egzekucje
+
+    assert ocen_egzekucje(_stan_egz(przyjete=1000, odrzucone=100, powody=["x"])) == []
+    assert len(ocen_egzekucje(_stan_egz(przyjete=2, odrzucone=100, powody=["x"]))) == 1
+
+
+def test_zlecenia_o_NIEZNANYM_stanie_alarmuja_zawsze():
+    """Odrzucone na pewno nie weszło. „Nieznane" znaczy, że odpowiedź nie
+    dotarła — a zlecenie MOGŁO wejść. To kandydat na pozycję-widmo."""
+    from services.engine.dozor import ocen_egzekucje
+
+    powody = ocen_egzekucje(_stan_egz(przyjete=100, nieznane=1,
+                                      id_nieznanych=["tai-p7"]))
+    assert len(powody) == 1
+    assert "tai-p7" in powody[0][2]            # identyfikator, nie sama liczba
+    assert "pozycję-widmo" in powody[0][2]
+
+
+def test_zawieszone_plany_zglaszane_jako_awaria_silnika():
+    """Nierozstrzygnięty plan wejścia blokuje kolejną decyzję dla tego
+    instrumentu — to awaria pętli, nie problem z giełdą."""
+    from services.engine.dozor import ocen_egzekucje
+
+    (kod, _, _), = ocen_egzekucje(_stan_egz(przyjete=5, zawieszone_plany=3))
+    assert kod == "engine.down"

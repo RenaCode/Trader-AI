@@ -425,6 +425,124 @@ async def sprawdz_swiezosc(fetch_all, notify, sucho: bool = False,
     return len(powody)
 
 
+def ocen_egzekucje(stan: dict) -> list[tuple[str, str, str]]:
+    """Czy zlecenia w ogole dochodza do gieldy. CZYSTA FUNKCJA.
+
+    Zwraca listę (kod_zdarzenia, tytuł, treść).
+
+    JEDNO ODRZUCENIE TO NIE AWARIA. Zlecenie poniżej minimalnej wartości albo
+    chwilowy limit konta zdarzają się i nie ma po co nikogo budzić o trzeciej
+    w nocy. Awarią jest stan, w którym NIC NIE PRZECHODZI — bo wtedy system
+    stoi, a wygląda dokładnie jak system bez sygnałów.
+
+    Dlatego progiem nie jest liczba odrzuceń, tylko ich stosunek do przyjęć.
+
+    ZLECENIA O NIEZNANYM STANIE SA GROZNIEJSZE NIZ ODRZUCONE. Odrzucone na pewno
+    nie weszło. „Nieznane" znaczy, że odpowiedź nie dotarła — a zlecenie mogło
+    wejść. Każde takie, które przeleżało dłużej niż jedną świecę, jest kandydatem
+    na pozycję-widmo i wymaga sprawdzenia, nie czekania.
+    """
+    powody = []
+    przyjete, odrzucone = stan["przyjete"], stan["odrzucone"]
+
+    if odrzucone and not przyjete:
+        powody.append((
+            "order.rejected",
+            f"Żadne zlecenie nie przeszło ({odrzucone} odrzuconych)",
+            f"W ostatnim oknie giełda nie przyjęła ANI JEDNEGO zlecenia, "
+            f"a odrzuciła {odrzucone}.\n\n"
+            f"Powody, po jednym na rodzaj:\n" + "\n".join(
+                f"  • {p}" for p in stan["powody"]) + "\n\n"
+            f"System nie handluje i NIE WYGLĄDA to na awarię: silnik bije, dane "
+            f"są świeże, kill-switch milczy. Odrzucone zlecenie w logu wygląda "
+            f"tak samo jak brak sygnału."))
+    elif odrzucone and przyjete and odrzucone >= przyjete:
+        powody.append((
+            "order.rejected",
+            f"Więcej zleceń odrzuconych ({odrzucone}) niż przyjętych ({przyjete})",
+            "Przechodzi mniej niż połowa zleceń. Powody:\n" + "\n".join(
+                f"  • {p}" for p in stan["powody"])))
+
+    if stan["nieznane"]:
+        powody.append((
+            "order.rejected",
+            f"Zlecenia o NIEZNANYM stanie: {stan['nieznane']}",
+            f"Dla {stan['nieznane']} zleceń odpowiedź giełdy nie dotarła i nikt "
+            f"nie ustalił, co się z nimi stało. Odrzucone zlecenie na pewno nie "
+            f"weszło — nieznane MOGŁO WEJŚĆ.\n\n"
+            f"Każde takie jest kandydatem na pozycję-widmo: risk kernel liczyłby "
+            f"z niej ekspozycję, więc blokowałaby wejścia, których nic nie "
+            f"blokuje.\n\nIdentyfikatory: " + ", ".join(stan["id_nieznanych"])))
+
+    if stan["zawieszone_plany"]:
+        powody.append((
+            "engine.down",
+            f"Plany bez rozstrzygnięcia: {stan['zawieszone_plany']}",
+            f"{stan['zawieszone_plany']} planów przekroczyło termin swojej świecy "
+            f"i nadal ma status `pending`. Znaczy to, że rozstrzyganie planów "
+            f"przestało działać — a nierozstrzygnięty plan wejścia blokuje "
+            f"kolejną decyzję dla tego instrumentu."))
+    return powody
+
+
+async def sprawdz_egzekucje(fetch_all, notify, sucho: bool = False,
+                            okno_h: int = 24) -> int:
+    """Czy sciezka egzekucji dziala. Stan, nie zdarzenie.
+
+    DLACZEGO TO NIE WYSTARCZA, ZE ZLECENIA SA ZAPISYWANE
+
+    `exec.order` ma kolumne `reject_reason` od migracji 0005 i typ zdarzenia
+    `order.rejected` istnieje w `notify.event_type` rownie dlugo - z etykieta,
+    opisem i cooldownem. NIKT GO NIGDY NIE WYSLAL. Zapis bez czujki znaczy
+    tyle, ze przyczyna bedzie znana, gdy juz ktos zauwazy skutek.
+    """
+    st = await fetch_all(
+        "SELECT count(*) FILTER (WHERE status NOT IN ('rejected','unknown')) AS przyjete,"
+        "       count(*) FILTER (WHERE status = 'rejected') AS odrzucone,"
+        "       count(*) FILTER (WHERE status = 'unknown') AS nieznane"
+        "  FROM exec.order WHERE submitted_at > now() - make_interval(hours => %(h)s)",
+        {"h": okno_h})
+    powody_rows = await fetch_all(
+        "SELECT DISTINCT left(reject_reason, 160) AS powod FROM exec.order"
+        " WHERE status = 'rejected' AND reject_reason IS NOT NULL"
+        "   AND submitted_at > now() - make_interval(hours => %(h)s) LIMIT 5",
+        {"h": okno_h})
+    nieznane_rows = await fetch_all(
+        "SELECT client_order_id FROM exec.order WHERE status = 'unknown'"
+        "   AND submitted_at < now() - make_interval(hours => 4) LIMIT 10")
+    zawieszone = await fetch_all(
+        "SELECT count(*) AS n FROM journal.planned_order"
+        " WHERE status = 'pending' AND valid_until < now() - make_interval(hours => 4)")
+
+    stan = {
+        "przyjete": st[0]["przyjete"] if st else 0,
+        "odrzucone": st[0]["odrzucone"] if st else 0,
+        # NIEZNANE LICZYMY TYLKO TE STARE. Zlecenie zlozone minute temu moze byc
+        # nieznane najzupelniej poprawnie - odpowiedz jeszcze nie wrocila.
+        "nieznane": len(nieznane_rows),
+        "id_nieznanych": [r["client_order_id"] or "?" for r in nieznane_rows],
+        "powody": [r["powod"] for r in powody_rows],
+        "zawieszone_plany": zawieszone[0]["n"] if zawieszone else 0,
+    }
+    print(f"egzekucja ({okno_h} h): przyjętych {stan['przyjete']}, "
+          f"odrzuconych {stan['odrzucone']}, o nieznanym stanie {stan['nieznane']}, "
+          f"planów bez rozstrzygnięcia {stan['zawieszone_plany']}")
+
+    powody = ocen_egzekucje(stan)
+    if not powody:
+        print("  bez zastrzeżeń")
+        return 0
+
+    odbiorcy = await fetch_all('SELECT id FROM app."user" WHERE is_active')
+    for kod, tytul, tresc in powody:
+        print(f"  {tytul}")
+        if sucho:
+            continue
+        for u in odbiorcy:
+            await notify(u["id"], kod, tytul, tresc, severity="critical")
+    return len(powody)
+
+
 async def sprawdz_kopie(fetch_all, notify, sucho: bool = False) -> int:
     """Czy istnieje swieza, zweryfikowana kopia zapasowa.
 
@@ -479,13 +597,14 @@ async def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--co", default="stan-nauki",
                     choices=("stan-nauki", "zywotnosc", "ryzyko", "kopie",
-                             "swiezosc"),
+                             "swiezosc", "egzekucja"),
                     help="stan-nauki: czy wynik treningu sie zmienil; "
                          "zywotnosc: czy silniki bija; "
                          "ryzyko: czy kill-switch zadzialal; "
                          "kopie: czy jest swieza kopia zapasowa; "
                          "swiezosc: czy dane, na ktorych silnik decyduje, "
-                         "nie sa przestarzale")
+                         "nie sa przestarzale; "
+                         "egzekucja: czy zlecenia dochodza do gieldy")
     ap.add_argument("--prog-min", type=int, default=None, dest="prog_min",
                     help="prog martwoty w minutach; do wywolania sciezki alarmowej "
                          "na zadanie. Domyslnie stala MARTWY_PO_MIN")
@@ -519,6 +638,8 @@ async def main() -> int:
         if args.co == "swiezosc":
             return await sprawdz_swiezosc(fetch_all, notify, sucho=args.sucho,
                                           bar=args.bar)
+        if args.co == "egzekucja":
+            return await sprawdz_egzekucje(fetch_all, notify, sucho=args.sucho)
 
         wiersze = await fetch_all(
             "SELECT status, windows_total, windows_positive, positive_ci_low,"

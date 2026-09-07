@@ -54,6 +54,13 @@ spec:
                   # cechach sprzed trzech dni. Stare cechy nie wygladaja jak
                   # awaria, tylko jak rynek, ktory przestal dawac sygnaly.
                   python services/engine/dozor.py --co swiezosc  || RC=$?
+                  # ZDROWIE EGZEKUCJI. exec.order ma kolumne reject_reason od
+                  # migracji 0005, a typ zdarzenia order.rejected istnieje
+                  # w notify.event_type rownie dlugo - z etykieta, opisem
+                  # i cooldownem. NIKT GO NIGDY NIE WYSLAL. Odrzucone zlecenie
+                  # wyglada w logu jak brak sygnalu, wiec system moglby nie
+                  # handlowac tygodniami przy dozorze meldujacym zdrowie.
+                  python services/engine/dozor.py --co egzekucja || RC=$?
                   # UZGODNIENIE Z GIELDA. Nasz obraz stanu i obraz gieldy to dwa
                   # rozne stany, ktore moga sie rozjechac - i zaden ze sposobow
                   # nie objawia sie awaria. Pozycja-widmo blokuje wejscia,
