@@ -449,7 +449,7 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
     # `tradeable` decyduje o uniwersum produkcyjnym - ta sama flaga, ktora czyta
     # petla decyzyjna (0020). Flaga --instrumenty sluzy WYLACZNIE eksperymentom
     # i zaweza to, co juz z bazy wyszlo; nie potrafi dodac niczego z powrotem.
-    cur.execute("SELECT id, symbol FROM ref.instrument WHERE engine=%s AND active"
+    cur.execute("SELECT id, symbol, quote_ccy FROM ref.instrument WHERE engine=%s AND active"
                 " AND tradeable AND kind <> 'perp' ORDER BY symbol", (engine,))
     instruments = cur.fetchall()
     # NADPISANIE uniwersum na potrzeby eksperymentu.
@@ -463,7 +463,7 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
     # Dlatego flaga wymaga --sucho: przebieg na uniwersum, ktorego produkcja nie
     # obstawia, nie moze promowac wersji modelu.
     if tylko:
-        cur.execute("SELECT id, symbol FROM ref.instrument WHERE engine=%s AND active"
+        cur.execute("SELECT id, symbol, quote_ccy FROM ref.instrument WHERE engine=%s AND active"
                     " AND kind <> 'perp' ORDER BY symbol", (engine,))
         instruments = cur.fetchall()
         znane = {i["symbol"] for i in instruments}
@@ -484,6 +484,7 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
     # bedzie martwy we wszystkich oknach. To jest poprawne zachowanie (lepsze
     # niz czytanie wartosci policzonej dla innego zbioru), ale MUSI byc
     # powiedziane wprost: cichy brak sygnalu wyglada jak sygnal bez tresci.
+    waluta_symbolu = {i["symbol"]: i["quote_ccy"] for i in instruments}
     fp = odcisk([i["symbol"] for i in instruments])
     cur.execute("SELECT count(*) AS n FROM feat.feature_def"
                 " WHERE active AND params->>'bar' = %s AND params->>'uniwersum' = %s",
@@ -611,6 +612,21 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
     # pozostale. Bez tej liczby "dolozylismy instrumenty" i "handlujemy tymi
     # instrumentami" wygladaja tak samo.
     udzial_instrumentu: dict[str, int] = {}
+    # Sharpe policzony OSOBNO dla kazdej grupy instrumentow, w tym samym oknie
+    # i tym samym przebiegu. {grupa: [sharpe okno po oknie]}
+    #
+    # PYTANIE, NA KTORE TO ODPOWIADA. Dwa uniwersa maja osobno mediane Sharpe
+    # okolo +0,11, a ich suma +0,011. Cztery naturalne wyjasnienia zostaly
+    # obalone pomiarem (docs/03). Zostaje jedno miejsce: `Sharpe/transakcje`
+    # w oknie to SREDNIA DZIELONA PRZEZ ODCHYLENIE po wszystkich transakcjach
+    # tego okna - a grupy o roznej zmiennosci wrzucone do jednej takiej
+    # statystyki daja wynik, ktory nie jest srednia ich wynikow.
+    #
+    # Jesli grupy liczone osobno W TYM SAMYM PRZEBIEGU maja nadal ~+0,11,
+    # to znaczy, ze transakcje sa w porzadku, a zalamuje sie MIARA. Jesli
+    # rowniez spadaja - to zmienil sie zestaw transakcji, czyli konstrukcja
+    # portfela, i szukac trzeba tam.
+    sharpe_grup: dict[str, list[float]] = {}
     porownywalne = 0
     all_sharpes: list[float] = []
     worst_dd = 0.0
@@ -771,6 +787,20 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
         for t in oos_res.trades:
             predictions.append((t["conf"], t["ret"] > 0))
             udzial_instrumentu[t["symbol"]] = udzial_instrumentu.get(t["symbol"], 0) + 1
+
+        # Grupujemy po walucie kwotowanej: to samo, co dzieli uniwersum
+        # decyzyjne (USDC) od reszty historii (USDT), bez zadnej nowej flagi.
+        if informative and len(waluta_symbolu) > 1:
+            wg_grupy: dict[str, list[float]] = {}
+            for t in oos_res.trades:
+                wg_grupy.setdefault(waluta_symbolu.get(t["symbol"], "?"), []).append(t["ret"])
+            for grupa, rety in wg_grupy.items():
+                # Ten sam wzor co w portfolio.metrics - inaczej porownywalibysmy
+                # dwie rozne statystyki i wniosek bylby o nich, a nie o danych.
+                if len(rety) < h.min_trades:
+                    continue
+                sd = max(statistics.pstdev(rety), 1e-9)
+                sharpe_grup.setdefault(grupa, []).append(statistics.fmean(rety) / sd)
 
         step = max(1, len(next(iter(test_slices.values()), [])) // 50)
         regimes = [classify_regime(r["f"], thresholds[s])[0]
@@ -1132,6 +1162,13 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
           f"   przedział ufności 95%: {ci_lo:.1%}–{ci_hi:.1%}")
     print(f"Mediana Sharpe (OOS): {median:+.3f}" if median is not None else "Mediana Sharpe: —")
     print(f"Najgorsze obsunięcie: {worst_dd:.2f}%")
+    if len(sharpe_grup) > 1:
+        print("Sharpe/transakcję policzony OSOBNO dla grup, w tym samym przebiegu:")
+        for grupa, wartosci in sorted(sharpe_grup.items()):
+            print(f"  {grupa:>6}: mediana {statistics.median(wartosci):+.3f}"
+                  f"   okien {len(wartosci)}")
+        print("  (powyżej mediana łączna — jeśli grupy osobno są wyraźnie lepsze,"
+              " załamuje się MIARA, a nie strategia)")
     if udzial_instrumentu:
         razem = sum(udzial_instrumentu.values())
         rank = sorted(udzial_instrumentu.items(), key=lambda x: -x[1])
