@@ -92,6 +92,12 @@ class PortfolioResult:
     blocked: int = 0          # ile wejsc odrzucil risk kernel
     downsized: int = 0        # ile obcial
     max_exposure: float = 0.0  # najwieksza jednoczesna ekspozycja
+    # SREDNIA ekspozycja po wszystkich swiecach okna - nie szczyt.
+    #
+    # Szczyt mowi, jak zle moglo byc w najgorszym momencie. O tym, ile
+    # kapitalu faktycznie pracowalo, nie mowi nic - a bez tego zwrotu
+    # z okna nie da sie porownac z niczym, co angazuje inna czesc konta.
+    avg_exposure: float = 0.0
     base_notional: float = 0.0  # budzet na pozycje wyliczony z limitu
     niewypelnione_wejscia: int = 0
     niewypelnione_wyjscia: int = 0
@@ -191,6 +197,8 @@ def simulate_portfolio(panels: dict[str, list[dict]],
 
     positions: dict[str, Position] = {}
     max_exposure = 0.0
+    suma_ekspozycji = 0.0
+    swiec_ekspozycji = 0
     realized = 0.0
     fees_paid = 0.0
     res = PortfolioResult()
@@ -284,6 +292,8 @@ def simulate_portfolio(panels: dict[str, list[dict]],
         orders_h = sum(1 for ot in order_times if ot > hour_ago)
 
         max_exposure = max(max_exposure, float(exposure))
+        suma_ekspozycji += float(exposure)
+        swiec_ekspozycji += 1
 
         if killswitch is None:
             konto = evaluate_account(
@@ -387,6 +397,7 @@ def simulate_portfolio(panels: dict[str, list[dict]],
                            "symbol": sym, "opened_at": pos.opened_at, "closed_at": last_t})
     res.equity_curve.append((last_t, START_EQUITY + realized - fees_paid))
     res.max_exposure = max_exposure
+    res.avg_exposure = (suma_ekspozycji / swiec_ekspozycji) if swiec_ekspozycji else 0.0
     res.base_notional = baza
     res.prowizja = fee
     res.poslizg = slip
@@ -408,6 +419,11 @@ def metrics(res: PortfolioResult, min_trades: int) -> dict:
 
     base = {"max_dd": round(max_dd, 4), "n_trades": len(rets),
             "total_return": round(total_return, 4), "trades": res.trades,
+            # UDZIAL kapitalu, ktory srednio pracowal - w tej samej bazie
+            # co total_return, wiec te dwie liczby wolno przez siebie
+            # dzielic. Bez niej zwrot z okna jest nieporownywalny
+            # z czymkolwiek o innej ekspozycji.
+            "avg_exposure": round(res.avg_exposure / START_EQUITY, 6),
             "blocked": res.blocked, "downsized": res.downsized,
             "killswitch": res.killswitch_reason,
             "niewypelnione": res.niewypelnione_wejscia + res.niewypelnione_wyjscia,

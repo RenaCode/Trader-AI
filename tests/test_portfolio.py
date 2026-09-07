@@ -10,7 +10,7 @@ import pytest
 from decimal import Decimal
 
 from services.engine.horizons import get as get_horizon
-from services.engine.portfolio import metrics, simulate_portfolio
+from services.engine.portfolio import kup_i_trzymaj, metrics, simulate_portfolio
 from services.engine.signals import DEFAULT_WEIGHTS
 
 H = get_horizon("4h")
@@ -552,3 +552,112 @@ def test_zwrot_z_transakcji_jest_po_prowizji_a_nie_przed():
         assert t["ret"] < 0, "transakcja bez ruchu ceny nie moze byc zyskowna"
         assert t["ret"] <= -1.5 * k.taker, (
             f"zwrot {t['ret']} nie zawiera obu nog prowizji ({k.taker} kazda)")
+
+
+# --------------------------------------------------------------------------
+# POROWNANIE Z KUP-I-TRZYMAJ MUSI ISC PRZY TEJ SAMEJ EKSPOZYCJI
+#
+# Odkryte 2026-09-07 na przebiegu nocnym. Strategia byla lepsza od kup-i-trzymaj
+# w 17/39 okien horyzontu 4h - i byly to DOKLADNIE te okna, w ktorych rynek
+# spadl (17/17), oraz zadne z tych, w ktorych rosl (0/22). Na horyzoncie 1h to
+# samo: 48/48 i 0/40. Sto dwadziescia siedem okien, zero wyjatkow.
+#
+# Powod jest strukturalny, nie statystyczny: strategia nie moze zaangazowac
+# wiecej niz `max_total_exposure`, czyli 15% kapitalu, a kup-i-trzymaj angazuje
+# 100%. Przy takiej roznicy wynik porownania jest funkcja ZNAKU RYNKU i nie
+# zawiera zadnej informacji o strategii.
+# --------------------------------------------------------------------------
+
+def test_srednia_ekspozycja_miesci_sie_miedzy_zerem_a_szczytem():
+    panele = {f"I{i}": panel(40, 100.0, 130.0) for i in range(5)}
+    limity = LIMITY_LUZNE | {
+        "max_total_exposure": {"value": Decimal("15000"), "action": "block"}}
+    res = uruchom(panele, limity)
+    assert res.trades, "test bez transakcji nie mierzy ekspozycji"
+    assert 0.0 < res.avg_exposure <= res.max_exposure + 1e-6
+    assert res.avg_exposure <= 15000.0 + 1e-6
+
+
+def test_srednia_ekspozycja_zeruje_sie_gdy_nie_ma_pozycji():
+    panele = {"AAA": [dict(r, f=cechy_neutralne()) for r in panel(40, 100.0, 130.0)]}
+    res = uruchom(panele, LIMITY_LUZNE, gate=0.9)
+    assert not res.trades, "przy neutralnym sygnale i wysokiej bramce nie ma wejsc"
+    assert res.avg_exposure == 0.0
+
+
+def test_srednia_ekspozycja_liczy_sie_po_WSZYSTKICH_swiecach():
+    """Kanarek na jedyny sposob, w jaki ta srednia moze byc zla po cichu.
+
+    Gdyby liczyla sie wylacznie po swiecach Z POZYCJA, portfel wchodzacy raz na
+    sto swiec wygladalby na w pelni zaangazowany - a wtedy odniesienie
+    dopasowane ekspozycja byloby zawyzone dokladnie tam, gdzie strategia
+    handluje najrzadziej.
+
+    Test dokleja do panelu spokojny ogon, w ktorym nie ma zadnych pozycji.
+    Kapital pracowal tyle samo co wczesniej, ale przez dwa razy dluzszy czas,
+    wiec SREDNIA MUSI SPASC. Srednia liczona tylko po swiecach z pozycja
+    nie drgnelaby.
+    """
+    baza = panel(40, 100.0, 130.0)
+    ogon = [{"t": baza[-1]["t"] + timedelta(hours=4 * (i + 1)),
+             "f": cechy_neutralne(), "price": 130.0,
+             "high": 130.0 * 1.004, "low": 130.0 * 0.996}
+            for i in range(40)]
+
+    krotka = uruchom({"AAA": list(baza)}, LIMITY_LUZNE)
+    dluga = uruchom({"AAA": baza + ogon}, LIMITY_LUZNE)
+
+    assert krotka.avg_exposure > 0.0
+    assert dluga.max_exposure == pytest.approx(krotka.max_exposure, rel=1e-9), \
+        "ogon nie ma otwierac nowych pozycji - inaczej test mierzy co innego"
+    assert dluga.avg_exposure < krotka.avg_exposure * 0.7, (
+        f"srednia nie spadla po dolozeniu bezczynnego ogona: "
+        f"{krotka.avg_exposure:.0f} -> {dluga.avg_exposure:.0f}")
+
+
+def test_werdykt_bez_dopasowania_ekspozycji_zalezy_od_ZNAKU_RYNKU():
+    """Ten sam kod strategii, dwa rynki: werdykt odwraca sie sam z siebie.
+
+    Gdyby porownanie mierzylo umiejetnosc, nie musialoby wychodzic
+    ujemnie na kazdym rosnacym rynku i dodatnio na kazdym spadajacym.
+    """
+    limity = LIMITY_LUZNE | {
+        "max_total_exposure": {"value": Decimal("15000"), "action": "block"}}
+
+    rosnacy = {f"I{i}": panel(40, 100.0, 130.0) for i in range(5)}
+    spadajacy = {f"I{i}": panel(40, 130.0, 100.0) for i in range(5)}
+
+    m_ros = metrics(uruchom(rosnacy, limity), min_trades=1)
+    m_spa = metrics(uruchom(spadajacy, limity), min_trades=1)
+    bh_ros = kup_i_trzymaj(rosnacy)
+    bh_spa = kup_i_trzymaj(spadajacy)
+
+    assert bh_ros > 0 > bh_spa, "panele maja isc w przeciwne strony"
+    # Werdykt sprzed poprawki: przegrana na rosnacym, wygrana na spadajacym -
+    # niezaleznie od tego, co strategia zrobila.
+    assert m_ros["total_return"] < bh_ros
+    assert m_spa["total_return"] > bh_spa
+
+
+def test_odniesienie_dopasowane_ekspozycja_jest_porownywalne_co_do_rzedu():
+    """Po dopasowaniu obie liczby opisuja ten sam kapital.
+
+    Wlasciwa miara nie jest "strategia wygrywa", tylko "porownanie w ogole
+    ma sens": odleglosc od odniesienia spada o rzad wielkosci.
+    """
+    limity = LIMITY_LUZNE | {
+        "max_total_exposure": {"value": Decimal("15000"), "action": "block"}}
+    rosnacy = {f"I{i}": panel(40, 100.0, 130.0) for i in range(5)}
+    res = uruchom(rosnacy, limity)
+    m = metrics(res, min_trades=1)
+
+    udzial = m["avg_exposure"]
+    assert 0.0 < udzial < 0.15, \
+        f"ekspozycja {udzial:.2%} - przy limicie 15% wiecej byc nie moze"
+
+    bh = kup_i_trzymaj(rosnacy)
+    surowe = abs(m["total_return"] - bh)
+    dopasowane = abs(m["total_return"] - bh * udzial)
+    assert dopasowane < surowe / 3, (
+        f"dopasowanie ekspozycja nie zblizylo liczb: surowo {surowe:.2f} pkt, "
+        f"po dopasowaniu {dopasowane:.2f} pkt")

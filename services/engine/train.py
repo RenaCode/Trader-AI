@@ -41,7 +41,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import psycopg
 from psycopg.rows import dict_row
 
-from services.engine.risk_rules import MIN_CONFIDENCE
+from services.engine.risk_rules import DEFAULT_LIMITS, MIN_CONFIDENCE, START_EQUITY
 from services.engine.horizons import DEFAULT_BAR, HORIZONS, Horizon, get as get_horizon
 from services.engine.portfolio import (
     Egzekucja, kup_i_trzymaj, metrics as portfolio_metrics, precompute_panels,
@@ -502,6 +502,8 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
     # mowi, czy strategia jest LEPSZA od kupienia i trzymania - a strategia
     # wylacznie dluga na rosnacym rynku ma duzo dodatnich okien z samej bety.
     pokonane_odniesienie = 0
+    pokonane_pelne = 0        # przy odniesieniu 100% zaangazowanym - do raportu
+    ekspozycje: list[float] = []
     porownywalne = 0
     all_sharpes: list[float] = []
     worst_dd = 0.0
@@ -683,15 +685,50 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
         martwe_w_oknie.append(martwe)
 
         odniesienie = kup_i_trzymaj({s: v for s, v in test_slices.items() if v}, kind)
-        if informative:
+        # ODNIESIENIE DOPASOWANE EKSPOZYCJA - uzasadnienie przy `bije_odniesienie`.
+        # Kup-i-trzymaj angazuje caly kapital przez cale okno; strategia
+        # srednio `ekspozycja` jego czesci. Zwrot z kupienia i trzymania
+        # jest w wielkosci pozycji liniowy, wiec czesc `f` kapitalu
+        # w tym samym koszyku (reszta w gotowce) zarobilaby dokladnie
+        # `f * odniesienie`. To jest kontrfaktyczny wynik przy TYM SAMYM
+        # zaangazowaniu i dopiero z nim porownanie mowi cokolwiek
+        # o umiejetnosci.
+        #
+        # POROWNANIE JEST WOLNE OD SKALI, a nie zlagodzone. Zwrot z konta jest
+        # w wielkosci pozycji liniowy po obu stronach: przy ekspozycji `f`
+        # strategia zarabia `f` razy tyle, co przy pelnej, i odniesienie tak
+        # samo. Warunek `r > f * bh` to dokladnie `r/f > bh` - "czy zloty
+        # zaangazowany przez strategie zarobil wiecej niz zloty wlozony
+        # w koszyk". Malejaca ekspozycja skraca obie strony jednakowo, wiec
+        # nie da sie tego warunku przejsc samym zmniejszeniem pozycji.
+        ekspozycja = oos_m["avg_exposure"]
+        odniesienie_dop = odniesienie * ekspozycja
+        # Okno bez ani jednej swiecy z pozycja nie ma czego porownywac:
+        # odniesienie dopasowane bylo by zerem, ktore "pokonuje" kazdy dodatni
+        # zwrot. Zwykle idzie to w parze z brakiem transakcji, ale nie musi -
+        # pozycja otwarta i zamknieta miedzy dwiema swiecami nie zdazy trafic
+        # do pomiaru ekspozycji, a transakcje do dziennika juz tak.
+        #
+        # Wyklucza to okno WYLACZNIE z porownania z odniesieniem. Do odsetka
+        # dodatnich okien liczy sie dalej, bo tam zerowa ekspozycja niczego
+        # nie psuje - a ciche wypadniecie okna z dwoch miar naraz bylo by
+        # trudniejsze do zauwazenia niz z jednej.
+        porownywalne_okno = informative and ekspozycja > 0.0
+        if porownywalne_okno:
             porownywalne += 1
-            if oos_m["total_return"] > odniesienie:
+            ekspozycje.append(ekspozycja)
+            if oos_m["total_return"] > odniesienie_dop:
                 pokonane_odniesienie += 1
+            if oos_m["total_return"] > odniesienie:
+                pokonane_pelne += 1
         mark = "" if informative else (f"  (poniżej {h.min_trades} transakcji — "
                                        "pominięte w ocenie)")
         if informative:
-            mark += (f"  [strategia {oos_m['total_return']:+.2f}% vs "
-                     f"kup-i-trzymaj {odniesienie:+.2f}%]")
+            mark += (f"  [strategia {oos_m['total_return']:+.2f}% przy ekspozycji "
+                     f"{ekspozycja:.1%} vs kup-i-trzymaj {odniesienie:+.2f}% → "
+                     f"przy tej samej ekspozycji {odniesienie_dop:+.2f}%]"
+                     if porownywalne_okno else
+                     "  [zerowa ekspozycja — poza porównaniem z odniesieniem]")
         if oos_res.killswitch_at:
             mark += f"  [KILL-SWITCH {oos_res.killswitch_at:%m-%d %H:%M}]"
         if oos_m["blocked"]:
@@ -776,6 +813,35 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
     # Prog stawiamy na DOLNEJ granicy przedzialu ufnosci, nie na samym odsetku,
     # z tego samego powodu, dla ktorego odsetek podajemy zawsze z przedzialem:
     # przy 26-40 oknach roznica kilku punktow nie jest sygnalem.
+    #
+    # POROWNANIE MUSI BYC PRZY TEJ SAMEJ EKSPOZYCJI (2026-09-07).
+    #
+    # Do tego dnia porownywalismy zwrot z konta strategii ze zwrotem z konta
+    # zaangazowanego w calosci. Strategia nie moze zaangazowac wiecej niz
+    # `max_total_exposure`, czyli 15% kapitalu, i srednio angazuje ulamek tego.
+    # Porownanie bylo wiec miedzy rachunkiem w kilku procentach zainwestowanym
+    # a rachunkiem w stu.
+    #
+    # Skutek dalo sie zmierzyc i jest jednoznaczny. W przebiegu nocnym
+    # z 2026-09-07 strategia byla lepsza od kup-i-trzymaj:
+    #
+    #     horyzont 4h:  17/39 okien - i byly to DOKLADNIE te 17 okien,
+    #                   w ktorych kup-i-trzymaj wyszedl na minus (17/17),
+    #                   oraz zadne z 22, w ktorych wyszedl na plus (0/22)
+    #     horyzont 1h:  48/88 - znowu dokladnie te, w ktorych rynek spadl
+    #                   (48/48 i 0/40)
+    #
+    # 127 okien, zero wyjatkow: wynik porownania rownal sie znakowi rynku.
+    # Warunek nie mierzyl strategii - mierzyl, czy krypto w danym miesiacu
+    # rosly. Przy 15% ekspozycji nie da sie pobic rosnacego rynku i nie da sie
+    # przegrac ze spadajacym, niezaleznie od tego, ile umiejetnosci jest
+    # w srodku. Warunek byl wiec nieosiagalny przez konstrukcje na rynku, ktory
+    # w badanym okresie rosl w 22 oknach na 39 - i przeszedlby sam z siebie,
+    # gdyby rynek spadal, przy strategii bez jakiejkolwiek przewagi.
+    #
+    # Odniesienie skalujemy wiec sredni ekspozycja okna. Nie jest to zlagodzenie
+    # progu: jest to zadanie tego samego pytania w sposob, na ktory odpowiedz
+    # nie jest z gory znana.
     odn_lo, odn_hi = wilson(pokonane_odniesienie, porownywalne) if porownywalne else (0.0, 1.0)
     bije_odniesienie = porownywalne >= MIN_WINDOWS_FOR_VALIDATION and odn_lo > 0.5
 
@@ -796,8 +862,9 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
         # to powiedziec wprost. Sam odsetek powyzej progu wyglada jak sukces.
         brak_przewagi = ""
         if pct >= 70 and median and median > 0.05 and not bije_odniesienie:
-            brak_przewagi = (f" Kup-i-trzymaj pokonane w {pokonane_odniesienie}/{porownywalne} "
-                             f"okien ({odn_lo:.0%}–{odn_hi:.0%}) — to nie jest przewaga, "
+            brak_przewagi = (f" Kup-i-trzymaj przy tej samej ekspozycji pokonane w "
+                             f"{pokonane_odniesienie}/{porownywalne} okien "
+                             f"({odn_lo:.0%}–{odn_hi:.0%}) — to nie jest przewaga, "
                              f"więc kryteria NIE są spełnione mimo odsetka powyżej progu.")
         reason = {
             "validated": f"Dodatnie {positive}/{total} okien out-of-sample ({pct:.0f}%).{ci} Kryteria spełnione.",
@@ -914,8 +981,20 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
               f"jeden kandydat na każde z {idx} okien")
     if porownywalne:
         pct_odn = pokonane_odniesienie / porownywalne * 100
-        print(f"Pokonano kup-i-trzymaj w {pokonane_odniesienie}/{porownywalne} oknach "
+        srednia_eksp = statistics.fmean(ekspozycje) if ekspozycje else 0.0
+        print(f"Średnia ekspozycja: {srednia_eksp:.2%} kapitału "
+              f"(limit łączny: {DEFAULT_LIMITS['max_total_exposure']['value']:.0f} "
+              f"z {START_EQUITY:.0f}, czyli "
+              f"{float(DEFAULT_LIMITS['max_total_exposure']['value']) / START_EQUITY:.0%})")
+        print(f"Pokonano kup-i-trzymaj PRZY TEJ SAMEJ EKSPOZYCJI w "
+              f"{pokonane_odniesienie}/{porownywalne} oknach "
               f"({pct_odn:.1f}%)   przedział 95%: {odn_lo:.1%}–{odn_hi:.1%}")
+        # Liczba sprzed poprawki, podawana dalej, bo opisuje realny zwrot
+        # z konta - tyle, ze o strategii nie mowi nic (patrz komentarz wyzej).
+        print(f"  dla porównania, wobec odniesienia zaangażowanego w 100%: "
+              f"{pokonane_pelne}/{porownywalne} "
+              f"({pokonane_pelne / porownywalne * 100:.1f}%) — ta liczba jest funkcją "
+              f"znaku rynku, nie strategii")
     print(f"Okna: {total}, dodatnie: {positive} ({pct:.1f}%)"
           f"   przedział ufności 95%: {ci_lo:.1%}–{ci_hi:.1%}")
     print(f"Mediana Sharpe (OOS): {median:+.3f}" if median is not None else "Mediana Sharpe: —")

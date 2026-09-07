@@ -1249,3 +1249,78 @@ więc poniżej progu pięciu i tak dostaje zero.
 
 Zmiana nie poprawia wyniku. Odblokowuje możliwość, żeby nowy sygnał kiedykolwiek
 go poprawił.
+
+---
+
+# Warunek „lepiej niż kupić i trzymać" mierzył znak rynku, nie strategię
+
+Znalezione 2026-09-07 przy przeglądzie nocnego przebiegu.
+
+## Obserwacja
+
+Warunek `bije_odniesienie` jest jedynym niespełnionym kryterium przejścia na
+live: odsetek dodatnich okien (74,4%) i mediana Sharpe (+0,100) są powyżej
+progów, a strategia bije kup-i-trzymaj w 17 oknach na 39 — czyli poniżej połowy.
+
+Rozbicie tych 17 okien według kierunku rynku daje wynik, który nie zostawia
+miejsca na interpretację:
+
+| horyzont | okien | kup-i-trzymaj ujemny | strategia wyżej | kup-i-trzymaj dodatni | strategia wyżej |
+|---|---|---|---|---|---|
+| 4h | 39 | 17 | **17** | 22 | **0** |
+| 1h | 88 | 48 | **48** | 40 | **0** |
+
+**Sto dwadzieścia siedem okien, zero wyjątków.** Wynik porównania równał się
+znakowi rynku. Warunek nie zawierał ani jednego bitu informacji o strategii.
+
+## Dlaczego tak być musiało
+
+Limit `max_total_exposure` to 15 000 przy kapitale 100 000, czyli **15%**.
+Budżet na pozycję to ten limit podzielony przez liczbę instrumentów, a udział
+budżetu to `min(1, |score| * 2)` — więc pojedyncza pozycja waży 0,75–1,5%
+kapitału, a cały portfel nigdy więcej niż 15%.
+
+Kup-i-trzymaj angażuje 100% przez całe okno.
+
+Przy takiej różnicy:
+
+- rosnącego rynku **nie da się pobić** — siedmiokrotnie mniejsza ekspozycja
+  musiałaby nadrobić siedmiokrotnie lepszym timingiem w każdym oknie;
+- ze spadającym rynkiem **nie da się przegrać** — nie ma czym stracić.
+
+Warunek był więc nieosiągalny przez konstrukcję na rynku, który w badanym
+okresie rósł w 22 oknach na 39. Gdyby krypto w tych czterech latach spadało,
+przeszedłby sam z siebie — przy strategii bez jakiejkolwiek przewagi.
+
+To ten sam kształt błędu, co prowizja liczona poza miarą: liczba wyglądała na
+pomiar umiejętności, a mierzyła coś innego, i nie objawiało się to awarią.
+
+## Poprawka
+
+Odniesienie skalowane **średnią ekspozycją okna**:
+
+```
+warunek:  zwrot_strategii > ekspozycja × zwrot_kup_i_trzymaj
+```
+
+Zwrot z konta jest w wielkości pozycji liniowy po obu stronach, więc to
+dokładnie `zwrot/ekspozycja > kup_i_trzymaj` — „czy złoty zaangażowany przez
+strategię zarobił więcej niż złoty włożony w koszyk". **Zmniejszeniem pozycji
+nie da się tego warunku przejść**: skraca obie strony jednakowo.
+
+Symulacja liczyła dotąd wyłącznie ekspozycję **szczytową**. Szczyt mówi, jak źle
+mogło być w najgorszym momencie; ile kapitału faktycznie pracowało — nie mówi
+nic. `PortfolioResult.avg_exposure` liczy średnią po **wszystkich** świecach
+okna, także tych bez pozycji.
+
+Stara liczba jest nadal raportowana, bo opisuje realny zwrot z konta. Jest tylko
+opisana tym, czym jest: funkcją znaku rynku.
+
+## Czego ta poprawka NIE rozstrzyga
+
+Osobne pytanie, którego projekt dotąd nie zadał: **czy 15% ekspozycji to
+właściwa liczba.** Suma zwrotów strategii przez 39 okien to +9,99% wobec
++100,47% dla kup-i-trzymaj — około 3% rocznie, poniżej stopy wolnej od ryzyka.
+Przy dodatniej przewadze na jednostkę kapitału to jest pytanie o wielkość
+pozycji, nie o sygnały. Ale odpowiedź wymaga pomiaru, nie decyzji — bo
+ekspozycja wchodzi też do obsunięcia i do limitu straty dziennej.
