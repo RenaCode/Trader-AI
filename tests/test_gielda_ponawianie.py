@@ -103,3 +103,65 @@ def test_flaga_retryable_ma_WYKONAWCE():
     zrodlo = Path("services/exchanges/bybit.py").read_text(encoding="utf-8")
     assert "if not e.retryable or proba == PROBY:" in zrodlo
     assert "await asyncio.sleep(" in zrodlo, "brak odczekania między próbami"
+
+
+# ------------------------------------------------------------- dryf zegara
+#
+# Podpis zapytania prywatnego zawiera znacznik czasu, a recv_window to pięć
+# sekund. Zegar rozjechany o więcej powoduje odrzucanie WSZYSTKICH zapytań
+# prywatnych — i objawia się jako błąd uwierzytelnienia, czyli kieruje szukanie
+# na klucz zamiast na czas.
+
+import time as _time
+
+from services.exchanges.bybit import RECV_WINDOW
+
+
+def gielda_z_czasem(przesuniecie_ms: int):
+    """Giełda, której zegar jest przesunięty o zadaną wartość."""
+    def handler(req):
+        # timeSecond siedzi w `result`, tak jak w prawdziwym API - pierwsza
+        # wersja tego mocka kladla go na wierzchu i test padal na wlasnym
+        # bledzie, nie na kodzie.
+        return httpx.Response(200, json={
+            "retCode": 0,
+            "result": {"timeSecond": str(int(_time.time()) + przesuniecie_ms // 1000)},
+        })
+    k = BybitAdapter(api_key="k", api_secret="s")
+    k._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    return k
+
+
+def test_zegar_zgodny_nie_ostrzega():
+    dryf, ostrzezenie = asyncio.run(gielda_z_czasem(0).dryf_zegara())
+    assert ostrzezenie is None, f"zgodny zegar nie ma o czym mówić, a mówi: {ostrzezenie}"
+    assert abs(dryf) < 2000
+
+
+def test_zegar_ponad_oknem_mowi_ZE_TO_NIE_KLUCZ():
+    """Sedno tego sprawdzenia. Bez niego objaw — odrzucane zapytania prywatne —
+    wygląda dokładnie jak zły klucz, więc szukanie idzie w złą stronę."""
+    dryf, ostrzezenie = asyncio.run(gielda_z_czasem(20_000).dryf_zegara())
+    assert ostrzezenie is not None
+    assert "NIE" in ostrzezenie and "kluczem" in ostrzezenie, (
+        f"komunikat musi wykluczyć klucz, a brzmi: {ostrzezenie}")
+    assert dryf > int(RECV_WINDOW)
+
+
+def test_zegar_blisko_granicy_ostrzega_ZANIM_zacznie_boleć():
+    """Połowa okna to jeszcze nie awaria, ale zapas topnieje. Ostrzeżenie
+    dopiero po przekroczeniu przychodziłoby razem z awarią, a nie przed nią."""
+    # 4 s, nie 3: czas gieldy przychodzi w PELNYCH SEKUNDACH, wiec obciecie
+    # daje do 1 s pozornego dryfu. Przy 3 s test bylby chwiejny w zaleznosci
+    # od tego, w ktorym ulamku sekundy sie uruchomi.
+    _, ostrzezenie = asyncio.run(gielda_z_czasem(4_000).dryf_zegara())
+    assert ostrzezenie is not None and "zapas topnieje" in ostrzezenie
+
+
+def test_sprawdzenie_czasu_idzie_endpointem_PUBLICZNYM():
+    """Cała wartość tego sprawdzenia. Gdyby wymagało podpisu, nie
+    odpowiedziałoby dokładnie w sytuacji, dla której istnieje — bo podpis
+    z rozjechanym zegarem jest właśnie tym, co przestaje działać."""
+    zrodlo = Path("services/exchanges/bybit.py").read_text(encoding="utf-8")
+    fragment = zrodlo.split("async def dryf_zegara")[1].split("async def")[0]
+    assert 'private=False' in fragment, "sprawdzenie czasu wymaga podpisu"

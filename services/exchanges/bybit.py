@@ -275,6 +275,45 @@ class BybitAdapter:
                 ))
         return out
 
+    async def dryf_zegara(self) -> tuple[int, str | None]:
+        """Roznica miedzy naszym zegarem a zegarem gieldy, w milisekundach.
+
+        DLACZEGO TO JEST OSOBNE SPRAWDZENIE
+
+        Podpis zapytania prywatnego zawiera znacznik czasu, a `recv_window` to
+        piec sekund. Zegar rozjechany o wiecej powoduje odrzucanie WSZYSTKICH
+        zapytan prywatnych - i objawia sie jako blad uwierzytelnienia, czyli
+        kieruje szukanie na klucz zamiast na czas. Kontener nie ma wlasnego NTP;
+        polega na zegarze wezla.
+
+        Endpoint czasu jest PUBLICZNY, wiec dziala takze wtedy, gdy podpis juz
+        nie przechodzi - i to jest cala wartosc tego sprawdzenia. Gdyby wymagal
+        podpisu, nie odpowiedzialby dokladnie w sytuacji, dla ktorej istnieje.
+        """
+        lokalnie = int(time.time() * 1000)
+        odp = await self._get("/v5/market/time", private=False)
+        # Bybit oddaje czas w sekundach i w nanosekundach; bierzemy to, co jest.
+        gieldy = odp.get("timeSecond") or odp.get("timeNano")
+        if gieldy is None:
+            return 0, "host nie wystawia czasu serwera"
+        gieldy = int(gieldy)
+        gieldy_ms = gieldy * 1000 if gieldy < 10**12 else gieldy // 10**6
+        # CZAS W PELNYCH SEKUNDACH daje do jednej sekundy pozornego dryfu
+        # z samego obciecia. Progi ponizej sa na tyle luzne, ze to nie generuje
+        # falszywych alarmow - ale przy zaostrzaniu ich trzeba o tym pamietac.
+        dryf = gieldy_ms - lokalnie
+
+        prog = int(RECV_WINDOW)
+        if abs(dryf) > prog:
+            return dryf, (
+                f"ZEGAR ROZJECHANY o {dryf/1000:+.1f} s przy oknie {prog/1000:.0f} s. "
+                f"Zapytania prywatne beda odrzucane jako bledny podpis - to NIE "
+                f"jest problem z kluczem. Zsynchronizuj zegar wezla.")
+        if abs(dryf) > prog // 2:
+            return dryf, (f"zegar rozjechany o {dryf/1000:+.1f} s - miesci sie "
+                          f"w oknie {prog/1000:.0f} s, ale zapas topnieje")
+        return dryf, None
+
     async def check_connection(self) -> ConnectionCheck:
         """Sprawdza poswiadczenia i raportuje uprawnienia.
 
@@ -284,6 +323,18 @@ class BybitAdapter:
         started = time.perf_counter()
         info: dict = {}
         note = ""
+
+        # DRYF ZEGARA PRZED PODPISEM. Sprawdzenie idzie endpointem publicznym,
+        # wiec odpowie takze wtedy, gdy zapytania prywatne juz sa odrzucane -
+        # a wtedy komunikat mowi o czasie, a nie o kluczu.
+        try:
+            _, ostrzezenie = await self.dryf_zegara()
+            if ostrzezenie:
+                note += " " + ostrzezenie
+        except ExchangeError:
+            # Brak endpointu czasu nie jest powodem, zeby uznac polaczenie za
+            # nieudane - to sprawdzenie pomocnicze.
+            pass
         try:
             info = await self._get("/v5/user/query-api")
         except AuthError as e:

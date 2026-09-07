@@ -138,16 +138,20 @@ konta; liczby idą z kropką i pełną precyzją, bo plik ma być źródłem, a 
 prezentacją; wariant `excel` dokłada BOM i średnik, bo polski Excel inaczej psuje
 znaki i wsadza wiersz do jednej komórki.
 
-### 6. Dryf zegara nie jest sprawdzany
+### 6. Dryf zegara nie jest sprawdzany — **ZROBIONE 2026-09-07**
 
 Podpis zapytania prywatnego u Bybita zawiera znacznik czasu i `recv_window`.
 Zegar rozjechany o więcej niż to okno powoduje odrzucanie **wszystkich** zapytań
 prywatnych — objawia się to jako błąd uwierzytelnienia, czyli kieruje szukanie
 w stronę klucza zamiast w stronę czasu.
 
-Kontener nie ma własnego NTP; polega na zegarze węzła. Nie jest to dziś problem
-i może nim nigdy nie być — ale koszt sprawdzenia to jedno zapytanie
-o `serverTime` przy starcie.
+Kontener nie ma własnego NTP; polega na zegarze węzła.
+
+**Zamknięte.** Sprawdzenie idzie **endpointem publicznym** i to jest cała jego
+wartość: gdyby wymagało podpisu, nie odpowiedziałoby dokładnie w sytuacji, dla
+której istnieje. Dwa progi — powyżej okna komunikat mówi wprost, że to nie jest
+problem z kluczem; powyżej połowy ostrzega, że zapas topnieje. Wpięte
+w `check_connection` przed pierwszym zapytaniem podpisanym.
 
 ### 7. Rozdzielenie uprawnień bazodanowych
 
@@ -179,5 +183,9 @@ Nie każda luka jest brakiem.
 1. ~~Wpłaty i wypłaty w modelu kapitału~~ — **zrobione**, migracja 0031.
 2. ~~Ponawianie u giełdy~~ — **zrobione**, trzy próby z odnawianym podpisem.
 3. ~~Eksport transakcji~~ — **zrobione**, dwa widoki CSV.
-4. **Sprawdzenie zegara przy starcie** — jedno zapytanie.
+4. ~~Sprawdzenie zegara~~ — **zrobione**, endpointem publicznym.
 5. Reszta wchodzi razem z egzekucją i nie ma sensu wcześniej.
+
+**Lista jest wyczerpana** poza pozycjami 1 i 3, które są dwiema stronami tej
+samej rzeczy: ścieżka egzekucji nie istnieje, a poślizgu nie da się zmierzyć,
+dopóki nikt niczego nie wykonuje.
