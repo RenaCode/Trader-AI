@@ -89,7 +89,7 @@ async def zloz_plan(cur, adapter, plan: dict, f: Filtry, *, engine: str,
 
     try:
         z = await adapter.zloz_zlecenie(
-            symbol=plan["symbol"], strona="Buy" if kupno else "Sell",
+            symbol=plan["symbol"], strona=plan["side"],
             ilosc=ilosc, cena_limitu=cena, id_wlasne=id_zlecenia(plan["id"]),
             kategoria=kategoria)
     except ExchangeError as e:

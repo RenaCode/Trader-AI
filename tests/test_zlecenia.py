@@ -158,3 +158,23 @@ def test_cena_w_gore_takze_bez_ogona():
     """Dodanie kroku po zaokrągleniu wnosi skalę kroku z powrotem."""
     krok = D("0.010000000000")
     assert str(cena_do_kroku(D("100.003"), krok, kupno=False)) == "100.01"
+
+
+def test_nieznana_strona_zlecenia_KONCZY_SIE_BLEDEM():
+    """Poprzednia wersja brzmiała `"Buy" if strona == "buy" else "Sell"`, więc
+    każda wartość poza dosłownym „buy" — w tym „Buy" — zamieniała kupno
+    w sprzedaż.
+
+    Objaw nie wygląda na błąd: giełda przyjmuje takie zlecenie i wykonuje je,
+    tylko w przeciwną stronę niż decyzja. W dzienniku wygląda to jak strategia,
+    która zrobiła coś dziwnego.
+    """
+    from services.exchanges.bybit import _strona_bybita
+
+    assert _strona_bybita("buy") == "Buy"
+    assert _strona_bybita("Buy") == "Buy"
+    assert _strona_bybita("sell") == "Sell"
+    assert _strona_bybita("SELL") == "Sell"
+    for zla in ("kup", "", "long", "b"):
+        with pytest.raises(ValueError):
+            _strona_bybita(zla)

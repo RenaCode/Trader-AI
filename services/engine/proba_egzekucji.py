@@ -73,7 +73,7 @@ async def przebieg(adapter, *, symbol: str, f: Filtry, cena_rynkowa: Decimal,
     zlozone = None
     try:
         zlozone = await adapter.zloz_zlecenie(
-            symbol=symbol, strona="Buy", ilosc=ilosc, cena_limitu=cena,
+            symbol=symbol, strona="buy", ilosc=ilosc, cena_limitu=cena,
             id_wlasne=id_wlasne, kategoria=kategoria)
         kroki.append(f"złożone: {ilosc} @ {cena} (id giełdy {zlozone.id_gieldy})")
 
@@ -94,7 +94,7 @@ async def przebieg(adapter, *, symbol: str, f: Filtry, cena_rynkowa: Decimal,
         # a nie utworzyc drugie. To jedyna ochrona przed podwojna pozycja przy
         # nieudanej odpowiedzi, wiec musi byc sprawdzona na prawdziwej gieldzie.
         ponowne = await adapter.zloz_zlecenie(
-            symbol=symbol, strona="Buy", ilosc=ilosc, cena_limitu=cena,
+            symbol=symbol, strona="buy", ilosc=ilosc, cena_limitu=cena,
             id_wlasne=id_wlasne, kategoria=kategoria)
         if not ponowne.juz_istnialo:
             raise Niezaliczona(

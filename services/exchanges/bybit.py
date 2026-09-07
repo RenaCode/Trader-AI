@@ -99,6 +99,19 @@ def _status_bybita(status: str) -> str:
 
 
 
+def _strona_bybita(strona: str) -> str:
+    """'buy'/'sell' -> 'Buy'/'Sell'. Nieznana wartosc KONCZY SIE BLEDEM.
+
+    Domyslanie sie strony jest tu najgorszym mozliwym zachowaniem: pomylka nie
+    objawia sie awaria, tylko zleceniem wykonanym w PRZECIWNA strone niz decyzja
+    - a to wyglada w dzienniku jak strategia, ktora zrobila cos dziwnego.
+    """
+    s = strona.strip().lower()
+    if s not in ("buy", "sell"):
+        raise ValueError(f"nieznana strona zlecenia: {strona!r}")
+    return "Buy" if s == "buy" else "Sell"
+
+
 def _dec_albo_nic(v) -> Decimal | None:
     """Pusty string i brak pola znacza to samo: gielda tego nie podaje.
 
@@ -599,7 +612,13 @@ class BybitAdapter:
         wynik = await self._post("/v5/order/create", {
             "category": kategoria,
             "symbol": symbol,
-            "side": "Buy" if strona == "buy" else "Sell",
+            # STRONA MAPOWANA JAWNIE, bez galezi "wszystko inne to sprzedaz".
+            #
+            # Poprzednia wersja brzmiala `"Buy" if strona == "buy" else "Sell"`,
+            # wiec KAZDA wartosc poza doslownym "buy" - w tym "Buy" - zamieniala
+            # kupno w sprzedaz. Objaw nie wyglada na blad: gielda przyjmuje takie
+            # zlecenie i wykonuje je, tylko w druga strone niz decyzja.
+            "side": _strona_bybita(strona),
             "orderType": "Limit",
             "qty": str(ilosc),
             "price": str(cena_limitu),
