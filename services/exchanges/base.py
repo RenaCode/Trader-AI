@@ -140,3 +140,25 @@ class StanZlecenia:
     @property
     def czesciowe(self) -> bool:
         return Decimal(0) < self.wypelniono < self.ilosc
+
+@dataclass(frozen=True)
+class Wypelnienie:
+    """Pojedyncze wykonanie zapisane przez giełdę.
+
+    To jest zapis GIEŁDY o tym, co się faktycznie stało — niezależny od naszego
+    dziennika. Na tym polega jego wartość przy uzgadnianiu: dwa zapisy tego
+    samego zdarzenia, prowadzone przez dwie strony.
+
+    `prowizja_w` jest osobnym polem, bo na spocie prowizja bywa pobierana
+    W KUPIONYM AKTYWIE. Pominięcie tego zaniża odtworzoną pozycję dokładnie
+    o wartość prowizji i wygląda potem jak rozjazd.
+    """
+    id_gieldy: str
+    id_wlasne: str | None
+    symbol: str
+    strona: str                    # 'Buy' / 'Sell'
+    ilosc: Decimal
+    cena: Decimal
+    prowizja: Decimal
+    prowizja_w: str | None
+    czas: datetime

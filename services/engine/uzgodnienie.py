@@ -81,6 +81,69 @@ def rozjazdy(nasze: dict[str, Decimal], gieldy: dict[str, Decimal],
     return wynik
 
 
+
+# --------------------------------------------------------------- z wypelnien
+
+def pozycje_z_wypelnien(wypelnienia, baza_symbolu: dict[str, str]) -> dict[str, Decimal]:
+    """Pozycja odtworzona z REJESTRU TRANSAKCJI GIELDY. Czysta funkcja.
+
+    TO NIE JEST TO SAMO PYTANIE CO SALDO i mieszanie ich byloby najgorszym
+    mozliwym uproszczeniem:
+
+      * saldo odpowiada „ile aktywa naprawde trzymamy" — lapie takze reczne
+        zamkniecie w panelu, przelew, wyplate i wszystko, co nie jest handlem,
+      * wypelnienia odpowiadaja „czy nasz dziennik zgadza sie z tym, co gielda
+        zapisala jako nasze transakcje" — lapia zlecenie, ktore weszlo bez
+        naszej wiedzy, i zlecenie zapisane u nas, a nieistniejace u niej.
+
+    Odtworzenie jest wiec sprawdzeniem SLABSZYM, ale niezaleznym. Na hoscie,
+    ktory sald nie wystawia, jest jedynym dostepnym — i lepszym niz nic,
+    pod warunkiem ze nikt go nie przedstawi jako uzgodnienia sald.
+
+    PROWIZJA POBRANA W KUPIONYM AKTYWIE JEST ODEJMOWANA. Na spocie Bybit
+    potrafi pobrac ja wlasnie tak; pominiecie tego zanizyloby odtworzona
+    pozycje dokladnie o wartosc prowizji przy kazdym kupnie.
+    """
+    stan: dict[str, Decimal] = {}
+    for w in wypelnienia:
+        baza = baza_symbolu.get(w.symbol)
+        if baza is None:
+            # Symbol spoza naszego uniwersum. NIE POMIJAMY GO PO CICHU tylko
+            # wtedy, gdy dotyczy aktywa, ktore mamy w dzienniku - a tego tutaj
+            # nie wiemy. Pomijamy, a rozjazd i tak wyjdzie po stronie „u nas".
+            continue
+        znak = Decimal(1) if w.strona.lower() == "buy" else Decimal(-1)
+        stan[baza] = stan.get(baza, Decimal(0)) + znak * w.ilosc
+        if w.prowizja_w and w.prowizja_w.upper() == baza.upper():
+            stan[baza] -= w.prowizja
+    return {k: v for k, v in stan.items() if v != 0}
+
+
+def pokrycie_wypelnien(wypelnienia, najstarsze_otwarcie) -> str | None:
+    """Czy rejestr gieldy siega tak daleko wstecz, jak nasz dziennik.
+
+    NAJGROZNIEJSZY PRZYPADEK TEJ SCIEZKI. Gielda przechowuje wypelnienia przez
+    ograniczony czas i potrafi zignorowac zbyt stary `startTime`, oddajac
+    milczaco samo okno retencji. Odtworzenie z takiego okna pomija wszystko,
+    co bylo wczesniej — czyli zaniza pozycje i produkuje falszywy alarm
+    „pozycja-widmo" o pozycji, ktora naprawde istnieje.
+
+    Zwraca powod, gdy pokrycia brak; None, gdy jest.
+    """
+    if najstarsze_otwarcie is None:
+        return None                      # nie mamy pozycji — nie ma czego pokrywac
+    if not wypelnienia:
+        return ("gielda nie oddala zadnego wypelnienia, a nasz dziennik ma "
+                f"pozycje otwarta {najstarsze_otwarcie:%Y-%m-%d %H:%M} — "
+                "odtworzenie nie pokrywa naszej historii")
+    najstarsze_u_gieldy = min(w.czas for w in wypelnienia)
+    if najstarsze_u_gieldy > najstarsze_otwarcie:
+        return (f"rejestr gieldy zaczyna sie {najstarsze_u_gieldy:%Y-%m-%d %H:%M}, "
+                f"a nasza najstarsza otwarta pozycja pochodzi z "
+                f"{najstarsze_otwarcie:%Y-%m-%d %H:%M} — okno retencji nie "
+                "pokrywa naszej historii, wiec odtworzona pozycja bylaby zanizona")
+    return None
+
 async def nasze_pozycje(fetch_all, engine: str, mode: str) -> dict[str, Decimal]:
     """Ile którego aktywa trzymamy według naszego dziennika."""
     rows = await fetch_all(
@@ -89,6 +152,18 @@ async def nasze_pozycje(fetch_all, engine: str, mode: str) -> dict[str, Decimal]
         " WHERE p.engine::text = %s AND p.mode::text = %s AND p.closed_at IS NULL"
         " GROUP BY i.base_ccy", (engine, mode))
     return {r["aktywo"]: Decimal(str(r["ilosc"])) for r in rows if r["ilosc"]}
+
+
+async def kontekst_wypelnien(fetch_all, engine: str, mode: str):
+    """Mapa symbol->aktywo bazowe i data najstarszego otwarcia. Z bazy, nie z gieldy."""
+    rows = await fetch_all(
+        "SELECT i.symbol, i.base_ccy FROM ref.instrument i WHERE i.active")
+    baza = {r["symbol"]: r["base_ccy"] for r in rows}
+    r = await fetch_all(
+        "SELECT min(p.opened_at) AS od FROM exec.position p"
+        " WHERE p.engine::text = %s AND p.mode::text = %s AND p.closed_at IS NULL",
+        (engine, mode))
+    return baza, (r[0]["od"] if r else None)
 
 
 async def uzgodnij(fetch_all, notify, adapter, engine: str = "crypto",
@@ -102,15 +177,31 @@ async def uzgodnij(fetch_all, notify, adapter, engine: str = "crypto",
     try:
         salda = {b.currency.upper(): Decimal(str(b.total))
                  for b in await adapter.fetch_balances()}
+        zrodlo = "salda"
     except ExchangeError as e:
-        # HOST, KTORY NIE WYSTAWIA SALDA, CZYNI UZGODNIENIE NIEWYKONALNYM -
-        # a nie zgodnym. Roznica jest cala: zwrocenie zera powiedzialoby
-        # "sprawdzone i w porzadku" o czyms, czego sprawdzic sie nie da.
-        # Tak zachowuje sie demo podmiotu unijnego (404 na wallet-balance).
-        raise Nieuzgadnialne(
-            f"nie da sie odczytac sald na tym hoscie ({e}); uzgodnienie jest "
-            f"NIEWYKONALNE, wiec skladanie zlecen w tym trybie nie ma oslony "
-            f"przed rozjazdem stanu") from e
+        # HOST BEZ SALD NIE JEST HOSTEM ZGODNYM. Zwrocenie zera powiedzialoby
+        # "sprawdzone i w porzadku" o czyms, czego sprawdzic sie nie da. Tak
+        # zachowuje sie demo podmiotu unijnego: 404 na kazdej sciezce do salda.
+        #
+        # Zostaje sciezka SLABSZA, ale niezalezna: odtworzenie pozycji
+        # z rejestru transakcji gieldy. Odpowiada na wezsze pytanie i dlatego
+        # jest OSOBNO NAZWANA az do komunikatu wlacznie.
+        if e.code != "404":
+            raise Nieuzgadnialne(
+                f"odczyt sald nie powiodl sie ({e}); uzgodnienie NIEWYKONALNE") from e
+        baza, najstarsze = await kontekst_wypelnien(fetch_all, engine, mode)
+        try:
+            wyp = await adapter.wypelnienia(
+                od_ms=int(najstarsze.timestamp() * 1000) if najstarsze else None)
+        except ExchangeError as e2:
+            raise Nieuzgadnialne(
+                f"ten host nie wystawia sald ({e}), a rejestru wypelnien nie da "
+                f"sie pobrac ({e2}) — uzgodnienie NIEWYKONALNE") from e2
+        brak = pokrycie_wypelnien(wyp, najstarsze)
+        if brak:
+            raise Nieuzgadnialne(f"ten host nie wystawia sald, a {brak}")
+        salda = pozycje_z_wypelnien(wyp, baza)
+        zrodlo = "wypelnienia"
 
     # Porównujemy WYŁĄCZNIE aktywa, które którakolwiek strona uważa za nasze
     # pozycje. Giełda trzyma też walutę kwotowaną i resztki po innych operacjach,
@@ -120,8 +211,17 @@ async def uzgodnij(fetch_all, notify, adapter, engine: str = "crypto",
 
     r = rozjazdy(nasze, salda)
     if not r:
-        print(f"uzgodnienie {engine}/{mode}: zgodne "
-              f"({len(nasze)} aktywów w dzienniku)")
+        if zrodlo == "salda":
+            print(f"uzgodnienie {engine}/{mode}: zgodne z saldami giełdy "
+                  f"({len(nasze)} aktywów w dzienniku)")
+        else:
+            # NIGDY nie piszemy tu "zgodne z saldami". Sprawdzone zostalo
+            # wezsze pytanie i komunikat musi to niesc, bo to on trafia do
+            # decyzji o dopuszczeniu trybu do handlu.
+            print(f"uzgodnienie {engine}/{mode}: zgodne z REJESTREM TRANSAKCJI "
+                  f"giełdy ({len(nasze)} aktywów) — UWAGA: ten host nie wystawia "
+                  f"sald, więc ręczne zamknięcie w panelu i przelewy pozostają "
+                  f"niesprawdzone")
         return 0
 
     for x in r:

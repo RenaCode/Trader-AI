@@ -248,32 +248,110 @@ def test_kazdy_budowniczy_adaptera_bierze_HOST_Z_BAZY():
             f"odbije się od globalnego z kodem nie do odróżnienia od złego klucza")
 
 
-def test_brak_sald_to_NIEWYKONALNE_a_nie_zgodnosc():
+def _fetch_all_stub(pozycje, symbole=(("BTCUSDC", "BTC"),), od=None):
+    """Rozdziela zapytania po treści SQL — jeden stub na trzy różne pytania."""
+    async def fetch_all(sql, params=None):
+        # Rozroznienie po NAJWEZSZYM markerze. Zapytanie o pozycje takze
+        # dotyka ref.instrument, wiec dopasowanie po nazwie tabeli laczyloby
+        # dwa rozne pytania w jedno - i test padalby na wlasnym stubie.
+        if "sum(p.qty)" in sql:
+            return pozycje
+        if "min(p.opened_at)" in sql:
+            return [{"od": od}]
+        return [{"symbol": s, "base_ccy": b} for s, b in symbole]
+    return fetch_all
+
+
+async def _notify_zabroniony(*a, **k):
+    raise AssertionError("nie powiadamiamy o rozjazdach, których nie zmierzono")
+
+
+class _BezSald:
+    """Host, który na każdą ścieżkę do salda odpowiada 404 — jak demo bybit.eu."""
+
+    def __init__(self, wypelnienia=None, blad_wypelnien=None):
+        self._wyp = wypelnienia or []
+        self._blad = blad_wypelnien
+
+    async def fetch_balances(self):
+        from services.exchanges.base import ExchangeError
+        raise ExchangeError("endpoint niedostepny na tym hoscie", code="404")
+
+    async def wypelnienia(self, **kw):
+        if self._blad:
+            raise self._blad
+        return self._wyp
+
+
+def _wypelnienie(qty, side="Buy", czas=None, symbol="BTCUSDC"):
+    from datetime import datetime, timezone
+
+    from services.exchanges.base import Wypelnienie
+    return Wypelnienie(
+        id_gieldy="x", id_wlasne=None, symbol=symbol, strona=side,
+        ilosc=Decimal(qty), cena=Decimal("50000"), prowizja=Decimal("0"),
+        prowizja_w=None,
+        czas=czas or datetime(2026, 9, 1, tzinfo=timezone.utc))
+
+
+def test_brak_sald_I_brak_wypelnien_to_NIEWYKONALNE_a_nie_zgodnosc():
     """Najgroźniejsza możliwa odpowiedź uzgodnienia to ciche zero.
 
-    Host demo podmiotu unijnego zwraca 404 na `wallet-balance`. Gdyby
-    uzgodnienie potraktowało to jak pusty zestaw sald, porównałoby nasze
-    pozycje z niczym i zameldowało zgodność — czyli powiedziałoby
-    „sprawdzone i w porządku" o czymś, czego sprawdzić się nie da.
+    Gdyby brak sald potraktować jak pusty ich zestaw, porównanie poszłoby
+    z niczym. Sprawdzone kanarkiem: taka wersja nie melduje nawet zgodności —
+    melduje FAŁSZYWY rozjazd „pozycja-widmo" o pozycji, która istnieje.
     """
     import asyncio
 
     from services.engine.uzgodnienie import Nieuzgadnialne, uzgodnij
     from services.exchanges.base import ExchangeError
 
-    class GieldaBezSald:
-        async def fetch_balances(self):
-            raise ExchangeError("endpoint niedostepny na tym hoscie", code="404")
-
-    async def fetch_all(sql, params=None):
-        return [{"aktywo": "BTC", "ilosc": Decimal("0.5")}]
-
-    async def notify(*a, **k):
-        raise AssertionError("nie powiadamiamy o rozjazdach, ktorych nie zmierzono")
-
+    gielda = _BezSald(blad_wypelnien=ExchangeError("brak", code="404"))
+    pozycje = [{"aktywo": "BTC", "ilosc": Decimal("0.5")}]
     with pytest.raises(Nieuzgadnialne) as exc:
-        asyncio.run(uzgodnij(fetch_all, notify, GieldaBezSald()))
+        asyncio.run(uzgodnij(_fetch_all_stub(pozycje), _notify_zabroniony, gielda))
     assert "NIEWYKONALNE" in str(exc.value)
+
+
+def test_rejestr_krotszy_niz_nasza_historia_to_NIEWYKONALNE():
+    """Okno retencji giełdy krótsze od naszej historii zaniża odtworzoną
+    pozycję — i wygląda dokładnie jak pozycja-widmo."""
+    import asyncio
+    from datetime import datetime, timezone
+
+    from services.engine.uzgodnienie import Nieuzgadnialne, uzgodnij
+
+    stare_otwarcie = datetime(2026, 8, 1, tzinfo=timezone.utc)
+    gielda = _BezSald([_wypelnienie("0.5", czas=datetime(2026, 9, 5, tzinfo=timezone.utc))])
+    pozycje = [{"aktywo": "BTC", "ilosc": Decimal("0.5")}]
+    with pytest.raises(Nieuzgadnialne) as exc:
+        asyncio.run(uzgodnij(_fetch_all_stub(pozycje, od=stare_otwarcie),
+                             _notify_zabroniony, gielda))
+    assert "retencji" in str(exc.value)
+
+
+def test_zgodnosc_z_rejestrem_NIE_JEST_nazywana_zgodnoscia_z_saldami(capsys):
+    """Dwa różne pytania nie mogą dać tego samego komunikatu.
+
+    Rejestr transakcji nie widzi ręcznego zamknięcia w panelu ani przelewu.
+    Komunikat, który by to zacierał, trafiłby do decyzji o dopuszczeniu trybu
+    do handlu jako mocniejszy, niż jest naprawdę.
+    """
+    import asyncio
+    from datetime import datetime, timezone
+
+    from services.engine.uzgodnienie import uzgodnij
+
+    otwarcie = datetime(2026, 9, 1, tzinfo=timezone.utc)
+    gielda = _BezSald([_wypelnienie("0.5", czas=otwarcie)])
+    pozycje = [{"aktywo": "BTC", "ilosc": Decimal("0.5")}]
+    n = asyncio.run(uzgodnij(_fetch_all_stub(pozycje, od=otwarcie),
+                             _notify_zabroniony, gielda))
+    assert n == 0
+    out = capsys.readouterr().out
+    assert "REJESTREM TRANSAKCJI" in out
+    assert "zgodne z saldami" not in out
+    assert "niesprawdzone" in out
 
 
 def test_ocena_hosta_odrzuca_brak_kazdej_sciezki_do_salda():
@@ -296,3 +374,60 @@ def test_ocena_hosta_odrzuca_brak_kazdej_sciezki_do_salda():
 
     bez_historii = dict(pelne, zlecenia_historia={"jest": False})
     assert ocena(bez_historii)[0] is False
+
+
+class _GieldaZWypelnieniami:
+    """Adapter z podmienioną warstwą HTTP — reszta metody działa jak w produkcji."""
+
+    def __init__(self, strony):
+        self.strony = strony
+        self.zapytania = []
+
+    async def _get(self, path, params=None, **kw):
+        self.zapytania.append((path, dict(params or {})))
+        return self.strony[len(self.zapytania) - 1]
+
+
+def _adapter_z_odpowiedziami(strony):
+    from services.exchanges.bybit import BybitAdapter
+    a = BybitAdapter.__new__(BybitAdapter)
+    a._category = "spot"
+    a._get = _GieldaZWypelnieniami(strony)._get
+    return a
+
+
+def _wyp(exec_id, qty, side="Buy", link=None):
+    return {"execId": exec_id, "orderLinkId": link, "symbol": "BTCUSDC",
+            "side": side, "execQty": qty, "execPrice": "50000",
+            "execFee": "0.1", "feeCurrency": "USDC", "execTime": "1700000000000"}
+
+
+def test_wypelnienia_pobieraja_WSZYSTKIE_strony():
+    """Zatrzymanie się na pierwszej stronie podaje ostatnie kilkadziesiąt
+    transakcji jako całą historię — a odtworzona z tego pozycja jest zaniżona."""
+    import asyncio
+
+    a = _adapter_z_odpowiedziami([
+        {"list": [_wyp("a", "1")], "nextPageCursor": "k1"},
+        {"list": [_wyp("b", "2")], "nextPageCursor": "k2"},
+        {"list": [_wyp("c", "3")], "nextPageCursor": ""},
+    ])
+    out = asyncio.run(a.wypelnienia())
+    assert [w.id_gieldy for w in out] == ["a", "b", "c"]
+    assert sum(w.ilosc for w in out) == Decimal("6")
+
+
+def test_urwana_paginacja_KONCZY_SIE_BLEDEM_a_nie_krotsza_lista():
+    """Cicha ucinka wygląda potem jak rozjazd „pozycja-widmo" — alarm
+    o pozycji, która naprawdę istnieje. Lepszy błąd niż fałszywy alarm."""
+    import asyncio
+
+    from services.exchanges.base import ExchangeError
+    from services.exchanges.bybit import BybitAdapter
+
+    strony = [{"list": [_wyp(str(i), "1")], "nextPageCursor": "dalej"}
+              for i in range(BybitAdapter.STRON_MAX + 1)]
+    a = _adapter_z_odpowiedziami(strony)
+    with pytest.raises(ExchangeError) as exc:
+        asyncio.run(a.wypelnienia())
+    assert "niepelna" in str(exc.value)

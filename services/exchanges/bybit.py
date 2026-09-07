@@ -59,7 +59,7 @@ import httpx
 
 from .base import (
     AuthError, Balance, BookLevel, Candle, ConnectionCheck, ExchangeError, OrderBook,
-    StanZlecenia, ZlozoneZlecenie,
+    StanZlecenia, Wypelnienie, ZlozoneZlecenie,
 )
 
 # Dane publiczne bierzemy z podmiotu GLOBALNEGO niezaleznie od tego, gdzie stoi
@@ -289,6 +289,56 @@ class BybitAdapter:
                     currency=coin["coin"], total=total,
                     available=Decimal(coin.get("availableToWithdraw") or coin.get("walletBalance") or "0"),
                 ))
+        return out
+
+    # Ile stron wypelnien wolno pobrac w jednym uzgodnieniu. Limit istnieje po
+    # to, zeby bledny kursor nie zapetlil sie w nieskonczonosc - a nie po to,
+    # zeby uciac wynik. Przekroczenie KONCZY SIE BLEDEM, bo urwana lista
+    # wypelnien zaniza odtworzona pozycje i wyglada potem jak rozjazd
+    # "pozycja-widmo": alarm o pozycji, ktora naprawde istnieje.
+    STRON_MAX = 50
+
+    async def wypelnienia(self, *, od_ms: int | None = None,
+                          symbol: str | None = None) -> list[Wypelnienie]:
+        """Wszystkie wykonania z rejestru gieldy, od najnowszych.
+
+        POBIERA WSZYSTKIE STRONY. Bybit zwraca `nextPageCursor`, dopoki jest co
+        oddawac; zatrzymanie sie na pierwszej stronie dalo by obraz kilkudziesieciu
+        ostatnich transakcji podany jako calosc historii.
+        """
+        params: dict = {"category": self._category, "limit": "100"}
+        if symbol:
+            params["symbol"] = symbol
+        if od_ms is not None:
+            params["startTime"] = str(od_ms)
+
+        out: list[Wypelnienie] = []
+        kursor: str | None = None
+        for strona in range(self.STRON_MAX + 1):
+            if strona == self.STRON_MAX:
+                raise ExchangeError(
+                    f"wypelnienia: przekroczono {self.STRON_MAX} stron - lista jest "
+                    f"niepelna, a niepelna lista zaniza odtworzona pozycje")
+            p = dict(params)
+            if kursor:
+                p["cursor"] = kursor
+            res = await self._get("/v5/execution/list", p)
+            for w in res.get("list", []):
+                out.append(Wypelnienie(
+                    id_gieldy=w.get("execId", ""),
+                    id_wlasne=w.get("orderLinkId") or None,
+                    symbol=w.get("symbol", ""),
+                    strona=w.get("side", ""),
+                    ilosc=Decimal(w.get("execQty") or "0"),
+                    cena=Decimal(w.get("execPrice") or "0"),
+                    prowizja=Decimal(w.get("execFee") or "0"),
+                    prowizja_w=w.get("feeCurrency") or None,
+                    czas=datetime.fromtimestamp(int(w.get("execTime", 0)) / 1000,
+                                                tz=timezone.utc),
+                ))
+            kursor = res.get("nextPageCursor") or None
+            if not kursor:
+                break
         return out
 
     async def dryf_zegara(self) -> tuple[int, str | None]:
