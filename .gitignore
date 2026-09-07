@@ -28,3 +28,7 @@ artifacts/
 /shot.mjs
 /diag.mjs
 /check.mjs
+
+# Worktree agentow pracujacych w tle. To osobne repozytoria, nie tresc projektu -
+# git add -A wciagnal je raz jako zagnieżdżone repo i zepsul commit.
+.claude/worktrees/
