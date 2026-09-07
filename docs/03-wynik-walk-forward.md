@@ -1509,11 +1509,32 @@ połączeniu.
    bez odwoływania się do czegokolwiek innego — i jest sprawdzalne.
 2. **`rel_strength` jest cechą przekrojową.** Ranking liczy się po uniwersum
    decyzyjnym, więc zmiana uniwersum zmienia wartość tej cechy dla **każdego**
-   instrumentu. Zastrzeżenie do wszystkich sześciu wierszy tabeli: wartości
-   w bazie pochodzą z rankingu po 24 instrumentach (sprzed 0023), więc także
-   przebieg produkcyjny czyta cechę policzoną dla innego zbioru niż ten, którym
-   handluje. Rozjazd jest symetryczny, więc nie tłumaczy różnicy sam z siebie —
-   ale zaniża wiarygodność porównania.
+   instrumentu.
+
+   Sprawdzone 2026-09-07, po podejrzeniu, że wartości historyczne pochodzą
+   z rankingu po 24 instrumentach. **Podejrzenie było błędne.** Krok wartości
+   zdradza liczność zbioru: `percent_rank` po *n* elementach daje wartości co
+   `2/(n-1)`. Zmierzone na dwóch losowych świecach: 0,2222 (= 2/9, dziesięć
+   instrumentów) i 0,2500 (= 2/8, dziewięć — NEARUSDC nie był jeszcze notowany).
+   Ranking zawsze szedł po zbiorze `tradeable`.
+
+   Mylące było `count(distinct instrument_id) = 34`: liczy instrumenty, które
+   **mają wiersze**, a nie te, po których liczono ranking. Dwadzieścia cztery
+   z nich to martwe pozostałości sprzed migracji 0023.
+
+   **Ale zastrzeżenie do wierszy z szerszym uniwersum zostaje, i teraz jest
+   precyzyjne.** Przebiegi na 24 instrumentach czytały dla czternastu z nich
+   `rel_strength` policzone przed 0023, dla **innego zbioru**. Przed każdym
+   kolejnym porównaniem uniwersum trzeba więc najpierw przeliczyć tę cechę dla
+   zbioru kandydującego:
+
+   ```bash
+   python services/ingest/features.py --bar 4h --backfill --days 1400 \
+       --tylko-przekroj --instrumenty <lista kandydująca>
+   ```
+
+   Bez tego porównanie idzie na siedmiu sygnałach zamiast ośmiu, czyli mierzy
+   inną strategię, a nie inne uniwersum.
 3. **Korelacja.** Pozycje w 24 skorelowanych aktywach to mniej niezależnych
    zakładów, niż sugeruje ich liczba. Zastrzeżenie o efektywnej liczbie
    obserwacji, opisane wyżej przy transakcjach, dotyczy tu wprost ekspozycji.
