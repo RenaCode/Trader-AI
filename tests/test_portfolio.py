@@ -661,3 +661,63 @@ def test_odniesienie_dopasowane_ekspozycja_jest_porownywalne_co_do_rzedu():
     assert dopasowane < surowe / 3, (
         f"dopasowanie ekspozycja nie zblizylo liczb: surowo {surowe:.2f} pkt, "
         f"po dopasowaniu {dopasowane:.2f} pkt")
+
+
+# ---------------------------------------------- rozklad ekspozycji na czynniki
+#
+# Srednia 1,28% przy limicie 15% (pomiar 2026-09-07) nie mowi, DLACZEGO kapital
+# nie pracuje. Portfel poza rynkiem przez 90% czasu i portfel trzymajacy bez
+# przerwy jedna mala pozycje daja te sama srednia, a wymagaja czegos zupelnie
+# innego. Rozbicie ma sens tylko wtedy, gdy mnozy sie z powrotem.
+
+def test_rozklad_ekspozycji_mnozy_sie_z_powrotem_do_sredniej():
+    """TOZSAMOSC, nie przyblizenie.
+
+    Gdyby ktorykolwiek licznik liczyl sie po innym zbiorze swiec niz pozostale,
+    ten test by padl - a same liczby nadal wygladalyby sensownie i nikt by tego
+    nie zauwazyl.
+    """
+    panele = {f"I{i}": panel(40, 100.0, 130.0) for i in range(5)}
+    limity = LIMITY_LUZNE | {
+        "max_total_exposure": {"value": Decimal("15000"), "action": "block"}}
+    res = uruchom(panele, limity)
+    assert res.trades, "test bez transakcji nie mierzy rozkladu"
+
+    assert res.srednio_pozycji * res.sredni_notional == pytest.approx(
+        res.avg_exposure, rel=1e-9), (
+        f"{res.srednio_pozycji} x {res.sredni_notional} != {res.avg_exposure}")
+    assert res.udzial_swiec_z_pozycja * res.pozycji_gdy_w_rynku == pytest.approx(
+        res.srednio_pozycji, rel=1e-9)
+
+
+def test_rozklad_odroznia_rzadkie_wejscia_od_malych_pozycji():
+    """Kanarek na to, po co ten rozklad w ogole powstal.
+
+    Dwa portfele o zblizonej sredniej ekspozycji, ale z zupelnie roznych
+    powodow: jeden siedzi w rynku rzadko, drugi ciagle, za to malymi pozycjami.
+    Sama srednia ich nie rozroznia.
+    """
+    ciagly = {f"I{i}": panel(40, 100.0, 130.0, okres=100) for i in range(4)}
+    rzadki = {f"I{i}": panel(40, 100.0, 130.0, okres=2) for i in range(4)}
+    limity = LIMITY_LUZNE | {
+        "max_total_exposure": {"value": Decimal("15000"), "action": "block"}}
+
+    c = uruchom(ciagly, limity)
+    r = uruchom(rzadki, limity)
+    assert c.trades and r.trades
+
+    assert c.udzial_swiec_z_pozycja > r.udzial_swiec_z_pozycja, (
+        f"sygnal ciagly ma siedziec w rynku dluzej: "
+        f"{c.udzial_swiec_z_pozycja:.2f} vs {r.udzial_swiec_z_pozycja:.2f}")
+
+
+def test_rozklad_zeruje_sie_bez_pozycji():
+    """Dzielenie przez zero w diagnostyce jest gorsze niz brak diagnostyki:
+    wywraca przebieg, ktory poza tym mial sie dobrze."""
+    panele = {"AAA": [dict(r, f=cechy_neutralne()) for r in panel(40, 100.0, 130.0)]}
+    res = uruchom(panele, LIMITY_LUZNE, gate=0.9)
+    assert not res.trades
+    assert res.srednio_pozycji == 0.0
+    assert res.sredni_notional == 0.0
+    assert res.pozycji_gdy_w_rynku == 0.0
+    assert res.udzial_swiec_z_pozycja == 0.0

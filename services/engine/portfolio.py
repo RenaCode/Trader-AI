@@ -98,6 +98,21 @@ class PortfolioResult:
     # kapitalu faktycznie pracowalo, nie mowi nic - a bez tego zwrotu
     # z okna nie da sie porownac z niczym, co angazuje inna czesc konta.
     avg_exposure: float = 0.0
+    # ROZKLAD SREDNIEJ EKSPOZYCJI NA CZYNNIKI.
+    #
+    # Sama srednia mowi, ze kapital nie pracuje - nie mowi DLACZEGO. A odpowiedzi
+    # sa trzy, prowadza do trzech roznych zmian i nie da sie ich rozroznic bez
+    # rozbicia liczby:
+    #
+    #     ekspozycja = srednio_pozycji x sredni_notional / kapital
+    #     srednio_pozycji = udzial_swiec_z_pozycja x pozycji_gdy_w_rynku
+    #
+    # Portfel poza rynkiem przez 90% czasu i portfel trzymajacy jedna male
+    # pozycje bez przerwy daja te sama srednia i wymagaja czegos zupelnie innego.
+    udzial_swiec_z_pozycja: float = 0.0   # ile swiec ma choc jedna pozycje
+    srednio_pozycji: float = 0.0          # srednia po WSZYSTKICH swiecach
+    pozycji_gdy_w_rynku: float = 0.0      # srednia po swiecach Z pozycja
+    sredni_notional: float = 0.0          # sredni rozmiar jednej pozycji
     base_notional: float = 0.0  # budzet na pozycje wyliczony z limitu
     niewypelnione_wejscia: int = 0
     niewypelnione_wyjscia: int = 0
@@ -199,6 +214,8 @@ def simulate_portfolio(panels: dict[str, list[dict]],
     max_exposure = 0.0
     suma_ekspozycji = 0.0
     swiec_ekspozycji = 0
+    suma_pozycji = 0
+    swiec_z_pozycja = 0
     realized = 0.0
     fees_paid = 0.0
     res = PortfolioResult()
@@ -294,6 +311,12 @@ def simulate_portfolio(panels: dict[str, list[dict]],
         max_exposure = max(max_exposure, float(exposure))
         suma_ekspozycji += float(exposure)
         swiec_ekspozycji += 1
+        # Liczymy z `per_inst`, nie z `positions`, zeby oba liczniki opisywaly
+        # DOKLADNIE ten sam zbior - inaczej tozsamosc
+        # `ekspozycja = srednio_pozycji x sredni_notional` przestaje byc
+        # sprawdzalna, a wtedy rozbicie niczego nie dowodzi.
+        suma_pozycji += len(per_inst)
+        swiec_z_pozycja += 1 if per_inst else 0
 
         if killswitch is None:
             konto = evaluate_account(
@@ -398,6 +421,13 @@ def simulate_portfolio(panels: dict[str, list[dict]],
     res.equity_curve.append((last_t, START_EQUITY + realized - fees_paid))
     res.max_exposure = max_exposure
     res.avg_exposure = (suma_ekspozycji / swiec_ekspozycji) if swiec_ekspozycji else 0.0
+    if swiec_ekspozycji:
+        res.udzial_swiec_z_pozycja = swiec_z_pozycja / swiec_ekspozycji
+        res.srednio_pozycji = suma_pozycji / swiec_ekspozycji
+    if swiec_z_pozycja:
+        res.pozycji_gdy_w_rynku = suma_pozycji / swiec_z_pozycja
+    if suma_pozycji:
+        res.sredni_notional = suma_ekspozycji / suma_pozycji
     res.base_notional = baza
     res.prowizja = fee
     res.poslizg = slip
@@ -424,6 +454,14 @@ def metrics(res: PortfolioResult, min_trades: int) -> dict:
             # dzielic. Bez niej zwrot z okna jest nieporownywalny
             # z czymkolwiek o innej ekspozycji.
             "avg_exposure": round(res.avg_exposure / START_EQUITY, 6),
+            # Czynniki tej sredniej. Mnoza sie z powrotem:
+            #   avg_exposure = srednio_pozycji x notional_na_pozycje
+            "w_rynku": round(res.udzial_swiec_z_pozycja, 6),
+            "srednio_pozycji": round(res.srednio_pozycji, 6),
+            "notional_na_pozycje": round(res.sredni_notional / START_EQUITY, 6),
+            # Budzet wyliczony z limitu - odniesienie dla powyzszego. Roznica
+            # miedzy nimi to `udzial_budzetu(score)`, czyli sila sygnalu.
+            "budzet_na_pozycje": round(res.base_notional / START_EQUITY, 6),
             "blocked": res.blocked, "downsized": res.downsized,
             "killswitch": res.killswitch_reason,
             "niewypelnione": res.niewypelnione_wejscia + res.niewypelnione_wyjscia,

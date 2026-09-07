@@ -505,6 +505,7 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
     pokonane_pelne = 0        # przy odniesieniu 100% zaangazowanym - do raportu
     ekspozycje: list[float] = []
     zwroty_okien: list[float] = []
+    rozklad: list[tuple[float, float, float]] = []   # (w rynku, pozycji, notional)
     porownywalne = 0
     all_sharpes: list[float] = []
     worst_dd = 0.0
@@ -719,6 +720,9 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
             porownywalne += 1
             ekspozycje.append(ekspozycja)
             zwroty_okien.append(oos_m["total_return"])
+            rozklad.append((oos_m["w_rynku"], oos_m["srednio_pozycji"],
+                            oos_m["notional_na_pozycje"], oos_m["budzet_na_pozycje"],
+                            len(aktywne)))
             if oos_m["total_return"] > odniesienie_dop:
                 pokonane_odniesienie += 1
             if oos_m["total_return"] > odniesienie:
@@ -1010,6 +1014,21 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
               f"(limit łączny: {DEFAULT_LIMITS['max_total_exposure']['value']:.0f} "
               f"z {START_EQUITY:.0f}, czyli "
               f"{float(DEFAULT_LIMITS['max_total_exposure']['value']) / START_EQUITY:.0%})")
+        # ROZKLAD TEJ SREDNIEJ NA CZYNNIKI. Bez niego "1,28%" prowadzi do trzech
+        # roznych hipotez i zadnego sposobu, zeby je rozroznic.
+        if rozklad:
+            w_rynku = statistics.fmean(x[0] for x in rozklad)
+            poz = statistics.fmean(x[1] for x in rozklad)
+            notional = statistics.fmean(x[2] for x in rozklad)
+            budzet = statistics.fmean(x[3] for x in rozklad)
+            instr = statistics.fmean(x[4] for x in rozklad)
+            print(f"  = w rynku {w_rynku:.1%} świec × średnio {poz:.2f} pozycji "
+                  f"jednocześnie × {notional:.2%} kapitału na pozycję")
+            if budzet:
+                print(f"    budżet na pozycję z limitu: {budzet:.2%} kapitału "
+                      f"({instr:.0f} instrumentów) — wykorzystany w "
+                      f"{notional / budzet:.0%}; miejsc na pozycje wolnych: "
+                      f"{instr - poz:.1f} z {instr:.0f}")
         print(f"Pokonano kup-i-trzymaj PRZY TEJ SAMEJ EKSPOZYCJI w "
               f"{pokonane_odniesienie}/{porownywalne} oknach "
               f"({pct_odn:.1f}%)   przedział 95%: {odn_lo:.1%}–{odn_hi:.1%}")
