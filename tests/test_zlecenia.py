@@ -207,3 +207,26 @@ def test_reguly_zlecen_bierzemy_z_hosta_PODMIOTU_a_nie_globalnego():
     asyncio.run(a.filtry_instrumentow("spot"))
     assert uzyte["host"] == "https://api-demo.bybit.eu"
     assert uzyte["private"] is False        # endpoint publiczny, bez klucza
+
+
+def test_zlecenia_ida_jako_PostOnly_a_nie_GTC():
+    """Limit przecinający spread jest wypełniany natychmiast jako taker —
+    u podmiotu unijnego po 0,250% zamiast 0,100%. Po cichu: w dzienniku wygląda
+    jak zwykłe wypełnienie.
+
+    Zdarza się to często, bo cenę wyliczamy z księgi globalnej, a zlecenie ląduje
+    w unijnej. Zmierzone 2026-09-07 na 1600 świecach 4h: w 16,8% świec rozjazd
+    zamknięć przekracza CAŁĄ rundę kosztową.
+
+    Symulacja zakłada makera bez poślizgu, więc PostOnly nie zmienia strategii —
+    urzeczywistnia jej założenie. Odrzucenie jest przy tym widoczne dla czujki
+    zdrowia egzekucji; cichy taker nie jest widoczny dla niczego.
+    """
+    from pathlib import Path
+
+    zrodlo = Path("services/exchanges/bybit.py").read_text(encoding="utf-8")
+    kod = "\n".join(w for w in zrodlo.splitlines()
+                    if not w.lstrip().startswith("#"))
+    fragment = kod.split("/v5/order/create")[1].split("})")[0]
+    assert '"timeInForce": "PostOnly"' in fragment
+    assert '"timeInForce": "GTC"' not in fragment

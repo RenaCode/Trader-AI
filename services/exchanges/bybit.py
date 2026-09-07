@@ -637,7 +637,28 @@ class BybitAdapter:
             "orderType": "Limit",
             "qty": str(ilosc),
             "price": str(cena_limitu),
-            "timeInForce": "GTC",
+            # POSTONLY, NIE GTC. Zlecenie, ktore przecina spread, jest przez
+            # gielde wypelniane NATYCHMIAST jako taker - u podmiotu unijnego po
+            # 0,250% zamiast 0,100% makera. Dzieje sie to po cichu: w dzienniku
+            # wyglada jak zwykle wypelnienie.
+            #
+            # Zdarza sie to czesto, bo cene limitu wyliczamy z ksiegi podmiotu
+            # GLOBALNEGO, a zlecenie ladzie w ksiedze UNIJNEJ. Zmierzone
+            # 2026-09-07 na 1600 swiecach 4h: mediana rozjazdu zamkniec 5,9 pb,
+            # p90 28,4 pb, a w 16,8% swiec rozjazd przekracza CALA runde
+            # kosztowa (20 pb). Dla NEARUSDC w polowie swiec.
+            #
+            # DLACZEGO TO NIE ZMIENIA STRATEGII, TYLKO JA URZECZYWISTNIA:
+            # symulacja juz zaklada wypelnienie makerem po cenie limitu i bez
+            # poslizgu (POSLIZG_MAKER = 0). PostOnly wymusza dokladnie to
+            # zalozenie - albo jestesmy makerem po naszej cenie, albo nie
+            # handlujemy. Bez niego produkcja czasem placi takera, czego
+            # symulacja nie modeluje w ogole, a projekt zmierzyl, ze przy
+            # takerze Sharpe jest ujemny.
+            #
+            # Odrzucenie zamiast cichego takera jest przy tym WIDOCZNE: trafia
+            # do czujki zdrowia egzekucji, ktora liczy odrzucone do przyjetych.
+            "timeInForce": "PostOnly",
             "orderLinkId": id_wlasne,
         })
         return ZlozoneZlecenie(id_wlasne=id_wlasne, id_gieldy=wynik.get("orderId"),
