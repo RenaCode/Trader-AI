@@ -1115,3 +1115,75 @@ Nic tutaj nie jest przewagą. Najsilniejszy sygnał, `mean_reversion_rsi`, ma IC
 +0,034 — przy rundzie kosztowej 0,200% to nadal za mało, żeby pokryć koszty.
 Poprawka na nakładanie się obserwacji nie odkryła nowej informacji; **odebrała
 pozorną**.
+
+
+---
+
+# Czy sygnał w ogóle wyczuwa czas — pierwszy test permutacyjny
+
+Projekt mierzył dotąd dwie rzeczy i **żadna nie odpowiadała na to pytanie**:
+
+- **Odsetek dodatnich okien** premiuje nieuczestniczenie. Strategia trzymająca
+  małą ekspozycję na spadającym rynku ma dużo okien dodatnich, bo rzadko traci —
+  i rzadko cokolwiek wyczuwa.
+- **Pokonanie kup-i-trzymaj** porównuje z pełną ekspozycją. Strategia
+  o dwuprocentowej ekspozycji pobije trzymanie na każdym rynku spadającym
+  i przegra na każdym rosnącym, niezależnie od tego, czy jej wejścia są trafione,
+  czy losowe.
+
+Brakowało benchmarku z **tą samą ekspozycją i losowym czasem**.
+
+## Konstrukcja
+
+Dla każdego okna testowego bierzemy faktyczne transakcje i zachowujemy z nich
+**wszystko poza momentem wejścia**: liczbę, długość każdej z nich, instrument,
+okno i model kosztów. Moment wejścia losujemy — 200 układów na okno. Potem
+sprawdzamy, na którym percentylu rozkładu losowego wypada wynik faktyczny.
+
+To nie jest kolejna hipoteza. Model zerowy nie jest kandydatem do wyboru:
+niczego nie optymalizuje, nie zmienia wag i nie zapisuje nic do
+`learn.hypothesis_trial`.
+
+## Wynik
+
+```
+Okien: 33
+Średni percentyl wyniku faktycznego wśród losowych: 43,3
+   (oczekiwane 50, błąd std. ±5,0, odchylenie −1,33)
+Okien powyżej mediany losowej: 14/33 (42%)
+   (oczekiwane 16,5, odchylenie −0,87)
+```
+
+**Nieodróżnialne od losowego.** Oba odchylenia mieszczą się poniżej dwóch
+błędów standardowych, więc nie da się stwierdzić ani trafności, ani szkodliwości
+wyboru momentu.
+
+Ale kierunek jest jednoznaczny w obu miarach i wskazuje **poniżej** losowego —
+a to znaczy, że nie ma podstaw twierdzić, że sygnał wnosi cokolwiek w wymiarze
+czasu.
+
+## Co to znaczy dla odsetka 74%
+
+Świeca 4h daje 74,4% dodatnich okien i to jest najwyższa liczba w projekcie.
+Ten test mówi, skąd ona pochodzi: **z profilu ekspozycji, nie z trafności
+wejść.** Strategia rzadko traci, bo rzadko jest na rynku — a gdy już wchodzi,
+robi to nie lepiej niż rzut monetą.
+
+Trzy niezależne pomiary układają się teraz w jedno zdanie:
+
+| pytanie | miara | odpowiedź |
+|---|---|---|
+| czy sygnały niosą informację? | IC | +0,034 najsilniejszy, przy koszcie 0,200% |
+| czy strategia bije nierobienie niczego? | kup-i-trzymaj | 43–50%, czyli nie |
+| czy moment wejścia coś znaczy? | test permutacyjny | 43,3 percentyla, czyli nie |
+
+## Jak liczona jest istotność
+
+Przy braku trafności percentyl każdego okna ma rozkład **jednostajny** na
+(0, 100): średnia 50, odchylenie 100/√12 ≈ 28,9. Błąd standardowy średniej
+z 33 okien to 28,9/√33 ≈ 5,0.
+
+Narzędzie liczy to samo i wypisuje werdykt, zamiast zostawiać liczbę czytelnikowi.
+Bez tego „43,3" zachęca do wniosku „gorzej niż losowo", który przy trzydziestu
+kilku oknach nie jest uprawniony — ten sam błąd, który tego samego dnia zamienił
+mikrostrukturę w pozorne odkrycie.

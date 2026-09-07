@@ -48,3 +48,55 @@ def test_prog_panelu_jest_stala_a_nie_liczba_w_warunku():
     """Liczba 500 wpisana w warunek nie da się wyjaśnić w komunikacie błędu."""
     assert "MIN_PANEL = 500" in ZRODLO
     assert "len(panel) < MIN_PANEL" in ZRODLO
+
+
+# --- test permutacyjny czasu wejscia ----------------------------------------
+TIMING = Path("services/engine/diagnose_timing.py").read_text()
+
+
+def test_test_permutacyjny_zachowuje_wszystko_poza_czasem():
+    """Jeśli losowanie zmieniłoby liczbę transakcji, ich długość albo instrument,
+    różnica nie pochodziłaby już z momentu wejścia — a to jest całe pytanie."""
+    assert "wzorce.append((t[\"symbol\"], max(1, i1 - i0)))" in TIMING, \
+        "wzorce transakcji nie zachowują instrumentu i długości"
+    assert "rng.randrange(0, len(seria) - dlugosc - 2)" in TIMING, \
+        "losowany jest nie tylko moment wejścia"
+
+
+def test_test_permutacyjny_liczy_istotnosc_sam():
+    """Liczba w rodzaju „43,3" zachęca do wniosku „gorzej niż losowo", który przy
+    trzydziestu kilku oknach zwykle nie jest uprawniony.
+
+    Przy braku trafności percentyl okna ma rozkład jednostajny: średnia 50,
+    odchylenie 100/√12 ≈ 28,9.
+    """
+    assert "28.87" in TIMING, "brak odchylenia rozkładu jednostajnego"
+    assert "se_sredniej" in TIMING and "odchylenie_licznika" in TIMING
+    assert "WERDYKT" in TIMING
+
+
+def _kod(zrodlo: str) -> str:
+    """Same instrukcje: bez komentarzy i bez docstringu modułu.
+
+    Pierwsza wersja testu niżej szukała słowa „hypothesis_trial" w całym pliku
+    i trafiała na komentarz wyjaśniający, że tej tabeli NIE dotykamy — czyli
+    zgłaszała problem tam, gdzie było jego wyjaśnienie.
+    """
+    bez_docstringu = zrodlo.split('"""', 2)[-1]
+    return "\n".join(l for l in bez_docstringu.splitlines()
+                      if not l.strip().startswith("#"))
+
+
+def test_test_permutacyjny_nie_zapisuje_hipotez():
+    """Model zerowy nie jest kandydatem do wyboru — nie może podnosić licznika
+    hipotez, bo nic nie optymalizuje."""
+    kod = _kod(TIMING)
+    for zapis in ("INSERT INTO", "UPDATE ", "DELETE FROM"):
+        assert zapis not in kod, f"narzędzie pomiarowe zapisuje do bazy: {zapis}"
+
+
+def test_kierunek_dlugi_jest_zapisany_wprost():
+    """Wyliczanie kierunku ze znaku zwrotu wyglądałoby na obsługę shortów,
+    a zwracałoby jedynkę zawsze — na spocie krótkich pozycji nie ma."""
+    assert "kierunek" not in _kod(TIMING), \
+        "kierunek pozycji nadal jest wyliczany zamiast zapisany wprost"
