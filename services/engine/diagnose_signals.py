@@ -50,6 +50,20 @@ from services.engine.train import atr_threshold, load_panel
 # nie dalo sie zlapac.
 HORYZONTY = (1, 3, 6, 12)
 
+# Cechy zbierane, ale NIEUZYWANE przez zaden sygnal.
+#
+# Mikrostruktura arkusza zlecen jest liczona od 2026-09-04, a sygnal na niej
+# oparty celowo jeszcze nie istnieje: kalibrowanie go na kilku dniach dodaloby
+# stopien swobody i nic nie powiedzialoby o rynku (patrz komentarz przy
+# compute_orderbook).
+#
+# ALE MIERZENIE TO NIE BUDOWANIE. IC jest statystyka opisowa - nie wybiera
+# niczego, nie wchodzi do licznika hipotez i nie zmienia zadnych wag. Odpowiada
+# na pytanie, ktore trzeba zadac ZANIM sygnal powstanie: czy w tych danych
+# w ogole cokolwiek jest. Jesli po kilku miesiacach IC bedzie zerowe, sygnal nie
+# powstanie wcale i zaoszczedzimy sobie stopnia swobody.
+CECHY_BEZ_SYGNALU = ("book_imbalance", "book_spread_bps")
+
 
 def main() -> int:
     ap = argparse.ArgumentParser()
@@ -73,6 +87,7 @@ def main() -> int:
 
         # {sygnal: {horyzont: ([wyniki], [zwroty])}}
         zebrane: dict[str, dict[int, tuple[list, list]]] = {}
+        cechy: dict[str, dict[int, tuple[list, list]]] = {}
         for inst in instrumenty:
             panel = load_panel(cur, inst["id"], h, now - timedelta(days=args.days), now)
             if len(panel) < 500:
@@ -93,6 +108,18 @@ def main() -> int:
                         w = zebrane.setdefault(name, {}).setdefault(k, ([], []))
                         w[0].append(out.score)
                         w[1].append(zwrot)
+
+                    # Surowe cechy, ktorych zaden sygnal nie konsumuje. Tu nie ma
+                    # progu "sygnal milczy" - wartosc cechy zawsze cos znaczy.
+                    # Cechy siedza pod kluczem "f", nie na wierzchu wiersza -
+                    # panel to {t, price, high, low, f:{rola: wartosc}}.
+                    for rola in CECHY_BEZ_SYGNALU:
+                        wartosc = (panel[i].get("f") or {}).get(rola)
+                        if wartosc is None:
+                            continue
+                        w = cechy.setdefault(rola, {}).setdefault(k, ([], []))
+                        w[0].append(float(wartosc))
+                        w[1].append(zwrot)
             print(f"  {inst['symbol']:10s} {len(panel):>6,} świec", flush=True)
 
     print()
@@ -108,6 +135,52 @@ def main() -> int:
             n = max(n, len(xs))
             wiersz += (f"{ic:+.4f}".rjust(11) if ic is not None else "—".rjust(11))
         print(f"{wiersz}   {n:,}")
+
+    if cechy:
+        print()
+        print("CECHY ZBIERANE, KTÓRYCH ŻADEN SYGNAŁ JESZCZE NIE UŻYWA")
+        print(naglowek.replace("sygnał", "cecha "))
+        print("-" * len(naglowek))
+        for name in sorted(cechy):
+            wiersz = name.ljust(20)
+            n = 0
+            for k in HORYZONTY:
+                xs, ys = cechy[name].get(k, ([], []))
+                ic = spearman(xs, ys)
+                n = max(n, len(xs))
+                wiersz += (f"{ic:+.4f}".rjust(11) if ic is not None else "—".rjust(11))
+            print(f"{wiersz}   {n:,}")
+        print()
+        print("Sygnał oparty na tych cechach CELOWO jeszcze nie istnieje —")
+        print("historia mikrostruktury jest za krótka. To jest pomiar, nie budowa:")
+        print("nie wybiera niczego i nie wchodzi do licznika hipotez.")
+
+    print()
+    print("BŁĄD STANDARDOWY IC — z poprawką na nakładanie się obserwacji")
+    print()
+    print("  Zwrot z k świec liczony przy KAŻDEJ świecy nakłada się na k-1")
+    print("  sąsiednich pomiarów: te obserwacje nie są niezależne. Naiwne")
+    print("  1/√n zaniża więc błąd tym mocniej, im dłuższy horyzont — czyli")
+    print("  dokładnie tam, gdzie IC zwykle wygląda najlepiej.")
+    print("  Efektywna liczba obserwacji to w przybliżeniu n/k.")
+    print()
+    naglowek2 = "seria".ljust(20) + "".join(f"{k:>4} św.".rjust(11) for k in HORYZONTY)
+    print(naglowek2)
+    print("-" * len(naglowek2))
+    for zbior, etykieta in ((zebrane, ""), (cechy, " (cecha)")):
+        for name in sorted(zbior):
+            wiersz = (name + etykieta).ljust(20)
+            for k in HORYZONTY:
+                xs, _ = zbior[name].get(k, ([], []))
+                n_ef = len(xs) / k if xs else 0
+                se = (1 / n_ef ** 0.5) if n_ef else float("inf")
+                ic = spearman(*zbior[name].get(k, ([], [])))
+                krotnosc = (abs(ic) / se) if (ic is not None and se) else 0.0
+                wiersz += f"±{se:.4f}({krotnosc:.1f})".rjust(11)
+            print(wiersz)
+    print()
+    print("  W nawiasie: |IC| wyrażone w błędach standardowych. Poniżej 2 to")
+    print("  wynik nieodróżnialny od zera niezależnie od tego, jak duży wygląda.")
 
     print()
     print("IC to korelacja rangowa między wynikiem sygnału a zwrotem PO nim.")

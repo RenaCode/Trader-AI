@@ -1043,3 +1043,75 @@ tym, jak ten sam błąd naprawiono w symulacji. Gdyby stawki rozjechały się
 bardziej — a rozjadą się przy każdej zmianie cennika giełdy — nikt by tego nie
 zauważył. Dlatego naprawą jest jedno źródło prawdy plus test, który pada, gdy
 wróci własna stała, a nie sama korekta liczby.
+
+
+---
+
+# Mikrostruktura: pierwszy odczyt i to, czym on nie jest
+
+Cechy z arkusza zleceń — nierównowaga i spread — są liczone od 2026-08-27.
+Sygnał na nich oparty **celowo nie istnieje**: kalibrowanie go na dwóch
+tygodniach dodałoby stopień swobody i nic nie powiedziało o rynku. Ale
+**mierzenie to nie budowanie**: współczynnik informacji niczego nie wybiera,
+nie zmienia wag i nie wchodzi do licznika hipotez.
+
+Diagnostyka sygnałów raportuje teraz osobno cechy, których żaden sygnał nie
+konsumuje. Pierwszy odczyt wyglądał sensacyjnie:
+
+| cecha | 1 św. | 3 św. | 6 św. | 12 św. | n |
+|---|---|---|---|---|---|
+| `book_imbalance` | +0,0135 | +0,0172 | +0,0410 | +0,0161 | 1 616 |
+| `book_spread_bps` | +0,0644 | +0,0798 | +0,1349 | **+0,1532** | 1 616 |
+
++0,1532 to **trzy i pół raza więcej niż najlepszy sygnał w projekcie**
+(`volume_breakout`, −0,0455). Gdyby to była prawda, byłby to najważniejszy
+wynik od początku prac.
+
+## Nie jest
+
+Naiwny błąd standardowy IC wynosi 1/√n, czyli ±0,0249 przy 1 616 obserwacjach.
+Ale **zwrot z dwunastu świec liczony przy każdej świecy nakłada się na jedenaście
+sąsiednich pomiarów** — te obserwacje nie są niezależne. Efektywna liczba
+obserwacji to około n/k, więc przy horyzoncie 12 świec nie 1 616, tylko ~135,
+a błąd standardowy nie ±0,025, tylko **±0,098**.
+
+Po poprawce `book_spread_bps` wyraża się w błędach standardowych tak:
+
+| | 1 św. | 3 św. | 6 św. | 12 św. |
+|---|---|---|---|---|
+| `book_spread_bps` | 2,6 | 1,8 | 2,1 | **1,6** |
+| `book_imbalance` | 0,5 | 0,4 | 0,6 | 0,2 |
+
+Czyli krąży wokół progu dwóch błędów standardowych, a przy najdłuższym
+horyzoncie — tam, gdzie surowa liczba wyglądała najlepiej — jest **najsłabszy**.
+To jest podręcznikowy kształt wyniku, który wygląda na odkrycie, dopóki nie
+policzy się błędu poprawnie.
+
+## Co ta poprawka pokazała przy okazji
+
+Ten sam rachunek zastosowany do sygnałów, które już mamy:
+
+| sygnał | 1 św. | 3 św. | 6 św. | 12 św. |
+|---|---|---|---|---|
+| `mean_reversion_rsi` | **6,9** | **6,6** | **4,1** | **3,1** |
+| `momentum_multi` | **6,6** | **5,7** | 2,2 | 1,3 |
+| `range_extreme` | **6,3** | **5,6** | **3,6** | 1,9 |
+| `trend_follow` | **3,4** | **6,0** | **4,5** | **3,3** |
+| `volume_breakout` | **4,0** | **3,8** | 2,3 | 0,9 |
+| `cross_section` | **3,0** | 2,4 | 2,1 | 1,3 |
+| `funding_carry` | 0,4 | 1,4 | 0,2 | 0,9 |
+
+Dwie rzeczy, których wcześniej nie było widać:
+
+- **`funding_carry` jest nieodróżnialny od zera na każdym horyzoncie.** Sygnał
+  ożył dopiero po migracji 0021 (wcześniej pary USDC nie miały podpiętego
+  finansowania) i pierwszy pomiar mówi, że nie niesie informacji.
+- **`volume_breakout` i `momentum_multi` tracą istotność przy dłuższych
+  horyzontach**, mimo że ich surowe IC pozostaje duże. Ich wartość jest krótka.
+
+## Czego to nie zmienia
+
+Nic tutaj nie jest przewagą. Najsilniejszy sygnał, `mean_reversion_rsi`, ma IC
++0,034 — przy rundzie kosztowej 0,200% to nadal za mało, żeby pokryć koszty.
+Poprawka na nakładanie się obserwacji nie odkryła nowej informacji; **odebrała
+pozorną**.
