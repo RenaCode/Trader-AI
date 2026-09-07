@@ -116,11 +116,23 @@ jobs:
       - name: Zaleznosci API
         run: pip install -r services/api/requirements.txt
 
-      - name: Migracje i dane testowe
+      # Nazwa bez "danych testowych": danych demonstracyjnych w tym projekcie
+      # nie ma i nie bedzie. services/seed_demo.py zostal usuniety 2026-08-27
+      # razem z decyzja, ze system pracuje wylacznie na realnych swiecach - ale
+      # ten krok wolal go dalej. Python konczyl sie wtedy kodem 2 ("nie moge
+      # otworzyc pliku"), krok padal, a TEST DYMNY NIE URUCHAMIAL SIE WCALE.
+      #
+      # Trwalo to 11 dni i 145 commitow. Przebiegi "chore: obraz sha-*" byly
+      # zielone, bo zmieniaja tylko chart i sa pomijane przez filtr sciezek -
+      # wiec z listy przebiegow wygladalo to na CI, ktore czasem pada.
+      #
+      # Test dymny sprawdza renderowanie, logowanie i skale wykresow; danych
+      # rynkowych do tego nie potrzebuje. Migracje zasiewaja to, co konieczne:
+      # gieldy, instrumenty, limity ryzyka i kanaly RSS (0008_seed.sql).
+      - name: Migracje i konto testowe
         run: |
           python db/migrate.py
           printf '%s' "$TEST_PASSWORD" | python scripts/create_admin.py "$TEST_LOGIN" --stdin
-          python services/seed_demo.py --reset
 
       - name: Start API
         run: |
