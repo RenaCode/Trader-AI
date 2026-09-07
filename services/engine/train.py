@@ -605,6 +605,12 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
     ekspozycje: list[float] = []
     zwroty_okien: list[float] = []
     rozklad: list[dict] = []          # czynniki ekspozycji, okno po oknie
+    # Ile transakcji przypadlo kazdemu instrumentowi. Uniwersum ma tyle miejsc,
+    # ile instrumentow, ale kandydaci konkuruja o wspolny kapital i sa sortowani
+    # PO SILE SYGNALU - wiec instrument o mocniejszych sygnalach moze wypchnac
+    # pozostale. Bez tej liczby "dolozylismy instrumenty" i "handlujemy tymi
+    # instrumentami" wygladaja tak samo.
+    udzial_instrumentu: dict[str, int] = {}
     porownywalne = 0
     all_sharpes: list[float] = []
     worst_dd = 0.0
@@ -764,6 +770,7 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
         # kalibracji mierzyl wtedy wlasny wynik i zawsze wygladal dobrze.
         for t in oos_res.trades:
             predictions.append((t["conf"], t["ret"] > 0))
+            udzial_instrumentu[t["symbol"]] = udzial_instrumentu.get(t["symbol"], 0) + 1
 
         step = max(1, len(next(iter(test_slices.values()), [])) // 50)
         regimes = [classify_regime(r["f"], thresholds[s])[0]
@@ -1125,6 +1132,18 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
           f"   przedział ufności 95%: {ci_lo:.1%}–{ci_hi:.1%}")
     print(f"Mediana Sharpe (OOS): {median:+.3f}" if median is not None else "Mediana Sharpe: —")
     print(f"Najgorsze obsunięcie: {worst_dd:.2f}%")
+    if udzial_instrumentu:
+        razem = sum(udzial_instrumentu.values())
+        rank = sorted(udzial_instrumentu.items(), key=lambda x: -x[1])
+        opis = "  ".join(f"{s} {n/razem:.0%}" for s, n in rank[:6])
+        print(f"Udział w transakcjach (6 największych z {len(rank)}): {opis}")
+        # Rowny podzial to 1/n. Instrument powyzej dwukrotnosci tego udzialu
+        # zajmuje miejsce, ktore mialo isc gdzie indziej.
+        rowno = 1 / len(rank)
+        dominujace = [s for s, n in rank if n / razem > 2 * rowno]
+        if dominujace:
+            print(f"  wypychają resztę (ponad 2× równy udział {rowno:.0%}): "
+                  f"{', '.join(dominujace)}")
     print(f"Przetestowanych konfiguracji: {trials}")
     print(f"Stan: {status} — {reason}")
 
