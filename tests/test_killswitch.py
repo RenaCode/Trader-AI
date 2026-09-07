@@ -191,3 +191,36 @@ def test_proba_pozarowa_traktuje_brak_powiadomienia_jako_NIEZALICZONE():
     assert "nikt się o tym nie dowiedział" in zrodlo
     assert zrodlo.count("NIEZALICZONE") >= 2, (
         "brak zadziałania i brak powiadomienia to dwa osobne niepowodzenia")
+
+
+def test_proba_pozarowa_nie_zjada_wlasnego_zrodla():
+    """Skrypt uruchamia się przez `ssh host 'bash -s' < skrypt`, czyli bash
+    czyta GO SAMEGO ze standardowego wejścia. Każde polecenie w środku, które
+    też czyta stdin — a `kubectl exec -i` czyta — zjada resztę skryptu.
+
+    Objaw: próba kończy się w losowym miejscu, bez błędu i z kodem 0, czyli
+    WYGLĄDA NA ZALICZONĄ. Dla skryptu, którego jedynym zadaniem jest orzec,
+    czy poduszka bezpieczeństwa działa, to najgorszy możliwy tryb awarii.
+    """
+    # WYLACZNIE kod, bez komentarzy. Pierwsza wersja tego testu padala na
+    # wlasnym komentarzu, w ktorym cytowane jest `kubectl exec -i` - ten sam
+    # ksztalt bledu co test szukajacy ciagu "409" obok komentarza z ta liczba.
+    kod = [l for l in Path("scripts/proba-killswitcha.sh")
+           .read_text(encoding="utf-8").splitlines()
+           if l.strip() and not l.strip().startswith("#")]
+
+    assert not any("kubectl exec -i" in l for l in kod), (
+        "kubectl exec -i podłącza stdin i zje resztę skryptu")
+
+    # Wywolanie kubectl albo samo odcina stdin, albo jest kontynuowane w linii
+    # nastepnej - wtedy odciecie stoi na koncu polecenia.
+    for i, linia in enumerate(kod):
+        if "kubectl" not in linia:
+            continue
+        pelne = linia
+        j = i
+        while pelne.rstrip().endswith("\\") and j + 1 < len(kod):
+            j += 1
+            pelne += kod[j]
+        assert "< /dev/null" in pelne, (
+            f"wywołanie kubectl bez odciętego stdin: {linia.strip()}")

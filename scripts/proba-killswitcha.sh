@@ -37,9 +37,15 @@ MODE=${MODE:-demo}
 CZEKAJ_SILNIK=${CZEKAJ_SILNIK:-420}
 CZEKAJ_DOZOR=${CZEKAJ_DOZOR:-660}
 
+# STDIN JAWNIE ODCIETY, i to nie jest ostrożność na wyrost.
+#
+# Skrypt uruchamia sie przez `ssh host 'bash -s' < scripts/proba-killswitcha.sh`,
+# czyli bash czyta GO SAMEGO ze standardowego wejscia. `kubectl exec -i` tez
+# podlacza stdin - i zjadlby reszte skryptu. Objawiloby sie to tym, ze proba
+# konczy sie w losowym miejscu bez bledu, czyli wyglada na zaliczona.
 psql_() {
-  kubectl exec -i deploy/trader-db -- sh -c \
-    "psql -U \$POSTGRES_USER -d \$POSTGRES_DB -At -F'|' -c \"$1\""
+  kubectl exec deploy/trader-db -- sh -c \
+    "psql -U \$POSTGRES_USER -d \$POSTGRES_DB -At -F'|' -c \"$1\"" < /dev/null
 }
 
 echo "=== PRÓBA POŻAROWA KILL-SWITCHA: $ENGINE/$MODE ==="
@@ -103,8 +109,8 @@ psql_ "SELECT '  zadziałał: id=' || id || '  ' || reason FROM risk.killswitch_
 
 echo
 echo "--- OGNIWO 3: czy silnik wstrzymał wejścia ---"
-if kubectl logs deploy/trader-engine --tail=40 2>/dev/null | grep -q "wejścia wstrzymane"; then
-  kubectl logs deploy/trader-engine --tail=40 | grep "wejścia wstrzymane" | tail -1
+if kubectl logs deploy/trader-engine --tail=40 < /dev/null 2>/dev/null | grep -q "wejścia wstrzymane"; then
+  kubectl logs deploy/trader-engine --tail=40 < /dev/null | grep "wejścia wstrzymane" | tail -1
 else
   echo "  (jeszcze nie widać w logu - silnik zdąży przy następnym cyklu)"
 fi
