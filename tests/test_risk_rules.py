@@ -243,3 +243,19 @@ def test_prog_kapitalu_dziala_PRZED_limitem_obsuniecia():
     assert v.verdict == "block"
     assert "Kapitał" in (v.reason or ""), (
         f"pierwszy ma zadzialac prog kapitalu, a zadzialalo: {v.reason}")
+
+
+def test_wydruk_limitu_ekspozycji_nie_zalezy_od_jednostki():
+    """Kanarek na blad, ktory ten wydruk juz mial.
+
+    Do 0028 limit byl kwota i wydruk dzielil go przez kapital startowy. Po
+    zmianie jednostki ta sama linia pokazywala "15 z 100000, czyli 0%" - liczba
+    prawdziwa, zdanie falszywe. Sprawdzamy oba zapisy tej samej rzeczy.
+    """
+    from services.engine.risk_rules import START_EQUITY
+
+    kwotowo = {"value": Decimal("15000"), "unit": "quote_ccy"}
+    procentowo = {"value": Decimal("15"), "unit": "pct_equity"}
+    baza = Decimal(str(START_EQUITY))
+    assert wartosc_limitu(kwotowo, baza) == wartosc_limitu(procentowo, baza)
+    assert float(wartosc_limitu(procentowo, baza)) / START_EQUITY == pytest.approx(0.15)

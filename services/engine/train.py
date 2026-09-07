@@ -32,6 +32,7 @@ import math
 import os
 import random
 import statistics
+from decimal import Decimal
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -41,7 +42,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import psycopg
 from psycopg.rows import dict_row
 
-from services.engine.risk_rules import DEFAULT_LIMITS, MIN_CONFIDENCE, START_EQUITY
+from services.engine.risk_rules import (
+    DEFAULT_LIMITS, MIN_CONFIDENCE, START_EQUITY, wartosc_limitu,
+)
 from services.engine.horizons import DEFAULT_BAR, HORIZONS, Horizon, get as get_horizon
 from services.engine.portfolio import (
     Egzekucja, kup_i_trzymaj, metrics as portfolio_metrics, precompute_panels,
@@ -79,6 +82,19 @@ MIN_WINDOWS_FOR_VALIDATION = 20
 # Kolejnosc jest kolejnoscia czynnikow w iloczynie.
 KLUCZE_ROZKLADU = ("w_rynku", "pozycji_w_rynku", "notional_na_pozycje",
                    "budzet_na_pozycje")
+
+
+def _limit_ekspozycji_pct() -> float:
+    """Limit lacznej ekspozycji jako UDZIAL kapitalu, niezaleznie od jednostki.
+
+    Do 0028 limit byl kwota i wydruk dzielil go przez START_EQUITY. Po zmianie
+    jednostki na `pct_equity` ta sama linia pokazywala "limit laczny: 15
+    z 100000, czyli 0%" - liczba prawdziwa, zdanie falszywe. Ten sam ksztalt
+    bledu co przy rozkladzie ekspozycji: wydruk, ktory przestal opisywac to,
+    co opisuje.
+    """
+    lim = DEFAULT_LIMITS["max_total_exposure"]
+    return float(wartosc_limitu(lim, Decimal(str(START_EQUITY)))) / START_EQUITY
 
 
 def probka_rozkladu(m: dict, instrumentow: int) -> dict:
@@ -941,7 +957,7 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
         srednia_eksp = statistics.fmean(ekspozycje) if ekspozycje else 0.0
         suma_zwrotow = sum(zwroty_okien)
         skala = (f" Średnia ekspozycja {srednia_eksp:.2%} kapitału przy limicie "
-                 f"{float(DEFAULT_LIMITS['max_total_exposure']['value']) / START_EQUITY:.0%}; "
+                 f"{_limit_ekspozycji_pct():.0%}; "
                  f"suma zwrotów z {porownywalne} okien {suma_zwrotow:+.1f}%.")
         reason = {
             "validated": f"Dodatnie {positive}/{total} okien out-of-sample ({pct:.0f}%).{ci}"
@@ -1064,9 +1080,7 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
         pct_odn = pokonane_odniesienie / porownywalne * 100
         srednia_eksp = statistics.fmean(ekspozycje) if ekspozycje else 0.0
         print(f"Średnia ekspozycja: {srednia_eksp:.2%} kapitału "
-              f"(limit łączny: {DEFAULT_LIMITS['max_total_exposure']['value']:.0f} "
-              f"z {START_EQUITY:.0f}, czyli "
-              f"{float(DEFAULT_LIMITS['max_total_exposure']['value']) / START_EQUITY:.0%})")
+              f"(limit łączny: {_limit_ekspozycji_pct():.0%} kapitału)")
         for linia in opis_rozkladu(rozklad)[0]:
             print(linia)
         print(f"Pokonano kup-i-trzymaj PRZY TEJ SAMEJ EKSPOZYCJI w "
