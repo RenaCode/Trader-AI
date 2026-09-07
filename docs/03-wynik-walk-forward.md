@@ -1552,3 +1552,92 @@ Konfiguracja produkcyjna jest **zmierzonym optimum lokalnym**, a nie wartością
 domyślną, której nikt nie sprawdził. Następne pytanie nie brzmi „ile
 instrumentów", tylko „czy wagi mają być wspólne dla całego uniwersum" — i to
 jest hipoteza dla osobnego przebiegu, nie dla zmiany w produkcji.
+
+---
+
+# Cztery hipotezy o „dwóch dobrych uniwersach", cztery obalone
+
+Poprzednia sekcja zostawiła zagadkę: dziesiątka ma przewagę, czternastka ma
+przewagę, a suma jej nie ma. Zmierzone teraz na **czystych danych** — po tym,
+jak cecha przekrojowa dostała odcisk uniwersum (`docs/06`, migracja 0030),
+więc każdy zbiór czyta wartości policzone dla siebie:
+
+| uniwersum | dodatnie okna | mediana Sharpe | zwrot | transakcji/okno | rozrzut Sharpe |
+|---|---|---|---|---|---|
+| **10 (produkcja)** | 30/39 (77%) | **+0,111** | +9,6% | 34 | **0,239** |
+| **14 osobno** | 23/39 (59%) | **+0,112** | +3,8% | 45 | 0,290 |
+| **24 razem** | 20/40 (50%) | **+0,011** | +2,0% | 77 | 0,312 |
+
+Jakość **na transakcję** obu grup jest praktycznie identyczna. Połączenie ją
+zabija. Poniżej cztery wyjaśnienia, które sprawdziłem i które nie przeszły.
+
+## 1. Skażona cecha przekrojowa — NIE
+
+Podejrzenie: przebiegi na 24 czytały `rel_strength` policzone dla innego zbioru.
+To była prawda, więc naprawiłem tożsamość cechy i policzyłem ją osobno dla
+każdego uniwersum. Wynik dla 24: 20/40 wobec 21/40 przed poprawką, mediana
++0,011 wobec +0,020. **Bez zmiany.**
+
+## 2. Wspólny wektor wag — NIE
+
+Podejrzenie: trener dopasowuje jeden wektor wag na reżim dla całego uniwersum,
+więc dwie grupy o różnej charakterystyce dostają kompromis gorszy dla obu.
+
+Współczynnik informacji policzony osobno dla każdej grupy (`diagnose_signals.py
+--instrumenty`, horyzont 3 świec):
+
+| sygnał | 10 | 14 | znak |
+|---|---|---|---|
+| mean_reversion_rsi | +0,0329 | +0,0399 | zgodny |
+| range_extreme | +0,0173 | +0,0218 | zgodny |
+| trend_follow | −0,0143 | −0,0281 | zgodny |
+| momentum_multi | −0,0160 | −0,0251 | zgodny |
+| volume_breakout | −0,0590 | −0,0457 | zgodny |
+| cross_section | −0,0037 | −0,0164 | zgodny |
+| funding_carry | +0,0116 | +0,0070 | zgodny |
+
+**Wszystkie siedem ma ten sam znak w obu grupach**, a czternastka ma je nawet
+silniejsze. Obie grupy chcą tego samego kierunku, więc kompromis nie ma na czym
+powstać.
+
+## 3. Wypychanie z portfela — NIE
+
+Podejrzenie: kandydaci są sortowani po sile sygnału, a czternastka ma sygnały
+mocniejsze — więc mogła wypchnąć dziesiątkę z portfela o wspólnym kapitale.
+
+Udział w transakcjach przy 24 instrumentach: sześć największych po 4–5% przy
+równym udziale 4,2%. **Żaden instrument nie przekracza dwukrotności równego
+udziału.** Portfel jest rozłożony równo.
+
+## 4. Zwykła dywersyfikacja — NIE, i to jest wskazówka
+
+Więcej instrumentów powinno **zmniejszyć** rozrzut wyników między oknami.
+Zmierzone jest odwrotnie:
+
+```
+10 instrumentów  →  34 transakcje/okno  →  rozrzut Sharpe 0,239
+14 instrumentów  →  45 transakcji/okno  →  rozrzut Sharpe 0,290
+24 instrumenty   →  77 transakcji/okno  →  rozrzut Sharpe 0,312
+```
+
+Rozrzut rośnie razem z liczbą transakcji. **Dokładane transakcje nie są
+niezależnymi zakładami** — to w dużej mierze ten sam zakład powtórzony.
+Zastrzeżenie o efektywnej liczbie obserwacji, które w tym dokumencie towarzyszy
+transakcjom od początku, dotyczy tu wprost jakości okien.
+
+## Co z tego zostaje
+
+Efekt jest **realny i powtarzalny**, a cztery najbardziej naturalne wyjaśnienia
+zostały wykluczone pomiarem. To zawęża mechanizm do jednego miejsca: sposobu,
+w jaki zwroty z pojedynczych transakcji składają się na wynik OKNA.
+
+`Sharpe/transakcję` w oknie to `średnia / odchylenie` po wszystkich transakcjach
+tego okna. Grupy o różnej zmienności, wrzucone do jednej takiej statystyki, dają
+wynik, który nie jest średnią ich wyników. Następny pomiar musi więc rozbić
+transakcje w przebiegu łączonym **na grupy pochodzenia** i policzyć średnią oraz
+odchylenie osobno dla każdej — dopiero to powie, czy grupy się znoszą, czy jedna
+zawyża mianownik drugiej.
+
+Do tego czasu wniosek operacyjny zostaje bez zmian: **uniwersum zostaje przy
+dziesięciu parach USDC.** Nie dlatego, że rozumiemy dlaczego — dlatego, że
+zmierzone alternatywy są gorsze.
