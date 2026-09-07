@@ -51,6 +51,7 @@ from services.engine.portfolio import (
     simulate_portfolio,
 )
 from services.engine.statystyka import spearman, wilson
+from services.engine.uniwersum import odcisk
 from services.engine.signals import (
     DEFAULT_WEIGHTS, REGIMES, SIGNALS, classify_regime, combine, evaluate,
 )
@@ -166,12 +167,18 @@ SEED = 20260827
 
 # ------------------------------------------------------------------ dane
 def load_panel(cur, instrument_id: int, h: Horizon,
-               since: datetime, until: datetime) -> list[dict]:
+               since: datetime, until: datetime, fp: str | None = None) -> list[dict]:
     """Panel cech w ukladzie czas -> {rola: wartosc}, plus cena swiecy.
 
     Cechy filtrujemy po `params->>'bar'`, wiec panel horyzontu 4 h nigdy nie
     zobaczy cech policzonych na swiecy 5-minutowej. Klucze slownika to ROLE,
     dzieki czemu sygnaly nie musza znac horyzontu.
+
+    ODCISK UNIWERSUM (`fp`) jest tu KONIECZNY, nie ozdobny. Klucze slownika to
+    role, a `jsonb_object_agg` po roli scala wiersze - wiec dwa warianty cechy
+    przekrojowej, policzone dla roznych zbiorow, zderzylyby sie w jednym kluczu
+    i wygralby przypadkowy. Bez tego filtru pierwszy eksperyment na innym
+    uniwersum po cichu zmienialby wynik przebiegu produkcyjnego.
 
     STRAZNIK BITEMPORALNY - `fv.ingested_at <= fv.event_time + DWIE swiece`:
 
@@ -213,6 +220,8 @@ def load_panel(cur, instrument_id: int, h: Horizon,
             WHERE fv.instrument_id = %(iid)s
               AND fv.event_time BETWEEN %(since)s AND %(until)s
               AND fd.params->>'bar' = %(bar_name)s
+              AND (fd.params->>'uniwersum' IS NULL
+                   OR fd.params->>'uniwersum' = %(fp)s)
               AND fv.ingested_at <= fv.event_time + 2 * %(bar)s::interval
         ),
         p AS ({price_cte})
@@ -222,7 +231,7 @@ def load_panel(cur, instrument_id: int, h: Horizon,
         GROUP BY f.event_time, p.close, p.high, p.low ORDER BY f.event_time
         """,
         {"iid": instrument_id, "since": since, "until": until, "tf": h.source_timeframe,
-         "bar": f"{h.bar_minutes} minutes", "bar_name": h.bar},
+         "bar": f"{h.bar_minutes} minutes", "bar_name": h.bar, "fp": fp},
     )
     return [{"t": r["t"], "f": {k: float(v) for k, v in r["feats"].items()},
              "price": float(r["close"]), "high": float(r["high"]),
@@ -469,6 +478,24 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
         print(f"  uniwersum zawężone do {len(instruments)}: "
               f"{', '.join(i['symbol'] for i in instruments)}")
 
+    # ODCISK UNIWERSUM. Cechy przekrojowe sa nim filtrowane - patrz load_panel.
+    #
+    # Gdy dla tego zbioru nikt jeszcze nie policzyl sily wzglednej, sygnal
+    # bedzie martwy we wszystkich oknach. To jest poprawne zachowanie (lepsze
+    # niz czytanie wartosci policzonej dla innego zbioru), ale MUSI byc
+    # powiedziane wprost: cichy brak sygnalu wyglada jak sygnal bez tresci.
+    fp = odcisk([i["symbol"] for i in instruments])
+    cur.execute("SELECT count(*) AS n FROM feat.feature_def"
+                " WHERE active AND params->>'bar' = %s AND params->>'uniwersum' = %s",
+                (h.bar, fp))
+    if not cur.fetchone()["n"]:
+        print(f"  UWAGA: brak cech przekrojowych dla tego uniwersum (odcisk {fp}).")
+        print(f"         Siła względna będzie martwa. Policz je najpierw:")
+        print(f"         python services/ingest/features.py --bar {h.bar} --backfill "
+              f"--days {days} --tylko-przekroj"
+              + (f" --instrumenty {','.join(i['symbol'] for i in instruments)}"
+                 if tylko else ""))
+
     cur.execute(
         "INSERT INTO learn.model (name, engine, kind, description) VALUES (%s,%s,%s,%s)"
         " ON CONFLICT (name) DO UPDATE SET kind = EXCLUDED.kind RETURNING id",
@@ -481,7 +508,9 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
     version = cur.fetchone()["v"]
 
     cur.execute("SELECT array_agg(id) AS ids FROM feat.feature_def"
-                " WHERE active AND params->>'bar' = %s", (h.bar,))
+                " WHERE active AND params->>'bar' = %s"
+                "   AND (params->>'uniwersum' IS NULL OR params->>'uniwersum' = %s)",
+                (h.bar, fp))
     feature_ids = cur.fetchone()["ids"] or []
     cur.execute("SELECT array_agg(id) AS ids FROM sig.signal_def WHERE engine = %s", (engine,))
     signal_ids = cur.fetchone()["ids"] or []
@@ -509,7 +538,7 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
     panels = {}
     inst_ids = {inst["symbol"]: inst["id"] for inst in instruments}
     for inst in instruments:
-        p = load_panel(cur, inst["id"], h, now - timedelta(days=days), now)
+        p = load_panel(cur, inst["id"], h, now - timedelta(days=days), now, fp=fp)
         if len(p) > 500:
             panels[inst["symbol"]] = p
         print(f"  {inst['symbol']:10s} {len(p):>7,} punktów panelu")

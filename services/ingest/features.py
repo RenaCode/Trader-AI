@@ -45,6 +45,7 @@ import psycopg
 from psycopg.rows import dict_row
 
 from services.engine.horizons import DEFAULT_BAR, HORIZONS, Horizon, get as get_horizon
+from services.engine.uniwersum import nazwa_przekrojowa, odcisk
 
 # Opoznienie obliczeniowe doliczane do ingested_at przy datowaniu wstecz.
 COMPUTE_LAG = timedelta(seconds=3)
@@ -147,6 +148,12 @@ PRICE_ROLES = ("rsi", "ema_ratio", "atr_pct", "ret_short", "ret_mid", "ret_long"
 # ma pusta dziure zamiast okresu.
 OKNO_ROLI = {"range_pos": "range", "volume_z": "volume", "rel_strength": "ret_mid"}
 
+# Role PRZEKROJOWE - ich wartosc zalezy od ZBIORU, nie tylko od instrumentu.
+# Nazwa takiej cechy niesie odcisk uniwersum (services/engine/uniwersum.py),
+# zeby wartosc policzona dla innego zbioru przestala byc widoczna, zamiast po
+# cichu znaczyc co innego.
+ROLE_PRZEKROJOWE = ("rel_strength",)
+
 
 def describe(role: str, h: Horizon) -> str:
     tpl = ROLES[role][1]
@@ -175,10 +182,27 @@ def params_for(role: str, h: Horizon) -> dict:
     return p
 
 
-def ensure_definitions(cur, h: Horizon) -> dict[str, int]:
-    """Rejestruje definicje cech dla tego horyzontu i zwraca rola -> id."""
+def ensure_definitions(cur, h: Horizon, symbole: list[str] | None = None) -> dict[str, int]:
+    """Rejestruje definicje cech dla tego horyzontu i zwraca rola -> id.
+
+    CECHY PRZEKROJOWE DOSTAJA ODCISK UNIWERSUM w nazwie i w `params`. Bez tego
+    zmiana zbioru zostawia w bazie wartosci, ktore WYGLADAJA na aktualne: nie ma
+    awarii, nie ma pustego pola, jest liczba - tyle ze opisujaca inny swiat.
+
+    `symbole` jest wymagane dla tych rol. Brak listy oznacza, ze wolajacy nie wie,
+    dla jakiego zbioru liczy - a wtedy jedyna uczciwa odpowiedzia jest odmowa,
+    nie zapis pod nazwa bez odcisku.
+    """
     ids = {}
     for role, (code_ref, _tpl) in ROLES.items():
+        nazwa = h.name(role)
+        params = params_for(role, h)
+        if role in ROLE_PRZEKROJOWE:
+            if not symbole:
+                continue
+            nazwa = nazwa_przekrojowa(nazwa, symbole)
+            params = params | {"uniwersum": odcisk(symbole),
+                               "symbole": sorted({s.upper() for s in symbole})}
         cur.execute(
             "INSERT INTO feat.feature_def (name, version, code_ref, params, description, active)"
             " VALUES (%s,1,%s,%s,%s,true)"
@@ -186,7 +210,7 @@ def ensure_definitions(cur, h: Horizon) -> dict[str, int]:
             "   SET code_ref = EXCLUDED.code_ref, params = EXCLUDED.params,"
             "       description = EXCLUDED.description, active = true"
             " RETURNING id",
-            (h.name(role), code_ref, json.dumps(params_for(role, h)), describe(role, h)),
+            (nazwa, code_ref, json.dumps(params), describe(role, h)),
         )
         ids[role] = cur.fetchone()["id"]
     return ids
@@ -624,9 +648,6 @@ def main() -> int:
 
     with psycopg.connect(url, row_factory=dict_row) as conn:
         cur = conn.cursor()
-        feat_ids = ensure_definitions(cur, h)
-        conn.commit()
-
         tylko = [s.strip().upper() for s in args.instrumenty.split(",") if s.strip()]
         cur.execute(
             "SELECT id, symbol FROM ref.instrument WHERE engine = %s AND active"
@@ -638,6 +659,24 @@ def main() -> int:
         brak = sorted(set(tylko) - {i["symbol"] for i in instruments})
         if brak:
             sys.exit(f"nie ma w bazie albo nieaktywne: {', '.join(brak)}")
+
+        # UNIWERSUM PRZEKROJOWE to nie to samo co lista liczonych instrumentow.
+        #
+        # Bez --instrumenty petla per instrument idzie po WSZYSTKICH aktywnych
+        # (historie zbieramy szerzej, niz handlujemy), ale ranking liczy sie
+        # wylacznie po uniwersum decyzyjnym - to samo `tradeable`, ktore czyta
+        # silnik. Odcisk musi opisywac ten drugi zbior, inaczej produkcja
+        # szukalaby cechy pod nazwa, ktorej nikt nie zapisal.
+        if tylko:
+            uniwersum = sorted(tylko)
+        else:
+            cur.execute(
+                "SELECT symbol FROM ref.instrument WHERE engine = %s AND active"
+                " AND tradeable AND kind <> 'perp' ORDER BY symbol", (args.engine,))
+            uniwersum = [r["symbol"] for r in cur.fetchall()]
+
+        feat_ids = ensure_definitions(cur, h, uniwersum or None)
+        conn.commit()
 
         total = 0
         for inst in instruments:
@@ -663,15 +702,24 @@ def main() -> int:
         # kandydujace PRZED jego wlaczeniem: bez sily wzglednej porownanie
         # szloby na siedmiu sygnalach zamiast osmiu, czyli mierzyloby inna
         # strategie, a nie inne uniwersum.
-        if len(instruments) < MIN_UNIVERSE:
-            print(f"\n  siła względna: pominięta, {len(instruments)} instrumentów "
-                  f"przy progu {MIN_UNIVERSE}")
+        # PROG DOTYCZY ZBIORU RANKINGU, nie listy liczonych instrumentow.
+        #
+        # Bez --instrumenty `instruments` to wszystkie aktywne (34), a ranking
+        # idzie po uniwersum decyzyjnym (10). Sprawdzanie tej pierwszej liczby
+        # przepuszczaloby ranking po trzech parach, dopoki w bazie lezy historia
+        # trzydziestu czterech - czyli dokladnie wtedy, gdy prog jest potrzebny.
+        if len(uniwersum) < MIN_UNIVERSE:
+            print(f"\n  siła względna: pominięta, {len(uniwersum)} instrumentów "
+                  f"w uniwersum przy progu {MIN_UNIVERSE}")
         else:
+            if "rel_strength" not in feat_ids:
+                sys.exit("brak definicji cechy przekrojowej — uniwersum puste?")
             x = compute_cross_section(cur, h, feat_ids, since, now,
                                       [i["id"] for i in instruments] if tylko else None)
             conn.commit()
             total += x
-            zbior = "podany zbiór" if tylko else "uniwersum decyzyjne"
+            zbior = (f"podany zbiór, odcisk {odcisk(uniwersum)}" if tylko
+                     else f"uniwersum decyzyjne, odcisk {odcisk(uniwersum)}")
             print(f"\n  siła względna ({zbior}): {x:>9,}")
 
         print(f"\nRazem {total:,} wartości cech")

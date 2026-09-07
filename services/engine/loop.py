@@ -37,6 +37,7 @@ from psycopg.rows import dict_row
 
 from services.engine.horizons import DEFAULT_BAR, HORIZONS, Horizon, get as get_horizon
 from services.engine.risk import RiskKernel
+from services.engine.uniwersum import odcisk
 from services.engine.koszty import POSLIZG_MAKER, POSLIZG_TAKER, koszty
 from services.engine.portfolio import _wypelnione
 from services.engine.risk_rules import (
@@ -114,15 +115,27 @@ def active_model(cur, engine: str, h: Horizon) -> dict:
     }
 
 
-def horizon_feature_ids(cur, h: Horizon) -> list[int]:
-    """Identyfikatory cech NALEZACYCH DO TEGO HORYZONTU.
+def horizon_feature_ids(cur, h: Horizon, symbole: list[str] | None = None) -> list[int]:
+    """Identyfikatory cech NALEZACYCH DO TEGO HORYZONTU i do TEGO uniwersum.
 
     feat.as_of() z NULL zwrocilby komplet cech wszystkich horyzontow naraz -
     silnik 4-godzinny dostalby wtedy takze cechy 5-minutowe i podejmowal decyzje
     na mieszance, ktorej trener nigdy nie widzial.
+
+    CECHY PRZEKROJOWE FILTRUJEMY ODCISKIEM UNIWERSUM. Ich wartosc zalezy od
+    zbioru, wiec ta sama nazwa bez odcisku znaczy co innego po kazdej zmianie
+    uniwersum - a zmiana taka juz raz zaszla (migracja 0023, pary USDT -> USDC).
+    Cechy per instrument nie maja odcisku w `params` i przechodza zawsze.
+
+    Bez podanych symboli cechy przekrojowe SA POMIJANE. Domysl jest zachowawczy:
+    wolacz, ktory nie wie, jakim zbiorem handluje, nie moze uzywac cechy, ktora
+    od tego zbioru zalezy.
     """
+    fp = odcisk(symbole) if symbole else None
     cur.execute("SELECT array_agg(id) AS ids FROM feat.feature_def"
-                " WHERE active AND params->>'bar' = %s", (h.bar,))
+                " WHERE active AND params->>'bar' = %s"
+                "   AND (params->>'uniwersum' IS NULL"
+                "        OR params->>'uniwersum' = %s)", (h.bar, fp))
     return cur.fetchone()["ids"] or []
 
 
@@ -652,7 +665,6 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
 
     now = datetime.now(timezone.utc)
     bar_start = current_bar(now, h)
-    feature_ids = horizon_feature_ids(cur, h)
     model = active_model(cur, engine, h)
     if verbose:
         print(f"  wagi: {'wersja modelu ' + str(model['version']) if model['version'] else 'założenia początkowe (brak zwalidowanego modelu)'}"
@@ -678,6 +690,10 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
     cur.execute("SELECT id, symbol, kind, quote_ccy FROM ref.instrument WHERE engine=%s"
                 " AND active AND tradeable AND kind <> 'perp' ORDER BY symbol", (engine,))
     instrumenty = cur.fetchall()
+
+    # IDENTYFIKATORY CECH DOPIERO TERAJ, bo cechy przekrojowe sa filtrowane
+    # odciskiem uniwersum - a uniwersum znamy dopiero po tym zapytaniu.
+    feature_ids = horizon_feature_ids(cur, h, [i["symbol"] for i in instrumenty])
 
     # Budzet na pozycje wyprowadzony z limitu lacznej ekspozycji i liczby
     # obserwowanych instrumentow. Stala 3000 przy limicie 15 000 i dwunastu
