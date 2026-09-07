@@ -290,3 +290,98 @@ def test_przepustnica_rozklada_zapytania_w_czasie(monkeypatch):
                           schema=TRIAGE_SCHEMA, max_tokens=100))
     assert spane, "drugie zapytanie ma odczekac, pierwsze nie"
     assert 0 < spane[-1] <= 4.0
+
+
+# ------------------------------------------------------------- mieszanka
+
+class _Fałszywy:
+    """Dostawca-atrapa: zapisuje, o co go pytano, i nic nie wysyła."""
+
+    def __init__(self, nazwa, triaz, analiza, cena):
+        self.nazwa, self.model_triazu, self.model_analizy = nazwa, triaz, analiza
+        self.CENNIK = {triaz: cena, analiza: cena}
+        self.CENNIK_DOMYSLNY = cena
+        self.pytania, self.zamkniety = [], False
+
+    async def zapytaj(self, *, model, system, user, schema, max_tokens):
+        self.pytania.append(model)
+        return {"ok": True}, {"input": 0, "output": 0, "cache_read": 0}
+
+    def koszt(self, model, usage):
+        return 42.0 if self.nazwa == "drogi" else 1.0
+
+    async def zamknij(self):
+        self.zamkniety = True
+
+
+def _mieszanka():
+    from services.ingest.llm import DostawcaMieszany
+    tani = _Fałszywy("tani", "flash-lite", "flash", (0.3, 2.5))
+    drogi = _Fałszywy("drogi", "haiku", "opus", (5.0, 25.0))
+    return DostawcaMieszany(triaz=tani, analiza=drogi), tani, drogi
+
+
+def test_triaz_idzie_do_taniego_a_analiza_do_mocnego():
+    """Triaż to 94% wywołań i tam decyduje cena; analiza kosztuje u obu tyle
+    samo, więc tam decyduje jakość. Odwrotny przydział oszczędziłby grosze
+    i wstawił uskok w środek cechy `news_sent`."""
+    import asyncio
+
+    m, tani, drogi = _mieszanka()
+    asyncio.run(m.zapytaj(model=m.model_triazu, system="", user="",
+                          schema={}, max_tokens=1))
+    asyncio.run(m.zapytaj(model=m.model_analizy, system="", user="",
+                          schema={}, max_tokens=1))
+    assert tani.pytania == ["flash-lite"]
+    assert drogi.pytania == ["opus"]
+
+
+def test_koszt_liczy_dostawca_KTORY_WYKONAL_wywolanie():
+    """Wspólny cennik dawałby liczbę wyglądającą poprawnie i błędną —
+    a limit dobowy opiera się właśnie na niej."""
+    m, _, _ = _mieszanka()
+    u = {"input": 0, "output": 0, "cache_read": 0}
+    assert m.koszt(m.model_triazu, u) == 1.0
+    assert m.koszt(m.model_analizy, u) == 42.0
+
+
+def test_model_spoza_mieszanki_nie_trafia_nigdzie_po_cichu():
+    """Milczący wybór „pierwszy z brzegu" trafiałby raz tu, raz tam — i przy
+    liczeniu kosztu użyłby cudzego cennika."""
+    m, _, _ = _mieszanka()
+    with pytest.raises(ValueError):
+        m.koszt("model-ktorego-nie-ma", {"input": 0, "output": 0, "cache_read": 0})
+
+
+def test_identyczne_modele_sa_odrzucane_a_nie_rozstrzygane_domyslem():
+    from services.ingest.llm import DostawcaMieszany
+
+    ten_sam = _Fałszywy("x", "jeden", "jeden", (1.0, 1.0))
+    with pytest.raises(ValueError):
+        DostawcaMieszany(triaz=ten_sam, analiza=ten_sam)
+
+
+def test_zamkniecie_obejmuje_OBU_dostawcow():
+    """Niedomknięty klient httpx zostawia otwarte gniazda na każdym cyklu."""
+    import asyncio
+
+    m, tani, drogi = _mieszanka()
+    asyncio.run(m.zamknij())
+    assert tani.zamkniety and drogi.zamkniety
+
+
+def test_oba_klucze_daja_mieszanke_a_jeden_pojedynczego_dostawce():
+    """Wybieranie jednego dostawcy do wszystkiego, gdy dostępni są obaj, byłoby
+    gorsze pod każdym względem naraz: drożej niż mieszanka i słabiej."""
+    from services.ingest.llm import (
+        DostawcaAnthropic, DostawcaGemini, DostawcaMieszany,
+    )
+    from services.ingest.news_worker import zbuduj_dostawce
+
+    assert zbuduj_dostawce({}) is None
+    assert isinstance(zbuduj_dostawce({"gemini": "g"}), DostawcaGemini)
+    assert isinstance(zbuduj_dostawce({"anthropic": "a"}), DostawcaAnthropic)
+    mieszany = zbuduj_dostawce({"anthropic": "a", "gemini": "g"})
+    assert isinstance(mieszany, DostawcaMieszany)
+    assert "gemini" in mieszany.model_triazu
+    assert "claude" in mieszany.model_analizy

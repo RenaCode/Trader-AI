@@ -36,7 +36,8 @@ from psycopg.rows import dict_row
 
 from services.api.security import SecretBox
 from services.ingest.llm import (
-    Dostawca, DostawcaAnthropic, DostawcaGemini, Odmowa, limit_dobowy_usd,
+    Dostawca, DostawcaAnthropic, DostawcaGemini, DostawcaMieszany, Odmowa,
+    limit_dobowy_usd,
 )
 
 # Nazwy modeli nalezą do DOSTAWCY, nie do tego pliku: te same prompty ida do
@@ -111,38 +112,57 @@ Nie zawyżaj pewności. System mierzy kalibrację twoich ocen i rozjazd między
 deklarowaną a rzeczywistą trafnością obniża wagę tej cechy."""
 
 
-# Kolejnosc jest decyzja, nie przypadkiem. Anthropic jest dostawca docelowym;
-# Gemini wszedl jako sciezka zapasowa na czas oczekiwania na klucz. Gdy pojawia
-# sie oba, wygrywa docelowy - inaczej wpisanie klucza Anthropica w interfejsie
-# nie zmienialoby niczego i wygladalo na awarie.
-DOSTAWCY = (
-    ("anthropic_api_key", "ANTHROPIC_API_KEY", DostawcaAnthropic),
-    ("gemini_api_key",    "GEMINI_API_KEY",    DostawcaGemini),
-)
+# Kolejnosc rozstrzyga, gdy dostepny jest DOKLADNIE JEDEN klucz. Gdy sa oba,
+# nie wybieramy miedzy nimi - laczymy je (patrz `zbuduj_dostawce`).
+def _klucz(conn, nazwa_sekretu: str, nazwa_env: str) -> str | None:
+    """Klucz z bazy, a gdy go nie ma - ze srodowiska.
+
+    Baza ma pierwszenstwo, bo to ona jest wymieniana bez redeployu; zmienna
+    srodowiskowa zostaje jako sciezka dla CI i uruchomien lokalnych.
+    """
+    row = conn.execute("SELECT value_enc FROM app.secret WHERE name = %s",
+                       (nazwa_sekretu,)).fetchone()
+    if row:
+        return SecretBox().decrypt(bytes(row[0]))
+    return os.environ.get(nazwa_env) or None
+
+
+def zbuduj_dostawce(klucze: dict[str, str | None]) -> Dostawca | None:
+    """Dostawca z tego, co jest. CZYSTA FUNKCJA — bez bazy i bez srodowiska.
+
+    OBA KLUCZE ZNACZA MIESZANKE, NIE WYBOR. Triaz to 94% wywolan i tam Gemini
+    jest 5,5x tanszy; analiza kosztuje u obu tyle samo, wiec o niej decyduje
+    jakosc. Wybieranie jednego dostawcy do wszystkiego bylo by w tej sytuacji
+    gorsze pod kazdym wzgledem naraz — patrz `DostawcaMieszany`.
+
+    Jeden klucz znaczy jednego dostawce, bez zmiany zachowania.
+    """
+    a = klucze.get("anthropic")
+    g = klucze.get("gemini")
+    if a and g:
+        return DostawcaMieszany(triaz=DostawcaGemini(g), analiza=DostawcaAnthropic(a))
+    if a:
+        return DostawcaAnthropic(a)
+    if g:
+        return DostawcaGemini(g)
+    return None
 
 
 def wybierz_dostawce(conn, wymagany: bool = True) -> Dostawca | None:
-    """Dostawca zbudowany z pierwszego znalezionego klucza.
+    """Dostawca zlozony z dostepnych kluczy.
 
-    Klucz z bazy (wpisany w interfejsie) ma pierwszenstwo przed zmienna
-    srodowiskowa TEGO SAMEGO dostawcy: to on jest wymieniany bez redeployu,
-    a zmienna zostaje jako sciezka dla CI i uruchomien lokalnych. Miedzy
-    dostawcami rozstrzyga kolejnosc w `DOSTAWCY`, nie zrodlo klucza - inaczej
-    klucz Gemini w srodowisku bilby klucz Anthropica wpisany w interfejsie.
+    Czytamy przy KAZDYM cyklu, bo klucz pojawia sie wtedy, gdy uzytkownik wpisze
+    go w interfejsie, a nie wtedy, gdy restartujemy poda.
 
     `wymagany=False` zwraca None zamiast konczyc proces - dla trybu, ktory
-    potrafi pracowac bez klucza (pobieranie artykulow bez analizy). Czytamy przy
-    KAZDYM cyklu, bo klucz pojawia sie wtedy, gdy uzytkownik wpisze go w UI,
-    a nie wtedy, gdy restartujemy poda.
+    potrafi pracowac bez klucza (pobieranie artykulow bez analizy).
     """
-    for nazwa_sekretu, nazwa_env, klasa in DOSTAWCY:
-        row = conn.execute("SELECT value_enc FROM app.secret WHERE name = %s",
-                           (nazwa_sekretu,)).fetchone()
-        if row:
-            return klasa(SecretBox().decrypt(bytes(row[0])))
-        env = os.environ.get(nazwa_env)
-        if env:
-            return klasa(env)
+    d = zbuduj_dostawce({
+        nazwa: _klucz(conn, sekret, env)
+        for sekret, env, nazwa in (("anthropic_api_key", "ANTHROPIC_API_KEY", "anthropic"),
+                                   ("gemini_api_key", "GEMINI_API_KEY", "gemini"))})
+    if d is not None:
+        return d
     if not wymagany:
         return None
     sys.exit(

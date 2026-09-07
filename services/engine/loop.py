@@ -373,6 +373,61 @@ def stawki(kind: str, limit: bool) -> tuple[Decimal, Decimal]:
             Decimal(str(POSLIZG_MAKER if limit else POSLIZG_TAKER)))
 
 
+def zapisz_wejscie(cur, engine: str, mode: str, instrument_id: int, decision_id: int,
+                   side: str, qty: Decimal, cena: Decimal, prowizja: Decimal,
+                   as_of: datetime, quote_ccy: str, meta: dict, *,
+                   planned_order_id: int | None = None,
+                   venue_order_id: str | None = None,
+                   client_order_id: str | None = None,
+                   venue_fill_id: str | None = None) -> int:
+    """Zapis wejscia w pozycje. JEDEN ZAPIS DLA OBU ZRODEL.
+
+    DLACZEGO TO JEST WSPOLNE, A NIE SKOPIOWANE
+
+    Symulacja i produkcja roznia sie WYLACZNIE tym, SKAD biora ilosc, cene
+    i prowizje: symulacja wylicza je z zalozonych stawek, produkcja odczytuje
+    z odpowiedzi gieldy. Sposob zapisu musi byc ten sam, bo dwie kopie tej samej
+    reguly rozjechalyby sie przy pierwszej zmianie - a roznica byla by
+    niewidoczna dokladnie tam, gdzie backtest ma mierzyc produkcje.
+
+    `meta` niesie, ktore zrodlo wpisalo ten wiersz. Bez tego pierwsze pytanie
+    przy analizie wyniku - "czy to bylo naprawde, czy policzone" - nie ma
+    odpowiedzi w danych.
+    """
+    cur.execute(
+        "INSERT INTO exec.order (decision_id, planned_order_id, engine, mode, instrument_id,"
+        " venue_order_id, client_order_id, side, order_type, qty, limit_price, status,"
+        " submitted_at, raw)"
+        " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'filled',%s,%s) RETURNING id",
+        (decision_id, planned_order_id, engine, mode, instrument_id,
+         venue_order_id, client_order_id or f"tai-{decision_id}", side,
+         meta.get("order", "market"), qty, cena, as_of, json.dumps(meta)))
+    oid = cur.fetchone()["id"]
+    cur.execute(
+        "INSERT INTO exec.fill (order_id, venue_fill_id, qty, price, fee, fee_ccy, event_time)"
+        " VALUES (%s,%s,%s,%s,%s,%s,%s)",
+        (oid, venue_fill_id or f"paper-{oid}", qty, cena, prowizja, quote_ccy, as_of))
+    cur.execute(
+        "INSERT INTO exec.position (engine, mode, instrument_id, side, qty, avg_price,"
+        " opened_at, fees_paid, open_decision_id) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+        (engine, mode, instrument_id, "long" if side == "buy" else "short",
+         qty, cena, as_of, prowizja, decision_id))
+    return oid
+
+
+def zapisz_wyjscie(cur, position: dict, cena: Decimal, prowizja: Decimal,
+                   as_of: datetime, decision_id: int) -> Decimal:
+    """Zamkniecie pozycji. Wspolne dla symulacji i produkcji - patrz wyzej."""
+    qty, entry = Decimal(position["qty"]), Decimal(position["avg_price"])
+    diff = (cena - entry) if position["side"] == "long" else (entry - cena)
+    pnl = diff * qty
+    cur.execute(
+        "UPDATE exec.position SET closed_at=%s, realized_pnl=%s,"
+        " fees_paid = fees_paid + %s, close_decision_id=%s WHERE id=%s",
+        (as_of, pnl, prowizja, decision_id, position["id"]))
+    return pnl
+
+
 def execute_paper(cur, engine: str, mode: str, instrument_id: int, decision_id: int,
                   side: str, qty: Decimal, price: Decimal, as_of: datetime,
                   kind: str, limit: bool, quote_ccy: str,
@@ -386,45 +441,26 @@ def execute_paper(cur, engine: str, mode: str, instrument_id: int, decision_id: 
     fee_rate, slip = stawki(kind, limit)
     fill = price * (Decimal(1) + slip) if side == "buy" else price * (Decimal(1) - slip)
     fee = qty * fill * fee_rate
-
-    cur.execute(
-        "INSERT INTO exec.order (decision_id, planned_order_id, engine, mode, instrument_id,"
-        " client_order_id, side, order_type, qty, status, submitted_at, raw)"
-        " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,'filled',%s,%s) RETURNING id",
-        (decision_id, planned_order_id, engine, mode, instrument_id,
-         f"tai-{decision_id}", side, "limit" if limit else "market", qty, as_of,
-         json.dumps({"execution": "internal_paper", "kind": kind,
-                     "order": "limit" if limit else "market",
-                     "fee_rate": str(fee_rate), "slippage": str(slip),
-                     "wypelnienie": ("sprawdzone na swiecy T+1 (plan "
-                                     f"{planned_order_id})" if planned_order_id
-                                    else "natychmiastowe")})))
-    oid = cur.fetchone()["id"]
-    cur.execute(
-        "INSERT INTO exec.fill (order_id, venue_fill_id, qty, price, fee, fee_ccy, event_time)"
-        " VALUES (%s,%s,%s,%s,%s,%s,%s)",
-        (oid, f"paper-{oid}", qty, fill, fee, quote_ccy, as_of))
-    cur.execute(
-        "INSERT INTO exec.position (engine, mode, instrument_id, side, qty, avg_price,"
-        " opened_at, fees_paid, open_decision_id) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
-        (engine, mode, instrument_id, "long" if side == "buy" else "short",
-         qty, fill, as_of, fee, decision_id))
+    zapisz_wejscie(
+        cur, engine, mode, instrument_id, decision_id, side, qty, fill, fee,
+        as_of, quote_ccy,
+        {"execution": "internal_paper", "kind": kind,
+         "order": "limit" if limit else "market",
+         "fee_rate": str(fee_rate), "slippage": str(slip),
+         "wypelnienie": ("sprawdzone na swiecy T+1 (plan "
+                         f"{planned_order_id})" if planned_order_id
+                        else "natychmiastowe")},
+        planned_order_id=planned_order_id)
 
 
 def close_paper(cur, position: dict, price: Decimal, as_of: datetime,
                 decision_id: int, kind: str, limit: bool) -> Decimal:
     fee_rate, slip = stawki(kind, limit)
-    qty, entry = Decimal(position["qty"]), Decimal(position["avg_price"])
+    qty = Decimal(position["qty"])
     exit_px = price * (Decimal(1) - slip) if position["side"] == "long" \
         else price * (Decimal(1) + slip)
     fee = qty * exit_px * fee_rate
-    diff = (exit_px - entry) if position["side"] == "long" else (entry - exit_px)
-    pnl = diff * qty
-    cur.execute(
-        "UPDATE exec.position SET closed_at=%s, realized_pnl=%s,"
-        " fees_paid = fees_paid + %s, close_decision_id=%s WHERE id=%s",
-        (as_of, pnl, fee, decision_id, position["id"]))
-    return pnl
+    return zapisz_wyjscie(cur, position, exit_px, fee, as_of, decision_id)
 
 
 def zaplanuj(cur, decision_id: int, instrument_id: int, side: str, qty: Decimal,

@@ -296,3 +296,79 @@ class DostawcaGemini(Dostawca):
     async def zamknij(self) -> None:
         if self._wlasny_http:
             await self._http.aclose()
+
+
+class DostawcaMieszany(Dostawca):
+    """Triaż u jednego dostawcy, analiza u drugiego.
+
+    DLACZEGO AKURAT TAK, A NIE ODWROTNIE — I DLACZEGO TO NIE JEST SAMA CENA
+
+    Zmierzone na produkcji 2026-09-07, koszt jednego wywołania:
+
+        triaż    gemini-3.5-flash-lite  $0,000213   claude-haiku-4-5  $0,001163
+        analiza  gemini-3.5-flash       $0,007809   claude-opus-5     $0,007503
+
+    Triaż to 94% wywołań, więc to on decyduje o rachunku — i tam Gemini jest
+    5,5× tańszy. Analiza kosztuje u obu tyle samo, więc o jej przydziale
+    decyduje wyłącznie jakość. Mieszanka wychodzi jednocześnie TAŃSZA niż sam
+    Anthropic i LEPSZA niż samo Gemini; nie jest to kompromis.
+
+    ALE POWÓD JEST GŁĘBSZY NIŻ CENNIK, i to on wyznacza, czego robić NIE wolno.
+    Te dwie role różnią się tym, co psuje ich zmiana:
+
+      * triaż WYBIERA, które wiadomości trafią do analizy. Zmiana modelu zmienia
+        więc próbkę — ale nie wstawia uskoku w wartości samej cechy,
+      * analiza WYTWARZA wartość cechy `news_sent`. Zmiana modelu wstawia
+        w środek szeregu skok, którego kalibracja wagi nie zakłada i którego
+        nie widać inaczej niż przez porównanie okresów.
+
+    Dlatego tani dostawca idzie tam, gdzie jest wolumen, a mocny tam, gdzie jest
+    POMIAR. Odwrócenie tego oszczędziłoby grosze i zepsuło cechę.
+
+    Model analizy MUSI być inny niż model triażu — inaczej nie da się
+    rozstrzygnąć, do którego dostawcy skierować zapytanie, a milczący wybór
+    „pierwszy z brzegu" trafiałby raz tu, raz tam.
+    """
+
+    nazwa = "mieszany"
+
+    def __init__(self, triaz: Dostawca, analiza: Dostawca):
+        if triaz.model_triazu == analiza.model_analizy:
+            raise ValueError(
+                "model triazu i model analizy sa identyczne - nie da sie "
+                "rozstrzygnac, do ktorego dostawcy skierowac zapytanie")
+        self._triaz = triaz
+        self._analiza = analiza
+        self.model_triazu = triaz.model_triazu
+        self.model_analizy = analiza.model_analizy
+        self.nazwa = f"{triaz.nazwa}+{analiza.nazwa}"
+
+    def _dla(self, model: str) -> Dostawca:
+        """Kierowanie PO NAZWIE MODELU, nie po kolejności wywołań.
+
+        Kolejność byłaby założeniem o tym, jak potok woła dostawcę - a to
+        założenie przestaje być prawdziwe przy pierwszej zmianie w potoku,
+        po cichu i z zachowaniem poprawnego wyglądu wyniku.
+        """
+        if model == self.model_triazu:
+            return self._triaz
+        if model == self.model_analizy:
+            return self._analiza
+        raise ValueError(f"model {model!r} nie nalezy do zadnego z dostawcow "
+                         f"mieszanki ({self.model_triazu} / {self.model_analizy})")
+
+    async def zapytaj(self, *, model: str, system: str, user: str,
+                      schema: dict, max_tokens: int) -> tuple[dict, dict]:
+        return await self._dla(model).zapytaj(
+            model=model, system=system, user=user, schema=schema,
+            max_tokens=max_tokens)
+
+    def koszt(self, model: str, usage: dict) -> float:
+        # CENNIK BIERZE TEN DOSTAWCA, KTORY WYKONAL WYWOLANIE. Wspolna tablica
+        # cen dawalaby liczbe wygladajaca poprawnie i bledna - a limit dobowy
+        # opiera sie wlasnie na niej.
+        return self._dla(model).koszt(model, usage)
+
+    async def zamknij(self) -> None:
+        for d in (self._triaz, self._analiza):
+            await d.zamknij()
