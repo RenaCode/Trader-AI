@@ -188,3 +188,89 @@ def test_cena_i_prowizja_pochodza_Z_GIELDY_a_nie_z_limitu():
     (_, params), = [(s, p) for s, p in cur.sql if "INSERT INTO exec.fill" in s]
     assert D("99.5") in params
     assert D("0.31") in params
+
+
+# ------------------------------------------- kill-switch a zlecenia na giełdzie
+
+WYJSCIE = dict(PLAN, id=43, side="sell",
+               trigger={"rodzaj": "wyjscie", "bar": "x", "position_id": 1})
+
+
+def test_killswitch_zdejmuje_WEJSCIA_ale_zostawia_WYJSCIA():
+    """Kill-switch ma wyprowadzać z ryzyka, a nie uwięzić w nim.
+
+    Zdjęcie zlecenia sprzedaży zostawiłoby otwartą pozycję bez czegokolwiek,
+    co ją zamknie — bezpiecznik zwiększyłby ekspozycję zamiast ją ściąć.
+    """
+    from services.engine.gielda_exec import anuluj_wejscia
+
+    cur = Kursor()
+    asyncio.run(anuluj_wejscia(cur, Gielda(), kategoria="spot", powod="test"))
+    (sql, _), = [(s, p) for s, p in cur.sql if "SELECT o.client_order_id" in s]
+    assert "'rodzaj', 'wejscie') <> 'wyjscie'" in sql
+
+
+def test_wysylka_przy_killswitchu_obejmuje_TYLKO_wyjscia():
+    """Plany wyjścia powstają także przy wstrzymanych wejściach. Niewysłanie
+    ich uwięziłoby pozycje dokładnie wtedy, gdy ryzyko jest za duże."""
+    from services.engine.gielda_exec import zloz_oczekujace
+
+    cur = Kursor()
+    asyncio.run(zloz_oczekujace(cur, Gielda(), engine="crypto", mode="demo",
+                                kategoria="spot", verbose=False,
+                                tylko_wyjscia=True))
+    (sql, params), = [(s, p) for s, p in cur.sql if "journal.planned_order" in s]
+    assert "p.trigger->>'rodzaj' = 'wyjscie'" in sql
+    assert params == (True,)
+
+
+def test_wysylka_bez_killswitcha_obejmuje_WSZYSTKIE_plany():
+    from services.engine.gielda_exec import zloz_oczekujace
+
+    cur = Kursor()
+    asyncio.run(zloz_oczekujace(cur, Gielda(), engine="crypto", mode="demo",
+                                kategoria="spot", verbose=False))
+    (_, params), = [(s, p) for s, p in cur.sql if "journal.planned_order" in s]
+    assert params == (False,)
+
+
+def test_nieudane_anulowanie_zostawia_SLAD_a_nie_cisze():
+    """„Kill-switch zadziałał" musi znaczyć to, co znaczy. Zlecenie, którego
+    nie udało się zdjąć, dalej leży w arkuszu."""
+    from services.engine.gielda_exec import anuluj_wejscia
+
+    cur = Kursor([{"client_order_id": "tai-p1", "symbol": "SOLUSDC",
+                   "planned_order_id": 1}])
+    g = Gielda(blad_anulowania=ExchangeError("nie poszlo"))
+    zdjete = asyncio.run(anuluj_wejscia(cur, g, kategoria="spot", powod="test"))
+    assert zdjete == 0
+    assert any("anulowanie po kill-switchu nie powiodlo sie" in str(p)
+               for _, p in cur.sql if p)
+
+
+def test_petla_NIE_bramkuje_wysylki_stanem_killswitcha():
+    """Reguła „wyjścia przechodzą przez kill-switch" żyje w `run_once`, którego
+    testy jednostkowe nie obejmują — wymaga bazy.
+
+    Sprawdzamy więc samo wywołanie: wysyłka ma być wołana ZAWSZE, a stan
+    kill-switcha ma trafiać do `tylko_wyjscia`, nie do warunku wejścia. Gdyby
+    trafiał do warunku, plany wyjścia powstawałyby i nigdy nie szły na giełdę —
+    pozycje zostałyby uwięzione dokładnie wtedy, gdy ryzyko jest za duże.
+
+    KOMENTARZE SĄ ODFILTROWANE przed przeszukaniem. Wcześniejszy test w tym
+    projekcie przechodził, bo szukanego wzorca dostarczał komentarz nad kodem.
+    """
+    from pathlib import Path
+
+    zrodlo = Path("services/engine/loop.py").read_text(encoding="utf-8")
+    kod = "\n".join(w for w in zrodlo.splitlines()
+                    if not w.lstrip().startswith("#"))
+
+    (wywolanie,) = [b for b in kod.split("zloz_oczekujace(")[1:]
+                    if "tylko_wyjscia" in b]
+    assert "tylko_wyjscia=wejscia_wstrzymane" in wywolanie.split(")")[0]
+
+    warunek = kod.split("from services.engine.gielda_exec import zloz_oczekujace")[0]
+    ostatni_if = warunek.rstrip().splitlines()[-1]
+    assert "gielda is not None" in ostatni_if
+    assert "wejscia_wstrzymane" not in ostatni_if

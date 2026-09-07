@@ -519,6 +519,24 @@ def zaplanuj(cur, decision_id: int, instrument_id: int, side: str, qty: Decimal,
          koniec_nastepnej))
 
 
+def termin_rozstrzygniecia(plan: dict, h: Horizon,
+                           now: datetime) -> tuple[datetime, bool]:
+    """Ktora swieca rozstrzyga plan i czy juz na nia czas. CZYSTA FUNKCJA.
+
+    WSPOLNA DLA RACHUNKU PAPIEROWEGO I DLA GIELDY. Obie sciezki musza pytac
+    o los planu w tej samej chwili: gdyby jedna rozstrzygala wczesniej, backtest
+    i produkcja ogladalyby inny wycinek swiecy - a roznica byla by niewidoczna,
+    bo obie wersje wygladalyby na poprawne.
+
+    Zwraca (swieca_rozstrzygajaca, czy_jeszcze_czekamy).
+    """
+    bar = datetime.fromisoformat(plan["trigger"]["bar"])
+    sprawdzana = bar + timedelta(minutes=h.bar_minutes)
+    czekamy = (sprawdzana + timedelta(minutes=h.bar_minutes) > now
+               and now < plan["valid_until"])
+    return sprawdzana, czekamy
+
+
 def rozstrzygnij_plany(cur, engine: str, mode: str, h: Horizon, now: datetime,
                        kind: str, verbose: bool) -> dict:
     """Sprawdza, czy plany z poprzedniej swiecy doczekaly sie wypelnienia.
@@ -534,9 +552,8 @@ def rozstrzygnij_plany(cur, engine: str, mode: str, h: Horizon, now: datetime,
         " FROM journal.planned_order p JOIN ref.instrument i ON i.id = p.instrument_id"
         " WHERE p.status = 'pending' ORDER BY p.id")
     for plan in cur.fetchall():
-        bar = datetime.fromisoformat(plan["trigger"]["bar"])
-        sprawdzana = bar + timedelta(minutes=h.bar_minutes)
-        if sprawdzana + timedelta(minutes=h.bar_minutes) > now and now < plan["valid_until"]:
+        sprawdzana, czekamy = termin_rozstrzygniecia(plan, h, now)
+        if czekamy:
             st["czekaja"] += 1
             continue
 
@@ -729,7 +746,15 @@ async def sprawdz(conn, engine: str = "crypto", h: Horizon | None = None) -> int
 
 async def run_once(conn, engine: str = "crypto", mode: str = "demo",
                    kind_kosztow: str = "spot", limit: bool = False,
-                   verbose: bool = True, h: Horizon | None = None) -> dict:
+                   verbose: bool = True, h: Horizon | None = None,
+                   gielda=None, kategoria: str = "spot") -> dict:
+    """Jeden przebieg silnika.
+
+    `gielda` PRZELACZA ZRODLO PRAWDY O WYPELNIENIU, a nie sposob decydowania.
+    Bez niej plan rozstrzyga swieca (rachunek papierowy); z nia - odpowiedz
+    gieldy. Decyzje, limity i dziennik sa w obu przypadkach te same, bo to nie
+    egzekucja ma o nich stanowic.
+    """
     h = h or get_horizon(DEFAULT_BAR)
     cur = conn.cursor()
     signal_ids = ensure_signal_defs(cur, engine)
@@ -749,6 +774,20 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
     if wejscia_wstrzymane and verbose:
         print(f"  UWAGA: wejścia wstrzymane — {konto.reason}")
 
+    # KILL-SWITCH ZDEJMUJE ZLECENIA Z GIELDY, a nie tylko wstrzymuje decyzje.
+    #
+    # Wstrzymanie wejsc zatrzymuje podejmowanie NOWYCH decyzji. Zlecenie zlozone
+    # minute wczesniej nadal lezy w arkuszu i nadal moze sie wypelnic - juz po
+    # tym, jak system uznal, ze handlowac nie wolno. Pozycja powstalaby wtedy
+    # wbrew dzialajacemu zabezpieczeniu i bez zadnej decyzji za soba.
+    if wejscia_wstrzymane and gielda is not None:
+        from services.engine.gielda_exec import anuluj_wejscia
+        zdjete = await anuluj_wejscia(cur, gielda, kategoria=kategoria,
+                                      powod=f"kill-switch: {konto.reason}")
+        conn.commit()
+        if zdjete and verbose:
+            print(f"  kill-switch: zdjęto z giełdy {zdjete} zleceń")
+
     now = datetime.now(timezone.utc)
     bar_start = current_bar(now, h)
     model = active_model(cur, engine, h)
@@ -765,7 +804,13 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
     # musi widziec stan PO tym rozstrzygnieciu - inaczej silnik podejmowalby
     # decyzje na podstawie pozycji, ktorej juz nie ma albo ktora wlasnie
     # powstala.
-    if limit:
+    if limit and gielda is not None:
+        from services.engine.gielda_exec import rozstrzygnij_oczekujace
+        stats.update(await rozstrzygnij_oczekujace(
+            cur, gielda, engine=engine, mode=mode, h=h, now=now,
+            kategoria=kategoria, kind=kind_kosztow, verbose=verbose))
+        conn.commit()
+    elif limit:
         stats.update(rozstrzygnij_plany(cur, engine, mode, h, now,
                                         kind_kosztow, verbose))
         conn.commit()
@@ -962,6 +1007,26 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
                   f"-> {action:12s} [{verdict.verdict}]")
         conn.commit()
 
+    # WYSYLKA NA KONIEC PRZEBIEGU, PO ZATWIERDZENIU WSZYSTKICH DECYZJI.
+    #
+    # Wysylanie kazdego planu od razu po jego powstaniu oznaczaloby, ze przerwany
+    # w polowie przebieg zostawia czesc zlecen na gieldzie, a czesc decyzji
+    # nierozwazonych - stan, ktorego zadna strona nie potrafi opisac. Tutaj albo
+    # decyzje sa komplete, albo nie wysylamy nic.
+    #
+    # PRZY WSTRZYMANYCH WEJSCIACH WYSYLAMY DALEJ WYJSCIA.
+    #
+    # Kill-switch blokuje wylacznie wejscia (patrz wyzej) - plany wyjscia
+    # POWSTAJA nadal. Niewyslanie ich na gielde uwiezilo by pozycje dokladnie
+    # w chwili, w ktorej system stwierdzil, ze ryzyko jest za duze. Bezpiecznik
+    # ma wyprowadzac z ryzyka, a nie zamykac w nim.
+    if limit and gielda is not None:
+        from services.engine.gielda_exec import zloz_oczekujace
+        stats.update(await zloz_oczekujace(
+            cur, gielda, engine=engine, mode=mode, kategoria=kategoria,
+            verbose=verbose, tylko_wyjscia=wejscia_wstrzymane))
+        conn.commit()
+
     update_equity(cur, engine, mode, now)
     cur.execute(
         "INSERT INTO risk.engine_heartbeat (engine, mode, last_beat_at, status, detail)"
@@ -973,11 +1038,45 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
     return stats
 
 
+async def zbuduj_adapter(url: str, mode: str):
+    """Adapter gieldy dla trybu, z hostem WZIETYM Z ref.venue.
+
+    HOST Z TABELI, NIE Z TABLICY W ADAPTERZE. Podmiot unijny ma wlasne hosty,
+    a klucz z bybit.eu odbity od hosta globalnego wraca z kodem 10003 -
+    komunikatem nie do odroznienia od zlego klucza. Ten projekt wszedl juz
+    w te pulapke raz, w module uzgodnienia, mimo ze komentarz przy
+    credentials.py przed nia ostrzegal.
+    """
+    from services.api.security import SecretBox
+    from services.exchanges.bybit import BybitAdapter
+
+    with psycopg.connect(url, row_factory=dict_row) as conn:
+        cred = conn.execute(
+            "SELECT c.key_enc, c.secret_enc, v.demo_host, v.live_host"
+            "  FROM app.api_credential c JOIN ref.venue v ON v.id = c.venue_id"
+            " WHERE v.code = 'bybit' AND c.mode::text = %s AND c.active"
+            " ORDER BY c.id LIMIT 1", (mode,)).fetchone()
+    if not cred:
+        # BRAK KLUCZA PRZY WLACZONEJ EGZEKUCJI TO BLAD KONFIGURACJI, nie powod
+        # do cichego zejscia na rachunek papierowy. Silnik udajacy, ze handluje,
+        # jest gorszy niz silnik, ktory nie wstal.
+        sys.exit(f"egzekucja na giełdzie wymaga aktywnego klucza dla trybu {mode}")
+
+    box = SecretBox()
+    return BybitAdapter(api_key=box.decrypt(bytes(cred["key_enc"])),
+                        api_secret=box.decrypt(bytes(cred["secret_enc"])),
+                        mode=mode,
+                        host=cred["demo_host"] if mode == "demo" else cred["live_host"])
+
+
 async def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--once", action="store_true")
     ap.add_argument("--interval", type=int, default=300)
     ap.add_argument("--engine", default="crypto")
+    # Tryb byl dotad zaszyty w domysle run_once. Przy egzekucji na gieldzie
+    # decyduje o tym, KTORY KLUCZ i ktory host - wiec musi byc jawny.
+    ap.add_argument("--mode", default="demo", choices=("demo", "live"))
     ap.add_argument("--quiet", action="store_true")
     ap.add_argument("--bar", default=DEFAULT_BAR, choices=sorted(HORIZONS))
     ap.add_argument("--sprawdz", action="store_true",
@@ -991,6 +1090,18 @@ async def main() -> int:
                     help="cennik giełdy dla rachunku papierowego")
     ap.add_argument("--limit", action="store_true",
                     help="zlecenia z limitem: stawka maker, bez poślizgu")
+    # EGZEKUCJA JEST PRZELACZNIKIEM ZRODLA PRAWDY, nie sposobu decydowania.
+    #
+    # `papier` rozstrzyga plan patrzac na swiece: jesli cena dotknela limitu,
+    # uznaje zlecenie za wypelnione w calosci. To zalozenie jest optymistyczne
+    # w dwie strony naraz - zaklada wypelnienie, ktorego moglo nie byc, i calosc
+    # tam, gdzie weszla czesc.
+    #
+    # `gielda` pyta gielde. Ilosc, cena i prowizja przestaja byc naszym
+    # zalozeniem. Domysl zostaje przy papierze SWIADOMIE: wlaczenie egzekucji
+    # ma byc decyzja wpisana w chart, a nie skutkiem przeoczenia flagi.
+    ap.add_argument("--egzekucja", default="papier", choices=("papier", "gielda"),
+                    help="papier: wypełnienie ze świecy; gielda: prawdziwe zlecenia")
     args = ap.parse_args()
 
     url = os.environ.get("DATABASE_URL")
@@ -1002,6 +1113,11 @@ async def main() -> int:
     if args.sprawdz:
         with psycopg.connect(url, row_factory=dict_row) as conn:
             return await sprawdz(conn, args.engine, h)
+
+    gielda = None
+    if args.egzekucja == "gielda":
+        gielda = await zbuduj_adapter(url, args.mode)
+        print(f"EGZEKUCJA NA GIEŁDZIE ({args.mode}) — zlecenia idą naprawdę.")
 
     from services.engine.koszty import runda
     print(f"Silnik {args.engine}, świeca {h.bar} — jedna decyzja na świecę.")
@@ -1031,8 +1147,9 @@ async def main() -> int:
         t0 = datetime.now(timezone.utc)
         try:
             with psycopg.connect(url, row_factory=dict_row) as conn:
-                s = await run_once(conn, args.engine, kind_kosztow=args.kind,
-                                   limit=args.limit, verbose=not args.quiet, h=h)
+                s = await run_once(conn, args.engine, mode=args.mode,
+                                   kind_kosztow=args.kind, limit=args.limit,
+                                   verbose=not args.quiet, h=h, gielda=gielda)
             plany = (f", plany: wypełnione {s['wypelnione']}, "
                      f"niewypełnione {s['niewypelnione']}, czekają {s['czekaja']}"
                      if args.limit else "")

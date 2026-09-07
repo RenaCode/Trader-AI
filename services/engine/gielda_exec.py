@@ -179,3 +179,130 @@ async def rozstrzygnij_plan(cur, adapter, plan: dict, f: Filtry, *, engine: str,
                 " WHERE planned_order_id=%s",
                 (stan.status, teraz, json.dumps(meta), plan["id"]))
     return r.rodzaj, r.powod
+
+
+async def zloz_oczekujace(cur, adapter, *, engine: str, mode: str,
+                          kategoria: str, verbose: bool = True,
+                          tylko_wyjscia: bool = False) -> dict:
+    """Wysyła na giełdę plany, które jeszcze tam nie poszły.
+
+    ROZPOZNANIE PO BRAKU WIERSZA ZLECENIA, nie po fladze na planie. Flaga
+    mogłaby skłamać: proces mógł ją ustawić i paść przed wysłaniem albo wysłać
+    i paść przed jej ustawieniem. Wiersz w `exec.order` powstaje w tej samej
+    transakcji co wysłanie, więc jego brak znaczy dokładnie „nie próbowaliśmy".
+
+    A gdyby mimo to zlecenie u giełdy było — złożenie jest idempotentne po
+    naszym identyfikatorze i po prostu je odnajdzie.
+
+    `tylko_wyjscia` obsługuje stan po zadziałaniu kill-switcha: nowych pozycji
+    nie otwieramy, ale zamykanie istniejących MUSI iść dalej. Zatrzymanie
+    wszystkiego bez wyjątku uwięziłoby pozycje w chwili, w której system właśnie
+    stwierdził, że ryzyko jest za duże.
+    """
+    st = {"zlozone": 0, "odrzucone": 0}
+    filtry = filtry_z_bazy(cur, engine)
+    cur.execute(
+        "SELECT p.id, p.decision_id, p.instrument_id, p.side, p.qty, p.limit_price,"
+        "       p.trigger, p.valid_until, i.symbol, i.quote_ccy"
+        "  FROM journal.planned_order p"
+        "  JOIN ref.instrument i ON i.id = p.instrument_id"
+        " WHERE p.status = 'pending'"
+        "   AND NOT EXISTS (SELECT 1 FROM exec.order o WHERE o.planned_order_id = p.id)"
+        "   AND (NOT %s OR p.trigger->>'rodzaj' = 'wyjscie')"
+        " ORDER BY p.id", (tylko_wyjscia,))
+    for plan in cur.fetchall():
+        f = filtry.get(plan["instrument_id"], Filtry())
+        ok, msg = await zloz_plan(cur, adapter, plan, f, engine=engine,
+                                  mode=mode, kategoria=kategoria)
+        st["zlozone" if ok else "odrzucone"] += 1
+        if verbose:
+            print(f"  [{'złożone' if ok else 'ODRZUCONE'}] {plan['symbol']} "
+                  f"{plan['side']} — {msg}")
+    return st
+
+
+async def rozstrzygnij_oczekujace(cur, adapter, *, engine: str, mode: str,
+                                  h, now, kategoria: str, kind: str,
+                                  verbose: bool = True) -> dict:
+    """Pyta giełdę o los planów, którym minęła świeca rozstrzygająca.
+
+    TERMIN BIERZEMY Z TEJ SAMEJ FUNKCJI CO RACHUNEK PAPIEROWY. Gdyby jedna
+    ścieżka pytała wcześniej, backtest i produkcja oglądałyby inny wycinek
+    świecy — a różnica byłaby niewidoczna, bo obie wersje wyglądałyby poprawnie.
+    """
+    from services.engine.loop import termin_rozstrzygniecia
+
+    st = {"wypelnione": 0, "niewypelnione": 0, "czekaja": 0, "czesciowe": 0,
+          "nie_do_zamkniecia": 0}
+    filtry = filtry_z_bazy(cur, engine)
+    cur.execute(
+        "SELECT p.id, p.decision_id, p.instrument_id, p.side, p.qty, p.limit_price,"
+        "       p.trigger, p.valid_until, i.symbol, i.quote_ccy"
+        "  FROM journal.planned_order p"
+        "  JOIN ref.instrument i ON i.id = p.instrument_id"
+        " WHERE p.status = 'pending' ORDER BY p.id")
+    for plan in cur.fetchall():
+        _, czekamy = termin_rozstrzygniecia(plan, h, now)
+        if czekamy:
+            st["czekaja"] += 1
+            continue
+        f = filtry.get(plan["instrument_id"], Filtry())
+        rodzaj, powod = await rozstrzygnij_plan(
+            cur, adapter, plan, f, engine=engine, mode=mode,
+            kategoria=kategoria, teraz=now, kind=kind)
+        if rodzaj == "brak":
+            st["niewypelnione"] += 1
+        else:
+            st["wypelnione"] += 1
+            if rodzaj in st:
+                st[rodzaj] += 1
+        if verbose:
+            print(f"  [{rodzaj}] {plan['symbol']} {plan['side']} — {powod}")
+    return st
+
+
+async def anuluj_wejscia(cur, adapter, *, kategoria: str, powod: str) -> int:
+    """Zdejmuje z giełdy oczekujące zlecenia WEJŚCIA. Wyjścia zostawia.
+
+    KILL-SWITCH, KTORY ZOSTAWIA ZLECENIA NA GIELDZIE, NIE JEST KILL-SWITCHEM.
+    Wstrzymanie wejść zatrzymuje podejmowanie NOWYCH decyzji, ale zlecenie
+    złożone minutę wcześniej nadal leży w arkuszu i nadal może się wypełnić —
+    już po tym, jak system uznał, że handlować nie wolno. Pozycja powstałaby
+    wtedy wbrew działającemu zabezpieczeniu i bez żadnej decyzji za sobą.
+
+    ALE WYJSCIA ZOSTAJA, I TO JEST ROWNIE WAZNE. Kill-switch ma wyprowadzić
+    z ryzyka, a nie uwięzić w nim. Zdjęcie zlecenia sprzedaży zostawiłoby
+    otwartą pozycję bez czegokolwiek, co ją zamknie — czyli bezpiecznik
+    zwiększyłby ekspozycję zamiast ją ściąć.
+    """
+    cur.execute(
+        "SELECT o.client_order_id, i.symbol, o.planned_order_id"
+        "  FROM exec.order o"
+        "  JOIN ref.instrument i ON i.id = o.instrument_id"
+        "  LEFT JOIN journal.planned_order p ON p.id = o.planned_order_id"
+        " WHERE o.status IN ('new','partial','unknown')"
+        "   AND o.client_order_id IS NOT NULL"
+        "   AND coalesce(p.trigger->>'rodzaj', 'wejscie') <> 'wyjscie'")
+    zdjete = 0
+    for o in cur.fetchall():
+        try:
+            await adapter.anuluj_zlecenie(symbol=o["symbol"],
+                                          id_wlasne=o["client_order_id"],
+                                          kategoria=kategoria)
+        except ExchangeError as e:
+            # NIEUDANE ANULOWANIE JEST ZAPISYWANE, nie pomijane. Zlecenie zostaje
+            # w arkuszu, wiec musi zostac slad - inaczej "kill-switch zadzialal"
+            # znaczyloby cos innego, niz sie wydaje.
+            cur.execute("UPDATE exec.order SET reject_reason=%s, updated_at=now()"
+                        " WHERE client_order_id=%s",
+                        (f"anulowanie po kill-switchu nie powiodlo sie: {e}",
+                         o["client_order_id"]))
+            continue
+        cur.execute("UPDATE exec.order SET status='cancelled', updated_at=now(),"
+                    " reject_reason=%s WHERE client_order_id=%s",
+                    (powod, o["client_order_id"]))
+        if o["planned_order_id"]:
+            cur.execute("UPDATE journal.planned_order SET status='cancelled',"
+                        " resolved_at=now() WHERE id=%s", (o["planned_order_id"],))
+        zdjete += 1
+    return zdjete
