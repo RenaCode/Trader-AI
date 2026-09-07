@@ -1,4 +1,4 @@
-"""Sekrety aplikacji (klucz Anthropic) i portfele obserwowane."""
+"""Sekrety aplikacji (klucze dostawcow analizy) i portfele obserwowane."""
 from __future__ import annotations
 
 import re
@@ -17,9 +17,20 @@ router = APIRouter(prefix="/api/settings", tags=["settings"])
 KNOWN_SECRETS = {
     "anthropic_api_key": {
         "label": "Klucz API Anthropic",
-        "description": "Używany przez skaner wiadomości do filtrowania i analizy artykułów.",
+        "description": "Używany przez skaner wiadomości do filtrowania i analizy artykułów. "
+                       "Dostawca docelowy — gdy jest ustawiony, ma pierwszeństwo przed Gemini.",
         "pattern": r"^sk-ant-[A-Za-z0-9_\-]{20,}$",
         "pattern_hint": "Klucz Anthropic zaczyna się od 'sk-ant-'.",
+        "testable": True,
+    },
+    # Sciezka zapasowa na czas oczekiwania na klucz Anthropica. Wzorzec obejmuje
+    # oba formaty kluczy Google: starszy `AIza...` i nowszy `AQ....`.
+    "gemini_api_key": {
+        "label": "Klucz API Google Gemini",
+        "description": "Alternatywa dla Anthropica w skanerze wiadomości. Używany tylko wtedy, "
+                       "gdy klucz Anthropic nie jest ustawiony.",
+        "pattern": r"^(AIza[A-Za-z0-9_\-]{30,}|AQ\.[A-Za-z0-9_\-]{20,})$",
+        "pattern_hint": "Klucz Google zaczyna się od 'AIza' albo 'AQ.'.",
         "testable": True,
     },
 }
@@ -221,5 +232,29 @@ async def test_secret(name: str, user: dict = Depends(current_user)):
             else:
                 msg = f"Nie udało się zweryfikować: {type(e).__name__}: {detail[:200]}"
             return {"ok": False, "message": msg}
+
+    if name == "gemini_api_key":
+        import httpx
+        try:
+            async with httpx.AsyncClient(timeout=20.0) as http:
+                r = await http.get(
+                    "https://generativelanguage.googleapis.com/v1beta/models",
+                    headers={"x-goog-api-key": key})
+            if r.status_code in (401, 403):
+                return {"ok": False, "message": (
+                    "Klucz odrzucony przez Google. Sprawdź, czy nie został usunięty "
+                    "i czy projekt ma włączone Generative Language API.")}
+            r.raise_for_status()
+            names = [m["name"].removeprefix("models/") for m in r.json().get("models", [])
+                     if "generateContent" in m.get("supportedGenerationMethods", [])][:6]
+            if not names:
+                return {"ok": False, "message":
+                        "Klucz działa, ale nie widzi żadnego modelu do generowania treści."}
+            return {"ok": True,
+                    "message": f"Klucz działa. Dostępne modele: {', '.join(names)}.",
+                    "models": names}
+        except Exception as e:                                  # noqa: BLE001
+            return {"ok": False,
+                    "message": f"Nie udało się zweryfikować: {type(e).__name__}: {str(e)[:200]}"}
 
     raise HTTPException(501, "Test dla tego sekretu nie jest zaimplementowany")

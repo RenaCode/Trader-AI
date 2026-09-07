@@ -29,7 +29,7 @@ export default function Sources({ engine }) {
         {!s || s.dzis.wywolania === 0 ? (
           <div className="empty">
             Brak wywołań modelu. Skaner wiadomości rusza po wpisaniu klucza Anthropic
-            w Ustawieniach.
+            albo Google Gemini w Ustawieniach.
           </div>
         ) : (
           <>

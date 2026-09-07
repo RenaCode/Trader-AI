@@ -32,13 +32,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import feedparser
 import httpx
 import psycopg
-from anthropic import AsyncAnthropic
 from psycopg.rows import dict_row
 
 from services.api.security import SecretBox
+from services.ingest.llm import (
+    Dostawca, DostawcaAnthropic, DostawcaGemini, Odmowa, limit_dobowy_usd,
+)
 
-ANALYSIS_MODEL = os.environ.get("ANALYSIS_MODEL", "claude-opus-5")
-TRIAGE_MODEL = os.environ.get("TRIAGE_MODEL", "claude-haiku-4-5")
+# Nazwy modeli nalezą do DOSTAWCY, nie do tego pliku: te same prompty ida do
+# Claude'a albo do Gemini w zaleznosci od tego, ktory klucz jest ustawiony.
 
 # Schemat wymuszony na modelu. Bez `strict` model potrafi dorzucic pole albo
 # zwrocic liczbe jako tekst, a to konczy sie wyjatkiem przy zapisie do bazy.
@@ -109,29 +111,44 @@ Nie zawyżaj pewności. System mierzy kalibrację twoich ocen i rozjazd między
 deklarowaną a rzeczywistą trafnością obniża wagę tej cechy."""
 
 
-def anthropic_key(conn, wymagany: bool = True) -> str | None:
-    """Klucz z bazy (wpisany w interfejsie), a w razie jego braku ze srodowiska.
+# Kolejnosc jest decyzja, nie przypadkiem. Anthropic jest dostawca docelowym;
+# Gemini wszedl jako sciezka zapasowa na czas oczekiwania na klucz. Gdy pojawia
+# sie oba, wygrywa docelowy - inaczej wpisanie klucza Anthropica w interfejsie
+# nie zmienialoby niczego i wygladalo na awarie.
+DOSTAWCY = (
+    ("anthropic_api_key", "ANTHROPIC_API_KEY", DostawcaAnthropic),
+    ("gemini_api_key",    "GEMINI_API_KEY",    DostawcaGemini),
+)
 
-    Kolejnosc jest celowa: klucz podany przez uzytkownika w UI ma pierwszenstwo,
-    bo to on jest wymieniany bez redeployu. Zmienna srodowiskowa zostaje jako
-    zapasowa sciezka dla CI i uruchomien lokalnych.
 
-    `wymagany=False` zwraca None zamiast konczyc proces - dla trybu, ktory potrafi
-    pracowac bez klucza (pobieranie artykulow bez analizy). Czytamy przy KAZDYM
-    cyklu, bo klucz pojawia sie wtedy, gdy uzytkownik wpisze go w UI, a nie wtedy,
-    gdy restartujemy poda.
+def wybierz_dostawce(conn, wymagany: bool = True) -> Dostawca | None:
+    """Dostawca zbudowany z pierwszego znalezionego klucza.
+
+    Klucz z bazy (wpisany w interfejsie) ma pierwszenstwo przed zmienna
+    srodowiskowa TEGO SAMEGO dostawcy: to on jest wymieniany bez redeployu,
+    a zmienna zostaje jako sciezka dla CI i uruchomien lokalnych. Miedzy
+    dostawcami rozstrzyga kolejnosc w `DOSTAWCY`, nie zrodlo klucza - inaczej
+    klucz Gemini w srodowisku bilby klucz Anthropica wpisany w interfejsie.
+
+    `wymagany=False` zwraca None zamiast konczyc proces - dla trybu, ktory
+    potrafi pracowac bez klucza (pobieranie artykulow bez analizy). Czytamy przy
+    KAZDYM cyklu, bo klucz pojawia sie wtedy, gdy uzytkownik wpisze go w UI,
+    a nie wtedy, gdy restartujemy poda.
     """
-    row = conn.execute("SELECT value_enc FROM app.secret WHERE name = 'anthropic_api_key'").fetchone()
-    if row:
-        return SecretBox().decrypt(bytes(row[0]))
-    env = os.environ.get("ANTHROPIC_API_KEY")
-    if env:
-        return env
+    for nazwa_sekretu, nazwa_env, klasa in DOSTAWCY:
+        row = conn.execute("SELECT value_enc FROM app.secret WHERE name = %s",
+                           (nazwa_sekretu,)).fetchone()
+        if row:
+            return klasa(SecretBox().decrypt(bytes(row[0])))
+        env = os.environ.get(nazwa_env)
+        if env:
+            return klasa(env)
     if not wymagany:
         return None
     sys.exit(
-        "Brak klucza Anthropic. Wpisz go w interfejsie (Ustawienia -> Klucz API Anthropic) "
-        "albo ustaw ANTHROPIC_API_KEY."
+        "Brak klucza dostawcy analizy. Wpisz go w interfejsie "
+        "(Ustawienia -> Klucz API Anthropic albo Klucz API Google Gemini) "
+        "albo ustaw ANTHROPIC_API_KEY / GEMINI_API_KEY."
     )
 
 
@@ -180,75 +197,65 @@ def entry_time(entry) -> datetime:
     return datetime.now(timezone.utc)
 
 
-async def triage(client: AsyncAnthropic, title: str,
-                 summary: str) -> tuple[bool, str, dict]:
-    r = await client.messages.create(
-        model=TRIAGE_MODEL,
-        max_tokens=300,
-        system=[{"type": "text", "text": TRIAGE_SYSTEM, "cache_control": {"type": "ephemeral"}}],
-        output_config={"format": {"type": "json_schema", "schema": TRIAGE_SCHEMA}},
-        messages=[{"role": "user", "content": f"Tytuł: {title}\n\nZajawka: {summary[:600]}"}],
-    )
-    usage = {"input": r.usage.input_tokens, "output": r.usage.output_tokens,
-             "cache_read": getattr(r.usage, "cache_read_input_tokens", 0) or 0}
-    if r.stop_reason == "refusal":
-        return False, "model odmówił oceny", usage
-    data = json.loads(next(b.text for b in r.content if b.type == "text"))
+async def triage(ai: Dostawca, title: str, summary: str) -> tuple[bool, str, dict]:
+    try:
+        data, usage = await ai.zapytaj(
+            model=ai.model_triazu,
+            system=TRIAGE_SYSTEM,
+            user=f"Tytuł: {title}\n\nZajawka: {summary[:600]}",
+            schema=TRIAGE_SCHEMA,
+            # Budzet obejmuje tez tokeny rozumowania, ktore modele 3.x zuzywaja
+            # nawet na tak prostym zadaniu. Przy 300 odpowiedz konczyla sie na
+            # limicie, zanim padlo pierwsze slowo wyniku.
+            max_tokens=1200,
+        )
+    except Odmowa as e:
+        # Odmowa na triazu nie jest awaria: artykul po prostu nie idzie dalej.
+        return False, str(e), e.usage
     return data["worth_analyzing"], data["reason"], usage
 
 
-async def analyze(client: AsyncAnthropic, title: str, summary: str,
+async def analyze(ai: Dostawca, title: str, summary: str,
                   source: str, published: datetime, symbols: list[str]) -> tuple[dict, dict]:
-    r = await client.messages.create(
-        model=ANALYSIS_MODEL,
-        max_tokens=1500,
-        thinking={"type": "adaptive"},
-        output_config={
-            "effort": "medium",
-            "format": {"type": "json_schema", "schema": ANALYSIS_SCHEMA},
-        },
-        system=[{"type": "text", "text": ANALYSIS_SYSTEM, "cache_control": {"type": "ephemeral"}}],
-        messages=[{
-            "role": "user",
-            "content": (
-                f"Instrumenty w obserwacji: {', '.join(symbols)}\n"
-                f"Źródło: {source}\n"
-                f"Opublikowano: {published:%Y-%m-%d %H:%M} UTC\n"
-                f"Tytuł: {title}\n\n{summary[:3000]}"
-            ),
-        }],
+    return await ai.zapytaj(
+        model=ai.model_analizy,
+        system=ANALYSIS_SYSTEM,
+        user=(f"Instrumenty w obserwacji: {', '.join(symbols)}\n"
+              f"Źródło: {source}\n"
+              f"Opublikowano: {published:%Y-%m-%d %H:%M} UTC\n"
+              f"Tytuł: {title}\n\n{summary[:3000]}"),
+        schema=ANALYSIS_SCHEMA,
+        # Jak przy triazu: limit musi pomiescic rozumowanie razem z odpowiedzia.
+        max_tokens=4000,
     )
-    if r.stop_reason == "refusal":
-        raise RuntimeError("model odmówił analizy")
-    data = json.loads(next(b.text for b in r.content if b.type == "text"))
-    usage = {
-        "input": r.usage.input_tokens,
-        "output": r.usage.output_tokens,
-        "cache_read": getattr(r.usage, "cache_read_input_tokens", 0) or 0,
-    }
-    return data, usage
-
-
-# Cennik (USD za milion tokenow) - do policzenia kosztu per artykul.
-PRICE = {
-    "claude-opus-5": (5.0, 25.0),
-    "claude-sonnet-5": (3.0, 15.0),
-    "claude-haiku-4-5": (1.0, 5.0),
-}
-
-
-def cost_usd(model: str, usage: dict) -> float:
-    inp, out = PRICE.get(model, (5.0, 25.0))
-    # Odczyt z cache kosztuje ~10% ceny wejscia.
-    billed_in = (usage["input"] - usage["cache_read"]) + usage["cache_read"] * 0.1
-    return round(billed_in / 1e6 * inp + usage["output"] / 1e6 * out, 6)
 
 
 # Twardy limit dobowy. Domyslnie ostrozny - przy zmierzonych 128 artykulach
 # na dobe realne zuzycie to okolo 0,60 USD, wiec 5 USD zostawia szeroki zapas,
 # a jednoczesnie zatrzyma petle, ktora zaczela analizowac w kolko to samo
 # (np. gdy kanal zmieni identyfikatory wpisow i deduplikacja przestanie dzialac).
-DAILY_LIMIT_USD = float(os.environ.get("ANTHROPIC_DAILY_USD", "5.0"))
+DAILY_LIMIT_USD = limit_dobowy_usd()
+
+
+def zapisz_nieudane(cur, conn, ai, model: str, purpose: str, blad: Exception) -> float:
+    """Koszt wywolania, ktore nic nie dalo. Zwraca wydana kwote (0, gdy nieznana).
+
+    Wywolanie, ktore poszlo do dostawcy i wrocilo bezuzyteczne - odmowa, odpowiedz
+    ucieta na limicie, pusta odpowiedz - JEST PLATNE. Bez tego zapisu limit dobowy
+    nie widzi tych pieniedzy, a to wlasnie one potrafia sie powtarzac w petli:
+    artykul, ktorego analiza zawsze konczy sie na limicie tokenow, wraca przy
+    kazdym cyklu nadrabiania zaleglosci.
+
+    Blad sieciowy nie niesie zuzycia i wtedy nie ma czego zapisywac - `usage`
+    jest wtedy zerowe, a wiersz z samymi zerami tylko zasmiecalby tabele.
+    """
+    u = getattr(blad, "usage", None)
+    if not u or not (u.get("input") or u.get("output")):
+        return 0.0
+    koszt = ai.koszt(model, u)
+    record_spend(cur, model, purpose, u, koszt, ok=False)
+    conn.commit()
+    return koszt
 
 
 def record_spend(cur, model: str, purpose: str, usage: dict, cost: float,
@@ -266,8 +273,8 @@ def spent_today(cur) -> float:
     return float(cur.fetchone()["s"])
 
 
-def zapisz_analize(cur, article_id: int, data: dict, usage: dict, price: float,
-                   published, instruments: dict[str, int]) -> None:
+def zapisz_analize(cur, article_id: int, model: str, data: dict, usage: dict,
+                   price: float, published, instruments: dict[str, int]) -> None:
     """Zapis wyniku analizy i powiazan z instrumentami.
 
     Wydzielone, bo korzystaja z tego DWIE sciezki: analiza swiezo pobranego
@@ -284,7 +291,7 @@ def zapisz_analize(cur, article_id: int, data: dict, usage: dict, price: float,
         " magnitude, horizon, confidence, novelty, reasoning, raw, input_tokens,"
         " output_tokens, cost_usd, event_time, ingested_at)"
         " VALUES (%s,%s,'v1',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s, now())",
-        (article_id, ANALYSIS_MODEL, data["direction"],
+        (article_id, model, data["direction"],
          max(0.0, min(1.0, data["magnitude"])), data["horizon"],
          max(0.0, min(1.0, data["confidence"])), max(0.0, min(1.0, data["novelty"])),
          data["reasoning"], json.dumps(data), usage["input"], usage["output"],
@@ -313,7 +320,7 @@ def zapisz_analize(cur, article_id: int, data: dict, usage: dict, price: float,
 OKNO_ZALEGLOSCI_H = 24
 
 
-async def nadrob_zaleglosci(conn, cur, ai: AsyncAnthropic, instruments: dict[str, int],
+async def nadrob_zaleglosci(conn, cur, ai: Dostawca, instruments: dict[str, int],
                             symbols: list[str], wydano: float, stats: dict,
                             verbose: bool) -> float:
     """Analiza artykulow zapisanych wczesniej, ktore analizy nie dostaly.
@@ -360,11 +367,14 @@ async def nadrob_zaleglosci(conn, cur, ai: AsyncAnthropic, instruments: dict[str
             worth, why, tri_usage = await triage(ai, a["title"], a["summary"] or "")
         except Exception as e:                                # noqa: BLE001
             stats["bledy"] += 1
+            stracone = zapisz_nieudane(cur, conn, ai, ai.model_triazu, "triage", e)
+            stats["koszt"] += stracone
+            wydano += stracone
             if verbose:
                 print(f"    filtr padl: {type(e).__name__}: {e}")
             continue
-        tri_cost = cost_usd(TRIAGE_MODEL, tri_usage)
-        record_spend(cur, TRIAGE_MODEL, "triage", tri_usage, tri_cost)
+        tri_cost = ai.koszt(ai.model_triazu, tri_usage)
+        record_spend(cur, ai.model_triazu, "triage", tri_usage, tri_cost)
         conn.commit()
         stats["koszt"] += tri_cost
         wydano += tri_cost
@@ -376,17 +386,21 @@ async def nadrob_zaleglosci(conn, cur, ai: AsyncAnthropic, instruments: dict[str
                                         a["event_time"], symbols)
         except Exception as e:                                # noqa: BLE001
             stats["bledy"] += 1
+            stracone = zapisz_nieudane(cur, conn, ai, ai.model_analizy, "analysis", e)
+            stats["koszt"] += stracone
+            wydano += stracone
             if verbose:
                 print(f"    analiza padla: {type(e).__name__}: {e}")
             continue
         if not data.get("relevant"):
             continue
 
-        price = cost_usd(ANALYSIS_MODEL, usage)
-        record_spend(cur, ANALYSIS_MODEL, "analysis", usage, price)
+        price = ai.koszt(ai.model_analizy, usage)
+        record_spend(cur, ai.model_analizy, "analysis", usage, price)
         stats["koszt"] += price
         wydano += price
-        zapisz_analize(cur, a["id"], data, usage, price, a["event_time"], instruments)
+        zapisz_analize(cur, a["id"], ai.model_analizy, data, usage, price,
+                       a["event_time"], instruments)
         conn.commit()
         stats["zaleglosci"] += 1
         if verbose:
@@ -394,7 +408,7 @@ async def nadrob_zaleglosci(conn, cur, ai: AsyncAnthropic, instruments: dict[str
     return wydano
 
 
-async def run_cycle(conn, ai: AsyncAnthropic | None, http: httpx.AsyncClient,
+async def run_cycle(conn, ai: Dostawca | None, http: httpx.AsyncClient,
                     verbose: bool, analizuj: bool = True,
                     silniki: list[str] | None = None) -> dict:
     """Jeden cykl: pobierz kanaly, odsiej, przeanalizuj, zapisz.
@@ -505,12 +519,15 @@ async def run_cycle(conn, ai: AsyncAnthropic | None, http: httpx.AsyncClient,
                 worth, why, tri_usage = await triage(ai, title, summary)
             except Exception as e:                            # noqa: BLE001
                 stats["bledy"] += 1
+                stracone = zapisz_nieudane(cur, conn, ai, ai.model_triazu, "triage", e)
+                stats["koszt"] += stracone
+                wydano += stracone
                 if verbose:
                     print(f"    filtr padl: {type(e).__name__}: {e}")
                 continue
 
-            tri_cost = cost_usd(TRIAGE_MODEL, tri_usage)
-            record_spend(cur, TRIAGE_MODEL, "triage", tri_usage, tri_cost)
+            tri_cost = ai.koszt(ai.model_triazu, tri_usage)
+            record_spend(cur, ai.model_triazu, "triage", tri_usage, tri_cost)
             conn.commit()
             stats["koszt"] += tri_cost
             wydano += tri_cost
@@ -526,6 +543,9 @@ async def run_cycle(conn, ai: AsyncAnthropic | None, http: httpx.AsyncClient,
                 data, usage = await analyze(ai, title, summary, feed["name"], published, symbols)
             except Exception as e:                            # noqa: BLE001
                 stats["bledy"] += 1
+                stracone = zapisz_nieudane(cur, conn, ai, ai.model_analizy, "analysis", e)
+                stats["koszt"] += stracone
+                wydano += stracone
                 if verbose:
                     print(f"    analiza padla: {type(e).__name__}: {e}")
                 continue
@@ -533,8 +553,8 @@ async def run_cycle(conn, ai: AsyncAnthropic | None, http: httpx.AsyncClient,
             if not data.get("relevant"):
                 continue
 
-            price = cost_usd(ANALYSIS_MODEL, usage)
-            record_spend(cur, ANALYSIS_MODEL, "analysis", usage, price)
+            price = ai.koszt(ai.model_analizy, usage)
+            record_spend(cur, ai.model_analizy, "analysis", usage, price)
             conn.commit()
             stats["koszt"] += price
             wydano += price
@@ -553,7 +573,8 @@ async def run_cycle(conn, ai: AsyncAnthropic | None, http: httpx.AsyncClient,
                 continue
             article_id = row["id"]
 
-            zapisz_analize(cur, article_id, data, usage, price, published, instruments)
+            zapisz_analize(cur, article_id, ai.model_analizy, data, usage, price,
+                           published, instruments)
 
             if verbose:
                 print(f"    [{data['direction']:>7s}] siła {data['magnitude']:.2f} "
@@ -614,23 +635,29 @@ async def main() -> int:
             # a nie wtedy, gdy restartujemy poda. Sprawdzanie raz na starcie
             # oznaczaloby, ze proces pobiera artykuly jeszcze dobe po tym, jak
             # klucz juz jest.
-            def tryb() -> tuple[AsyncAnthropic | None, bool]:
+            def tryb() -> tuple[Dostawca | None, bool]:
                 if args.bez_analizy:
                     return None, False
-                klucz = anthropic_key(conn, wymagany=not args.auto)
-                if not klucz:
+                d = wybierz_dostawce(conn, wymagany=not args.auto)
+                if d is None:
                     return None, False
-                return AsyncAnthropic(api_key=klucz), True
+                return d, True
 
-            poprzedni_tryb: bool | None = None
+            poprzedni_tryb: str | None = None
             while True:
                 started = datetime.now(timezone.utc)
                 try:
                     ai, analizuj = tryb()
-                    if analizuj != poprzedni_tryb:
-                        print("Tryb: " + ("pobieranie i ANALIZA" if analizuj else
-                                          "wylacznie pobieranie (brak klucza Anthropic)"))
-                        poprzedni_tryb = analizuj
+                    # ZMIANA DOSTAWCY JEST ZDARZENIEM, nie szczegolem. Oceny
+                    # dwoch roznych modeli nie sa tym samym pomiarem, a cecha
+                    # `news_sent` sklejona z obu ma w srodku uskok, ktorego
+                    # kalibracja wagi nie zaklada. Musi byc widoczna w logu.
+                    opis = (f"pobieranie i ANALIZA ({ai.nazwa}: {ai.model_triazu} → "
+                            f"{ai.model_analizy})" if ai else
+                            "wylacznie pobieranie (brak klucza dostawcy)")
+                    if opis != poprzedni_tryb:
+                        print("Tryb: " + opis)
+                        poprzedni_tryb = opis
                     s = await run_cycle(conn, ai, http, verbose=not args.quiet,
                                         analizuj=analizuj, silniki=silniki)
                     took = (datetime.now(timezone.utc) - started).total_seconds()

@@ -1,9 +1,9 @@
 """Zakladka ZRODLA: z jakich stron system korzysta, co z nich wyciagnal."""
 from __future__ import annotations
 
-import os
-
 from fastapi import APIRouter, Query
+
+from services.ingest.llm import limit_dobowy_usd
 
 from ..db import fetch_all
 
@@ -72,7 +72,11 @@ async def api_spend(dni: int = Query(30, le=365)):
         "SELECT COALESCE(sum(cost_usd), 0) AS koszt FROM news.api_spend"
         " WHERE event_time >= now() - make_interval(days => %s)", (dni,))
 
-    limit = float(os.environ.get("ANTHROPIC_DAILY_USD", "5.0"))
+    # Ten sam odczyt co w potoku analizy. Wlasna kopia `os.environ.get`
+    # rozjechala by sie z workerem przy pierwszej zmianie nazwy zmiennej,
+    # a rozjazd objawilby sie tym, ze UI pokazuje inny limit niz ten,
+    # ktory faktycznie zatrzymuje wydatki.
+    limit = limit_dobowy_usd()
     wydano_dzis = float(dzis[0]["koszt"]) if dzis else 0.0
     return {
         "limit_dobowy_usd": limit,

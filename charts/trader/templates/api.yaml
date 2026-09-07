@@ -56,6 +56,11 @@ spec:
             - name: ANTHROPIC_API_KEY
               valueFrom:
                 secretKeyRef: { name: {{ .Values.secretName }}, key: ANTHROPIC_API_KEY, optional: true }
+            # Dostawca zapasowy analizy wiadomosci. Anthropic ma pierwszenstwo,
+            # gdy oba klucze sa ustawione.
+            - name: GEMINI_API_KEY
+              valueFrom:
+                secretKeyRef: { name: {{ .Values.secretName }}, key: GEMINI_API_KEY, optional: true }
             - name: CORS_ORIGINS
               value: "https://{{ .Values.ingress.host }}"
           ports:

@@ -41,8 +41,12 @@ z osobnymi modelami, osobnym ryzykiem i osobnymi zakładkami w UI.
 - [x] Konto demo Bybit **EU** zweryfikowane; cennik odczytany z giełdy
 - [x] Skaner RSS — 10 kanałów sprawdzonych i zbierających (235 wpisów w pierwszym
       cyklu, zero błędów); artykuły zapisują się **bez** klucza
-- [ ] Analiza Claude — **czeka na klucz API Anthropic**; do tego czasu
-      `news_shock` jest wykluczany z kalibracji jako sygnał martwy
+- [x] Porównanie z kup-i-trzymaj **przy tej samej ekspozycji** — warunek
+      w starej postaci mierzył znak rynku, nie strategię (patrz `docs/03`)
+- [x] Dwa dostawcy analizy wiadomości: Anthropic (docelowy) i Google Gemini
+      (zapasowy). Wybiera się sam po tym, który klucz jest ustawiony
+- [ ] Analiza wiadomości włączona na produkcji; do tego czasu `news_shock`
+      jest wykluczany z kalibracji jako sygnał martwy
 - [ ] Egzekucja zleceń — **zablokowana wąskim gardłem podmiotu unijnego**
       (patrz niżej), nie brakiem klucza
 - [ ] Adapter IBKR + silnik equity
@@ -123,7 +127,7 @@ wejściem w pętlę i nie startuje, gdy zawiedzie.
 ```
 web (nginx + React)  ──► api (FastAPI) ──┬──► PostgreSQL 17 + TimescaleDB + pgvector
    trader.renacode.com                    ├──► Redis
-                                          └──► Anthropic API (claude-opus-5)
+                                          └──► API modelu (Anthropic albo Gemini)
        engine-crypto ─┐
        engine-equity ─┴──► wspólny rdzeń: dane, newsy, cechy, risk kernel, audyt
 ```
@@ -168,7 +172,7 @@ kasuje wszystko, co wygenerował, zostawiając realne dane rynkowe.
 | `features` | cechy z realnych świec, co 5 min | — |
 | `engine` | pętla decyzyjna: reżim → sygnały → risk kernel → dziennik | cechy |
 | `trainer` | walk-forward, raz na dobę, po nim **dozór** | cechy |
-| `news` | RSS → zapis; z kluczem także filtr → analiza, co 5 min | — |
+| `news` | RSS → zapis; z kluczem także filtr → analiza, co 5 min | klucz dostawcy |
 
 ## Niezmiennik danych rynkowych
 
@@ -222,6 +226,39 @@ Do 2026-09-06 pętla zapisywała wypełnienie od razu, przyjmując, że limit si
 wypełnił. Błąd był systematyczny w jedną stronę: zlecenia, które się nie
 wypełniają, to zwykle te, przy których rynek uciekł w naszą stronę, czyli
 najbardziej zyskowne.
+
+## Dostawca analizy wiadomości
+
+Skaner wiadomości potrzebuje modelu do dwóch rzeczy: **triażu** (czy nagłówek
+w ogóle może ruszyć ceną — model tani) i **analizy** (kierunek, siła, horyzont,
+nowość — model mocniejszy). Dostawcę wybiera `services/ingest/llm.py` po tym,
+który klucz jest ustawiony:
+
+| kolejność | sekret w UI / zmienna | triaż | analiza |
+|---|---|---|---|
+| 1 | `anthropic_api_key` / `ANTHROPIC_API_KEY` | claude-haiku-4-5 | claude-opus-5 |
+| 2 | `gemini_api_key` / `GEMINI_API_KEY` | gemini-3.5-flash-lite | gemini-3.5-flash |
+
+Anthropic wygrywa, gdy ustawione są oba — jest dostawcą docelowym, a Gemini
+wszedł jako ścieżka na czas oczekiwania na klucz. Klucz z bazy (wpisany
+w Ustawieniach) bije zmienną środowiskową **tego samego** dostawcy; między
+dostawcami rozstrzyga kolejność z tabeli, nie źródło klucza.
+
+Zmierzony koszt analizy przez Gemini: **około 0,54 USD na dobę** przy 128
+artykułach, z czego triaż to kilka procent — reszta idzie na artykuły, które
+przez triaż przeszły. Limit dobowy (`LLM_DAILY_USD`, domyślnie 5 USD) zatrzymuje
+potok twardo.
+
+> **Zmiana dostawcy w trakcie nie jest neutralna.** Oceny dwóch różnych modeli
+> nie są tym samym pomiarem, a cecha `news_sent` sklejona z obu ma w środku
+> uskok, którego kalibracja wagi nie zakłada. Model zapisuje się przy każdym
+> wierszu (`news.article_analysis.model`), a zmiana trybu jest wykrzyczana
+> w logu — ale to jest wykrywalność, nie rozwiązanie.
+
+**Kiedy to wpłynie na model.** Nigdy wstecz. Analizy powstają od dnia wpięcia
+klucza, więc `news_shock` jest martwy we wszystkich oknach historycznych. Wchodzi
+do wag produkcyjnych dopiero po `MIN_OKIEN_ZYWEGO = 5` oknach, w których żyje —
+przy kroku 30 dni to około pięciu miesięcy od dziś.
 
 ## Dozór stanu nauki
 

@@ -48,11 +48,15 @@ spec:
             - name: SECRETS_KEY_OLD
               valueFrom:
                 secretKeyRef: { name: {{ $.Values.secretName }}, key: SECRETS_KEY_OLD, optional: true }
-            # Klucz Anthropic jest czytany PRZEDE WSZYSTKIM z bazy (wpisany w UI).
-            # Ten wpis jest tylko sciezka zapasowa i celowo optional.
+            # Klucze dostawcow analizy sa czytane PRZEDE WSZYSTKIM z bazy
+            # (wpisane w UI). Te wpisy sa tylko sciezka zapasowa i celowo optional.
+            # Anthropic ma pierwszenstwo, gdy ustawione sa oba.
             - name: ANTHROPIC_API_KEY
               valueFrom:
                 secretKeyRef: { name: {{ $.Values.secretName }}, key: ANTHROPIC_API_KEY, optional: true }
+            - name: GEMINI_API_KEY
+              valueFrom:
+                secretKeyRef: { name: {{ $.Values.secretName }}, key: GEMINI_API_KEY, optional: true }
             - name: PYTHONUNBUFFERED
               value: "1"
           resources: {{- toYaml $w.resources | nindent 12 }}
