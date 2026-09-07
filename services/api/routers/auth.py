@@ -149,7 +149,21 @@ async def login(body: LoginBody, request: Request, response: Response):
 
     await _start_session(row["id"], True, request, response)
     await audit("auth.login", user_id=row["id"], request=request)
-    await _zglos_nowe_urzadzenie(row["id"], request)
+    # CALE wykrywanie jest osłonięte, nie tylko wysylka powiadomienia.
+    #
+    # Poprzednia wersja wolala _zglos_nowe_urzadzenie() wprost, ufajac, ze
+    # `powiadom_o_bezpieczenstwie` w srodku polknie ewentualny blad. Ale ten
+    # wariant chroni WYLACZNIE ostatni krok - zapytanie, ktore go karmi, bylo
+    # nagie. Blad w nazwie kolumny wywrocil wiec logowanie bledem 500.
+    #
+    # To dokladnie ta awaria, przed ktora ostrzega komentarz przy
+    # `powiadom_o_bezpieczenstwie`: mechanizm ostrzegania zablokowal chroniona
+    # operacje. Zabezpieczylem ostatni krok zamiast calego skutku ubocznego.
+    try:
+        await _zglos_nowe_urzadzenie(row["id"], request)
+    except Exception as e:                                    # noqa: BLE001
+        print(f"[powiadomienie] wykrywanie nowego urządzenia zawiodło: "
+              f"{type(e).__name__}: {e}", flush=True)
     return {"mfa_required": False, "login": row["login"]}
 
 
@@ -177,12 +191,17 @@ async def _zglos_nowe_urzadzenie(user_id: int, request: Request) -> None:
           else (request.client.host if request.client else None))
     ua = request.headers.get("user-agent")
 
-    # `< now()` odcina wpis wlasnie zapisany przez audit() - inaczej kazde
-    # logowanie widzialoby samo siebie jako wczesniejsze i nic by nie zglaszalo.
+    # `at`, nie `created_at` - kolumna czasu w app.audit_log nazywa sie `at`
+    # (migracja 0007). Pierwsza wersja tego zapytania uzywala zlej nazwy
+    # i WYWRACALA LOGOWANIE bledem 500.
+    #
+    # Odejmowanie sekundy odcina wpis wlasnie zapisany przez audit() - inaczej
+    # kazde logowanie widzialoby samo siebie jako wczesniejsze i nie zglaszaloby
+    # nigdy niczego.
     znane = await fetch_one(
         "SELECT 1 FROM app.audit_log WHERE actor_user_id = %s AND action = 'auth.login'"
         "   AND ip IS NOT DISTINCT FROM %s::inet AND user_agent IS NOT DISTINCT FROM %s"
-        "   AND created_at < now() - interval '1 second' LIMIT 1",
+        "   AND at < now() - interval '1 second' LIMIT 1",
         (user_id, ip, ua))
     if znane:
         return

@@ -13,6 +13,7 @@ i dodanie klucza to dwa zdarzenia, których przeoczenie kosztuje najwięcej.
 """
 import asyncio
 import inspect
+import re
 from pathlib import Path
 
 import pytest
@@ -43,7 +44,7 @@ def test_nowe_urzadzenie_nie_widzi_samego_siebie():
     wpisu każde logowanie znajdowałoby siebie jako wcześniejsze i nic nie
     zgłaszało — alarm, który nigdy nie zadziała, wygląda identycznie jak brak
     zagrożeń."""
-    assert "created_at < now() - interval '1 second'" in AUTH
+    assert "at < now() - interval '1 second'" in AUTH
 
 
 def test_zmiana_hasla_i_dodanie_klucza_sa_zglaszane():
@@ -65,3 +66,35 @@ def test_helper_polyka_wyjatek_ale_go_nie_ukrywa():
     zrodlo = inspect.getsource(powiadom_o_bezpieczenstwie)
     assert "except Exception" in zrodlo
     assert "print(" in zrodlo, "błąd kanału znika bez śladu w logu"
+
+
+# --- regresja: wykrywanie nowego urzadzenia wywrocilo logowanie -------------
+def test_wykrywanie_nowego_urzadzenia_jest_oslonione_w_calosci():
+    """Osłonięcie samego `notify()` NIE WYSTARCZYŁO.
+
+    Pierwsza wersja wołała `_zglos_nowe_urzadzenie()` wprost, ufając, że
+    `powiadom_o_bezpieczenstwie` w środku połknie błąd. Ale ten wariant chroni
+    wyłącznie ostatni krok — zapytanie, które go karmi, było nagie. Literówka
+    w nazwie kolumny (`created_at` zamiast `at`) wywróciła logowanie błędem 500
+    i nikt tego nie zauważył, bo test dymny w tym czasie nie działał.
+
+    To dokładnie ta awaria, przed którą ostrzega komentarz przy helperze:
+    mechanizm ostrzegania zablokował chronioną operację.
+    """
+    i = AUTH.index("await _zglos_nowe_urzadzenie(")
+    kontekst = AUTH[max(0, i - 700):i]
+    assert "try:" in kontekst, \
+        "wywołanie wykrywania nie jest osłonięte — błąd w nim wywróci logowanie"
+
+
+def test_zapytanie_o_audyt_uzywa_istniejacej_kolumny_czasu():
+    """`app.audit_log` ma kolumnę `at`, nie `created_at` (migracja 0007)."""
+    ddl = Path("db/migrations/0007_risk_and_app.sql").read_text()
+    tabela = ddl[ddl.index("CREATE TABLE app.audit_log"):]
+    tabela = tabela[:tabela.index(");")]
+    assert "created_at" not in tabela and re.search(r"^\s+at\s+timestamptz", tabela, re.M)
+
+    zapytanie = AUTH[AUTH.index("FROM app.audit_log"):]
+    zapytanie = zapytanie[:zapytanie.index("LIMIT 1")]
+    assert "created_at" not in zapytanie, \
+        "zapytanie o app.audit_log używa nieistniejącej kolumny created_at"
