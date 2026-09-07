@@ -370,7 +370,8 @@ class BybitAdapter:
                 break
         return out
 
-    async def filtry_instrumentow(self, kategoria: str | None = None) -> dict[str, dict]:
+    async def filtry_instrumentow(self, kategoria: str | None = None, *,
+                                  host: str | None = None) -> dict[str, dict]:
         """Reguly, ktorych gielda pilnuje przy KAZDYM zleceniu.
 
         Krok ilosci, krok ceny i minimalna wartosc zlecenia nie sa szczegolem
@@ -382,12 +383,26 @@ class BybitAdapter:
             jest przypadek drogi, bo gdy odrzucone jest WYJSCIE, pozycja
             zostaje otwarta wbrew decyzji.
 
-        Endpoint jest PUBLICZNY, wiec czytamy go z hosta globalnego: to ten sam
-        rejestr instrumentow, na ktorym trenowany byl model.
+        HOST TEGO PODMIOTU, KTORY PRZYJMIE ZLECENIE - i to jest tu sedno.
+
+        Dane rynkowe bierzemy z podmiotu globalnego, bo to jego ksiega
+        posluzyla do trenowania modelu. REGULY ZLECEN SA CZYM INNYM: obowiazuja
+        tam, gdzie zlecenie ladzie. Zmierzone 2026-09-07 na ADAUSDC:
+
+            api.bybit.com      basePrecision 0.01
+            api-demo.bybit.eu  basePrecision 0.1
+            api.bybit.eu       basePrecision 0.1
+
+        Pierwsza wersja czytala host globalny i zapisywala 0.01, wiec gielda
+        unijna odbijala kazde zlecenie komunikatem "Order quantity has too many
+        decimals". KOMUNIKAT WSKAZUJE NA NASZE ZAOKRAGLANIE, a wina jest w tym,
+        KOGO PYTAMY o regule - szukanie idzie wiec od razu w zla strone.
+
+        Endpoint jest publiczny, wiec nie wymaga klucza takze na hoscie podmiotu.
         """
         res = await self._get("/v5/market/instruments-info",
                               {"category": kategoria or self._category},
-                              private=False, host=PUBLIC_HOST)
+                              private=False, host=host or self._host)
         out: dict[str, dict] = {}
         for i in res.get("list", []):
             lot = i.get("lotSizeFilter") or {}

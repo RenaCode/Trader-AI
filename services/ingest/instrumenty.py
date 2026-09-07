@@ -66,6 +66,8 @@ def niekompletne(w_bazie: list[dict]) -> list[str]:
 async def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--engine", default="crypto")
+    ap.add_argument("--mode", default="demo", choices=("demo", "live"),
+                    help="ktorego podmiotu regul uzywamy")
     ap.add_argument("--sucho", action="store_true",
                     help="pokaz, co by sie zmienilo, i nie zapisuj")
     args = ap.parse_args()
@@ -73,19 +75,31 @@ async def main() -> int:
     if not os.environ.get("DATABASE_URL"):
         sys.exit("DATABASE_URL nie jest ustawiony")
 
-    from services.api.db import close_pool, execute, fetch_all, open_pool
+    from services.api.db import close_pool, execute, fetch_all, fetch_one, open_pool
     from services.exchanges.bybit import BybitAdapter
 
     await open_pool()
     try:
+        # HOST PODMIOTU, NIE GLOBALNY. Reguly zlecen obowiazuja tam, gdzie
+        # zlecenie ladzie, a podmiot unijny ma je INNE: ADAUSDC ma u niego krok
+        # ilosci 0.1 zamiast 0.01. Zapisanie regul globalnych konczy sie
+        # odbiciem kazdego zlecenia komunikatem o "too many decimals", ktory
+        # wskazuje na nasze zaokraglanie zamiast na zrodlo reguly.
+        host = await fetch_one(
+            "SELECT demo_host, live_host FROM ref.venue WHERE code = 'bybit'")
+        if not host:
+            sys.exit("brak wpisu ref.venue dla bybit - nie wiadomo, kogo pytac")
+        adres = host["demo_host"] if args.mode == "demo" else host["live_host"]
+
         # BEZ KLUCZA. Endpoint instrumentow jest publiczny, wiec adapter
         # powstaje z pustymi poswiadczeniami - i to jest cecha, nie brak:
         # uzupelnienie regul nie zalezy od tego, czy klucz w ogole istnieje.
-        adapter = BybitAdapter(api_key="", api_secret="", mode="demo")
+        adapter = BybitAdapter(api_key="", api_secret="", mode=args.mode, host=adres)
         try:
             z_gieldy = await adapter.filtry_instrumentow("spot")
         finally:
             await adapter.close()
+        print(f"reguły z {adres} (podmiot trybu {args.mode})")
 
         w_bazie = await fetch_all(
             "SELECT id, symbol, lot_size, tick_size, min_notional, tradeable,"

@@ -178,3 +178,32 @@ def test_nieznana_strona_zlecenia_KONCZY_SIE_BLEDEM():
     for zla in ("kup", "", "long", "b"):
         with pytest.raises(ValueError):
             _strona_bybita(zla)
+
+
+def test_reguly_zlecen_bierzemy_z_hosta_PODMIOTU_a_nie_globalnego():
+    """Dane rynkowe biorą się z podmiotu globalnego (jego księga posłużyła do
+    trenowania modelu). REGUŁY ZLECEŃ są czym innym: obowiązują tam, gdzie
+    zlecenie ląduje.
+
+    Zmierzone 2026-09-07 na ADAUSDC — `basePrecision` 0.01 globalnie, 0.1
+    u podmiotu unijnego. Czytanie hosta globalnego kończyło się odbiciem
+    każdego zlecenia komunikatem „Order quantity has too many decimals", który
+    wskazuje na nasze zaokrąglanie zamiast na źródło reguły.
+    """
+    import asyncio
+
+    from services.exchanges.bybit import BybitAdapter
+
+    a = BybitAdapter.__new__(BybitAdapter)
+    a._category = "spot"
+    a._host = "https://api-demo.bybit.eu"
+    uzyte = {}
+
+    async def _get(path, params=None, *, private=True, host=None):
+        uzyte.update(path=path, host=host, private=private)
+        return {"list": []}
+
+    a._get = _get
+    asyncio.run(a.filtry_instrumentow("spot"))
+    assert uzyte["host"] == "https://api-demo.bybit.eu"
+    assert uzyte["private"] is False        # endpoint publiczny, bez klucza
