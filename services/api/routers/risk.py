@@ -1,9 +1,11 @@
 """Zakladka RYZYKO: limity, ich wykorzystanie, naruszenia, kill-switch."""
 from __future__ import annotations
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from pydantic import BaseModel, Field
 
-from ..db import fetch_all
+from ..auth import audit, current_user, require_csrf
+from ..db import execute, fetch_all, fetch_one
 
 router = APIRouter(prefix="/api/engines/{engine}/risk", tags=["risk"])
 
@@ -84,3 +86,62 @@ async def killswitch(engine: str, limit: int = Query(10, le=100)):
         }
         for r in rows
     ]
+
+
+class ZwolnienieBody(BaseModel):
+    # POWOD JEST WYMAGANY, i to jest cala tresc tego pola.
+    #
+    # Kill-switch nie wygasa sam, bo automatyczne wznowienie po obsunieciu to
+    # najprostsza droga do powtorzenia tej samej straty. Zwolnienie jednym
+    # klignieciem, bez podania powodu, jest tym samym wznowieniem - tyle ze
+    # z dodatkowym krokiem, ktory daje zludzenie namyslu.
+    #
+    # Minimalna dlugosc nie sprawdza, czy ktos pomyslal. Sprawdza, czy w ogole
+    # cokolwiek napisal - i zostawia to w bazie na potem, gdy ktos bedzie pytal,
+    # dlaczego system wrocil do handlu.
+    note: str = Field(min_length=10, max_length=500)
+
+
+@router.post("/killswitch/{event_id}/release", dependencies=[Depends(require_csrf)])
+async def zwolnij_killswitch(engine: str, event_id: int, body: ZwolnienieBody,
+                             request: Request, user: dict = Depends(current_user)):
+    """Reczne zwolnienie kill-switcha.
+
+    DLACZEGO TO ISTNIEJE DOPIERO TERAZ
+
+    Kolumny `released_at`, `released_by` i `release_note` sa w schemacie od
+    migracji 0007. Sciezki zapisu nie bylo: router ryzyka mial wylacznie GET,
+    a zaden inny modul nie pisal do tej tabeli. Kill-switch byl wiec drzwiami
+    JEDNOKIERUNKOWYMI - dzialal, zatrzymywal silnik i nie dawalo sie go zwolnic
+    inaczej niz recznym SQL-em na produkcyjnej bazie.
+
+    Jednoczesnie powiadomienie o zadzialaniu mowilo wprost "Zwolnienie: zakladka
+    Ryzyko w interfejsie", a interfejs pokazywal komunikat "Odblokowanie wymaga
+    recznego potwierdzenia" bez zadnej kontrolki. Instrukcja odsylala do rzeczy,
+    ktorej nie bylo.
+    """
+    z = await fetch_one(
+        "SELECT id, engine::text AS engine, reason, released_at"
+        " FROM risk.killswitch_event WHERE id = %s", (event_id,))
+    if not z:
+        raise HTTPException(404, "Nie ma takiego zdarzenia kill-switcha")
+    if z["engine"] != engine:
+        raise HTTPException(404, "Zdarzenie należy do innego silnika")
+    if z["released_at"]:
+        # 409, nie 200: powtorzone zwolnienie znaczy, ze ktos widzi inny stan
+        # niz baza. Ciche potwierdzenie zostawiloby go w tym przekonaniu.
+        raise HTTPException(409, "To zdarzenie zostało już zwolnione")
+
+    await execute(
+        "UPDATE risk.killswitch_event"
+        " SET released_at = now(), released_by = %s, release_note = %s"
+        " WHERE id = %s AND released_at IS NULL",
+        (user["id"], body.note.strip(), event_id))
+
+    await audit("risk.killswitch_released", user_id=user["id"],
+                entity="risk.killswitch_event", entity_id=str(event_id),
+                before={"reason": z["reason"], "released_at": None},
+                after={"release_note": body.note.strip()}, request=request)
+
+    return {"ok": True, "message": "Kill-switch zwolniony. Silnik wróci do handlu "
+                                   "przy najbliższym cyklu decyzyjnym."}

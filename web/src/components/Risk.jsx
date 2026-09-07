@@ -1,6 +1,6 @@
 /* Zakladka RYZYKO: limity, ich wykorzystanie, naruszenia, kill-switch. */
-import React from 'react';
-import { useApi } from '../utils/api';
+import React, { useState } from 'react';
+import { useApi, post } from '../utils/api';
 import { fmtNum, fmtTime, fmtAgo } from '../utils/format';
 
 const LIMIT_PL = {
@@ -9,10 +9,15 @@ const LIMIT_PL = {
   max_position_notional: 'Maks. wielkość pozycji',
   max_total_exposure: 'Maks. łączna ekspozycja',
   max_orders_per_hour: 'Maks. zleceń na godzinę',
+  min_equity: 'Próg kapitału',
 };
+const UNIT_PL = { pct: '%', pct_equity: '% kapitału', quote_ccy: 'USD', count: 'szt.' };
 const ACTION_PL = { block: 'blokada', downsize: 'zmniejszenie', killswitch: 'kill-switch' };
 
 export default function Risk({ engine }) {
+  const [note, setNote] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
   const limits = useApi(`/api/engines/${engine}/risk/limits`, [engine], { refreshMs: 30000 });
   const viol = useApi(`/api/engines/${engine}/risk/violations?limit=30`, [engine], { refreshMs: 30000 });
   const ks = useApi(`/api/engines/${engine}/risk/killswitch`, [engine], { refreshMs: 30000 });
@@ -26,6 +31,37 @@ export default function Risk({ engine }) {
           <strong>Kill-switch aktywny.</strong> {active[0].reason} — uruchomiony {fmtAgo(active[0].triggered_at)}.
           Odblokowanie wymaga ręcznego potwierdzenia; automatyczne wznowienie po obsunięciu
           kapitału jest najprostszą drogą do powtórzenia tej samej straty.
+
+          <div style={{ marginTop: 12 }}>
+            <label className="field" style={{ marginBottom: 8 }}>
+              <span className="field-label">
+                Powód zwolnienia — co się zmieniło, żeby to się nie powtórzyło?
+              </span>
+              <input className="input-field" value={note} maxLength={500}
+                     placeholder="np. przyczyną był błąd w danych świec, poprawiony w sha-…"
+                     onChange={(e) => { setNote(e.target.value); setErr(null); }} />
+            </label>
+            <button className="btn" disabled={busy || note.trim().length < 10}
+                    onClick={async () => {
+                      setBusy(true); setErr(null);
+                      try {
+                        await post(`/api/engines/${engine}/risk/killswitch/${active[0].id}/release`,
+                                   { note: note.trim() });
+                        setNote('');
+                        ks.reload?.();
+                      } catch (e) {
+                        setErr(e.message || 'Nie udało się zwolnić');
+                      } finally { setBusy(false); }
+                    }}>
+              {busy ? 'Zwalniam…' : 'Zwolnij kill-switch'}
+            </button>
+            {note.trim().length > 0 && note.trim().length < 10 && (
+              <span className="hint" style={{ marginLeft: 10 }}>
+                powód musi mieć co najmniej 10 znaków
+              </span>
+            )}
+            {err && <div className="notice error" style={{ marginTop: 8 }}>{err}</div>}
+          </div>
         </div>
       )}
 
