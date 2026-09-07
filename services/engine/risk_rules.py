@@ -49,6 +49,32 @@ class RiskVerdict:
     trigger_killswitch: str | None = None
 
 
+def wartosc_limitu(lim: dict, kapital: Decimal) -> Decimal:
+    """Limit w walucie, niezaleznie od tego, jak zostal zapisany.
+
+    DLACZEGO TO ISTNIEJE
+
+    Trzy limity byly zapisane jako KWOTY wyliczone dla rachunku 100 000 USD:
+    pozycja 5 000, laczna ekspozycja 15 000, budzet 1 500. Dopoki rachunek ma
+    100 000, jest to 5%, 15% i 1,5% - dokladnie to, na czym mierzono wynik.
+
+    Na rachunku 10 000 te same kwoty znacza 50%, 150% i 15%. Limit lacznej
+    ekspozycji przestaje wtedy cokolwiek ograniczac, bo na spocie bez dzwigni
+    nie da sie przekroczyc 100% rachunku - a caly profil ryzyka rosnie
+    dziesieciokrotnie wzgledem zmierzonego.
+
+    Nie objawiloby sie to awaria. System handlowalby dalej, raportowal zielone
+    statusy i ryzykowal dziesieciokrotnie wiecej, niz wynika z pomiaru.
+
+    `pct_equity` wiaze limit z kapitalem, wiec zmiana wplaty nie zmienia profilu
+    ryzyka. `quote_ccy` zostaje, bo limit wyrazony kwotowo bywa tym, o co chodzi
+    (np. minimum gieldowe) - ale przestaje byc domyslnym sposobem zapisu.
+    """
+    if lim.get("unit") == "pct_equity":
+        return Decimal(lim["value"]) / Decimal(100) * kapital
+    return Decimal(lim["value"])
+
+
 def evaluate_account(state: RiskState, limits: dict[str, dict]) -> RiskVerdict:
     """Limity dotyczace CALEGO KONTA - kill-switch, strata dzienna, obsuniecie.
 
@@ -90,7 +116,44 @@ def evaluate_account(state: RiskState, limits: dict[str, dict]) -> RiskVerdict:
                 trigger_killswitch=(f"Strata dzienna {loss_pct:.2f}% przekroczyła limit "
                                     f"{lim['value']}%") if lim["action"] == "killswitch" else None)
 
-    # 3. Obsuniecie od szczytu.
+    # 3. PROG KAPITALU - twarda podloga w walucie, nie w procentach od szczytu.
+    #
+    # DLACZEGO OSOBNO OD max_drawdown
+    #
+    # Obsuniecie liczy sie od SZCZYTU, a szczyt rosnie razem z rachunkiem. Przy
+    # progu 10% podloga to 0,9 x szczyt, wiec po wzroscie kapitalu przesuwa sie
+    # w gore - i to jest dobre. Ale na samym poczatku, gdy szczyt rowna sie
+    # wplacie, ten sam prog dopuszcza strate 10% wplaconych pieniedzy, zanim
+    # cokolwiek zadziala.
+    #
+    # Wlasciciel wplacajacy 10 000 USD nie mysli w kategoriach "10% od szczytu",
+    # tylko "ile z moich pieniedzy moze zniknac". To sa dwa rozne pytania i
+    # potrzebuja dwoch roznych limitow. Ten wyraza drugie z nich wprost, w tych
+    # samych jednostkach, w ktorych wplacil.
+    #
+    # CZEGO TEN LIMIT NIE ROBI: nie jest zleceniem stop-loss. Sprawdza sie raz
+    # na cykl decyzyjny, wiec miedzy sprawdzeniami cena moze zejsc nizej.
+    # Ogranicza to, ILE SYSTEM ZARYZYKUJE DALEJ, a nie to, ile juz stracil.
+    lim = limits.get("min_equity")
+    if lim:
+        # ZAWSZE KWOTOWO, nigdy procentowo. Prog wyrazony jako procent szczytu
+        # jest DOKLADNIE limitem obsuniecia, ktory stoi punkt nizej - czyli
+        # duplikatem, ktory wyglada na dodatkowe zabezpieczenie i nim nie jest.
+        # Ten limit ma odpowiadac na pytanie "ile z WPLACONYCH pieniedzy moze
+        # zniknac", a wplata jest kwota.
+        prog = Decimal(lim["value"])
+        usage.append({"name": "min_equity", "used": float(state.equity),
+                      "threshold": float(prog)})
+        if state.equity <= prog:
+            violations.append({"limit": "min_equity", "observed": float(state.equity),
+                               "threshold": float(prog), "action": lim["action"]})
+            return RiskVerdict(
+                "block", f"Kapitał {state.equity:.2f} spadł do progu {prog:.2f}",
+                violations=violations, usage=usage,
+                trigger_killswitch=(f"Kapitał {state.equity:.2f} spadł do progu "
+                                    f"{prog:.2f}") if lim["action"] == "killswitch" else None)
+
+    # 4. Obsuniecie od szczytu.
     lim = limits.get("max_drawdown")
     if lim and state.peak > 0:
         dd_pct = float((state.peak - state.equity) / state.peak * 100)
@@ -137,7 +200,7 @@ def evaluate_limits(state: RiskState, limits: dict[str, dict],
         after = state.exposure + notional
         usage.append({"name": "max_total_exposure", "used": float(state.exposure),
                       "threshold": float(lim["value"])})
-        if after > Decimal(lim["value"]):
+        if after > wartosc_limitu(lim, state.equity):
             violations.append({"limit": "max_total_exposure", "observed": float(after),
                                "threshold": float(lim["value"]), "action": lim["action"]})
             return RiskVerdict(
@@ -148,7 +211,7 @@ def evaluate_limits(state: RiskState, limits: dict[str, dict],
     # 6. Wielkosc pojedynczej pozycji - tutaj obcinamy zamiast blokowac.
     lim = limits.get("max_position_notional")
     if lim:
-        cap = Decimal(lim["value"])
+        cap = wartosc_limitu(lim, state.equity)
         current = state.per_instrument.get(instrument_id, Decimal(0))
         usage.append({"name": "max_position_notional", "used": float(current),
                       "threshold": float(cap)})
@@ -175,12 +238,32 @@ def evaluate_limits(state: RiskState, limits: dict[str, dict],
 # Limity domyslne - uzywane przez symulacje, gdy nie da sie ich odczytac z bazy.
 # Muszą odpowiadać wierszom zasianym w risk.limit_def; rozjazd tutaj oznaczałby,
 # że backtest mierzy inny system niż produkcja.
+# Limity domyslne. Jednostki sa czescia definicji, nie ozdoba: `pct_equity`
+# wiaze limit z kapitalem, wiec ten sam zapis znaczy to samo na rachunku
+# 100 000 i na 10 000. Wartosci dobrane tak, zeby na 100 000 dawaly DOKLADNIE
+# te kwoty, ktore obowiazywaly wczesniej - zmiana jednostki nie mialaby prawa
+# zmienic zmierzonego wyniku i nie zmienia.
 DEFAULT_LIMITS = {
-    "max_daily_loss":        {"value": Decimal("2"),     "action": "killswitch"},
-    "max_drawdown":          {"value": Decimal("10"),    "action": "killswitch"},
-    "max_orders_per_hour":   {"value": Decimal("20"),    "action": "block"},
-    "max_position_notional": {"value": Decimal("5000"),  "action": "downsize"},
-    "max_total_exposure":    {"value": Decimal("15000"), "action": "block"},
+    "max_daily_loss":        {"value": Decimal("2"),   "unit": "pct",
+                              "action": "killswitch"},
+    "max_drawdown":          {"value": Decimal("10"),  "unit": "pct",
+                              "action": "killswitch"},
+    "max_orders_per_hour":   {"value": Decimal("20"),  "unit": "count",
+                              "action": "block"},
+    "max_position_notional": {"value": Decimal("5"),   "unit": "pct_equity",
+                              "action": "downsize"},   # bylo 5 000 przy 100 000
+    "max_total_exposure":    {"value": Decimal("15"),  "unit": "pct_equity",
+                              "action": "block"},      # bylo 15 000 przy 100 000
+    # Twarda podloga w walucie. 5% ponizej kapitalu startowego, czyli ciasniej
+    # niz limit obsuniecia - to ona staje sie wiazaca. Zmierzone na 39 oknach:
+    # najgorszy punkt ciaglej sciezki to 99,97% wplaty, wiec ten prog nie
+    # zadzialalby ani razu. Jest siatka, nie kagancem.
+    # Wpisane liczba, nie wyrazeniem ze START_EQUITY: ta stala jest zdefiniowana
+    # NIZEJ w pliku i odwolanie do niej tutaj wywraca import. Zwiazek miedzy nimi
+    # pilnuje test, a nie kolejnosc linii - bo kolejnosc linii nie jest niczym,
+    # na czym wolno oprzec limit ryzyka.
+    "min_equity":            {"value": Decimal("95000"),
+                              "unit": "quote_ccy", "action": "killswitch"},
 }
 
 
@@ -219,6 +302,7 @@ def udzial_budzetu(score: float) -> float:
 
 
 def position_budget(limits: dict[str, dict], n_instruments: int,
+                    kapital: Decimal | None = None,
                     fallback: Decimal = Decimal("3000")) -> Decimal:
     """Bazowa wielkosc zlecenia wyprowadzona z limitu lacznej ekspozycji.
 
@@ -242,7 +326,12 @@ def position_budget(limits: dict[str, dict], n_instruments: int,
     lim = limits.get("max_total_exposure")
     if not lim or n_instruments <= 0:
         return fallback
-    budzet = Decimal(lim["value"]) / Decimal(n_instruments)
+    # `kapital` jest potrzebny wylacznie wtedy, gdy limit zapisano procentowo.
+    # Domyslnie START_EQUITY, zeby stare wywolania nie zmienily zachowania -
+    # przy limicie kwotowym ta wartosc i tak nie jest uzywana.
+    budzet = wartosc_limitu(
+        lim, kapital if kapital is not None else Decimal(str(START_EQUITY))
+    ) / Decimal(n_instruments)
     # Zlecenie mniejsze niz minimum gieldowe nie ma sensu - wtedy lepiej
     # obserwowac mniej instrumentow niz handlowac pylem.
     return max(budzet, Decimal("50"))
