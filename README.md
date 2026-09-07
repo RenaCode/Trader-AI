@@ -35,7 +35,7 @@ z osobnymi modelami, osobnym ryzykiem i osobnymi zakładkami w UI.
 - [x] Rola bazy bez uprawnień superużytkownika + kontrola uprawnień
 - [x] Kopie zapasowe (weryfikowane), rotacja `SECRETS_KEY`, limit wydatków na API
 - [x] 123 testy jednostkowe (reguły ryzyka, portfel, koszty, TOTP, kryptografia)
-- [x] Ustawienia, powiadomienia (w aplikacji / Telegram / webhook), profil konta
+- [x] Ustawienia, powiadomienia (w aplikacji / WhatsApp / webhook), profil konta
 - [x] Prowizja w mierze, a nie tylko w krzywej kapitału — odsetek dodatnich
       okien i mediana Sharpe były liczone **przed kosztami** (patrz `docs/03`)
 - [x] Konto demo Bybit **EU** zweryfikowane; cennik odczytany z giełdy

@@ -204,7 +204,7 @@ function NotificationsSection() {
   const [quiet, setQuiet] = useState(null);
   const [state, setState] = useState(null);
   const [busy, setBusy] = useState(false);
-  const [form, setForm] = useState({ kind: 'telegram', label: '', bot_token: '', chat_id: '', url: '' });
+  const [form, setForm] = useState({ kind: 'whatsapp', label: '', telefon: '', apikey: '', url: '' });
 
   const load = useCallback(async () => {
     setPrefs(await get('/api/notifications/preferences'));
@@ -230,7 +230,7 @@ function NotificationsSection() {
     setBusy(true); setState(null);
     try {
       await post('/api/notifications/channels', form);
-      setForm({ kind: form.kind, label: '', bot_token: '', chat_id: '', url: '' });
+      setForm({ kind: form.kind, label: '', telefon: '', apikey: '', url: '' });
       await load();
       setState({ ok: true, message: 'Kanał dodany. Wyślij wiadomość testową, żeby go zweryfikować.' });
     } catch (e) { setState({ ok: false, message: e.message }); }
@@ -262,10 +262,11 @@ function NotificationsSection() {
     <>
       <Section title="Kanały powiadomień" hint="gdzie mają docierać alerty">
         <div className="notice info" style={{ marginBottom: 14 }}>
-          Kanał <strong>w aplikacji</strong> działa zawsze. Telegram jest najszybszym
-          sposobem, żeby dostać alert na telefon — utwórz bota u <span className="mono">@BotFather</span>,
-          napisz do niego wiadomość, a identyfikator czatu odczytasz z
-          <span className="mono"> api.telegram.org/bot&lt;token&gt;/getUpdates</span>.
+          Kanał <strong>w aplikacji</strong> działa zawsze. <strong>WhatsApp</strong> to
+          najszybsza droga na telefon: zapisz numer <span className="mono">+34 644 51 95 23</span>{' '}
+          w kontaktach, wyślij na niego <span className="mono">I allow callmebot to send me messages</span>,
+          a w odpowiedzi dostaniesz klucz API przypisany do swojego numeru.
+          Nie wymaga to konta Meta ani zatwierdzania szablonów.
         </div>
 
         {channels?.length > 0 && (
@@ -310,7 +311,7 @@ function NotificationsSection() {
             <span className="field-label">Typ kanału</span>
             <select className="input-field" value={form.kind}
                     onChange={(e) => setForm({ ...form, kind: e.target.value })}>
-              <option value="telegram">Telegram</option>
+              <option value="whatsapp">WhatsApp</option>
               <option value="webhook">Webhook (HTTPS)</option>
             </select>
           </label>
@@ -318,22 +319,23 @@ function NotificationsSection() {
             <span className="field-label">Etykieta</span>
             <input className="input-field" value={form.label}
                    onChange={(e) => setForm({ ...form, label: e.target.value })}
-                   placeholder="np. telefon" />
+                   placeholder="np. mój telefon" />
           </label>
         </div>
 
-        {form.kind === 'telegram' ? (
+        {form.kind === 'whatsapp' ? (
           <div className="grid grid-2" style={{ gap: 12, marginTop: 12 }}>
             <label className="field" style={{ marginBottom: 0 }}>
-              <span className="field-label">Token bota</span>
-              <input className="input-field mono" type="password" value={form.bot_token}
-                     autoComplete="off"
-                     onChange={(e) => setForm({ ...form, bot_token: e.target.value })} />
+              <span className="field-label">Numer telefonu</span>
+              <input className="input-field mono" value={form.telefon}
+                     placeholder="+48123456789" autoComplete="off"
+                     onChange={(e) => setForm({ ...form, telefon: e.target.value })} />
             </label>
             <label className="field" style={{ marginBottom: 0 }}>
-              <span className="field-label">Identyfikator czatu</span>
-              <input className="input-field mono" value={form.chat_id}
-                     onChange={(e) => setForm({ ...form, chat_id: e.target.value })} />
+              <span className="field-label">Klucz CallMeBot</span>
+              <input className="input-field mono" type="password" value={form.apikey}
+                     autoComplete="off"
+                     onChange={(e) => setForm({ ...form, apikey: e.target.value })} />
             </label>
           </div>
         ) : (
@@ -370,7 +372,7 @@ function NotificationsSection() {
           </label>
         </div>
         <div className="row-body">
-          W godzinach ciszy alerty nie idą na Telegram ani webhook, ale nadal trafiają
+          W godzinach ciszy alerty nie idą na WhatsAppa ani webhook, ale nadal trafiają
           do dzwonka. <strong>Kill-switch i martwy silnik przechodzą zawsze</strong> —
           alert krytyczny, który nie dotarł, jest groźniejszy niż jego brak.
         </div>
@@ -404,7 +406,7 @@ function NotificationsSection() {
                   <div className="row-body">{p.description}</div>
                   {p.enabled && !p.always_on && (
                     <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
-                      {['inapp', 'telegram', 'webhook'].map((k) => (
+                      {['inapp', 'whatsapp', 'webhook'].map((k) => (
                         <button key={k} className={`chip ${p.channels.includes(k) ? 'on' : ''}`}
                                 onClick={() => toggleChannel(p, k)}>
                           {k === 'inapp' ? 'w aplikacji' : k}

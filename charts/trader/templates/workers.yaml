@@ -18,6 +18,7 @@ metadata:
     trader.renacode.com/component: worker
 spec:
   replicas: 1
+  revisionHistoryLimit: {{ $.Values.revisionHistoryLimit | default 3 }}
   # Recreate, nie RollingUpdate: dwa egzemplarze tego samego workera pisalyby
   # rownolegle do tych samych tabel.
   strategy:

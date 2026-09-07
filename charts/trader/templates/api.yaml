@@ -5,6 +5,7 @@ metadata:
   labels: {{- include "trader.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.replicaCount }}
+  revisionHistoryLimit: {{ .Values.revisionHistoryLimit | default 3 }}
   selector:
     matchLabels:
       app: {{ include "trader.fullname" . }}-api

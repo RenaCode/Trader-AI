@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
@@ -15,10 +16,12 @@ router = APIRouter(prefix="/api/notifications", tags=["notifications"])
 
 
 class ChannelBody(BaseModel):
-    kind: str = Field(pattern="^(telegram|webhook)$")
+    kind: str = Field(pattern="^(whatsapp|webhook)$")
     label: str = Field(min_length=1, max_length=64)
-    bot_token: str | None = Field(default=None, max_length=200)
-    chat_id: str | None = Field(default=None, max_length=64)
+    # WhatsApp przez CallMeBot: numer w formacie miedzynarodowym + klucz, ktory
+    # ta bramka przypisuje do NUMERU, a nie do konta.
+    telefon: str | None = Field(default=None, max_length=24)
+    apikey: str | None = Field(default=None, max_length=64)
     url: str | None = Field(default=None, max_length=500)
     secret: str | None = Field(default=None, max_length=200)
 
@@ -106,11 +109,18 @@ async def list_channels(user: dict = Depends(current_user)):
 
 @router.post("/channels", dependencies=[Depends(require_csrf)])
 async def add_channel(body: ChannelBody, request: Request, user: dict = Depends(current_user)):
-    if body.kind == "telegram":
-        if not body.bot_token or not body.chat_id:
-            raise HTTPException(400, "Telegram wymaga tokenu bota i identyfikatora czatu")
-        config = {"bot_token": body.bot_token.strip(), "chat_id": body.chat_id.strip()}
-        hint = "czat " + body.chat_id.strip()[-6:]
+    if body.kind == "whatsapp":
+        if not body.telefon or not body.apikey:
+            raise HTTPException(400, "WhatsApp wymaga numeru telefonu i klucza CallMeBot")
+        telefon = body.telefon.strip().replace(" ", "").replace("-", "")
+        # Numer MUSI byc w formacie miedzynarodowym z plusem. CallMeBot przy
+        # numerze bez kierunkowego nie zwraca bledu - wysyla donikad, a kanal
+        # wyglada na dzialajacy.
+        if not re.fullmatch(r"\+[1-9]\d{7,17}", telefon):
+            raise HTTPException(
+                400, "Numer musi być w formacie międzynarodowym, np. +48123456789")
+        config = {"telefon": telefon, "apikey": body.apikey.strip()}
+        hint = telefon[:3] + "•" * max(0, len(telefon) - 6) + telefon[-3:]
     else:
         if not body.url or not body.url.startswith("https://"):
             raise HTTPException(400, "Webhook wymaga adresu zaczynającego się od https://")
@@ -134,7 +144,7 @@ async def add_channel(body: ChannelBody, request: Request, user: dict = Depends(
 @router.post("/channels/{channel_id}/test", dependencies=[Depends(require_csrf)])
 async def test_channel(channel_id: int, user: dict = Depends(current_user)):
     """Wysyla wiadomosc testowa. Sukces oznacza kanal zweryfikowany."""
-    from ..notifications import _send_telegram, _send_webhook
+    from ..notifications import _send_whatsapp, _send_webhook
 
     ch = await fetch_one(
         "SELECT id, kind::text AS kind, config_enc, label FROM notify.channel"
@@ -147,8 +157,8 @@ async def test_channel(channel_id: int, user: dict = Depends(current_user)):
 
     config = json.loads(SecretBox().decrypt(bytes(ch["config_enc"])))
     try:
-        if ch["kind"] == "telegram":
-            await _send_telegram(config, "Trader AI — test kanału",
+        if ch["kind"] == "whatsapp":
+            await _send_whatsapp(config, "Trader AI — test kanału",
                                  "Jeśli to widzisz, powiadomienia działają.", "info")
         else:
             await _send_webhook(config, {"event": "channel.test", "severity": "info",

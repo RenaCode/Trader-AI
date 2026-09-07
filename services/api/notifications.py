@@ -2,7 +2,7 @@
 
 Jedno wejscie dla calego systemu: `notify(...)`. Kazde zdarzenie najpierw laduje
 w tabeli powiadomien (zrodlo prawdy), a dopiero potem sa proby dostarczenia -
-dzieki temu awaria Telegrama nie gubi zdarzenia, tylko jego doreczenie.
+dzieki temu awaria bramki nie gubi zdarzenia, tylko jego doreczenie.
 
 Dwie reguly, ktorych nie da sie obejsc ustawieniami:
   - zdarzenie `always_on` dochodzi zawsze, takze w godzinach ciszy
@@ -31,17 +31,43 @@ def _in_quiet_hours(now_local: time, start: time | None, end: time | None) -> bo
     return now_local >= start or now_local < end
 
 
-async def _send_telegram(config: dict, title: str, body: str, severity: str) -> None:
+# CallMeBot: darmowa bramka do WhatsAppa. Rejestracja polega na wyslaniu jednej
+# wiadomosci na ich numer; w odpowiedzi przychodzi klucz przypisany DO TEGO
+# NUMERU. Wysylka to jedno GET.
+#
+# DLACZEGO NIE OFICJALNE API META. Poza 24-godzinnym oknem od ostatniej
+# wiadomosci uzytkownika Meta przepuszcza WYLACZNIE zatwierdzone szablony ze
+# zmiennymi. Alert dziala wiec podczas testu - bo test robi sie zaraz po
+# napisaniu do bota - i przestaje dzialac dobe pozniej. Cicho. Dla systemu,
+# ktorego jedynym zadaniem jest odezwac sie, gdy cos jest nie tak, to jest
+# najgorszy mozliwy tryb awarii.
+#
+# Cena za to: CallMeBot jest usluga nieoficjalna i ma wlasne ograniczenie tempa.
+# Dlatego kazde niepowodzenie ladu je w notify.delivery ze statusem 'failed'
+# i trescia bledu - kanal, ktory przestal dzialac, ma byc widoczny w interfejsie,
+# a nie domyslany z ciszy.
+WHATSAPP_URL = "https://api.callmebot.com/whatsapp.php"
+
+
+async def _send_whatsapp(config: dict, title: str, body: str, severity: str) -> None:
     icon = {"critical": "\U0001F534", "warning": "\U0001F7E0", "info": "\U0001F535"}[severity]
-    text = f"{icon} *{title}*\n\n{body}" if body else f"{icon} *{title}*"
-    async with httpx.AsyncClient(timeout=15.0) as c:
-        r = await c.post(
-            f"https://api.telegram.org/bot{config['bot_token']}/sendMessage",
-            json={"chat_id": config["chat_id"], "text": text[:4000],
-                  "parse_mode": "Markdown", "disable_web_page_preview": True},
-        )
+    text = f"{icon} {title}\n\n{body}" if body else f"{icon} {title}"
+    async with httpx.AsyncClient(timeout=20.0) as c:
+        r = await c.get(WHATSAPP_URL, params={
+            "phone": config["telefon"],
+            "apikey": config["apikey"],
+            "text": text[:900],
+        })
+        # CallMeBot odpowiada 200 takze wtedy, gdy odmawia - powod siedzi
+        # w tresci. Sam kod odpowiedzi nie wystarcza wiec za potwierdzenie.
+        tresc = r.text[:300]
         if r.status_code != 200:
-            raise RuntimeError(f"Telegram zwrocil {r.status_code}: {r.text[:200]}")
+            raise RuntimeError(f"CallMeBot zwrocil {r.status_code}: {tresc}")
+        nisko = tresc.lower()
+        if "apikey" in nisko and ("invalid" in nisko or "not" in nisko):
+            raise RuntimeError(f"CallMeBot odrzucil klucz: {tresc}")
+        if "error" in nisko:
+            raise RuntimeError(f"CallMeBot: {tresc}")
 
 
 async def _send_webhook(config: dict, payload: dict) -> None:
@@ -62,7 +88,7 @@ async def powiadom_o_bezpieczenstwie(user_id: int, event_code: str, title: str,
 
     Zdarzenia bezpieczenstwa - nowe logowanie, zmiana klucza, zmiana hasla - sa
     zgłaszane W TRAKCIE obslugi zadania uzytkownika. Wyjatek z kanalu
-    powiadomien (niedostepny Telegram, blad webhooka, zerwane polaczenie) nie
+    powiadomien (niedostepny WhatsApp, blad webhooka, zerwane polaczenie) nie
     moze wywrocic logowania ani zapisu klucza.
 
     Mechanizm ostrzegania, ktory potrafi zablokowac chroniona operacje, jest
@@ -133,7 +159,7 @@ async def notify(user_id: int, event_code: str, title: str, body: str = "",
     if et["always_on"]:
         # Zdarzenie krytyczne idzie wszystkimi skonfigurowanymi kanalami,
         # niezaleznie od preferencji dla tego typu.
-        wanted = {"inapp", "telegram", "webhook"}
+        wanted = {"inapp", "whatsapp", "webhook"}
 
     channels = await fetch_all(
         "SELECT id, kind::text AS kind, config_enc, label FROM notify.channel"
@@ -156,8 +182,8 @@ async def notify(user_id: int, event_code: str, title: str, body: str = "",
 
         try:
             config = json.loads(box.decrypt(bytes(ch["config_enc"]))) if ch["config_enc"] else {}
-            if ch["kind"] == "telegram":
-                await _send_telegram(config, title, body, sev)
+            if ch["kind"] == "whatsapp":
+                await _send_whatsapp(config, title, body, sev)
             else:
                 await _send_webhook(config, {
                     "event": event_code, "severity": sev, "title": title,

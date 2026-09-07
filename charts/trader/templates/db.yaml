@@ -17,6 +17,7 @@ metadata:
   labels: {{- include "trader.labels" . | nindent 4 }}
 spec:
   replicas: 1
+  revisionHistoryLimit: {{ .Values.revisionHistoryLimit | default 3 }}
   # Recreate, nie RollingUpdate: dwa Postgresy nie moga trzymac tego samego PVC.
   strategy:
     type: Recreate

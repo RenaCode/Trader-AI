@@ -1,4 +1,8 @@
 replicaCount: 1
+
+# Ile starych ReplicaSetow trzymac po rolloucie. Domyslne k8s to 10, co przy
+# deployu z kazdego pusha uzbieralo 115 pustych RS w ~2.5 miesiaca.
+revisionHistoryLimit: 3
 # Repo jest prywatne, wiec pakiety w ghcr.io tez - a k3s nie ma PAT-a z read:packages.
 # Do czasu jego dodania obrazy sa budowane NA VPS i importowane do containerd
 # (scripts/build-on-vps.sh), dlatego pullPolicy ponizej to IfNotPresent, a lista
