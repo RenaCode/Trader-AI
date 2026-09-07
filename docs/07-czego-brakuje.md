@@ -118,7 +118,7 @@ odnawiany przy każdej próbie** — zawiera znacznik czasu, a `recv_window` to
 pięć sekund, więc ponowienie ze starym podpisem zostałoby odrzucone jako błąd
 uwierzytelnienia i skierowało szukanie na klucz zamiast na sieć.
 
-### 5. Brak eksportu transakcji
+### 5. Brak eksportu transakcji — **ZROBIONE 2026-09-07**
 
 Żaden endpoint nie oddaje historii w formacie do dalszego użytku. Przy handlu
 automatycznym liczba transakcji rośnie szybko, a każda jest zdarzeniem
@@ -126,6 +126,17 @@ podatkowym. Dane są w bazie i są kompletne — brakuje wyłącznie wyjścia.
 
 To jedyna pozycja na tej liście, którą można zbudować **w każdej chwili**, bo
 nie zależy od egzekucji.
+
+**Zamknięte.** Dwa widoki, bo odpowiadają na dwa różne pytania: `wypelnienia`
+(pojedyncze zdarzenia — surowy materiał do rozliczeń) i `pozycje` (zamknięte
+przejścia z wynikiem **po kosztach**, liczonym w pliku, a nie zostawionym
+odbiorcy — `realized_pnl` w bazie jest przed prowizją).
+
+Trzy decyzje formatu, każda z powodem: **`tryb` jest pierwszą kolumną w każdym
+wierszu**, bo plik bez tego po przesłaniu dalej wygląda jak wyciąg z prawdziwego
+konta; liczby idą z kropką i pełną precyzją, bo plik ma być źródłem, a nie
+prezentacją; wariant `excel` dokłada BOM i średnik, bo polski Excel inaczej psuje
+znaki i wsadza wiersz do jednej komórki.
 
 ### 6. Dryf zegara nie jest sprawdzany
 
@@ -167,6 +178,6 @@ Nie każda luka jest brakiem.
 
 1. ~~Wpłaty i wypłaty w modelu kapitału~~ — **zrobione**, migracja 0031.
 2. ~~Ponawianie u giełdy~~ — **zrobione**, trzy próby z odnawianym podpisem.
-3. **Eksport transakcji** — tani, niezależny od egzekucji, rośnie z czasem.
+3. ~~Eksport transakcji~~ — **zrobione**, dwa widoki CSV.
 4. **Sprawdzenie zegara przy starcie** — jedno zapytanie.
 5. Reszta wchodzi razem z egzekucją i nie ma sensu wcześniej.
