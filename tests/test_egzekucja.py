@@ -221,3 +221,28 @@ def test_brak_klucza_NIE_jest_zgodnoscia():
     nie sprawdzono."""
     zrodlo = Path("services/engine/uzgodnienie.py").read_text(encoding="utf-8")
     assert "nie ma z czym porównać" in zrodlo
+
+
+def test_kazdy_budowniczy_adaptera_bierze_HOST_Z_BAZY():
+    """Pułapka, w którą projekt już raz wszedł — i to po tym, jak ją opisał.
+
+    Podmiot unijny ma własne hosty. Klucz z bybit.eu odbity od hosta globalnego
+    wraca z kodem 10003, czyli komunikatem NIE DO ODRÓŻNIENIA od złego klucza:
+    szukanie idzie wtedy na klucz, a wina jest w adresie.
+
+    Każde miejsce budujące adapter musi więc podać host jawnie. Test sprawdza
+    wszystkie naraz, bo następne takie miejsce powstanie za miesiąc i nikt nie
+    będzie pamiętał.
+    """
+    budowniczowie = [
+        "services/api/routers/credentials.py",
+        "services/engine/uzgodnienie.py",
+    ]
+    for plik in budowniczowie:
+        zrodlo = Path(plik).read_text(encoding="utf-8")
+        if "BybitAdapter(" not in zrodlo:
+            continue
+        fragment = zrodlo.split("BybitAdapter(")[1][:400]
+        assert "host=" in fragment, (
+            f"{plik}: adapter budowany bez jawnego hosta — klucz z bybit.eu "
+            f"odbije się od globalnego z kodem nie do odróżnienia od złego klucza")

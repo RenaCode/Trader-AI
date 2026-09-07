@@ -146,7 +146,8 @@ async def main() -> int:
     await open_pool()
     try:
         cred = await fetch_one(
-            "SELECT c.key_enc, c.secret_enc FROM app.api_credential c"
+            "SELECT c.key_enc, c.secret_enc, v.demo_host, v.live_host"
+            " FROM app.api_credential c"
             " JOIN ref.venue v ON v.id = c.venue_id"
             " WHERE v.code = 'bybit' AND c.mode::text = %s AND c.active"
             " ORDER BY c.id LIMIT 1", (args.mode,))
@@ -157,9 +158,18 @@ async def main() -> int:
                   f"nie ma z czym porównać")
             return 0
         box = SecretBox()
+        # HOST Z ref.venue, nie z tablicy w adapterze.
+        #
+        # Podmiot unijny ma wlasne hosty, a klucz z bybit.eu odbity od hosta
+        # globalnego wraca z kodem 10003 - komunikatem nie do odroznienia od
+        # zlego klucza. Adapter ostrzega przed tym w komentarzu, a mimo to
+        # pierwsza wersja tego modulu podala sam tryb i dostala "API key is
+        # invalid" na kluczu, ktory jest w porzadku.
         adapter = BybitAdapter(api_key=box.decrypt(bytes(cred["key_enc"])),
                                api_secret=box.decrypt(bytes(cred["secret_enc"])),
-                               mode=args.mode)
+                               mode=args.mode,
+                               host=cred["demo_host"] if args.mode == "demo"
+                               else cred["live_host"])
         try:
             return await uzgodnij(fetch_all, notify, adapter,
                                   engine=args.engine, mode=args.mode, sucho=args.sucho)
