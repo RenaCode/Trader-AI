@@ -5,15 +5,19 @@ automatycznego handlu mają jako standard. Każda pozycja jest zweryfikowana
 odczytem źródeł, nie dokumentacji.
 
 Pozycje zamknięte znikają z tej listy — historia jest w gicie. Przegląd powstał
-2026-09-07 z siedmioma pozycjami; tego samego dnia zamknięto osiem: przepływy
-kapitału, ponawianie u giełdy, eksport transakcji, dryf zegara, uzgadnianie
-z giełdą, reguły zleceń, wypełnienia częściowe i zdejmowanie zleceń przez
-kill-switch.
+2026-09-07 z siedmioma pozycjami. Przez dwie doby zamknięto ich kilkanaście,
+a **większość nie pochodziła z tego przeglądu, tylko z pomiaru i z audytu kodu**:
+przepływy kapitału, ponawianie u giełdy, eksport transakcji, dryf zegara,
+uzgadnianie z giełdą, reguły zleceń, wypełnienia częściowe, zdejmowanie zleceń
+przez kill-switch, rozdzielenie uprawnień bazodanowych, puls procesów tła,
+bramka promocji modelu, delisting, pasmo ceny i sprzątanie zleceń.
 
-Trzy pozycje **dopisano po pomiarze**, nie po przeglądzie dokumentacji: brak
-reguł handlu w bazie (dotyczył 10 z 12 instrumentów), niezdolność demo podmiotu
-unijnego do uzgodnienia sald oraz `|| true` w komendach pięciu podów, które
-połykało każdą awarię.
+Warto zapisać, skąd brały się najgroźniejsze z nich, bo to mówi więcej niż sama
+lista. **Żadna nie objawiała się awarią.** Silnik rozstrzygał co drugą świecę
+i meldował „już rozstrzygnięte"; tryb `live` nie miał ani jednego limitu ryzyka
+i zwracał werdykt `allow`; cena limitu powstawała z innej księgi niż ta, w której
+zlecenie lądowało; wyjście przyciągane do krawędzi pasma lądowało 10% nad rynkiem
+i nigdy się nie wypełniało. Wszystkie cztery wyglądały w logu na zdrowie.
 
 ---
 
@@ -77,32 +81,34 @@ Znaczy to, że ta konkretna obrona **pierwszy raz zadziała w pełni na żywym
 rachunku**. Ryzyko jest ograniczone (ścieżka z rejestru jest przećwiczona
 i wspólna), ale nie jest zerowe i musi być wypowiedziane.
 
-## 3. ~~Rozdzielenie uprawnień bazodanowych~~ — zrobione (migracja 0034)
+## 3. Waluta, w której brzmi obietnica
 
-Było: silnik, dozorca i API chodziły na tej samej roli `trader_app`, więc nic
-nie **wymuszało**, że silnik nie zwolni sobie kill-switcha — nie robił tego, bo
-nie miał takiego kodu, a nie dlatego, że nie mógł.
+Risk kernel mierzy w `quote_ccy`, czyli w USDC; próg `min_equity` jest progiem
+w USDC. Rail fiatowy podmiotu unijnego to EUR, a właściciel myśli w złotówkach.
 
-Jest: pięć ról, po jednej na proces. Rola silnika ma na `risk.killswitch_event`
-`SELECT` i `INSERT` — czyta zatrzymanie i potrafi go zażądać — ale **nie ma
-`UPDATE` ani `DELETE`**, więc próba zwolnienia kończy się `InsufficientPrivilege`
-i zatrzymaniem poda. Nie ma też prawa zmienić `risk.limit_def`, co jest tym samym
-wyłączeniem bezpiecznika, tylko cichszym: podniesiony próg nie zostawia wiersza
-w dzienniku ani nie wysyła powiadomienia.
+Zmierzone na `USDCEUR` (452 dni): zakres 0,8318–0,8806, czyli **5,9% wahania**.
+Zmierzony wynik strategii to około **2,9% rocznie**.
 
-Rozdział działa w obie strony: dozorca zwalnia (trzy kolumny zwolnienia, bez
-prawa przepisania `reason` i `triggered_at`), ale nie może zapisać zlecenia ani
-pozycji i nie ma dostępu do zaszyfrowanych kluczy giełdy.
+Znaczy to, że stan „kill-switch zielony, wszystkie limity w normie, rachunek
+10 000 USDC" jest w pełni zgodny ze stanem „właściciel ma o kilka procent mniej,
+niż wpłacił". **Bezpiecznik jest z konstrukcji ślepy na tę stratę, bo mierzy
+w walucie, w której jej nie widać.**
 
-Co z tego nadal zostaje długiem:
+To nie jest usterka do naprawienia w kodzie, tylko definicja do ustalenia:
+w jakiej walucie brzmi warunek „bez minusa". Druga krzywa kapitału jest
+w budowie; czy próg ma stać w USDC czy w walucie właściciela, pozostaje jego
+decyzją.
 
-- **Jedna baza, nie jedna instancja.** Role dzielą ten sam serwer Postgresa.
-  Właściciel schematów (`trader`) może wszystko, a migrator chodzi jego rolą
-  w podzie API — kompromitacja obrazu API nadal daje pełny dostęp.
-- **Próba pożarowa może podnieść próg kapitału.** Musi, bo na tym polega. Nie
-  może natomiast wyłączyć limitu (`enabled`) ani zmienić jego akcji.
+## 4. Dryf cech jest wysoki i milczący
 
----
+Zmierzone na produkcji: PSI **0,695** przy progu alarmowym 0,25, utrzymujące się
+od dni. Powiadomienie `learning.drift_high` nie zostało wysłane **ani razu**.
+
+Dozór zgłasza ZMIANĘ, nie stan — i jest to reguła świadoma, bo powiadomienie
+przychodzące zawsze przestaje cokolwiek znaczyć. Skutkiem ubocznym jest jednak
+to, że **stan trwale zły milczy na zawsze**: model handluje na cechach, których
+rozkład odjechał od treningowego prawie trzykrotnie ponad próg, i nikt się o tym
+nie dowie.
 
 ## Czego świadomie NIE robimy
 
