@@ -131,3 +131,39 @@ def rozjazd_z_ulamkow(pary: list[tuple[str, Decimal]]) -> dict:
         "czesciowych": sum(1 for r, _ in weszly if r == "czesciowe"),
         "nie_do_zamkniecia": sum(1 for r, _ in weszly if r == "nie_do_zamkniecia"),
     }
+
+
+def rozlicz_prowizje(ilosc: Decimal, cena: Decimal, prowizja: Decimal,
+                     prowizja_w: str | None, base_ccy: str,
+                     quote_ccy: str) -> tuple[Decimal, Decimal]:
+    """Ile aktywa NAPRAWDĘ mamy i ile to kosztowało. CZYSTA FUNKCJA.
+
+    Zwraca (ilość_netto, prowizja_w_walucie_kwotowanej).
+
+    NA SPOCIE KUPNO PŁACI PROWIZJĘ W KUPIONYM AKTYWIE. Bybit potrąca ją
+    z otrzymanej ilości: zlecenie na 1,0 SOL przy makerze 0,1% daje nam 0,999
+    SOL. Zapisanie 1,0 do `exec.position.qty` tworzy pozycję, której NIE DA SIĘ
+    SPRZEDAĆ — sygnał wyjścia planuje sprzedaż całości, giełda odrzuca ją za brak
+    salda, plan wygasa, następna świeca powtarza to samo. **Nie ma nic, co tę
+    pętlę przerwie**, bo każdy przebieg wygląda tak samo jak poprzedni.
+
+    Uzgodnienie z giełdą odejmowało tę prowizję od początku (`pozycje_z_wypelnien`)
+    — czyli jedna strona porównania liczyła netto, a druga brutto. Różnica wynosi
+    0,1% i przy `UZGODNIENIE_TOLERANCJA = 0.001` leży DOKŁADNIE na granicy: przy
+    innej stawce makera każda pozycja alarmowałaby jako pozycja-widmo.
+
+    KOSZT PRZELICZAMY NA WALUTĘ KWOTOWANĄ, bo `update_equity` sumuje `fees_paid`
+    jako liczby bez jednostki. Prowizja 0,01 SOL wpisana wprost odejmowała od
+    kapitału 0,01 zamiast około 1,40 — zaniżenie stukrotne, i to w stronę, która
+    ZAWYŻA kapitał, więc obsunięcie wychodzi mniejsze i kill-switch strzela
+    później, niż powinien.
+
+    Gdy prowizja jest w walucie kwotowanej (tak jest przy sprzedaży), ilość
+    zostaje nietknięta, a koszt bierzemy wprost.
+    """
+    if prowizja_w and prowizja_w.upper() == base_ccy.upper():
+        return ilosc - prowizja, prowizja * cena
+    # Waluta kwotowana albo nieznana. Nieznana traktowana jak kwotowana, bo taka
+    # jest konwencja wiekszosci gield - ale wtedy NIE RUSZAMY ilosci, zeby
+    # domysl nie zmienial tego, co uwazamy za posiadane.
+    return ilosc, prowizja

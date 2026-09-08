@@ -31,7 +31,7 @@ import json
 from datetime import datetime
 from decimal import Decimal
 
-from services.engine.egzekucja import co_z_wypelnieniem
+from services.engine.egzekucja import co_z_wypelnieniem, rozlicz_prowizje
 from services.engine.loop import zapisz_wejscie, zapisz_wyjscie
 from services.engine.zlecenia import Filtry, sprawdz_zlecenie
 from services.exchanges.base import ExchangeError
@@ -263,6 +263,14 @@ async def rozstrzygnij_plan(cur, adapter, plan: dict, f: Filtry, *, engine: str,
     # o dwa rzedy wielkosci - a przy przewadze mierzonej w dziesiatych czesciach
     # procenta to nie jest zaokraglenie.
     prowizja_ccy = stan.prowizja_w or plan["quote_ccy"]
+
+    # ILE NAPRAWDE MAMY I ILE TO KOSZTOWALO. Na spocie kupno placi prowizje
+    # w kupionym aktywie, wiec zlecenie na 1,0 daje nam 0,999. Zapis brutto
+    # tworzy pozycje NIE DO SPRZEDANIA: wyjscie prosi o calosc, gielda odrzuca
+    # za brak salda, plan wygasa i nastepna swieca powtarza to samo bez konca.
+    ilosc_netto, prowizja_kwot = rozlicz_prowizje(
+        r.ilosc, cena, prowizja, stan.prowizja_w,
+        plan.get("base_ccy") or "", plan["quote_ccy"])
     uwaga = None
     rodzaj_zwrotny, powod_zwrotny = r.rodzaj, r.powod
 
@@ -306,7 +314,7 @@ async def rozstrzygnij_plan(cur, adapter, plan: dict, f: Filtry, *, engine: str,
             powod_zwrotny = uwaga + f" ({r.powod})"
     else:
         zapisz_wejscie(cur, engine, mode, plan["instrument_id"], plan["decision_id"],
-                       plan["side"], r.ilosc, cena, prowizja, teraz,
+                       plan["side"], ilosc_netto, cena, prowizja_kwot, teraz,
                        plan["quote_ccy"], meta, planned_order_id=plan["id"],
                        venue_order_id=stan.id_gieldy, client_order_id=id_w,
                        venue_fill_id=f"{stan.id_gieldy}",
@@ -365,7 +373,7 @@ async def zloz_oczekujace(cur, adapter, *, engine: str, mode: str,
     filtry = filtry_z_bazy(cur, engine)
     cur.execute(
         "SELECT p.id, p.decision_id, p.instrument_id, p.side, p.qty, p.limit_price,"
-        "       p.trigger, p.valid_until, i.symbol, i.quote_ccy,"
+        "       p.trigger, p.valid_until, i.symbol, i.quote_ccy, i.base_ccy,"
         # ATR do pasma ceny. Nieznana zmiennosc nie wylacza pasma - daje pasmo
         # awaryjne - ale zawezenie go realna zmiennoscia pary jest cala wartoscia
         # tego progu: stala liczba jest albo krzykliwa, albo bezuzyteczna.
@@ -409,7 +417,7 @@ async def rozstrzygnij_oczekujace(cur, adapter, *, engine: str, mode: str,
     filtry = filtry_z_bazy(cur, engine)
     cur.execute(
         "SELECT p.id, p.decision_id, p.instrument_id, p.side, p.qty, p.limit_price,"
-        "       p.trigger, p.valid_until, i.symbol, i.quote_ccy"
+        "       p.trigger, p.valid_until, i.symbol, i.quote_ccy, i.base_ccy"
         "  FROM journal.planned_order p"
         "  JOIN ref.instrument i ON i.id = p.instrument_id"
         " WHERE p.status = 'pending' ORDER BY p.id")

@@ -68,3 +68,59 @@ def test_nadwyzka_ponad_plan_nie_powieksza_pozycji():
 def test_plan_o_zerowej_ilosci_nie_przechodzi_po_cichu():
     with pytest.raises(ValueError):
         co_z_wypelnieniem(D("0"), D("0"), D("100"), F)
+
+
+# ------------------------------- prowizja pobrana w kupionym aktywie
+
+def test_prowizja_w_aktywie_ZMNIEJSZA_posiadana_ilosc():
+    """Zlecenie na 1,0 SOL przy makerze 0,1% daje nam 0,999 SOL — Bybit potrąca
+    prowizję z otrzymanej ilości.
+
+    Zapisanie 1,0 tworzy pozycję, KTÓREJ NIE DA SIĘ SPRZEDAĆ: sygnał wyjścia
+    planuje sprzedaż całości, giełda odrzuca ją za brak salda, plan wygasa,
+    następna świeca powtarza to samo. Nic tej pętli nie przerywa, bo każdy
+    przebieg wygląda identycznie jak poprzedni.
+    """
+    from services.engine.egzekucja import rozlicz_prowizje
+
+    ilosc, koszt = rozlicz_prowizje(D("1.0"), D("140"), D("0.001"),
+                                    "SOL", "SOL", "USDC")
+    assert ilosc == D("0.999")
+    assert koszt == D("0.140")
+
+
+def test_prowizja_w_aktywie_JEST_PRZELICZANA_na_walute_kwotowana():
+    """`update_equity` sumuje `fees_paid` jako liczby bez jednostki. Prowizja
+    0,001 SOL wpisana wprost odejmowała od kapitału 0,001 zamiast 0,14 —
+    zaniżenie stukrotne.
+
+    Kierunek jest najgorszy z możliwych: ZAWYŻA kapitał, więc obsunięcie wychodzi
+    mniejsze i kill-switch strzela później, niż powinien.
+    """
+    from services.engine.egzekucja import rozlicz_prowizje
+
+    _, koszt = rozlicz_prowizje(D("1.0"), D("140"), D("0.001"),
+                                "SOL", "SOL", "USDC")
+    assert koszt == D("0.14")
+    assert koszt != D("0.001")
+
+
+def test_prowizja_w_walucie_kwotowanej_NIE_rusza_ilosci():
+    """Przy sprzedaży prowizja idzie w walucie kwotowanej — odjęcie jej od
+    ilości byłoby wtedy odejmowaniem jabłek od gruszek."""
+    from services.engine.egzekucja import rozlicz_prowizje
+
+    ilosc, koszt = rozlicz_prowizje(D("1.0"), D("140"), D("0.14"),
+                                    "USDC", "SOL", "USDC")
+    assert ilosc == D("1.0")
+    assert koszt == D("0.14")
+
+
+def test_NIEZNANA_waluta_prowizji_nie_zmienia_tego_co_uwazamy_za_posiadane():
+    """Domysł może być potrzebny przy koszcie, ale nie przy ilości: pomyłka
+    w drugą stronę stworzyłaby pozycję-widmo z niczego."""
+    from services.engine.egzekucja import rozlicz_prowizje
+
+    ilosc, _ = rozlicz_prowizje(D("1.0"), D("140"), D("0.14"),
+                                None, "SOL", "USDC")
+    assert ilosc == D("1.0")
