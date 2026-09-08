@@ -34,12 +34,21 @@ import os
 import sys
 from datetime import datetime, timedelta, timezone
 
+from pathlib import Path
+
 import psycopg
 from psycopg.rows import dict_row
 
-from services.exchanges.base import ExchangeError
-from services.exchanges.bybit import BybitAdapter
-from services.ingest.funding import ensure_perp, missing_ranges
+# Korzen repozytorium na sciezce importu. Uruchomienie `python
+# services/ingest/pozycjonowanie.py` ustawia sys.path[0] na katalog SKRYPTU,
+# nie na korzen - bez tego `import services.*` konczy sie
+# ModuleNotFoundError dopiero przy uruchomieniu, mimo ze testy przechodza.
+# Tak samo robia funding.py, instrumenty.py i history_worker.py.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from services.exchanges.base import ExchangeError  # noqa: E402
+from services.exchanges.bybit import BybitAdapter  # noqa: E402
+from services.ingest.funding import ensure_perp, missing_ranges  # noqa: E402
 
 # Siatka godzinowa - taka, jaką oddaje giełda dla obu tych wielkości.
 INTERVAL_H = 1

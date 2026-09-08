@@ -198,3 +198,39 @@ def test_pozycjonowanie_NIE_DOTYKA_decyzji_ani_ryzyka():
                      "killswitch"):
         assert zakazane not in zrodlo, (
             f"kolektor danych sięga po {zakazane} — to już nie jest zbieranie")
+
+
+def test_KAZDY_uruchamialny_skrypt_ma_korzen_na_sciezce_importu():
+    """Uruchomienie `python services/ingest/cos.py` ustawia `sys.path[0]` na
+    katalog SKRYPTU, nie na korzeń repozytorium — więc `import services.*`
+    kończy się `ModuleNotFoundError`.
+
+    Testy tego nie łapią z definicji: pytest startuje z korzenia, więc import
+    działa. Awaria pojawia się dopiero przy uruchomieniu — i tak właśnie padło
+    zadanie backfillu na produkcji 2026-09-08, po przejściu wszystkich testów.
+
+    Ten test sprawdza WSZYSTKIE skrypty uruchamialne, a nie tylko ten jeden:
+    pułapka jest cechą sposobu uruchamiania, nie konkretnego pliku.
+    """
+    import ast
+    from pathlib import Path
+
+    korzen = Path(__file__).resolve().parents[1]
+    winne = []
+    for plik in sorted((korzen / "services").rglob("*.py")):
+        zrodlo = plik.read_text(encoding="utf-8")
+        drzewo = ast.parse(zrodlo)
+        uruchamialny = any(
+            isinstance(w, ast.If) and "__main__" in ast.dump(w.test)
+            for w in drzewo.body)
+        if not uruchamialny:
+            continue
+        importuje_services = any(
+            isinstance(w, ast.ImportFrom) and (w.module or "").startswith("services")
+            for w in ast.walk(drzewo))
+        if importuje_services and "sys.path.insert" not in zrodlo:
+            winne.append(str(plik.relative_to(korzen)))
+
+    assert not winne, (
+        "skrypty uruchamialne bez korzenia na sys.path — padną przy "
+        "`python <plik>`: " + ", ".join(winne))
