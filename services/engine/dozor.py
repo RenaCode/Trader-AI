@@ -782,11 +782,212 @@ async def sprawdz_instrumenty(fetch_all, notify, sucho: bool = False, *,
     return len(powody)
 
 
+# ------------------------------------------------------- puls workerow danych
+#
+# Ile CYKLI DANEGO WORKERA moze minac bez pulsu, zanim uznamy go za martwego.
+#
+# Prog wyprowadzony z interwalu, nie jedna liczba dla wszystkich: `market`
+# chodzi co 60 s, a `history` co 1200 s, wiec kwadrans ciszy znaczy przy nich
+# co innego. Jedna wspolna liczba albo krzyczalaby na historii, albo milczala
+# przy rynku - a czujka, ktora robi jedno z tych dwoch, nie jest czujka.
+#
+# Trzy cykle, a nie dwa - z tego samego powodu co SWIEC_ZWLOKI wyzej. Prog
+# dwoch lezalby na gornej granicy normy (cykl trwa niezerowo, a jego dlugosc
+# jest zmienna) i migalby kilka razy dziennie. Ta sama liczba stoi zreszta za
+# MARTWY_PO_MIN: 15 minut to dokladnie trzy cykle petli decyzyjnej po 300 s.
+CYKLI_ZWLOKI = 3
+
+# Podloga progu. Bez niej `market` (60 s) dostalby prog trzech minut, a to jest
+# mniej niz:
+#
+#   * okres samej czujki - zadanie cykliczne chodzi co 10 minut (values.yaml,
+#     zywotnoscCron.schedule), wiec prog krotszy niz jej wlasna rozdzielczosc
+#     opisuje stan, ktorego ta czujka nie umie zobaczyc,
+#   * czas restartu poda - pobranie obrazu, start procesu i pierwszy pelny cykl
+#     to minuty. Kazde wdrozenie konczyloby sie alarmem o martwym workerze.
+#
+# 15 minut to ta sama podloga, ktora MARTWY_PO_MIN daje silnikowi, i z tego
+# samego powodu. Czujka, ktora miga, jest tak samo bezuzyteczna jak falszywa:
+# obie ucza odbiorce, ze mozna je pomijac.
+#
+# Progi wychodza z tego takie: market 15 min, news 15 min, features 45 min,
+# history 60 min.
+MIN_PROG_S = 900
+
+
+def ocen_puls_workerow(wiersze: list[dict], cykli_zwloki: int = CYKLI_ZWLOKI,
+                       min_prog_s: int = MIN_PROG_S,
+                       prog_s: int | None = None) -> list[tuple[str, str, str]]:
+    """Ktore workery danych zamilkly. CZYSTA FUNKCJA.
+
+    Zwraca liste (worker, tytul, tresc) - pusta znaczy: wszystkie bija.
+
+    JEDEN WARUNEK ALARMU, NIE DWA
+    -----------------------------
+    Alarmuje wylacznie wiek `last_beat_at`. Kusi, zeby dolozyc drugi warunek na
+    `awarii_pod_rzad`, ale to bylby ten sam problem zgloszony dwa razy: worker
+    konczacy cykle bledem NIE odswieza `last_beat_at` z definicji (patrz
+    services/ingest/puls.py), wiec i tak wpadnie w ten warunek. Dwa powiadomienia
+    o jednej awarii ucza odbiorce, ze mozna je pomijac - a to jest ta sama szkoda
+    co czujka falszywa.
+
+    Kolumny awarii zmieniaja wiec TRESC, a nie liczbe alarmow. I to jest ich
+    cala wartosc, bo rozdzielaja dwa stany nie do odroznienia po samym pulsie:
+
+        proces STOI            ostatnia proba jest rownie stara co puls
+        proces NIE DAJE RADY   ostatnia proba jest swieza, jest opis bledu
+
+    Pierwszy to „zajrzyj, czy pod zyje". Drugi to „gielda odmawia od godziny".
+    """
+    powody: list[tuple[str, str, str]] = []
+    for w in wiersze:
+        interwal = int(w["interwal_s"])
+        prog = prog_s if prog_s is not None else max(cykli_zwloki * interwal,
+                                                     min_prog_s)
+        if w["wiek_s"] <= prog:
+            continue
+
+        # Ostatnia proba rownie stara jak puls => proces nie zaczyna cyklu.
+        # Swieza => cykle sie koncza, tylko bledem.
+        pracuje = (w["proba_wiek_s"] is not None and w["proba_wiek_s"] <= prog
+                   and w["proba_wiek_s"] < w["wiek_s"])
+        if pracuje:
+            tytul = f"Worker {w['worker']} nie domyka cykli"
+            diagnoza = (
+                f"Proces ODPOWIADA — ostatnia próba {w['proba_wiek_s'] / 60:.0f} min "
+                f"temu — ale kończy cykle błędem: {w['awarii_pod_rzad']} pod rząd.\n"
+                f"Ostatni błąd: {w['ostatni_blad'] or 'bez opisu'}\n\n"
+                f"To NIE jest zawieszony proces. Szukaj po stronie źródła danych "
+                f"albo bazy, nie poda.")
+        else:
+            proba = ("brak" if w["proba_wiek_s"] is None
+                     else f"{w['proba_wiek_s'] / 60:.0f} min temu")
+            tytul = f"Worker {w['worker']} zamilkł"
+            diagnoza = (
+                f"Proces nie domknął ANI JEDNEJ próby w tym oknie "
+                f"(ostatnia: {proba}).\n\n"
+                f"Tak wygląda proces ZAWIESZONY, a nie martwy: nie kończy cyklu, "
+                f"więc nie podnosi licznika awarii, nie kończy się i nie "
+                f"restartuje. `kubectl get pods` pokazuje `Running` bez końca.")
+
+        powody.append((
+            w["worker"], tytul,
+            f"Ostatni UDANY cykl {w['wiek_s'] / 60:.0f} min temu, próg to "
+            f"{prog / 60:.0f} min ({cykli_zwloki} cykle po {interwal} s).\n\n"
+            f"{diagnoza}\n\n"
+            f"Sprawdź: kubectl logs deploy/trader-{w['worker']} --tail=50"))
+    return powody
+
+
+async def sprawdz_puls_workerow(fetch_all, notify, sucho: bool = False,
+                                prog_min: int | None = None) -> int:
+    """Czy cztery procesy wejscia danych domykaja cykle.
+
+    DLACZEGO TO NIE JEST `--co swiezosc` JESZCZE RAZ
+
+    Swiezosc wykrywa SKUTEK: dane przestaly naplywac. To dobra obrona i ta jej
+    nie zastepuje - lapie tez awarie, ktorych puls nie zobaczy (skasowany
+    Deployment, zapchany dysk, worker piszacy nie tam, gdzie trzeba). Ale
+    odpowiada dopiero po czasie jednej swiecy zrodlowej (przy 1h - trzy
+    godziny), nie odroznia „worker stoi" od „gielda nie oddaje danych" i nie
+    mowi, KTORY z czterech procesow zamilkl: sygnal z `feat.feature_value` jest
+    ten sam niezaleznie od tego, czy stanal `market`, `history` czy `features`.
+
+    Puls odpowiada na pytanie o PROCES, swiezosc na pytanie o DANE. Zdrowy
+    proces moze nie miec danych i to nie jest ta sama awaria.
+
+    DLACZEGO TO NIE JEST `--co zywotnosc` JESZCZE RAZ
+
+    Tamta czyta `risk.engine_heartbeat` i `risk.dozorca_heartbeat` - pulsy
+    procesow, ktore DECYDUJA. Ten czyta `risk.worker_heartbeat` - pulsy
+    procesow, ktore ZBIERAJA. Osobna funkcja, bo prog jest liczony inaczej
+    (z interwalu w wierszu, nie ze stalej) i bo tresc alarmu ma prowadzic gdzie
+    indziej.
+
+    STAN, NIE ZDARZENIE
+
+    Pytamy o wiek wiersza, a nie o to, czy przyszedl jakis sygnal. Stan jest
+    odporny na kazdy sposob, w jaki proces moze zamilknac - takze na taki,
+    ktorego nie przewidzielismy.
+
+    CZEGO TA CZUJKA NIE POWIE
+
+    Wiersz zaklada PIERWSZY UDANY CYKL workera (puls.py). Worker, ktory od
+    wdrozenia nie domknal ani jednego, nie ma wiersza i tu sie nie pojawi -
+    lapie go licznik pieciu awarii (CrashLoopBackOff widac w `kubectl get pods`)
+    oraz `--co swiezosc`. Zgadywanie, ktore workery „powinny" istniec, byloby
+    czwarta kopia listy z values.yaml.
+    """
+    # Prog jako parametr - zeby dalo sie wywolac SCIEZKE ALARMOWA na zadanie.
+    # Bez tego jedynym sposobem sprawdzenia, czy alarm dziala, byloby zabicie
+    # workera na produkcji.
+    prog_s = None if prog_min is None else prog_min * 60
+
+    wiersze = await fetch_all(
+        "SELECT worker, interwal_s, last_beat_at, awarii_pod_rzad, ostatni_blad,"
+        "       extract(epoch from (now() - last_beat_at)) AS wiek_s,"
+        "       extract(epoch from (now() - ostatnia_proba_at)) AS proba_wiek_s"
+        "  FROM risk.worker_heartbeat ORDER BY worker")
+    if not wiersze:
+        # Cisza jest wynikiem, wiec musi byc widoczna. Inaczej nie da sie
+        # odroznic czujki, ktora nic nie znalazla, od czujki, ktora nie dziala.
+        print("brak wpisow o pulsie workerow — żaden nie domknął jeszcze cyklu")
+        return 0
+
+    po_workerze = {w["worker"]: w for w in wiersze}
+    powody = ocen_puls_workerow(wiersze, prog_s=prog_s)
+    ciche = {p[0] for p in powody}
+    for w in wiersze:
+        znacznik = "MILCZY  " if w["worker"] in ciche else "żyje    "
+        print(f"  {znacznik} {w['worker']}: ostatni udany cykl "
+              f"{w['wiek_s'] / 60:.0f} min temu, interwał {w['interwal_s']} s, "
+              f"awarii pod rząd {w['awarii_pod_rzad']}")
+
+    if not powody:
+        print("  bez zastrzeżeń")
+        return 0
+
+    if sucho:
+        print("Tryb suchy — powiadomienie nie wysyłane.")
+        return len(powody)
+
+    odbiorcy = await fetch_all('SELECT id FROM app."user" WHERE is_active')
+    for worker, tytul, tresc in powody:
+        # TLUMIENIE BEZ DODATKOWEJ KOLUMNY, tak samo jak przy zywotnosci
+        # silnikow: jesli powiadomienie o TYM workerze poszlo juz PO jego
+        # ostatnim udanym cyklu, ta awaria jest zgloszona. Gdy worker wroci,
+        # `last_beat_at` przesunie sie i nastepna awaria bedzie nowa.
+        #
+        # `engine.down` jest zdarzeniem `always_on`, wiec omija zwykly cooldown -
+        # bez tlumienia czujka krzyczalaby co dziesiec minut, az ktos wyciszy
+        # kanal. Wyciszony kanal to gorszy stan niz brak czujki.
+        juz = await fetch_all(
+            "SELECT 1 FROM notify.notification WHERE event_code = 'engine.down'"
+            " AND data->>'worker' = %s AND created_at > %s LIMIT 1",
+            (worker, po_workerze[worker]["last_beat_at"]))
+        if juz:
+            print(f"  (awaria {worker} juz zgloszona — cisza)")
+            continue
+        print(f"  {tytul}")
+        for u in odbiorcy:
+            # `engine` NIE jest tu podawany: notify.notification.engine ma typ
+            # ref.engine, a „market" czy „news" nie sa silnikami handlowymi.
+            # Nazwa workera idzie do `data`, skad czyta ja tlumienie wyzej.
+            await notify(u["id"], "engine.down", tytul, tresc, severity="critical",
+                         data={"worker": worker,
+                               "awarii_pod_rzad": po_workerze[worker]["awarii_pod_rzad"]})
+
+    # KOD WYJSCIA NIEZEROWY, choc powiadomienie juz poszlo: nieudane zadanie
+    # widac w `kubectl get jobs` takze wtedy, gdy kanal powiadomien zawiodl.
+    return len(powody)
+
+
 async def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--co", default="stan-nauki",
                     choices=("stan-nauki", "zywotnosc", "ryzyko", "kopie",
-                             "swiezosc", "egzekucja", "poslizg", "instrumenty"),
+                             "swiezosc", "egzekucja", "poslizg", "instrumenty",
+                             "workery"),
                     help="stan-nauki: czy wynik treningu sie zmienil; "
                          "zywotnosc: czy silniki bija; "
                          "ryzyko: czy kill-switch zadzialal; "
@@ -797,7 +998,9 @@ async def main() -> int:
                          "poslizg: ile NAPRAWDE kosztuje egzekucja - raport, "
                          "nie czujka; "
                          "instrumenty: czy uniwersum nadal istnieje u gieldy "
-                         "(wycofanie, zawieszenie, nieaktualny odczyt statusu)")
+                         "(wycofanie, zawieszenie, nieaktualny odczyt statusu); "
+                         "workery: czy procesy zbierajace dane domykaja cykle - "
+                         "prog liczony z INTERWALU kazdego z nich")
     ap.add_argument("--prog-statusu-h", type=int, default=None, dest="prog_statusu_h",
                     help="prog nieswiezosci odczytu statusu w godzinach dla "
                          "--co instrumenty; do wywolania sciezki alarmowej na "
@@ -834,6 +1037,9 @@ async def main() -> int:
         if args.co == "zywotnosc":
             return await sprawdz_zywotnosc(fetch_all, notify, sucho=args.sucho,
                                            prog_min=args.prog_min)
+        if args.co == "workery":
+            return await sprawdz_puls_workerow(fetch_all, notify, sucho=args.sucho,
+                                               prog_min=args.prog_min)
         if args.co == "ryzyko":
             return await sprawdz_ryzyko(fetch_all, notify, sucho=args.sucho)
         if args.co == "kopie":

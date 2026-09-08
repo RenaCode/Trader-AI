@@ -54,6 +54,19 @@ spec:
                   # cechach sprzed trzech dni. Stare cechy nie wygladaja jak
                   # awaria, tylko jak rynek, ktory przestal dawac sygnaly.
                   python services/engine/dozor.py --co swiezosc  || RC=$?
+                  # PULS WORKEROW DANYCH. Swiezosc wyzej wykrywa SKUTEK - dane
+                  # przestaly naplywac - i robi to dopiero po czasie jednej
+                  # swiecy zrodlowej, przy 1h nawet po trzech godzinach. Nie
+                  # odroznia przy tym "worker stoi" od "gielda nie oddaje
+                  # danych" i nie mowi, KTORY z czterech procesow zamilkl: przy
+                  # martwym `market`, `history` i `features` sygnal
+                  # z feat.feature_value jest ten sam.
+                  #
+                  # To sprawdzenie pyta o PROCES, a nie o dane: czy domknal
+                  # cykl. Prog liczy z INTERWALU danego workera zapisanego przez
+                  # niego samego (market 60 s, history 1200 s), wiec nie ma tu
+                  # drugiej kopii tej liczby do rozjechania.
+                  python services/engine/dozor.py --co workery   || RC=$?
                   # ZDROWIE EGZEKUCJI. exec.order ma kolumne reject_reason od
                   # migracji 0005, a typ zdarzenia order.rejected istnieje
                   # w notify.event_type rownie dlugo - z etykieta, opisem

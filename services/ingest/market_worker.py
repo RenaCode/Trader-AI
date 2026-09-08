@@ -5,6 +5,22 @@ Swiece pobieramy z zakladka (ostatnie ~200 zamiast ostatniej), zeby przerwa
 w dzialaniu workera zalatala sie sama przy nastepnym cyklu. ON CONFLICT
 DO NOTHING sprawia, ze powtorki nic nie kosztuja.
 
+DWA SYGNALY O TYM, ZE PROCES PRZESTAL PRACOWAC
+
+Ten modul jako jedyny z czterech workerow nie mial ZADNEGO z nich:
+
+  * LICZNIK AWARII konczy proces po pieciu nieudanych cyklach pod rzad. Wpis
+    w logu nie jest widocznoscia - logu poda nikt nie czyta o trzeciej w nocy,
+    a po restarcie kontenera nie ma go juz wcale. Restart JEST widoczny: rosnie
+    licznik restartow i pod wpada w CrashLoopBackOff. Nieudane pobranie
+    pojedynczego instrumentu tez liczy sie jako awaria cyklu - tak samo jak
+    w history_worker, bo inaczej instrument, ktorego gielda nie zna, moglby
+    milczec miesiacami przy zerowym liczniku restartow.
+  * PULS po kazdym UDANYM cyklu (`risk.worker_heartbeat`). Licznik broni przed
+    procesem, ktory PADA; puls przed procesem, ktory STOI - zawieszony na
+    gniezdzie bez limitu czasu nie konczy cyklu, wiec nie dolicza sie do zadnego
+    licznika i w `kubectl get pods` widnieje jako `Running` bez konca.
+
 Uzycie:
     DATABASE_URL=... python services/ingest/market_worker.py --interval 60
 """
@@ -25,6 +41,15 @@ from psycopg.rows import dict_row
 
 from services.exchanges.base import ExchangeError
 from services.exchanges.bybit import BybitAdapter
+from services.ingest import puls
+
+# Ile cykli pod rzad zakonczonych bledem konczy proces - ta sama stala co
+# w history_worker, features i news_worker. Rozna liczba w kazdym module
+# znaczylaby, ze „piec awarii" jest wynikiem przypadku, a nie decyzji.
+POD_RZAD_MAX = 5
+
+# Nazwa w `risk.worker_heartbeat` - ROLA w potoku, nie egzemplarz procesu.
+PULS = "market"
 
 
 async def cycle(conn, adapter, instruments: list[dict], book_depth: int) -> dict:
@@ -93,17 +118,56 @@ async def main() -> int:
             instruments = cur.fetchall()
             print(f"Obserwowane instrumenty: {', '.join(i['symbol'] for i in instruments)}")
 
+            pod_rzad = 0
             while True:
                 t0 = datetime.now(timezone.utc)
+                blad: str | None = None
                 try:
                     s = await cycle(conn, adapter, instruments, args.depth)
                     print(f"[{t0:%H:%M:%S}] świece +{s['swiece']}, orderbooki {s['orderbooki']}, "
                           f"błędy {s['bledy']}")
+                    if s["bledy"]:
+                        # JEDNO NIEUDANE POBRANIE TO AWARIA CYKLU. Opisy
+                        # poszczegolnych bledow poszly juz wyzej, do logu;
+                        # tutaj liczy sie sam fakt, ze cykl nie zebral
+                        # wszystkiego, co mial zebrac.
+                        blad = (f"{s['bledy']} nieudanych pobrań na "
+                                f"{len(instruments)} instrumentów")
+                    else:
+                        # PULS DOPIERO TU, po CALYM udanym cyklu. Bicie przed
+                        # petla albo po pierwszym instrumencie meldowaloby
+                        # zdrowie procesu, ktory zawiesil sie na drugim.
+                        #
+                        # Blad zapisu pulsu celowo NIE jest lapiany osobno
+                        # (patrz `puls.bij`) - wpadnie do `except` nizej
+                        # i policzy sie jako awaria cyklu, bo nia jest.
+                        puls.bij(conn, PULS, args.interval,
+                                 {"instrumenty": len(instruments),
+                                  "swiece": s["swiece"],
+                                  "orderbooki": s["orderbooki"],
+                                  "glebokosc": args.depth})
                 except Exception as e:                        # noqa: BLE001
                     conn.rollback()
-                    print(f"[{t0:%H:%M:%S}] cykl przerwany: {type(e).__name__}: {e}")
+                    blad = f"{type(e).__name__}: {e}"
+                    print(f"[{t0:%H:%M:%S}] cykl przerwany: {blad}")
+
+                if blad:
+                    pod_rzad += 1
+                    # `last_beat_at` NIE RUSZA SIE - rosna tylko kolumny awarii.
+                    # Puls „zyje" przy pieciu awariach pod rzad jest gorszy niz
+                    # jego brak: mowi czujce dokladnie to, co czujka chce
+                    # uslyszec, w chwili gdy jest najbardziej nieprawdziwe.
+                    puls.zglos_awarie(conn, PULS, args.interval, pod_rzad, blad)
+                    print(f"[{t0:%H:%M:%S}] cykl nieudany ({pod_rzad}/{POD_RZAD_MAX})")
+                    if pod_rzad >= POD_RZAD_MAX:
+                        print(f"{POD_RZAD_MAX} cykli pod rząd zakończonych błędem — "
+                              f"kończę proces, żeby restart był WIDOCZNY zamiast cichy")
+                        return 1
+                else:
+                    pod_rzad = 0
+
                 if args.once:
-                    return 0
+                    return 1 if blad else 0
                 await asyncio.sleep(args.interval)
     finally:
         await adapter.close()

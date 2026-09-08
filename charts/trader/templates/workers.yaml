@@ -5,6 +5,47 @@ danych rynkowych ani petli decyzyjnej.
 
 Wszystkie uzywaja tego samego obrazu co API: dziela kod, konfiguracje i migracje,
 wiec nie da sie ich rozjechac wersjami.
+
+DLACZEGO TU NIE MA `livenessProbe` - I NIE MA GO DOSTAC
+=======================================================
+
+Problem jest prawdziwy: proces ZAWIESZONY - a nie martwy - nie konczy cyklu,
+wiec nie podnosi licznika pieciu awarii, nie konczy sie, nie restartuje i stoi
+"Running" bez konca. Licznik awarii broni przed procesem, ktory PADA. Nie broni
+przed procesem, ktory STOI.
+
+Zadna z tych komend nie slucha na porcie, wiec probe musialby byc typu `exec`:
+plik dotykany po kazdym udanym cyklu i skrypt sprawdzajacy jego wiek. Da sie.
+Nie robimy tego, i to sa powody - w kolejnosci waznosci:
+
+1. RESTART NIE JEST REAKCJA, KTOREJ TU POTRZEBA. Probe restartuje kontener
+   i NIKOMU O TYM NIE MOWI. Zawieszenie na gniezdzie bez limitu czasu wraca -
+   to nie jest stan, ktory mija po restarcie. Cicho leczony co dwadziescia
+   minut worker zostawia dziury w swiecach i cechach, ktorych nikt nie
+   zbada, bo nic o nich nie powiedzialo, a model uczy sie na tych dziurach.
+   To jest DOKLADNIE ten sam ksztalt, ktory mial `|| true` w komendzie: awaria
+   obsluzona i niewidoczna. Puls w `risk.worker_heartbeat` + `dozor.py --co
+   workery` daja zamiast tego powiadomienie krytyczne z NAZWA workera i kod
+   wyjscia widoczny w `kubectl get jobs`.
+
+2. PROG BYLBY TRZECIA KOPIA INTERWALU. Dzis interwal kazdego workera zyje
+   w jednym miejscu - w `--interval` w values.yaml - a proces deklaruje go
+   razem z pulsem, wiec czujka liczy prog z wiersza i nie ma czego rozjechac.
+   `periodSeconds` i `failureThreshold` w tym szablonie byly by druga liczba
+   opisujaca to samo, o dwa pliki dalej. Rozjazd dwoch takich list zdarzyl sie
+   juz 2026-09-04 (workers.features kontra trainerCron.horyzonty) i kosztowal
+   21 godzin martwych cech, przy zerowym liczniku restartow.
+
+3. PROBE ZABIJA DLUGI CYKL. Cykl `features` na pelnym uniwersum i dwoch
+   horyzontach trwa minuty, `--backfill` dziesiatki minut. Prog dobrany ciasno
+   ubija proces w polowie pracy i wyglada w logu jak awaria, ktorej nie bylo;
+   prog dobrany bezpiecznie jest tym samym progiem, ktory ma juz czujka - tyle
+   ze bez powiadomienia.
+
+CO BY TA DECYZJE ZMIENILO: worker o cyklu na tyle krotkim, ze kwadrans ciszy
+jest kosztem nie do przyjecia, ORAZ zawieszenie, ktore naprawde mija po
+restarcie. Wtedy probe ma sens JAKO DODATEK do pulsu, nigdy zamiast niego -
+bo sam restart nadal nikomu nic nie mowi.
 */}}
 {{- range $name, $w := .Values.workers }}
 {{- if $w.enabled }}

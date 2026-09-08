@@ -35,6 +35,7 @@ import psycopg
 from psycopg.rows import dict_row
 
 from services.api.security import SecretBox
+from services.ingest import puls
 from services.ingest.llm import (
     Dostawca, DostawcaAnthropic, DostawcaGemini, DostawcaMieszany, Odmowa,
     limit_dobowy_usd,
@@ -674,6 +675,9 @@ async def main() -> int:
         POD_RZAD_MAX = 5
         pod_rzad = 0
         poprzedni_tryb: str | None = None
+        # Nazwa w `risk.worker_heartbeat` - ROLA w potoku, nie egzemplarz
+        # procesu. Lista silnikow i tryb ida do `detail`, bo sa argumentem.
+        PULS = "news"
 
         while True:
             started = datetime.now(timezone.utc)
@@ -700,8 +704,40 @@ async def main() -> int:
                         print("Tryb: " + tryb_opis)
                         poprzedni_tryb = tryb_opis
 
-                    s = await run_cycle(conn, ai, http, verbose=not args.quiet,
-                                        analizuj=analizuj, silniki=silniki)
+                    try:
+                        s = await run_cycle(conn, ai, http, verbose=not args.quiet,
+                                            analizuj=analizuj, silniki=silniki)
+                    except Exception as e:                    # noqa: BLE001
+                        # Cykl przerwany NIE ODSWIEZA `last_beat_at` - dopisuje
+                        # tylko szczegoly, zeby czujka umiala odroznic „proces
+                        # stoi" od „proces pracuje i nie daje rady". `raise`
+                        # oddaje wyjatek licznikowi nizej: jedna awaria ma miec
+                        # jedno miejsce, w ktorym sie liczy.
+                        puls.zglos_awarie(conn, PULS, args.interval, pod_rzad + 1,
+                                          f"{type(e).__name__}: {e}")
+                        raise
+
+                    # PULS PO UDANYM CYKLU, na tym samym polaczeniu.
+                    #
+                    # „Udany" znaczy tu DOKLADNIE to, co znaczylo dla licznika
+                    # `pod_rzad` juz wczesniej: cykl bez wyjatku. Bledy
+                    # pojedynczych kanalow (`s['bledy']`) awaria cyklu NIE SA -
+                    # jeden martwy kanal RSS wsrod kilkunastu nie ma prawa
+                    # wprowadzic poda w CrashLoopBackOff - i ta decyzja zostaje
+                    # tam, gdzie byla. Ida za to do `detail`, zeby przy
+                    # ewentualnym alarmie bylo widac, co ten worker robil
+                    # ostatnim razem, bez zagladania w log poda.
+                    #
+                    # Blad zapisu pulsu celowo NIE jest lapiany (patrz
+                    # `puls.bij`): policzy sie jako awaria cyklu, bo worker,
+                    # ktorego czujka nie widzi, jest dla nadzoru nieodrozninalny
+                    # od workera, ktorego nie ma.
+                    puls.bij(conn, PULS, args.interval,
+                             {"analiza": analizuj, "kanaly": s["kanaly"],
+                              "zapisane": s["zapisane"],
+                              "przeanalizowane": s["przeanalizowane"],
+                              "bledy_kanalow": s["bledy"],
+                              "silniki": silniki or []})
                 took = (datetime.now(timezone.utc) - started).total_seconds()
                 # Podsumowanie musi rozrozniac ZAPISANE od PRZEANALIZOWANYCH.
                 # Pierwsza wersja liczyla zapisane jako przeanalizowane, wiec

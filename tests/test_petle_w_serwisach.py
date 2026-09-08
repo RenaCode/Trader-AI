@@ -138,12 +138,21 @@ class AtrapaPolaczenia:
     def __init__(self, fabryka=dict_row):
         self.fabryka = fabryka
         self.rollbacki = 0
+        # Zapytania puszczone PROSTO z połączenia (`conn.execute`), a nie przez
+        # kursor — tak zapisuje się puls workera (services/ingest/puls.py).
+        # Atrapa bez tej metody kończyłaby udany cykl `AttributeError`, czyli
+        # zamieniałaby brak pulsu w awarię cyklu.
+        self.zapytania = []
 
     def __enter__(self):
         return self
 
     def __exit__(self, *a):
         return False
+
+    def execute(self, sql, params=None):
+        self.zapytania.append((sql, params))
+        return AtrapaKursora(self.fabryka)
 
     def rollback(self):
         self.rollbacki += 1

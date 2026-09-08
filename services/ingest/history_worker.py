@@ -19,6 +19,13 @@ Trzy skutki, kazdy zly i zaden widoczny:
 Teraz proces zyje wlasna petla, laczy sie z baza NA KAZDY CYKL i KONCZY SIE
 po pieciu awariach pod rzad - bo restart poda widac, a wpis w logu nie.
 
+Licznik awarii broni jednak wylacznie przed procesem, ktory PADA. Proces, ktory
+STOI - zawieszony na gniezdzie bez limitu czasu albo na blokadzie w bazie - nie
+konczy cyklu, wiec nie dolicza sie do zadnego licznika i nadal wyglada na
+`Running`. Dlatego po kazdym UDANYM cyklu leci puls do `risk.worker_heartbeat`
+(services/ingest/puls.py), a `dozor.py --co workery` porownuje jego wiek
+z interwalem TEGO workera.
+
 Dwa zadania w jednym procesie, bo sa jednym zadaniem: obraz historii, ktorego
 potrzebuja cechy. Swiece 4h powstaja z agregacji 1h, wiec bez tego procesu
 horyzont domyslny stanalby w miejscu; funding to jedyne zrodlo w zestawie,
@@ -44,6 +51,13 @@ from psycopg.rows import dict_row
 
 from services.ingest import backfill as swiece
 from services.ingest import funding as stawki
+from services.ingest import puls
+
+# Nazwa w `risk.worker_heartbeat`. To ROLA w potoku, a nie egzemplarz procesu:
+# `--engine` i `--timeframe` ida do `detail`, zeby zmiana argumentu w charcie
+# nie zakladala nowego wiersza i nie zostawiala starego, ktory od tej chwili
+# starzalby sie w nieskonczonosc jako „martwy worker".
+PULS = "history"
 
 # Ile awarii pod rzad konczy proces. Wypisanie bledu do logu NIE JEST
 # widocznoscia - logu poda nikt nie czyta o trzeciej w nocy. Restart poda jest
@@ -53,7 +67,8 @@ POD_RZAD_MAX = 5
 
 
 async def cykl(url: str, *, engine: str, timeframe: str, days: int,
-               verbose: bool) -> tuple[int, int, list[str]]:
+               verbose: bool, interwal_s: int, pod_rzad: int
+               ) -> tuple[int, int, list[str]]:
     """Jeden cykl: swiece, potem funding, na SWIEZYM polaczeniu.
 
     POLACZENIE NA KAZDY CYKL, NIE NA CALY PROCES.
@@ -94,6 +109,24 @@ async def cykl(url: str, *, engine: str, timeframe: str, days: int,
             conn.rollback()
             bledy.append(f"funding: {type(e).__name__}: {e}")
 
+        # PULS TUTAJ, A NIE W `main`: polaczenie zyje tylko w tym bloku, wiec
+        # zapis pulsu z zewnatrz wymagalby drugiego polaczenia - czyli sprawdzal
+        # baze, ktorej cykl juz nie uzywa.
+        #
+        # Warunek jest DOKLADNIE tym samym warunkiem, ktory nizej zeruje licznik
+        # `pod_rzad`: pusta lista bledow. Druga definicja awarii „na potrzeby
+        # pulsu" rozjechalaby czujke z licznikiem restartow tego samego procesu.
+        if bledy:
+            puls.zglos_awarie(conn, PULS, interwal_s, pod_rzad + 1, bledy[0])
+        else:
+            # Blad zapisu pulsu NIE JEST tu lapiany - patrz `puls.bij`. Wpadnie
+            # do `except` w `main` i zostanie policzony jako awaria cyklu, bo
+            # nim jest: worker, ktorego czujka nie widzi, jest dla nadzoru
+            # nieodrozninalny od workera, ktorego nie ma.
+            puls.bij(conn, PULS, interwal_s,
+                     {"engine": engine, "timeframe": timeframe, "dni_okna": days,
+                      "swiece": ile_swiec, "stawki": ile_stawek})
+
     return ile_swiec, ile_stawek, bledy
 
 
@@ -123,7 +156,8 @@ async def main() -> int:
         try:
             ile_swiec, ile_stawek, bledy = await cykl(
                 url, engine=args.engine, timeframe=args.timeframe,
-                days=args.days, verbose=not args.quiet)
+                days=args.days, verbose=not args.quiet,
+                interwal_s=args.interval, pod_rzad=pod_rzad)
         except Exception as e:                                # noqa: BLE001
             # Tu wpada juz tylko to, czego nie da sie przypisac do zadania -
             # przede wszystkim nieudane POLACZENIE z baza.

@@ -48,6 +48,13 @@ from psycopg.rows import dict_row
 
 from services.engine.horizons import DEFAULT_BAR, HORIZONS, Horizon, get as get_horizon
 from services.engine.uniwersum import nazwa_przekrojowa, odcisk
+from services.ingest import puls
+
+# Nazwa w `risk.worker_heartbeat` - ROLA w potoku, nie egzemplarz procesu. Lista
+# swiec idzie do `detail`, bo jest argumentem: gdyby wchodzila do klucza, zmiana
+# `--bar` w charcie zakladalaby nowy wiersz i zostawialaby stary, ktory od tej
+# chwili starzalby sie w nieskonczonosc jako „martwy worker".
+PULS = "features"
 
 # Opoznienie obliczeniowe doliczane do ingested_at przy datowaniu wstecz.
 COMPUTE_LAG = timedelta(seconds=3)
@@ -816,6 +823,26 @@ def main() -> int:
                     except Exception as e:                    # noqa: BLE001
                         conn.rollback()
                         bledy.append(f"{bar}: {type(e).__name__}: {e}")
+
+                # PULS PO CALYM CYKLU, nie po kazdym horyzoncie: cykl to
+                # przeliczenie WSZYSTKICH swiec z `--bar`. Bicie po pierwszym
+                # horyzoncie meldowaloby zdrowie procesu, ktory od tygodnia
+                # wywala sie na drugim - a to jest dokladnie ta awaria, ktora
+                # 2026-09-04 kosztowala 21 godzin martwych cech 1h.
+                #
+                # Warunek jest TYM SAMYM warunkiem, ktory nizej zeruje licznik
+                # `pod_rzad`: pusta lista bledow.
+                if bledy:
+                    puls.zglos_awarie(conn, PULS, args.interval, pod_rzad + 1,
+                                      bledy[0])
+                else:
+                    # Blad zapisu pulsu NIE jest tu lapiany (patrz `puls.bij`):
+                    # wpadnie do `except` nizej i policzy sie jako awaria cyklu.
+                    # Worker, ktorego czujka nie widzi, jest dla nadzoru
+                    # nieodrozninalny od workera, ktorego nie ma.
+                    puls.bij(conn, PULS, args.interval,
+                             {"engine": args.engine, "bary": bary,
+                              "wartosci": total, "backfill": bool(args.backfill)})
         except Exception as e:                                # noqa: BLE001
             # Tu wpada przede wszystkim nieudane POLACZENIE z baza.
             bledy.append(f"{type(e).__name__}: {e}")

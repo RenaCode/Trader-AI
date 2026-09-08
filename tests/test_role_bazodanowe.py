@@ -62,6 +62,10 @@ SZABLONY = KORZEN / "charts" / "trader" / "templates"
 TABELE_RISK = {
     "limit_def", "limit_usage", "violation", "killswitch_event",
     "engine_heartbeat", "dozorca_heartbeat",
+    # Puls workerów danych (0035). Nadania NIE są w 0034, tylko w tamtej
+    # migracji — model niżej czyta wyłącznie 0034, więc pilnuje ich osobny
+    # zestaw twierdzeń w tests/test_puls_workerow.py.
+    "worker_heartbeat",
 }
 
 PRAWA = ("SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES",
