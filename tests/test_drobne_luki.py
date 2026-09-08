@@ -409,3 +409,36 @@ def test_odswiezenie_instrumentow_NIE_zapala_zadania_na_czerwono():
                 and not w.strip().startswith("#")]
     assert "|| true" in linia
     assert "RC=" not in linia
+
+
+def test_zaden_modul_nie_ma_definicji_ZA_STRAZNIKIEM_main():
+    """Definicja po `if __name__ == "__main__"` istnieje przy imporcie,
+    a NIE ISTNIEJE przy uruchomieniu skryptu — bo `main()` startuje, zanim
+    interpreter do niej dojdzie.
+
+    Testy tego nie łapią z definicji: import wykonuje cały plik, uruchomienie
+    zatrzymuje się na `main()`. Zdarzyło się to naprawdę — `mozliwosci.py`
+    przechodził wszystkie testy i wywracał się na produkcji z `NameError`,
+    w zadaniu dozoru wołanym co dziesięć minut.
+    """
+    import ast
+    from pathlib import Path
+
+    winne = []
+    for plik in sorted(Path("services").rglob("*.py")):
+        drzewo = ast.parse(plik.read_text(encoding="utf-8"))
+        straznicy = [w for w in drzewo.body
+                     if isinstance(w, ast.If)
+                     and "__main__" in ast.dump(w.test)]
+        if not straznicy:
+            continue
+        granica = straznicy[-1].lineno
+        po = [w for w in drzewo.body
+              if w.lineno > granica
+              and isinstance(w, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                 ast.ClassDef, ast.Assign))]
+        if po:
+            winne.append(f"{plik}: {[getattr(w, 'name', '?') for w in po]}")
+
+    assert not winne, (
+        "te definicje nie istnieją przy uruchomieniu skryptu:\n" + "\n".join(winne))

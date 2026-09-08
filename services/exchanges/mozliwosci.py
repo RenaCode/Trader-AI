@@ -275,9 +275,6 @@ async def main() -> int:
         await close_pool()
 
 
-if __name__ == "__main__":
-    raise SystemExit(asyncio.run(main()))
-
 async def stawki_gieldy(adapter, symbol: str, kategoria: str = "spot") -> dict:
     """Prowizje, ktore gielda NAPRAWDE nalicza dla tego konta.
 
@@ -335,3 +332,6 @@ def rozjazd_stawek(zmierzone: dict, modelowane, prog=None) -> list[str]:
                 f"rachunek papierowy i backtest liczą po nieprawdziwej stawce")
     return out
 
+
+if __name__ == "__main__":
+    raise SystemExit(asyncio.run(main()))
