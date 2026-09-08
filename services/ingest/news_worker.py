@@ -37,8 +37,7 @@ from psycopg.rows import dict_row
 from services.api.security import SecretBox
 from services.ingest import puls
 from services.ingest.llm import (
-    Dostawca, DostawcaAnthropic, DostawcaGemini, DostawcaMieszany, Odmowa,
-    limit_dobowy_usd,
+    Dostawca, Odmowa, limit_dobowy_usd, zbuduj_dostawce,
 )
 
 # Nazwy modeli nalezą do DOSTAWCY, nie do tego pliku: te same prompty ida do
@@ -126,27 +125,6 @@ def _klucz(conn, nazwa_sekretu: str, nazwa_env: str) -> str | None:
     if row:
         return SecretBox().decrypt(bytes(row[0]))
     return os.environ.get(nazwa_env) or None
-
-
-def zbuduj_dostawce(klucze: dict[str, str | None]) -> Dostawca | None:
-    """Dostawca z tego, co jest. CZYSTA FUNKCJA — bez bazy i bez srodowiska.
-
-    OBA KLUCZE ZNACZA MIESZANKE, NIE WYBOR. Triaz to 94% wywolan i tam Gemini
-    jest 5,5x tanszy; analiza kosztuje u obu tyle samo, wiec o niej decyduje
-    jakosc. Wybieranie jednego dostawcy do wszystkiego bylo by w tej sytuacji
-    gorsze pod kazdym wzgledem naraz — patrz `DostawcaMieszany`.
-
-    Jeden klucz znaczy jednego dostawce, bez zmiany zachowania.
-    """
-    a = klucze.get("anthropic")
-    g = klucze.get("gemini")
-    if a and g:
-        return DostawcaMieszany(triaz=DostawcaGemini(g), analiza=DostawcaAnthropic(a))
-    if a:
-        return DostawcaAnthropic(a)
-    if g:
-        return DostawcaGemini(g)
-    return None
 
 
 def wybierz_dostawce(conn, wymagany: bool = True) -> Dostawca | None:

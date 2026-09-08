@@ -342,8 +342,15 @@ function SecretsPanel() {
   const [error, setError] = useState({});
   const [saved, setSaved] = useState({});
   const [tested, setTested] = useState({});
+  const [tryb, setTryb] = useState(null);
 
-  const load = useCallback(async () => setSecrets(await get('/api/settings/secrets')), []);
+  const load = useCallback(async () => {
+    setSecrets(await get('/api/settings/secrets'));
+    // Tryb liczy SERWER ta sama funkcja, ktorej uzywa worker. Druga kopia
+    // reguly tutaj rozjechalaby sie przy pierwszej zmianie - i to wlasnie ten
+    // ekran zapewnialby wtedy, ze jest inaczej niz jest.
+    try { setTryb(await get('/api/settings/analiza-tryb')); } catch { setTryb(null); }
+  }, []);
   useEffect(() => { load(); }, [load]);
 
   const save = async (name) => {
@@ -380,6 +387,37 @@ function SecretsPanel() {
         Klucze usług
         <span className="hint">szyfrowane przed zapisem · nigdy nie zwracane przez API</span>
       </div>
+
+      {tryb && (
+        <div className={tryb.aktywny ? 'notice info' : 'notice warn'}
+             style={{ marginBottom: 16 }}>
+          {!tryb.aktywny && <>{tryb.opis}</>}
+          {tryb.aktywny && tryb.mieszanka && (
+            <>
+              <strong>Oba klucze pracują RAZEM.</strong> Filtrowanie artykułów robi{' '}
+              <span className="mono">{tryb.model_triazu}</span>, a analizę tych, które
+              przeszły filtr — <span className="mono">{tryb.model_analizy}</span>.
+              <br /><br />
+              Filtrowanie to około 94% wywołań i tam Gemini jest 5,5× tańszy; analiza
+              kosztuje u obu podobnie, więc decyduje o niej jakość. Gdy Gemini wyczerpie
+              limit, filtrowanie <em>samo</em> przechodzi na Anthropica i wraca, gdy limit
+              się odnowi — bez zmiany ustawień.
+            </>
+          )}
+          {tryb.aktywny && !tryb.mieszanka && (
+            <>
+              Analiza wiadomości działa na jednym dostawcy
+              (<span className="mono">{tryb.dostawca}</span>): filtrowanie{' '}
+              <span className="mono">{tryb.model_triazu}</span>, analiza{' '}
+              <span className="mono">{tryb.model_analizy}</span>.
+              <br /><br />
+              <strong>Dodanie drugiego klucza obniża koszt</strong>, a nie tylko dokłada
+              zapas: filtrowanie przeniesie się wtedy na tańszy model, a analiza zostanie
+              na mocniejszym.
+            </>
+          )}
+        </div>
+      )}
 
       <div className="notice info" style={{ marginBottom: 16 }}>
         <strong>Subskrypcja Claude.ai to nie to samo co dostęp do API.</strong> Plan Pro

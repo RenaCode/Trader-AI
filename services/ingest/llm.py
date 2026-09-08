@@ -51,11 +51,20 @@ class BladOdpowiedzi(RuntimeError):
 class Przeciazony(RuntimeError):
     """Dostawca odmawia z powodu LIMITU, nie z powodu bledu w zapytaniu.
 
+    `dobowy=True` znaczy, ze wyczerpany jest limit NA DOBE, a nie tempo. To sa
+    dwie rozne sytuacje i myla sie tylko dlatego, ze maja ten sam kod HTTP:
+    limit tempa mija w sekundy i ponawianie ma sens, limit dobowy nie minie do
+    nastepnej doby i KAZDE ponowienie jest czysta strata czasu.
+
     Osobna klasa, a nie goly RuntimeError, bo to jedyny wyjatek, po ktorym wolno
     siegnac po drugiego dostawce. Lapanie RuntimeError zamiotlo by przy okazji
     kazdy blad w naszym kodzie - i zamiast awarii dostalibysmy ciche zejscie
     na dostawce zapasowego, z rachunkiem, ktory rosnie bez powodu.
     """
+
+    def __init__(self, komunikat: str, *, dobowy: bool = False):
+        super().__init__(komunikat)
+        self.dobowy = dobowy
 
 
 class Odmowa(BladOdpowiedzi):
@@ -254,6 +263,35 @@ class DostawcaGemini(Dostawca):
                 pass
         return min(60.0, 5.0 * (2 ** (proba - 1)))
 
+    @staticmethod
+    def limit_dobowy(r: httpx.Response) -> bool:
+        """Czy 429 dotyczy limitu NA DOBE, a nie tempa zapytan.
+
+        Google zwraca oba jako 429 i rozroznia je dopiero w tresci: pole
+        `quotaId` konczy sie `PerDay...` przy limicie dobowym. Rozroznienie ma
+        skutek praktyczny: przy limicie tempa ponawianie jest sensowne
+        (odstep i tak mija w sekundy), przy dobowym KAZDE ponowienie to czysta
+        strata - limit nie minie do nastepnej doby.
+
+        Zmierzone na produkcji 2026-09-08:
+          quotaId: GenerateRequestsPerDayPerProjectPerModel-FreeTier
+          quotaValue: 500, model: gemini-3.5-flash-lite
+
+        Ciekawostka, ktora latwo zle zrozumiec: odpowiedz zawiera przy tym
+        `retryDelay: 30s`. Ponowienie po 30 sekundach NIE POMOZE - to pole
+        opisuje odstep miedzy probami, nie moment odnowienia limitu.
+        """
+        try:
+            tresc = r.json()
+        except ValueError:
+            return False
+        naruszenia = (tresc.get("error", {}).get("details") or [])
+        for d in naruszenia:
+            for v in d.get("violations", []) or []:
+                if "PerDay" in (v.get("quotaId") or ""):
+                    return True
+        return "PerDay" in (tresc.get("error", {}).get("message") or "")
+
     async def _poslij(self, model: str, body: dict) -> httpx.Response:
         for proba in range(1, self.PROBY + 1):
             await self._przepustnica()
@@ -263,6 +301,13 @@ class DostawcaGemini(Dostawca):
             if r.status_code not in self.PONAWIALNE:
                 r.raise_for_status()
                 return r
+            if r.status_code == 429 and self.limit_dobowy(r):
+                # BEZ PONAWIANIA. Piec prob z narastajacym odstepem kosztowalo
+                # tu okolo 80 sekund NA ARTYKUL, a limit dobowy i tak nie minie.
+                raise Przeciazony(
+                    f"wyczerpany limit DOBOWY klucza dla modelu {model} "
+                    f"(HTTP 429). Ponawianie nie pomoze - limit odnawia sie "
+                    f"dopiero nastepnej doby.", dobowy=True)
             if proba == self.PROBY:
                 break
             await asyncio.sleep(self._ile_czekac(r, proba))
@@ -371,10 +416,17 @@ class DostawcaMieszany(Dostawca):
     # z rzedu, KAZDA po pieciu ponowieniach, to juz nie tempo, tylko wyczerpany
     # klucz - i wtedy dalsze proby sa czysta strata czasu.
     PROG_ZWARCIA = 2
-    # Po tym czasie probujemy znowu. Limity dostawcow sa OKRESOWE (na minute,
-    # na dobe), wiec trwale odciecie zamienialoby chwilowy limit w trwala
-    # zmiane modelu triazu - czyli cicha zmiane probki artykulow.
+    # Po tym czasie probujemy znowu. Limity dostawcow sa OKRESOWE, wiec trwale
+    # odciecie zamienialoby chwilowy limit w trwala zmiane modelu triazu -
+    # czyli cicha zmiane probki artykulow.
     ZWARCIE_S = 600.0
+    # LIMIT DOBOWY TO INNA SYTUACJA i wymaga innej liczby. Przy dziesieciu
+    # minutach potok co dziesiec minut odkrywa od nowa, ze limit dobowy jest
+    # wyczerpany - przez cala dobe. Godzina daje najwyzej 24 takie sprawdzenia
+    # na dobe zamiast 144, a jednoczesnie nie czeka do polnocy: limity Google
+    # odnawiaja sie o polnocy czasu pacyficznego, wiec sztywne "do konca doby"
+    # liczone lokalnie byloby zle o kilka godzin w jedna albo w druga strone.
+    ZWARCIE_DOBOWE_S = 3600.0
 
     def __init__(self, triaz: Dostawca, analiza: Dostawca):
         if triaz.model_triazu == analiza.model_analizy:
@@ -445,15 +497,21 @@ class DostawcaMieszany(Dostawca):
             # padl, zatrzymuje CALA analize, co widac wlasnie na produkcji:
             # darmowy klucz Gemini odbil 94% wywolan i potok stanal.
             self._odmowy_triazu += 1
-            if (self._odmowy_triazu >= self.PROG_ZWARCIA
-                    and not self._zwarcie_otwarte()):
-                self._zwarcie_do = time.monotonic() + self.ZWARCIE_S
+            # Limit DOBOWY zwiera od razu, bez czekania na druga odmowe: on nie
+            # minie sam za chwile, a kazde kolejne pytanie to strata czasu.
+            dobowy = getattr(sys.exc_info()[1], "dobowy", False)
+            prog = 1 if dobowy else self.PROG_ZWARCIA
+            if self._odmowy_triazu >= prog and not self._zwarcie_otwarte():
+                self._zwarcie_do = time.monotonic() + (
+                    self.ZWARCIE_DOBOWE_S if dobowy else self.ZWARCIE_S)
                 # GLOSNO, raz na zwarcie. Cicha zmiana modelu triazu znaczy, ze
                 # probka artykulow zmienia sie bez sladu - a to widac dopiero
                 # w wynikach, tygodnie pozniej.
-                print(f"[llm] {self._triaz.nazwa} odrzuca zapytania triazu "
-                      f"({self._odmowy_triazu} razy pod rzad) — przechodze na "
-                      f"{self._analiza.nazwa} na {self.ZWARCIE_S / 60:.0f} min",
+                ile = (self.ZWARCIE_DOBOWE_S if dobowy else self.ZWARCIE_S) / 60
+                powod = ("wyczerpany limit DOBOWY" if dobowy
+                         else f"odmowy {self._odmowy_triazu} razy pod rzad")
+                print(f"[llm] triaz: {self._triaz.nazwa} — {powod}; "
+                      f"przechodze na {self._analiza.nazwa} na {ile:.0f} min",
                       file=sys.stderr, flush=True)
             return await self._triaz_zapasowy(system, user, schema, max_tokens)
 
@@ -488,3 +546,24 @@ class DostawcaMieszany(Dostawca):
     async def zamknij(self) -> None:
         for d in (self._triaz, self._analiza):
             await d.zamknij()
+
+
+def zbuduj_dostawce(klucze: dict[str, str | None]) -> Dostawca | None:
+    """Dostawca z tego, co jest. CZYSTA FUNKCJA — bez bazy i bez srodowiska.
+
+    OBA KLUCZE ZNACZA MIESZANKE, NIE WYBOR. Triaz to 94% wywolan i tam Gemini
+    jest 5,5x tanszy; analiza kosztuje u obu tyle samo, wiec o niej decyduje
+    jakosc. Wybieranie jednego dostawcy do wszystkiego bylo by w tej sytuacji
+    gorsze pod kazdym wzgledem naraz — patrz `DostawcaMieszany`.
+
+    Jeden klucz znaczy jednego dostawce, bez zmiany zachowania.
+    """
+    a = klucze.get("anthropic")
+    g = klucze.get("gemini")
+    if a and g:
+        return DostawcaMieszany(triaz=DostawcaGemini(g), analiza=DostawcaAnthropic(a))
+    if a:
+        return DostawcaAnthropic(a)
+    if g:
+        return DostawcaGemini(g)
+    return None

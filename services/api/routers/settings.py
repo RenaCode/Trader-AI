@@ -17,8 +17,10 @@ router = APIRouter(prefix="/api/settings", tags=["settings"])
 KNOWN_SECRETS = {
     "anthropic_api_key": {
         "label": "Klucz API Anthropic",
-        "description": "Używany przez skaner wiadomości do filtrowania i analizy artykułów. "
-                       "Dostawca docelowy — gdy jest ustawiony, ma pierwszeństwo przed Gemini.",
+        "description": "Skaner wiadomości. Gdy ustawione są OBA klucze, pracują RAZEM: "
+                       "Anthropic analizuje artykuły, które przeszły filtr, i jest też "
+                       "ścieżką zapasową filtra, gdy Gemini wyczerpie limit. "
+                       "Sam Anthropic robi jedno i drugie.",
         "pattern": r"^sk-ant-[A-Za-z0-9_\-]{20,}$",
         "pattern_hint": "Klucz Anthropic zaczyna się od 'sk-ant-'.",
         "testable": True,
@@ -27,8 +29,9 @@ KNOWN_SECRETS = {
     # oba formaty kluczy Google: starszy `AIza...` i nowszy `AQ....`.
     "gemini_api_key": {
         "label": "Klucz API Google Gemini",
-        "description": "Alternatywa dla Anthropica w skanerze wiadomości. Używany tylko wtedy, "
-                       "gdy klucz Anthropic nie jest ustawiony.",
+        "description": "Skaner wiadomości. Gdy ustawione są OBA klucze, Gemini FILTRUJE "
+                       "artykuły — to 94% wywołań i tam jest 5,5× tańszy od Anthropica. "
+                       "Analizę zostawia Anthropicowi. Sam Gemini robi jedno i drugie.",
         "pattern": r"^(AIza[A-Za-z0-9_\-]{30,}|AQ\.[A-Za-z0-9_\-]{20,})$",
         "pattern_hint": "Klucz Google zaczyna się od 'AIza' albo 'AQ.'.",
         "testable": True,
@@ -73,6 +76,43 @@ async def list_secrets(user: dict = Depends(current_user)):
         }
         for name, meta in KNOWN_SECRETS.items()
     ]
+
+
+@router.get("/analiza-tryb")
+async def tryb_analizy(user: dict = Depends(current_user)):
+    """Kto NAPRAWDE filtruje, a kto analizuje — przy obecnych kluczach.
+
+    Interfejs opisywal dotad oba klucze tak, jakby drugi byl tylko zapasem
+    ("uzywany tylko wtedy, gdy klucz Anthropic nie jest ustawiony"), podczas gdy
+    silnik przy dwoch kluczach buduje MIESZANKE. Wlasciciel wpisal oba klucze
+    i z opisu wynikalo, ze jeden lezy nieuzywany - a on przez caly czas
+    wykonywal 94% wywolan.
+
+    Zrodlem prawdy jest tu ta sama funkcja, ktorej uzywa worker
+    (`zbuduj_dostawce`), a nie druga kopia reguly. Kopia rozjechalaby sie przy
+    pierwszej zmianie i to wlasnie ten ekran zapewnialby wtedy, ze jest inaczej.
+    """
+    from services.ingest.llm import zbuduj_dostawce
+
+    rows = await fetch_all("SELECT name FROM app.secret")
+    ustawione = {r["name"] for r in rows}
+    # Wartosci sa nieistotne - `zbuduj_dostawce` decyduje po OBECNOSCI kluczy,
+    # a odszyfrowywanie ich tylko po to, zeby narysowac ekran, byloby
+    # wystawieniem sekretu bez powodu.
+    d = zbuduj_dostawce({
+        "anthropic": "x" if "anthropic_api_key" in ustawione else None,
+        "gemini": "x" if "gemini_api_key" in ustawione else None,
+    })
+    if d is None:
+        return {"aktywny": False,
+                "opis": "Brak klucza — skaner pobiera artykuły, ale ich nie analizuje."}
+    return {
+        "aktywny": True,
+        "dostawca": d.nazwa,
+        "model_triazu": d.model_triazu,
+        "model_analizy": d.model_analizy,
+        "mieszanka": "+" in d.nazwa,
+    }
 
 
 @router.put("/secrets/{name}", dependencies=[Depends(require_csrf)])
@@ -250,8 +290,40 @@ async def test_secret(name: str, user: dict = Depends(current_user)):
             if not names:
                 return {"ok": False, "message":
                         "Klucz działa, ale nie widzi żadnego modelu do generowania treści."}
+
+            # PROBNE WYGENEROWANIE, nie samo wypisanie modeli.
+            #
+            # Lista modeli NIE ZUZYWA limitu generowania, wiec przy wyczerpanym
+            # limicie dobowym ten test meldowal "Klucz dziala" - i slusznie,
+            # bo klucz dziala. Tyle ze skaner i tak nie mogl nic zrobic,
+            # a wlasciciel mial czarno na bialym, ze wszystko gra. Zdarzylo sie
+            # 2026-09-08: 500 zapytan na dobe wyczerpane, potok stal,
+            # a test klucza byl zielony.
+            from services.ingest.llm import DostawcaGemini
+
+            model = min(names, key=len)
+            async with httpx.AsyncClient(timeout=20.0) as http:
+                proba = await http.post(
+                    f"https://generativelanguage.googleapis.com/v1beta/models/"
+                    f"{model}:generateContent",
+                    headers={"x-goog-api-key": key},
+                    json={"contents": [{"role": "user", "parts": [{"text": "ping"}]}],
+                          "generationConfig": {"maxOutputTokens": 8}})
+            if proba.status_code == 429:
+                dobowy = DostawcaGemini.limit_dobowy(proba)
+                return {"ok": False, "models": names, "message": (
+                    "Klucz jest poprawny, ale WYCZERPAŁ LIMIT "
+                    + ("DOBOWY — odnowi się następnej doby. "
+                       if dobowy else "tempa zapytań. ")
+                    + "Skaner nadal działa: filtrowanie przechodzi wtedy na "
+                      "Anthropica, jeśli jego klucz jest ustawiony.")}
+            if proba.status_code >= 400:
+                return {"ok": False, "models": names, "message": (
+                    f"Klucz widzi modele, ale próbne wywołanie zwróciło "
+                    f"HTTP {proba.status_code}.")}
             return {"ok": True,
-                    "message": f"Klucz działa. Dostępne modele: {', '.join(names)}.",
+                    "message": f"Klucz działa, próbne wywołanie przeszło. "
+                               f"Dostępne modele: {', '.join(names)}.",
                     "models": names}
         except Exception as e:                                  # noqa: BLE001
             return {"ok": False,

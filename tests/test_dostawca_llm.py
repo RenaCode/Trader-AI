@@ -12,8 +12,8 @@ import httpx
 import pytest
 
 from services.ingest.llm import (
-    BladOdpowiedzi, DostawcaGemini, Odmowa, _bez_additional_properties,
-    limit_dobowy_usd,
+    BladOdpowiedzi, DostawcaGemini, Odmowa, Przeciazony,
+    _bez_additional_properties, limit_dobowy_usd,
 )
 from services.ingest.news_worker import ANALYSIS_SCHEMA, TRIAGE_SCHEMA
 
@@ -591,3 +591,116 @@ def test_ANALIZA_nadal_nie_ma_zejscia_awaryjnego():
     analiza.zapytaj = _Odmawiajacy().zapytaj
     with pytest.raises(Przeciazony):
         _pytaj(ai, ai.model_analizy)
+
+
+# =========================== limit DOBOWY to nie to samo co limit TEMPA
+
+# Odpowiedz zapisana z produkcji 2026-09-08 (skrocona). Kluczowe jest `quotaId`:
+# Google rozroznia limit dobowy od limitu tempa DOPIERO w tresci, bo kod HTTP
+# obu jest ten sam.
+ODPOWIEDZ_DOBOWA = {
+    "error": {
+        "code": 429,
+        "message": ("You exceeded your current quota. Quota exceeded for metric: "
+                    "generate_content_free_tier_requests, limit: 500, "
+                    "model: gemini-3.5-flash-lite. Please retry in 30.9s."),
+        "status": "RESOURCE_EXHAUSTED",
+        "details": [
+            {"@type": "type.googleapis.com/google.rpc.QuotaFailure",
+             "violations": [{
+                 "quotaMetric": "generativelanguage.googleapis.com/"
+                                "generate_content_free_tier_requests",
+                 "quotaId": "GenerateRequestsPerDayPerProjectPerModel-FreeTier",
+                 "quotaValue": "500"}]},
+            {"@type": "type.googleapis.com/google.rpc.RetryInfo",
+             "retryDelay": "30s"},
+        ],
+    }
+}
+
+ODPOWIEDZ_TEMPO = {
+    "error": {"code": 429, "message": "Too many requests", "status": "RESOURCE_EXHAUSTED",
+              "details": [{"@type": "type.googleapis.com/google.rpc.QuotaFailure",
+                           "violations": [{"quotaId":
+                                           "GenerateRequestsPerMinutePerProject"}]}]}
+}
+
+
+def _odpowiedz(tresc):
+    return httpx.Response(429, json=tresc,
+                          request=httpx.Request("POST", "https://x/y"))
+
+
+def test_limit_DOBOWY_jest_odrozniany_od_limitu_TEMPA():
+    """Oba maja kod 429 i tylko tresc je rozroznia. Skutek jest praktyczny:
+    limit tempa mija w sekundy i ponawianie ma sens, dobowy nie minie do
+    nastepnej doby i kazde ponowienie to strata czasu."""
+    assert DostawcaGemini.limit_dobowy(_odpowiedz(ODPOWIEDZ_DOBOWA)) is True
+    assert DostawcaGemini.limit_dobowy(_odpowiedz(ODPOWIEDZ_TEMPO)) is False
+
+
+def test_limit_DOBOWY_NIE_JEST_ponawiany():
+    """Piec prob z narastajacym odstepem kosztowalo 80 sekund NA ARTYKUL —
+    zmierzone na produkcji. Przy limicie dobowym wszystkie pieć jest z gory
+    stracone."""
+    wywolan = {"n": 0}
+
+    async def atrapa_post(*a, **k):
+        wywolan["n"] += 1
+        return _odpowiedz(ODPOWIEDZ_DOBOWA)
+
+    g = DostawcaGemini("klucz")
+    g.ODSTEP_S = 0.0
+    g._http.post = atrapa_post
+    with pytest.raises(Przeciazony) as exc:
+        asyncio.run(g._poslij("gemini-3.5-flash-lite", {}))
+    assert wywolan["n"] == 1, f"limit dobowy ponowiony {wywolan['n']} razy"
+    assert exc.value.dobowy is True
+
+
+def test_limit_TEMPA_nadal_jest_ponawiany():
+    """Druga granica: gdyby ponawianie zniknelo dla wszystkich 429, chwilowy
+    limit tempa zatrzymywalby potok tak samo jak dobowy."""
+    wywolan = {"n": 0}
+
+    async def atrapa_post(*a, **k):
+        wywolan["n"] += 1
+        return _odpowiedz(ODPOWIEDZ_TEMPO)
+
+    g = DostawcaGemini("klucz")
+    g.ODSTEP_S = 0.0
+    g._ile_czekac = staticmethod(lambda r, p: 0.0)
+    g._http.post = atrapa_post
+    with pytest.raises(Przeciazony) as exc:
+        asyncio.run(g._poslij("gemini-3.5-flash-lite", {}))
+    assert wywolan["n"] == g.PROBY
+    assert exc.value.dobowy is False
+
+
+def test_limit_DOBOWY_zwiera_od_razu_i_NA_DLUZEJ():
+    """Przy dziesieciu minutach potok co dziesiec minut odkrywalby od nowa, ze
+    limit dobowy jest wyczerpany — przez cala dobe, 144 razy."""
+    from services.ingest.llm import DostawcaMieszany
+
+    class Dobowy(_Odmawiajacy):
+        async def zapytaj(self, **kw):
+            self.wywolan += 1
+            raise Przeciazony("limit dobowy", dobowy=True)
+
+    triaz, analiza = Dobowy(), _Dzialajacy()
+    ai = DostawcaMieszany(triaz, analiza)
+    _pytaj(ai, ai.model_triazu)
+    assert ai._zwarcie_otwarte(), "limit dobowy ma zewrzeć po PIERWSZEJ odmowie"
+    assert ai.ZWARCIE_DOBOWE_S > ai.ZWARCIE_S
+
+
+def test_OBA_klucze_znacza_mieszanke_a_nie_zapas():
+    """Interfejs opisywal dotad drugi klucz jako uzywany „tylko wtedy, gdy
+    pierwszy nie jest ustawiony" — i wlasciciel slusznie uznal, ze jeden klucz
+    lezy nieuzywany. Silnik przez caly czas robil co innego."""
+    from services.ingest.llm import zbuduj_dostawce
+
+    oba = zbuduj_dostawce({"anthropic": "a", "gemini": "g"})
+    assert "+" in oba.nazwa
+    assert oba.model_triazu.startswith("gemini"), "filtrowanie ma iść na tańszy model"
+    assert oba.model_analizy.startswith("claude"), "analiza ma zostać na mocniejszym"
