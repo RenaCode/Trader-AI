@@ -17,20 +17,68 @@ PLAN = {"id": 42, "decision_id": 7, "instrument_id": 3, "side": "buy",
         "quote_ccy": "USDC", "trigger": {"rodzaj": "wejscie", "bar": "x"}}
 
 
+# Ograniczenia z db/migrations/0005_decisions_and_execution.sql i 0032.
+# NIE JEST TO EMULATOR POSTGRESA — to dokładnie te dwa rodzaje ograniczeń, na
+# których dziś przeszły do produkcji dwa błędy: zapis `status='rejected'` łamiący
+# CHECK oraz drugi INSERT łamiący UNIQUE (mode, client_order_id).
+STATUSY_PLANU = ("pending", "triggered", "cancelled", "expired", "rejected")
+
+# `exec.order.status` nie ma ograniczenia w bazie (kolumna jest tekstowa), więc
+# tu go nie udajemy. Wpisywanie ograniczeń, których baza nie ma, robi z atrapy
+# drugie źródło prawdy, a to rozjeżdża się przy pierwszej migracji.
+
+
 class Kursor:
     """Atrapa kursora: zapamiętuje SQL, oddaje z góry zadane wiersze.
 
     ATRAPA BEZ OGRANICZEŃ PRZEPUSZCZA INSTRUKCJE, KTÓRE BAZA ODRZUCA. Test
     dopasowujący sam tekst SQL-a przechodzi wtedy także dla zapytania
-    niewykonalnego — dlatego tu sprawdzamy przynajmniej to, co da się sprawdzić
-    bez bazy: liczba miejsc na parametry musi się zgadzać z liczbą parametrów.
-    Rozjazd w tę stronę jest najczęstszym błędem przy ręcznie sklejanych
-    UPDATE-ach i psuje zapytanie dopiero na produkcji.
+    niewykonalnego — i tak właśnie dwa błędy doszły dziś do produkcji, mimo
+    pełnego zestawu testów:
+
+      * `UPDATE journal.planned_order SET status='rejected'` — CHECK dopuszczał
+        wtedy cztery inne stany, więc odmowa złożenia wywracała całą transakcję
+        cyklu, a odmowa jest ścieżką NORMALNĄ, nie awaryjną,
+      * drugi `INSERT INTO exec.order` z tym samym `client_order_id` — łamał
+        UNIQUE (mode, client_order_id) przy pierwszym wypełnieniu.
+
+    Sprawdzamy więc trzy rzeczy dające się sprawdzić bez bazy: zgodność liczby
+    parametrów, dozwolone wartości `status` na `journal.planned_order`, oraz
+    unikalność `client_order_id` przy wstawianiu do `exec.order`.
     """
 
-    def __init__(self, wiersze=None):
+    def __init__(self, wiersze=None, mode="demo"):
         self.sql = []
         self._wiersze = list(wiersze or [])
+        self._mode = mode
+        self._klucze = set()
+
+    def _sprawdz_status_planu(self, jedno):
+        if "journal.planned_order" not in jedno or "SET status=" not in jedno:
+            return
+        for dozwolony in STATUSY_PLANU:
+            if f"SET status='{dozwolony}'" in jedno:
+                return
+        wartosc = jedno.split("SET status=")[1].split(",")[0].strip()
+        raise AssertionError(
+            f"journal.planned_order.status = {wartosc} łamie CHECK "
+            f"(dozwolone: {', '.join(STATUSY_PLANU)}) — baza odrzuciłaby całą "
+            f"transakcję cyklu")
+
+    def _sprawdz_unikalnosc(self, jedno, params):
+        if "INSERT INTO exec.order" not in jedno or not params:
+            return
+        # client_order_id rozpoznajemy po ksztalcie: to jedyny parametr tekstowy
+        # zaczynajacy sie od prefiksu naszych identyfikatorow.
+        for p in params:
+            if isinstance(p, str) and p.startswith("tai-"):
+                if (self._mode, p) in self._klucze:
+                    raise AssertionError(
+                        f"drugi INSERT INTO exec.order z client_order_id={p!r} "
+                        f"łamie UNIQUE (mode, client_order_id) — pierwsze "
+                        f"wypełnienie zabiłoby silnik, a pozycja zostałaby "
+                        f"na giełdzie")
+                self._klucze.add((self._mode, p))
 
     def execute(self, sql, params=None):
         jedno = " ".join(sql.split())
@@ -39,6 +87,8 @@ class Kursor:
         assert oczekiwane == podane, (
             f"zapytanie ma {oczekiwane} miejsc na parametry, a dostało {podane}: "
             f"{jedno}")
+        self._sprawdz_status_planu(jedno)
+        self._sprawdz_unikalnosc(jedno, params)
         self.sql.append((jedno, params))
 
     def fetchone(self):
@@ -603,3 +653,37 @@ def test_WYJSCIE_poza_pasmem_jest_PRZYCIAGANE_a_nie_odrzucane():
     assert len(gielda.zlozone) == 1
     # Cena zeszla z 200 do gornej krawedzi pasma wokol 100.
     assert gielda.zlozone[0]["cena_limitu"] < D("200")
+
+
+def test_PELEN_OBIEG_planu_nie_lamie_unikalnosci_zlecenia():
+    """Złożenie i rozstrzygnięcie na JEDNYM kursorze — tak, jak dzieje się to
+    w produkcji: wiersz zlecenia powstaje w jednym cyklu, wypełnienie księguje
+    się w następnym.
+
+    Każde z osobna przechodziło; dopiero razem łamały `UNIQUE (mode,
+    client_order_id)`. Pierwsze prawdziwe wypełnienie zabiłoby silnik, a kupione
+    aktywo zostałoby na giełdzie bez śladu w dzienniku. Testy tego nie widziały,
+    bo żaden nie wykonywał obu kroków na wspólnym stanie.
+    """
+    import datetime as dt
+
+    teraz = dt.datetime(2026, 9, 8, tzinfo=dt.timezone.utc)
+    plan = dict(PLAN, atr_pct=1.0)
+    g = Gielda(odniesienie=D("100"), stan=_stan(D("10")))
+
+    # Kursor jeden na oba kroki — to on pilnuje unikalności.
+    cur = Kursor([{"id": 1, "qty": D("10")}, {"id": 1}])
+
+    ok, _ = asyncio.run(zloz_plan(cur, g, plan, F, engine="crypto",
+                                  mode="demo", kategoria="spot"))
+    assert ok is True
+
+    rodzaj, _ = asyncio.run(rozstrzygnij_plan(
+        cur, g, plan, F, engine="crypto", mode="demo", kategoria="spot",
+        teraz=teraz, kind="spot"))
+    assert rodzaj == "pelne"
+
+    wstawienia = [s for s, _ in cur.sql if "INSERT INTO exec.order" in s]
+    assert len(wstawienia) == 1, (
+        "jeden plan musi zostawić dokładnie jeden wiersz zlecenia — drugi łamie "
+        "UNIQUE (mode, client_order_id)")
