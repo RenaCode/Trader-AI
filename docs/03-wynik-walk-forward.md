@@ -1702,3 +1702,55 @@ dziesiątka (113 tys. wobec 77 tys.), więc to ona dominuje wektor wag — i mim
 ona traci. Wskazuje to, że dziesiątka jest po prostu **odporna na złe wagi**,
 a czternastka nie. To jest hipoteza sprawdzalna: wystarczy zmierzyć, jak wynik
 każdej grupy reaguje na wagi dopasowane do tej drugiej.
+
+## Eksperyment: pozycjonowanie tłumu (2026-09-08)
+
+**Pytanie właściciela:** czy kopiować ruchy najlepszych traderów crypto?
+
+Kopiowania nie da się zrobić i nie warto — `/v5/copytrading/*` zwraca 404 na
+wszystkich hostach, wewnętrzny ranking Bybita odpowiada 403, podmiot unijny nie
+ma perpetuali w ogóle, a czołówka rankingu to prawy ogon rozkładu, zdominowany
+przez szczęście pomnożone przez dźwignię. Mierzalna jest natomiast
+**zagregowana** informacja o ustawieniu tłumu, bez wybierania zwycięzców.
+
+Zebrano 779 844 godzin z 24 rynków (listopad 2022 – wrzesień 2026): udział kont
+długich i otwarte pozycje na perpetualach. Z tego trzy cechy i jeden sygnał
+kontrariański, wymagający DWÓCH warunków naraz: skrajnego wychylenia tłumu
+**i** rosnących otwartych pozycji.
+
+### Wynik — 40 okien walk-forward, oba przebiegi w trybie suchym
+
+| | bez sygnału | z sygnałem | różnica |
+|---|---|---|---|
+| Okna dodatnie | 25/40 (62,5%) | 25/40 (62,5%) | **bez zmian** |
+| Mediana Sharpe (OOS) | +0,070 | +0,121 | +0,051 |
+| Suma zwrotów z 40 okien | +7,6% | +6,6% | −1,0 pp |
+| Średnia ekspozycja | 1,22% | 1,01% | −0,21 pp |
+| Najgorsze obsunięcie | −2,83% | −2,75% | +0,08 pp |
+
+### Odczytanie, które nie da się nadużyć
+
+Mediana Sharpe'a rośnie o 73% i **jest to liczba myląca, jeśli podać ją samą**.
+Sygnał obniża ekspozycję o 17% i to wyjaśnia obie zmiany naraz: mniej
+zaangażowanego kapitału daje lepszy wynik na jednostkę ryzyka i jednocześnie
+mniejszy zwrot łączny.
+
+Po znormalizowaniu na ekspozycję (zwrot na jednostkę zaangażowanego kapitału)
+przewaga wynosi **+4,9%** — przy **identycznej** liczbie okien dodatnich (25/40
+w obu przebiegach). Sygnał nie zmienia więc tego, KTÓRE okna są zyskowne;
+zmienia wyłącznie, ile kapitału jest w rynku.
+
+### Werdykt: zostaje za bramką
+
+To nie jest dowód przewagi. Cztery i pół procent na jednostkę ekspozycji przy
+niezmienionej trafności okien nie odróżnia się od szumu, a sygnał, który
+głównie tłumi ekspozycję, jest **decyzją o apetycie na ryzyko, a nie zmierzoną
+przewagą**. Włączenie go byłoby zmianą profilu ryzyka pod pozorem poprawy
+wyniku.
+
+Sygnał zostaje w `EKSPERYMENTALNE`: liczy się wyłącznie w przebiegach z jawnie
+ustawionym `SYGNALY_EKSPERYMENTALNE` i nie ma wagi domyślnej w żadnym reżimie.
+
+**Co zmieniłoby ten werdykt:** wzrost liczby okien dodatnich, a nie samego
+Sharpe'a. Dane zbierają się dalej, więc pomiar da się powtórzyć na dłuższej
+historii bez żadnej dodatkowej pracy.
