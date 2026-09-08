@@ -94,7 +94,12 @@ spec:
                   # zwraca 1 takze wtedy, gdy ktorykolwiek instrument nie ma
                   # kompletu regul, a to jest warunek dopuszczenia egzekucji,
                   # nie awaria zadania dozoru. Od oceny jest linia nizej.
-                  python services/ingest/instrumenty.py --mode demo || true
+                  # ODSWIEZANIE STATUSU WYPROWADZONE STAD do osobnego zadania
+                  # `trader-instrumenty`. Ono ZAPISUJE, a to zadanie chodzi na
+                  # roli tylko do odczytu - proba zapisu konczyla sie tu bledem
+                  # uprawnien, zamaskowanym przez `|| true`, wiec przez 10 godzin
+                  # nikt nie odswiezal statusu i nikt tego nie widzial.
+                  # Zostaje sama OCENA, ktora jest odczytem.
                   python services/engine/dozor.py --co instrumenty || RC=$?
                   python services/engine/uzgodnienie.py          || RC=$?
                   # CENNIK GIELDY KONTRA CENNIK W KODZIE. Sprawdzenie istnialo

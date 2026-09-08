@@ -324,6 +324,17 @@ zywotnoscCron:
   enabled: true
   schedule: "*/10 * * * *"
 
+# Odswiezanie statusu instrumentow u gieldy (delisting, zawieszenie handlu).
+#
+# Osobne zadanie, bo ZAPISUJE do `ref.instrument` i musi chodzic na roli
+# z prawem zapisu - czujka zywotnosci chodzi na roli tylko do odczytu.
+# Co szesc godzin, bo prog czujki to 26 h: przy przebiegu dobowym jedna
+# nieudana proba od razu przekracza prog i budzi czlowieka.
+instrumentyCron:
+  enabled: true
+  schedule: "7 */6 * * *"
+  mode: demo
+
 # Proba pozarowa kill-switcha. Doprowadza do PRAWDZIWEGO zadzialania i sprawdza
 # caly lancuch: zadanie -> wiersz w bazie -> wstrzymanie wejsc -> powiadomienie.
 #

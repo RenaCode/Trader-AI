@@ -139,7 +139,19 @@ class DostawcaAnthropic(Dostawca):
     def __init__(self, klucz: str):
         from anthropic import AsyncAnthropic
 
-        self._c = AsyncAnthropic(api_key=klucz)
+        # TIMEOUT I LIMIT PONOWIEN WPISANE WPROST.
+        #
+        # Domyslnie SDK czeka 600 s i ponawia dwa razy, wiec JEDNO wywolanie
+        # moglo zablokowac workera na okolo pol godziny - przy interwale cyklu
+        # 300 s. Tak wlasnie zamilkl worker newsow 2026-09-08: pod staly
+        # "Running", zero logow przez 41 minut, zadnego wyjatku do zlapania.
+        # Klient Gemini obok mial 90 s od poczatku; ta rozbieznosc nie byla
+        # decyzja, tylko przeoczeniem.
+        #
+        # 180 s z jednym ponowieniem daje najgorszy przypadek ~6 minut, co
+        # miesci sie w limicie calego cyklu. Analiza z rozszerzonym myśleniem
+        # bywa wolniejsza od triazu, stad wiecej niz 90 s.
+        self._c = AsyncAnthropic(api_key=klucz, timeout=180.0, max_retries=1)
         self.model_analizy = os.environ.get("ANALYSIS_MODEL", "claude-opus-5")
         self.model_triazu = os.environ.get("TRIAGE_MODEL", "claude-haiku-4-5")
 

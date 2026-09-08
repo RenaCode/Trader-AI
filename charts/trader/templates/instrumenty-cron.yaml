@@ -1,0 +1,79 @@
+{{- if .Values.instrumentyCron.enabled }}
+# Odswiezanie statusu instrumentow u gieldy.
+#
+# OSOBNE ZADANIE, A NIE KROK W CZUJCE ZYWOTNOSCI - i to jest cala tresc tej
+# zmiany. Krok siedzial dotad w `trader-zywotnosc`, ktory z zalozenia chodzi na
+# roli TYLKO DO ODCZYTU: proces diagnostyczny z prawem zmiany stanu predzej czy
+# pozniej ten stan zmieni i zacznie mierzyc siebie zamiast systemu. Odswiezanie
+# ZAPISUJE `ref.instrument`, wiec od migracji 0034 konczylo sie bledem
+# `permission denied for table instrument` - zamaskowanym przez `|| true`,
+# a wiec niewidocznym w kodzie wyjscia zadania.
+#
+# Skutek byl cichy i powazny: kolumna statusu zamarzla na ostatniej znanej
+# wartosci i od tej chwili codziennie zapewniala, ze wszystko handluje. Caly
+# mechanizm wykrywania delistingu byl ozdoba przez 10 godzin - do czasu, az
+# czujka zglosilaby "status nie byl sprawdzany" po przekroczeniu progu 26 h.
+#
+# CO SZESC GODZIN, a nie raz na dobe. Prog czujki wynosi 26 h, wiec przy
+# przebiegu dobowym JEDNA nieudana proba od razu przekracza prog i budzi
+# czlowieka. Co szesc godzin daje trzy podejscia zanim to nastapi, a koszt jest
+# zerowy: endpoint instrumentow jest publiczny i nie wymaga klucza.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: trader-instrumenty
+  labels: {{- include "trader.labels" . | nindent 4 }}
+spec:
+  schedule: {{ .Values.instrumentyCron.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  startingDeadlineSeconds: 300
+  jobTemplate:
+    spec:
+      # Zadanie, ktore nie domknie sie w dziesiec minut, samo dostanie warunek
+      # Failed. Bez tego zawieszone polaczenie z gielda blokuje `Forbid`
+      # w nieskonczonosc, a kolejne przebiegi po cichu przepadaja.
+      activeDeadlineSeconds: 600
+      # Jedno ponowienie: chwilowy blad sieci albo 429 u gieldy mija sam,
+      # a odswiezenie jest bezpieczne do powtorzenia (UPDATE po id).
+      backoffLimit: 1
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: instrumenty
+              image: "{{ .Values.api.image.repository }}:{{ .Values.api.image.tag }}"
+              imagePullPolicy: {{ .Values.api.image.pullPolicy }}
+              command:
+                - sh
+                - -c
+                - |
+                  python services/ingest/instrumenty.py --mode {{ .Values.instrumentyCron.mode }}
+                  RC=$?
+                  # KOD 3 = "sa instrumenty bez kompletu regul". To jest stan
+                  # BRAMKI EGZEKUCJI, nie awaria odswiezania - i na podmiocie
+                  # unijnym stan NORMALNY, bo 24 pary USDT u niego nie istnieja.
+                  # Zadanie wiecznie czerwone przestaje cokolwiek znaczyc.
+                  #
+                  # Kazdy inny kod niezerowy zostaje: 1 to awaria (wyjatek, brak
+                  # uprawnien, gielda milczy), 4 to wycofanie instrumentu -
+                  # drugi sygnal obok powiadomienia, celowo widoczny jako
+                  # nieudane zadanie.
+                  [ "$RC" = 3 ] && exit 0
+                  exit $RC
+              env:
+                # ROLA Z PRAWEM ZAPISU DO `ref` - tu jest to uzasadnione, bo to
+                # jest proces POBIERAJACY DANE, a nie diagnostyczny. Ocena tego,
+                # co zostalo zapisane, zostaje w czujce i dalej chodzi na roli
+                # tylko do odczytu.
+                {{- include "trader.rolaDbEnv" (dict "ctx" $ "rola" "silnik") | nindent 16 }}
+                - name: SECRETS_KEY
+                  valueFrom:
+                    secretKeyRef: { name: {{ .Values.secretName }}, key: SECRETS_KEY }
+                - name: PYTHONUNBUFFERED
+                  value: "1"
+              resources:
+                limits:   { cpu: 300m, memory: 256Mi }
+                requests: { cpu: 20m,  memory: 64Mi }
+{{- end }}

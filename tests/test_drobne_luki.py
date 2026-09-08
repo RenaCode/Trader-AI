@@ -377,38 +377,71 @@ def test_status_instrumentow_jest_ODSWIEZANY_I_OCENIANY_cyklicznie():
 
     Potrzebne są OBA kroki. Bez odświeżenia kolumna statusu zamarza na
     „Trading" i codziennie zapewnia, że wszystko gra; bez oceny nikt tej
-    kolumny nie czyta. Czujka ma próg 26 h, więc odświeżanie musi być
-    częstsze niż dobowe — a zadanie dozoru chodzi co dziesięć minut.
+    kolumny nie czyta.
+
+    KROKI SĄ W OSOBNYCH ZADANIACH od 2026-09-08 i to jest istota poprawki:
+    odświeżanie ZAPISUJE, więc musi chodzić na roli z prawem zapisu, a ocena
+    jest odczytem i zostaje w czujce chodzącej na roli tylko do odczytu.
+    Trzymanie ich razem kończyło się `permission denied` maskowanym przez
+    `|| true` — zadanie meldowało powodzenie, nie odświeżając niczego.
     """
     from pathlib import Path
 
-    chart = Path("charts/trader/templates/zywotnosc-cron.yaml").read_text(
-        encoding="utf-8")
-    linie = [w.strip() for w in chart.splitlines()
-             if w.strip() and not w.strip().startswith("#")]
+    szablony = Path("charts/trader/templates")
+    wszystko = "\n".join(
+        "\n".join(w for w in p.read_text(encoding="utf-8").splitlines()
+                  if w.strip() and not w.strip().startswith("#"))
+        for p in sorted(szablony.glob("*.yaml")))
 
-    assert any("services/ingest/instrumenty.py" in w for w in linie), (
+    assert "services/ingest/instrumenty.py" in wszystko, (
         "bez odświeżenia status zamarza i czujka po 26 h zgłosi 'nie sprawdzano'")
-    assert any("dozor.py --co instrumenty" in w for w in linie), (
+    assert "dozor.py --co instrumenty" in wszystko, (
         "bez oceny nikt nie czyta zebranego statusu")
 
+    czujka = (szablony / "zywotnosc-cron.yaml").read_text(encoding="utf-8")
+    linie = [w.strip() for w in czujka.splitlines()
+             if w.strip() and not w.strip().startswith("#")]
+    assert not any("services/ingest/instrumenty.py" in w for w in linie), (
+        "odświeżanie wróciło do czujki, która chodzi na roli bez prawa zapisu")
 
-def test_odswiezenie_instrumentow_NIE_zapala_zadania_na_czerwono():
-    """`instrumenty.py` zwraca 1, gdy któryś instrument nie ma kompletu reguł.
 
-    To jest warunek dopuszczenia egzekucji, a nie awaria zadania dozoru —
-    doliczenie go do kodu wyjścia sprawiłoby, że zadanie świeci na czerwono
-    z powodu, którym zajmuje się zupełnie inna czujka.
+def test_odswiezenie_instrumentow_ODROZNIA_stan_bramki_od_AWARII():
+    """`instrumenty.py` zwracało 1 w trzech różnych sytuacjach naraz: gdy
+    instrument nie ma kompletu reguł (stan bramki egzekucji — na podmiocie
+    unijnym NORMALNY, bo 24 par USDT on nie oferuje), gdy wykryto wycofanie,
+    i gdy poleciał nieprzechwycony wyjątek.
+
+    Wołający miał więc do wyboru maskować wszystko albo nic — i maskował
+    wszystko przez `|| true`. Dlatego `permission denied for table instrument`
+    wyglądał identycznie jak „brakuje reguł" i przez 10 godzin nikt nie
+    odświeżał statusu, a zadanie kończyło się powodzeniem.
     """
+    import ast
     from pathlib import Path
 
-    chart = Path("charts/trader/templates/zywotnosc-cron.yaml").read_text(
-        encoding="utf-8")
-    (linia,) = [w.strip() for w in chart.splitlines()
-                if "services/ingest/instrumenty.py" in w
-                and not w.strip().startswith("#")]
-    assert "|| true" in linia
-    assert "RC=" not in linia
+    zrodlo = Path("services/ingest/instrumenty.py").read_text(encoding="utf-8")
+    drzewo = ast.parse(zrodlo)
+    glowna = next(w for w in drzewo.body
+                  if isinstance(w, (ast.AsyncFunctionDef, ast.FunctionDef))
+                  and w.name == "main")
+    kody = {w.value.value for w in ast.walk(glowna)
+            if isinstance(w, ast.Return) and isinstance(w.value, ast.Constant)}
+    assert 1 not in kody, (
+        "kod 1 z `main` jest nieodróżnialny od nieprzechwyconego wyjątku — "
+        "awaria wygląda wtedy tak samo jak normalny stan bramki")
+    assert {3, 4} <= kody, "brak osobnych kodów dla braku reguł i dla wycofania"
+
+    # Komentarze ODSIANE: opisują właśnie tę wadę, więc test na samej treści
+    # pliku łapałby własne uzasadnienie zamiast polecenia.
+    zadanie = "\n".join(
+        w for w in Path("charts/trader/templates/instrumenty-cron.yaml")
+        .read_text(encoding="utf-8").splitlines()
+        if w.strip() and not w.strip().startswith("#"))
+    assert '[ "$RC" = 3 ] && exit 0' in zadanie, (
+        "zadanie nie odsiewa stanu bramki — będzie wiecznie czerwone")
+    assert "|| true" not in zadanie, (
+        "maskowanie wszystkiego jest dokładnie tą wadą, która ukryła brak "
+        "uprawnień na dziesięć godzin")
 
 
 def test_zaden_modul_nie_ma_definicji_ZA_STRAZNIKIEM_main():

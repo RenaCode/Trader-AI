@@ -645,6 +645,20 @@ async def main() -> int:
     ap.add_argument("--once", action="store_true", help="jeden cykl zamiast petli")
     ap.add_argument("--interval", type=int, default=120, help="przerwa miedzy cyklami (s)")
     ap.add_argument("--quiet", action="store_true")
+    # LIMIT CZASU JEDNEGO CYKLU.
+    #
+    # Zawieszenie NIE JEST WYJATKIEM, wiec cala obsluga bledow nizej byla na nie
+    # slepa: licznik `pod_rzad` nie rosl, puls nie byl bity, a pod stal "Running"
+    # i nie robil nic. Zdarzylo sie 2026-09-08: worker zamilkl na 41 minut przy
+    # interwale 300 s, bo klient Anthropica czekal bez ograniczenia.
+    #
+    # 600 s to okolo szesciokrotnosc typowego cyklu (~100 s) i poltorakrotnosc
+    # najdluzszego zaobserwowanego (374 s), wiec nie utnie pracy zdrowego cyklu.
+    # Po przekroczeniu leci TimeoutError, ktory liczy sie jak kazda inna awaria
+    # cyklu: puls dostaje powod, a po POD_RZAD_MAX z rzedu proces konczy sie
+    # i restart poda jest WIDOCZNY zamiast cichy.
+    ap.add_argument("--limit-cyklu", type=int, default=600, dest="limit_cyklu",
+                    help="maksymalny czas jednego cyklu (s)")
     ap.add_argument("--bez-analizy", action="store_true", dest="bez_analizy",
                     help="pobieraj i zapisuj artykuly, nie wywoluj Anthropica. "
                          "Do pracy przed pojawieniem sie klucza: material, ktorego "
@@ -705,8 +719,14 @@ async def main() -> int:
                         poprzedni_tryb = tryb_opis
 
                     try:
-                        s = await run_cycle(conn, ai, http, verbose=not args.quiet,
-                                            analizuj=analizuj, silniki=silniki)
+                        # Limit obejmuje CALY cykl, nie pojedyncze wywolanie.
+                        # Timeout na kliencie HTTP chroni przed jednym zawieszonym
+                        # zapytaniem; ten limit chroni przed wszystkim innym, co
+                        # moze stanac - takze przed kodem, ktorego jeszcze nie ma.
+                        async with asyncio.timeout(args.limit_cyklu):
+                            s = await run_cycle(conn, ai, http,
+                                                verbose=not args.quiet,
+                                                analizuj=analizuj, silniki=silniki)
                     except Exception as e:                    # noqa: BLE001
                         # Cykl przerwany NIE ODSWIEZA `last_beat_at` - dopisuje
                         # tylko szczegoly, zeby czujka umiala odroznic „proces

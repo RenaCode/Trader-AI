@@ -406,6 +406,27 @@ def niekompletne(w_bazie: list[dict]) -> list[str]:
                        or r.get("min_notional") is None))
 
 
+# KODY WYJSCIA - ROZDZIELONE, bo mieszaly dwie rozne rzeczy.
+#
+# Do 2026-09-08 wszystko niezerowe bylo jedynka: i "instrument nie ma kompletu
+# regul" (stan bramki egzekucji, na podmiocie unijnym NORMALNY - 24 pary USDT
+# nie istnieja u tego podmiotu), i "wycofanie instrumentu", i nieprzechwycony
+# wyjatek. Wolajacy mial wiec do wyboru maskowac wszystko albo nic.
+#
+# Wybrano maskowanie: krok siedzial w czujce zywotnosci z `|| true`. Skutek
+# ujawnil sie przy rozdzieleniu rol bazodanowych - `permission denied for table
+# instrument` wygladal dokladnie tak samo jak "brakuje regul", wiec przez 10
+# godzin nikt nie odswiezal statusu i zadanie konczylo sie powodzeniem.
+#
+#   0  odswiezono, nic do zglaszania
+#   1  AWARIA - nieprzechwycony wyjatek, brak uprawnien, gielda nie odpowiada
+#   3  odswiezono; sa instrumenty bez kompletu regul (stan bramki, nie awaria)
+#   4  odswiezono; WYCOFANIE instrumentu - drugi, niezalezny sygnal obok
+#      powiadomienia, na wypadek gdyby kanal powiadomien zawiodl
+KOD_BRAK_REGUL = 3
+KOD_WYCOFANIE = 4
+
+
 async def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--engine", default="crypto")
@@ -512,11 +533,12 @@ async def main() -> int:
             " FROM ref.instrument WHERE active AND engine::text = %s", (args.engine,))
         brakuje = niekompletne(po)
         if brakuje:
+            # KOD 3, NIE 1 - patrz KODY_WYJSCIA na gorze pliku.
             print(f"\nNADAL BEZ KOMPLETU REGUŁ ({len(brakuje)}): {', '.join(brakuje)}")
             print("Egzekucji nie wolno uruchamiać, dopóki ta lista nie jest pusta —"
                   " zlecenie bez reguł zostanie odrzucone, a odrzucenie w logu"
                   " wygląda jak brak sygnału.")
-            return 1
+            return 3
         print("\nwszystkie instrumenty dopuszczone do handlu mają komplet reguł")
         # KOD NIEZEROWY PRZY WYCOFANIU, choc powiadomienie juz poszlo. To jest
         # drugi, niezalezny sygnal: nieudane zadanie widac w `kubectl get jobs`
@@ -525,7 +547,7 @@ async def main() -> int:
         if pilne:
             print(f"WYCOFYWANE INSTRUMENTY: {pilne} — patrz powiadomienia; "
                   "otwarta pozycja NIE zostala zamknieta automatycznie.")
-            return 1
+            return 4
         return 0
     finally:
         await close_pool()
