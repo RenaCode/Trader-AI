@@ -19,16 +19,63 @@ from typing import Protocol
 class ExchangeError(Exception):
     """Blad po stronie gieldy albo transportu."""
 
-    def __init__(self, message: str, *, code: str | None = None, retryable: bool = False):
+    def __init__(self, message: str, *, code: str | None = None, retryable: bool = False,
+                 wymaga_czlowieka: bool = False):
         super().__init__(message)
         self.code = code
         # Rozroznienie jest istotne: bledu walidacji zlecenia nie ma sensu ponawiac,
         # a chwilowego 5xx albo rate limitu - owszem.
         self.retryable = retryable
+        # TRZECI STAN, obok "ponow" i "odpusc ten jeden odczyt": awaria, ktorej
+        # zaden restart nie naprawi, bo zmiana musi zajsc POZA procesem - w panelu
+        # gieldy albo w konfiguracji klastra.
+        #
+        # Bez tego rozroznienia "gielda nas zablokowala" wyglada w alarmie
+        # dokladnie tak samo jak "padla baza": proces konczy sie po pieciu
+        # cyklach w obu przypadkach, a to sa dwie rozne noce i dwa rozne miejsca,
+        # do ktorych trzeba pojsc. Gorzej: przy martwym kluczu czujka zywotnosci
+        # milczy, bo silnik zyje i bije - tylko gielda go nie slucha, wiec nie
+        # da sie ZAMKNAC otwartych pozycji.
+        self.wymaga_czlowieka = wymaga_czlowieka
 
 
 class AuthError(ExchangeError):
     """Klucz odrzucony, wygasly albo bez wymaganych uprawnien."""
+
+    def __init__(self, message: str, *, code: str | None = None, retryable: bool = False,
+                 wymaga_czlowieka: bool = True):
+        # Domyslnie `wymaga_czlowieka=True`: zadne ponowienie nie naprawi klucza,
+        # ktory gielda odrzuca. Ponawianie tylko opoznia moment, w ktorym ktos
+        # zobaczy prawdziwa przyczyne, i zjada limit zapytan.
+        super().__init__(message, code=code, retryable=retryable,
+                         wymaga_czlowieka=wymaga_czlowieka)
+
+
+class BladIpKlucza(AuthError):
+    """Zapytanie przyszlo z adresu spoza listy IP przypietej do klucza (10010).
+
+    Osobna klasa, bo REAKCJA jest inna niz przy kazdym innym bledzie klucza:
+    klucz jest poprawny, sekret jest poprawny, wygenerowanie nowego niczego nie
+    zmieni. Zmienil sie adres wyjsciowy klastra albo lista IP w panelu gieldy.
+
+    Sklejenie tego z ogolnym `AuthError` konczy sie noca spedzona na sprawdzaniu
+    sekretu w Vaulcie, podczas gdy pozycje stoja otwarte, a wyjscia z nich sa
+    odrzucane dokladnie tak samo jak wejscia.
+    """
+
+
+class KontoZamrozone(ExchangeError):
+    """Gielda wstrzymala handel na koncie (compliance, ban, blokada).
+
+    Nie jest to `AuthError`: klucz dziala, podpis przechodzi, to KONTO jest
+    zablokowane. Rozroznienie decyduje, gdzie isc - do panelu gieldy i jej
+    wsparcia, a nie do klastra i nie do konfiguracji kluczy.
+    """
+
+    def __init__(self, message: str, *, code: str | None = None, retryable: bool = False,
+                 wymaga_czlowieka: bool = True):
+        super().__init__(message, code=code, retryable=retryable,
+                         wymaga_czlowieka=wymaga_czlowieka)
 
 
 @dataclass(frozen=True)

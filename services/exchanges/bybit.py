@@ -58,8 +58,8 @@ from decimal import Decimal
 import httpx
 
 from .base import (
-    AuthError, Balance, BookLevel, Candle, ConnectionCheck, ExchangeError, OrderBook,
-    StanZlecenia, Wypelnienie, ZlozoneZlecenie,
+    AuthError, Balance, BladIpKlucza, BookLevel, Candle, ConnectionCheck, ExchangeError,
+    KontoZamrozone, OrderBook, StanZlecenia, Wypelnienie, ZlozoneZlecenie,
 )
 
 # Dane publiczne bierzemy z podmiotu GLOBALNEGO niezaleznie od tego, gdzie stoi
@@ -96,6 +96,78 @@ _STATUSY = {
 
 def _status_bybita(status: str) -> str:
     return _STATUSY.get(status, f"nieznany:{status}")
+
+
+# --------------------------------------------------------------- kody bledow
+#
+# Kody trzymamy w NAZWANYCH ZBIORACH, nie w krotkach wpisanych w dwie galezie
+# `if` (GET i POST mialy dotad wlasne, rozjezdzajace sie listy). Dolozenie kodu
+# ma byc jedna linia w jednym miejscu, inaczej przy nastepnym rozjezdzie POST
+# bedzie klasyfikowal inaczej niz GET - a to droga awaryjna, na ktorej najmniej
+# widac, ze cos jest nie tak.
+
+# Klucz albo jego uprawnienia: zly, wygasly, bez uprawnienia, zly podpis.
+KODY_UWIERZYTELNIENIA = {"10003", "10004", "10005", "33004"}
+
+# 10010 - "Unmatched IP". Klucz i podpis sa POPRAWNE, tylko przyszly z adresu
+# spoza listy przypietej do klucza. Wlasna klasa, bo naprawa jest gdzie indziej.
+KODY_NIEZGODNE_IP = {"10010"}
+
+# Konto zablokowane przez gielde: ban uzytkownika, reguly compliance, zakaz
+# handlu. Klucz dziala, podpis przechodzi - to konto jest wylaczone.
+KODY_KONTO_ZAMROZONE = {"10008", "10024", "10027"}
+
+# Limit zapytan zwrocony jako retCode przy HTTP 200 (Bybit robi i tak, i przez
+# status 429). To stan PRZEJSCIOWY - do niedawna wpadal do rodziny
+# uwierzytelnienia, wiec chwilowy limit wygladal jak zly klucz i nie byl
+# ponawiany, mimo ze wystarczylo odczekac sekunde.
+KODY_LIMIT = {"10006", "10018"}
+
+
+def _blad_z_kodu(ret, msg: str) -> ExchangeError:
+    """Zamienia `retCode` gieldy na wyjatek, ktory MOWI, CO ZROBIC.
+
+    DLACZEGO TO NIE MOZE BYC JEDEN `ExchangeError`
+
+    Odbiorca bledu ma dokladnie trzy sensowne reakcje: ponow, odpusc ten odczyt,
+    albo obudz czlowieka. Gdy wszystko poza 404/429/5xx/kluczem wpada w ogolny
+    `ExchangeError`, proces po pieciu cyklach po prostu sie konczy - i "gielda
+    nas zablokowala" wyglada w alarmie tak samo jak "padla baza".
+
+    Roznica jest praktyczna: przy zablokowanym koncie albo martwym kluczu silnik
+    ZYJE i bije, wiec czujka zywotnosci milczy, a otwartych pozycji nie da sie
+    zamknac, bo wyjscia sa odrzucane tak samo jak wejscia. Komunikat musi wiec
+    o trzeciej w nocy powiedziec wprost, czy isc do panelu gieldy, czy do klastra.
+    """
+    kod = str(ret)
+    if kod in KODY_NIEZGODNE_IP:
+        return BladIpKlucza(
+            f"{msg} (kod {kod}) — NIEZGODNOSC IP: gielda odrzuca WSZYSTKIE zapytania "
+            f"prywatne, bo adres wyjsciowy nie jest na liscie IP przypietej do klucza. "
+            f"To nie jest zly klucz ani awaria procesu — proces zyje, tylko gielda go "
+            f"nie slucha, wiec nie da sie ZAMKNAC otwartych pozycji. "
+            f"IDZ DO PANELU GIELDY (API -> lista IP klucza) albo sprawdz, czy klaster "
+            f"nie zmienil adresu wyjsciowego. Restart i ponowienie nic nie zmienia.",
+            code=kod)
+    if kod in KODY_KONTO_ZAMROZONE:
+        return KontoZamrozone(
+            f"{msg} (kod {kod}) — KONTO ZABLOKOWANE PO STRONIE GIELDY: handel wstrzymany. "
+            f"Klucz i podpis dzialaja, wiec to nie jest problem poswiadczen ani klastra. "
+            f"Otwarte pozycje zostaja, a zlecenia WYJSCIA sa odrzucane tak samo jak "
+            f"wejscia. IDZ DO PANELU GIELDY (compliance / wsparcie). "
+            f"Restart i ponowienie nic nie zmienia.",
+            code=kod)
+    if kod in KODY_UWIERZYTELNIENIA:
+        return AuthError(
+            f"{msg} (kod {kod}) — KLUCZ ODRZUCONY. IDZ DO PANELU GIELDY i sprawdz klucz "
+            f"(waznosc, uprawnienia, podmiot: klucz z bybit.eu na hoscie globalnym "
+            f"dostaje 10003). Klaster jest tu bez winy.",
+            code=kod)
+    if kod in KODY_LIMIT:
+        # `retryable=True`: limit mija sam. Bez tego chwilowe zdlawienie
+        # wygladalo jak blad klucza i konczylo zapytanie przy pierwszej probie.
+        return ExchangeError(f"{msg} (kod {kod}) — limit zapytan", code=kod, retryable=True)
+    return ExchangeError(f"{msg} (kod {kod})", code=kod)
 
 
 
@@ -225,12 +297,11 @@ class BybitAdapter:
 
         ret = data.get("retCode")
         if ret != 0:
-            msg = data.get("retMsg", "nieznany blad")
-            # 10003/10004/10005 to rodzina bledow uwierzytelniania - warto je
-            # rozroznic, bo w UI znacza "popraw klucz", a nie "sprobuj ponownie".
-            if ret in (10003, 10004, 10005, 10006, 33004):
-                raise AuthError(f"{msg} (kod {ret})", code=str(ret))
-            raise ExchangeError(f"{msg} (kod {ret})", code=str(ret))
+            # Klasyfikacja siedzi w jednym miejscu (`_blad_z_kodu`) i jest wspolna
+            # z POST-em: rozjazd list kodow miedzy odczytem a skladaniem zlecen
+            # znaczylby, ze ta sama awaria gieldy brzmi inaczej zaleznie od tego,
+            # ktora sciezka ja napotkala.
+            raise _blad_z_kodu(ret, data.get("retMsg", "nieznany blad"))
         return data.get("result") or {}
 
     # ------------------------------------------------------------- publiczne
@@ -598,10 +669,10 @@ class BybitAdapter:
                                 f"({r.status_code})") from e
         ret = data.get("retCode")
         if ret != 0:
-            msg = data.get("retMsg", "nieznany blad")
-            if ret in (10003, 10004, 10005, 33004):
-                raise AuthError(f"{msg} (kod {ret})", code=str(ret))
-            raise ExchangeError(f"{msg} (kod {ret})", code=str(ret))
+            # Ta sama klasyfikacja co przy GET. Wazniejsza tutaj: to na sciezce
+            # skladania zlecen martwy klucz albo zamrozone konto zatrzymuje nie
+            # tylko WEJSCIA, ale i WYJSCIA z otwartych pozycji.
+            raise _blad_z_kodu(ret, data.get("retMsg", "nieznany blad"))
         return data.get("result") or {}
 
     async def stan_zlecenia(self, id_wlasne: str, kategoria: str = "spot") -> StanZlecenia | None:
@@ -613,13 +684,41 @@ class BybitAdapter:
 
         Sprawdzamy zlecenia otwarte ORAZ historię: zlecenie mogło się wypełnić
         i zniknąć z listy otwartych między naszym timeoutem a zapytaniem.
+
+        TOŻSAMOŚĆ ZWRÓCONEGO ZLECENIA JEST SPRAWDZANA, NIE ZAKŁADANA
+
+        Na tym odczycie stoi cała idempotencja: `zloz_zlecenie` pyta o stan ZANIM
+        cokolwiek wyśle i przy odpowiedzi niepustej uznaje, że zlecenie już
+        istnieje. Filtrowanie po `orderLinkId` robi giełda — my dostajemy tylko
+        listę i wierzymy, że jest nasza.
+
+        Gdyby giełda ten parametr zignorowała (inna kategoria, zmiana API,
+        literówka w nazwie pola, zapytanie bez filtru po refaktorze), pierwszy
+        wiersz z listy byłby CUDZYM zleceniem: przypisalibyśmy sobie cudze
+        wypełnienie albo uznali za istniejące zlecenie, którego nie ma — i nigdy
+        go nie złożyli, bo `juz_istnialo=True` kończy sprawę bez śladu awarii.
+        Jedno porównanie zamienia to w błąd zamiast w pozycję, na obu endpointach.
         """
         for sciezka in ("/v5/order/realtime", "/v5/order/history"):
             odp = await self._get(sciezka, {"category": kategoria,
                                             "orderLinkId": id_wlasne})
             lista = odp.get("list") or []
-            if lista:
-                o = lista[0]
+            nasze = [o for o in lista if (o.get("orderLinkId") or "") == id_wlasne]
+            if lista and not nasze:
+                # Odczyt PORZUCONY, a nie "brak zlecenia". Zwrócenie None
+                # posłałoby `zloz_zlecenie` prosto w złożenie drugiego zlecenia
+                # na podstawie odczytu, o którym już wiemy, że nic nie znaczy.
+                obce = sorted({str(o.get("orderLinkId") or "") for o in lista})[:3]
+                raise ExchangeError(
+                    f"gielda zwrocila zlecenia o CUDZYCH orderLinkId {obce} na zapytanie "
+                    f"o {id_wlasne!r} ({sciezka}) — filtr zostal zignorowany, wiec ten "
+                    f"odczyt nie mowi nic o naszym zleceniu. Przyjecie go przypisaloby "
+                    f"nam cudze wypelnienie albo uznaloby za istniejace zlecenie, "
+                    f"ktorego nie ma. SPRAWDZ ADAPTER I API GIELDY — to nie jest stan "
+                    f"przejsciowy i ponowienie nic nie da.",
+                    code="tozsamosc-zlecenia", wymaga_czlowieka=True)
+            if nasze:
+                o = nasze[0]
                 ilosc = Decimal(str(o.get("qty") or 0))
                 wyp = Decimal(str(o.get("cumExecQty") or 0))
                 cena = o.get("avgPrice")
@@ -635,12 +734,6 @@ class BybitAdapter:
                     # kwotowanej. `Wypelnienie` mialo to pole od poczatku
                     # i uzgodnienie z niego korzysta; sciezka egzekucji czytala
                     # sama kwote i zapisywala ja jako USDC.
-                    #
-                    # Skutek byl podwojny i oba razy w te sama strone: koszt
-                    # wejscia zanizony okolo stukrotnie (0,01 SOL zapisane jako
-                    # 0,01 USDC zamiast ~1 USDC), a ilosc w dzienniku wyzsza od
-                    # faktycznego salda o wartosc prowizji - dokladnie na progu
-                    # tolerancji uzgodnienia.
                     prowizja_w=o.get("feeCurrency") or None,
                 )
         return None
