@@ -292,19 +292,31 @@ async def main() -> int:
     if not os.environ.get("DATABASE_URL"):
         sys.exit("DATABASE_URL nie jest ustawiony")
 
-    from services.api.db import close_pool, fetch_all, fetch_one, open_pool
+    from services.api.db import close_pool, fetch_all, open_pool
     from services.api.notifications import notify
     from services.api.security import SecretBox
     from services.exchanges.bybit import BybitAdapter
+    from services.exchanges.mozliwosci import wybierz_klucz
 
     await open_pool()
     try:
-        cred = await fetch_one(
-            "SELECT c.key_enc, c.secret_enc, v.demo_host, v.live_host"
+        # NAJNOWSZY KLUCZ, TEN SAM CO U SILNIKA — i tu waży to więcej niż
+        # gdziekolwiek indziej. Uzgodnienie istnieje po to, żeby wyłapać
+        # rozjazd między naszym obrazem stanu a obrazem giełdy. Pytanie
+        # zadane starym kluczem trafia na INNY RACHUNEK niż ten, którym
+        # handluje `loop.zbuduj_adapter`, więc narzędzie do wykrywania
+        # rozjazdu samo by go produkowało: zgłaszałoby pozycje-widma
+        # i salda nieznane, których nie ma, albo — groźniej — meldowałoby
+        # zgodność pustego rachunku, gdy na handlowanym coś zostało otwarte.
+        cred, ostrzezenie = wybierz_klucz(await fetch_all(
+            "SELECT c.id, c.key_hint, c.created_at, c.key_enc, c.secret_enc,"
+            "       v.demo_host, v.live_host"
             " FROM app.api_credential c"
             " JOIN ref.venue v ON v.id = c.venue_id"
             " WHERE v.code = 'bybit' AND c.mode::text = %s AND c.active"
-            " ORDER BY c.id LIMIT 1", (args.mode,))
+            " ORDER BY c.created_at DESC, c.id DESC", (args.mode,)), args.mode)
+        if ostrzezenie:
+            print(f"uzgodnienie: UWAGA: {ostrzezenie}")
         if not cred:
             # BRAK KLUCZA TO NIE JEST ZGODNOSC. Milczace zero powiedzialoby
             # "sprawdzone i w porzadku" o czyms, czego nie sprawdzono.

@@ -80,7 +80,46 @@ spec:
                   # ktorych nic nie blokuje; saldo nieznane to ekspozycja poza
                   # limitami. Na rachunku papierowym sprawdzenie jest tanie
                   # i milczace, a przy wlaczeniu egzekucji dziala od pierwszego dnia.
+                  # STATUS INSTRUMENTOW U GIELDY, dwa kroki: odswiezenie
+                  # i ocena.
+                  #
+                  # Caly mechanizm wykrywania delistingu powstal razem z 32
+                  # kanarkami i NIE BYL WOLANY PRZEZ NIC - dokladnie ten wzorzec,
+                  # ktory tropimy: zaprojektowane, okolumnowane, niewpiete.
+                  # Kolumna statusu zamarzalaby na "Trading" i codziennie
+                  # zapewniala, ze wszystko gra.
+                  #
+                  # Odswiezenie idzie endpointem PUBLICZNYM hosta podmiotu, wiec
+                  # nie wymaga klucza. Jego kod wyjscia NIE dopisuje sie do RC:
+                  # zwraca 1 takze wtedy, gdy ktorykolwiek instrument nie ma
+                  # kompletu regul, a to jest warunek dopuszczenia egzekucji,
+                  # nie awaria zadania dozoru. Od oceny jest linia nizej.
+                  python services/ingest/instrumenty.py --mode demo || true
+                  python services/engine/dozor.py --co instrumenty || RC=$?
                   python services/engine/uzgodnienie.py          || RC=$?
+                  # CENNIK GIELDY KONTRA CENNIK W KODZIE. Sprawdzenie istnialo
+                  # od poczatku jako narzedzie CLI i nikt go nigdy nie uruchomil.
+                  # Runda kosztuje 0,200%, a mediana zwrotu na transakcje jest
+                  # rzedu dziesiatych procenta, wiec cala przewaga miesci sie
+                  # w kilku punktach bazowych - a stawki nie sa stale: zmieniaja
+                  # je progi VIP, promocje i regulamin podmiotu. Zmiana przelicza
+                  # bledy KAZDA transakcje az do chwili, w ktorej ktos zapyta
+                  # hosta wprost.
+                  #
+                  # ROZJAZD NIE OBJAWIA SIE NICZYM: rachunek papierowy dalej
+                  # liczy po starej stawce, backtest dalej pokazuje przewage,
+                  # a prawdziwy wynik po prostu jest inny - i wyglada jak pech
+                  # albo jak zmiana rynku.
+                  #
+                  # `--stawki`, a nie pelne badanie hosta: pelny przebieg konczy
+                  # sie kodem 1 na kazdym hoscie bez sald, czyli na podmiocie
+                  # unijnym w demo ZAWSZE. Czujka meldujaca awarie przy kazdym
+                  # przebiegu przestaje byc czujka.
+                  #
+                  # `--kind` MUSI byc ten sam, ktorym chodzi silnik (values.yaml,
+                  # workers.crypto: `--kind spot_eu`). Inny rodzaj instrumentu
+                  # znaczy porownanie z wierszem CENNIKA, ktorego nikt nie uzywa.
+                  python services/exchanges/mozliwosci.py --stawki --kind spot_eu || RC=$?
                   # POSLIZG I ULAMEK WYPELNIENIA. To jedyna linia tego zadania,
                   # ktora nie jest czujka, tylko POMIAREM - i dlatego nie dopisuje
                   # sie do RC. POSLIZG_TAKER = 0,0004 i POSLIZG_MAKER = 0 sa
