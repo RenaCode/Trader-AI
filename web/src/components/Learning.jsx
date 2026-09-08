@@ -188,14 +188,24 @@ export default function Learning({ engine }) {
 
         <div className="glass-card">
           <div className="card-title">
-            Dryf rozkładu cech (PSI)
-            <span className="hint">próg alarmowy: 0,25</span>
+            Dryf rozkładu cech
+            <span className="hint">
+              próg alarmowy: {fmtNum(drift.data?.prog_alarmu ?? 1.0, 2)}
+            </span>
           </div>
-          {drift.data?.length ? (
+          {drift.data?.pozycje?.length ? (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 9 }}>
-              {drift.data.map((d) => {
-                const w = Math.min(100, (d.psi / 0.4) * 100);
-                const tone = d.psi > 0.25 ? 'var(--loss)' : d.psi > 0.15 ? 'var(--color-orange)' : 'var(--profit)';
+              {drift.data.pozycje.map((d) => {
+                // PROGI Z SERWERA, nie wpisane tutaj. Wlasna kopia tych liczb
+                // stala tu wczesniej i pokazywala czerwien od 0,25 - progu
+                // z literatury o PSI, ktora do tej miary nie pasuje. Czujka
+                // alarmuje od 1,0, wiec dashboard malowal na czerwono stan,
+                // ktory system uznaje za normalny.
+                const progAlarm = drift.data.prog_alarmu ?? 1.0;
+                const progTrwaly = drift.data.prog_trwaly ?? 0.5;
+                const w = Math.min(100, (d.psi / (progAlarm * 1.2)) * 100);
+                const tone = d.psi > progAlarm ? 'var(--loss)'
+                  : d.psi > progTrwaly ? 'var(--color-orange)' : 'var(--profit)';
                 return (
                   <div key={d.feature}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.77rem', marginBottom: 4 }}>
@@ -207,9 +217,17 @@ export default function Learning({ engine }) {
                 );
               })}
               <div className="row-body">
-                PSI mierzy, jak bardzo bieżący rozkład cechy odjechał od tego, na którym model
-                był trenowany. Rosnący dryf zapowiada spadek skuteczności <em>zanim</em> pojawi
-                się on w wyniku.
+                Miara: <span className="mono">{drift.data.miara}</span> — mimo nazwy
+                kolumny <span className="mono">psi</span> to NIE jest Population Stability
+                Index i próg 0,25 z literatury o PSI do niej nie pasuje. Porównywane są
+                przy tym dwa odcinki tej samej historii (świeższy wobec starszego), a nie
+                rozkład treningowy wobec bieżącego.
+                <br /><br />
+                Pomarańczowy od {fmtNum(drift.data.prog_trwaly ?? 0.5, 2)} — tyle wystarczy,
+                gdy utrzymuje się przez trzy kolejne przebiegi. Czerwony od{' '}
+                {fmtNum(drift.data.prog_alarmu ?? 1.0, 2)} — pojedynczy odczyt wystarcza,
+                żeby czujka się odezwała. Rosnący dryf zapowiada spadek skuteczności
+                <em> zanim</em> pojawi się on w wyniku.
               </div>
             </div>
           ) : <div className="empty">Brak pomiarów dryfu</div>}

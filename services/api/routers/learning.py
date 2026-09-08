@@ -227,7 +227,25 @@ async def calibration(engine: str):
 
 @router.get("/drift")
 async def drift(engine: str, limit: int = Query(12, le=60)):
-    """Dryf rozkladu cech (PSI). > 0.25 = rozklad realnie odjechal od treningowego."""
+    """Dryf rozkladu cech. UWAGA: kolumna nazywa sie `psi`, ale to NIE JEST PSI.
+
+    `train.py` liczy standaryzowane przesuniecie sredniej (d Cohena) powiekszone
+    o wzgledna zmiane rozrzutu:
+
+        |srednia_nowa - srednia_stara| / sd_stare + |sd_nowe / sd_stare - 1|
+
+    PSI to suma po kubelkach (p-q)*ln(p/q) - inna konstrukcja i inna skala. Prog
+    0,25 z literatury Siddiqiego, ktory stal w tym docstringu i na dashboardzie,
+    NIE ZNACZY WIEC NIC dla tej miary, a wygladal na uzasadniony. Wlasciciel
+    widzial czerwien przy stanie, ktory czujka uznaje za normalny.
+
+    Porownywane okna to tez swiezsza historia wobec starszej, a NIE rozklad
+    treningowy wobec biezacego - mimo nazwy kolumny.
+
+    Progi oddajemy WPROST z modulu dozoru, zeby interfejs nie mial wlasnej kopii
+    tych liczb. Poprzednio mial i wlasnie stad wzial sie ten rozjazd.
+    """
+    from services.engine.dozor import DRYF_TRWALY_PROG, PSI_PROG
     rows = await fetch_all(
         """
         SELECT fd.name || '@' || fd.version AS feature, d.psi, d.ks_stat, d.event_time
@@ -243,11 +261,16 @@ async def drift(engine: str, limit: int = Query(12, le=60)):
         """,
         (engine, limit),
     )
-    return [
-        {"feature": r["feature"], "psi": r["psi"], "ks": r["ks_stat"],
-         "at": r["event_time"].isoformat()}
-        for r in rows
-    ]
+    return {
+        "miara": "wielkość efektu (d Cohena + względna zmiana rozrzutu)",
+        "prog_alarmu": PSI_PROG,
+        "prog_trwaly": DRYF_TRWALY_PROG,
+        "pozycje": [
+            {"feature": r["feature"], "psi": r["psi"], "ks": r["ks_stat"],
+             "at": r["event_time"].isoformat()}
+            for r in rows
+        ],
+    }
 
 
 @router.get("/signal-performance")

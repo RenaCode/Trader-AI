@@ -439,3 +439,81 @@ def test_liczba_przebiegow_jest_ta_sama_co_przy_pozostalych_czujkach():
     CYKLI_ZWLOKI i MARTWY_PO_MIN. Próg dwóch leży na górnej granicy normalnego
     wahania i czujka migałaby."""
     assert DRYF_TRWALY_PRZEBIEGOW == 3
+
+
+# ================================ nazwa i prog musza mowic to samo co czujka
+
+def test_ZADNE_miejsce_nie_obiecuje_juz_progu_0_25():
+    """Próg 0,25 pochodzi z literatury Siddiqiego o PSI, a ta miara PSI nie
+    jest: `train.py` liczy wielkość efektu (d Cohena + względna zmiana
+    rozrzutu). Próg przeniesiony z jednej miary na drugą nie znaczy nic,
+    a wygląda na uzasadniony.
+
+    Skutek był mylący w obie strony naraz: dashboard malował na czerwono od
+    0,25, czujka odzywa się od 1,0. Właściciel widział alarmujący kolor przy
+    stanie, który system uznaje za normalny — i uczył się ignorować ten wykres.
+    """
+    from pathlib import Path
+
+    korzen = Path(__file__).resolve().parents[1]
+    podejrzane = []
+    for wzorzec in ("services/api/routers/learning.py",
+                    "web/src/components/Learning.jsx"):
+        tresc = (korzen / wzorzec).read_text(encoding="utf-8")
+        for nr, linia in enumerate(tresc.splitlines(), 1):
+            if "0.25" in linia and "PSI" not in linia.upper():
+                podejrzane.append(f"{wzorzec}:{nr}: {linia.strip()[:80]}")
+    assert not podejrzane, "próg 0,25 nadal użyty jako granica: " + "; ".join(podejrzane)
+
+
+def test_interfejs_NIE_MA_wlasnej_kopii_progow():
+    """Własna kopia liczb w interfejsie jest dokładnie tym, przez co ten rozjazd
+    powstał. Progi mają przychodzić z serwera, z tego samego modułu, którego
+    używa czujka."""
+    from pathlib import Path
+
+    korzen = Path(__file__).resolve().parents[1]
+    ui = (korzen / "web/src/components/Learning.jsx").read_text(encoding="utf-8")
+    assert "drift.data.prog_alarmu" in ui and "drift.data.prog_trwaly" in ui
+    api = (korzen / "services/api/routers/learning.py").read_text(encoding="utf-8")
+    assert "from services.engine.dozor import DRYF_TRWALY_PROG, PSI_PROG" in api, (
+        "API ma brać progi z modułu dozoru, a nie wpisywać własne")
+
+
+def test_katalog_zdarzen_opisuje_MIARE_ktora_naprawde_liczymy():
+    """Opis zdarzenia to jedyne miejsce, które właściciel czyta w powiadomieniu.
+    Obietnica „PSI powyżej 0,25" wysyłała go do literatury, która tej liczby nie
+    tłumaczy."""
+    from pathlib import Path
+
+    korzen = Path(__file__).resolve().parents[1]
+    migracja = korzen / "db/migrations/0037_opis_dryfu.sql"
+    assert migracja.exists(), "brak migracji poprawiającej opis zdarzenia"
+    tresc = migracja.read_text(encoding="utf-8")
+    assert "learning.drift_high" in tresc
+    assert "NIE jest to PSI" in tresc
+    assert "1,0" in tresc and "0,5" in tresc
+
+
+def test_progi_w_opisie_zdarzenia_zgadzaja_sie_z_czujka():
+    """Trzecia kopia tych samych liczb — tym razem w tekście, więc nie da się
+    jej podłączyć do stałej. Test pilnuje, żeby nie rozjechała się po cichu."""
+    from pathlib import Path
+
+    from services.engine.dozor import DRYF_TRWALY_PROG, PSI_PROG
+
+    import re
+
+    korzen = Path(__file__).resolve().parents[1]
+    plik = (korzen / "db/migrations/0037_opis_dryfu.sql").read_text(encoding="utf-8")
+    # TYLKO TRESC ZDARZENIA, bez komentarzy. Pierwsza wersja tego testu czytala
+    # caly plik i przechodzila, bo te same liczby stoja w uzasadnieniu powyzej -
+    # kanarek na podmienionej tresci nie padl i to wlasnie go zdemaskowalo.
+    opis = " ".join(re.findall(r"'([^']*)'", plik.split("SET description =")[1]
+                               .split("WHERE")[0]))
+    assert opis, "nie udalo sie wyluskac tresci zdarzenia"
+    assert f"{PSI_PROG:.1f}".replace(".", ",") in opis, (
+        f"tresc zdarzenia nie podaje progu alarmu {PSI_PROG}")
+    assert f"{DRYF_TRWALY_PROG:.1f}".replace(".", ",") in opis, (
+        f"tresc zdarzenia nie podaje progu trwalego {DRYF_TRWALY_PROG}")
+    assert "0,25" not in opis, "prog 0,25 wrocil do tresci zdarzenia"
