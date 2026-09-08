@@ -687,3 +687,28 @@ def test_PELEN_OBIEG_planu_nie_lamie_unikalnosci_zlecenia():
     assert len(wstawienia) == 1, (
         "jeden plan musi zostawić dokładnie jeden wiersz zlecenia — drugi łamie "
         "UNIQUE (mode, client_order_id)")
+
+
+def test_zapytanie_o_ATR_uzywa_ISTNIEJACEJ_kolumny():
+    """Nazwa kolumny zgadnięta zamiast sprawdzonej zatrzymała silnik na
+    produkcji: `feat.feature_value` ma `feature_def_id`, nie `feature_id`.
+
+    Pięć przebiegów pod rząd zakończonych błędem, proces zakończony, trzy
+    restarty poda. Zabezpieczenie zadziałało — awaria była widoczna zamiast
+    cichej — ale przez kilkanaście minut silnik nie handlował.
+
+    Atrapa kursora nie mogła tego złapać, bo nie zna schematu bazy; ten test
+    porównuje nazwę wprost z migracją, która tę tabelę tworzy.
+    """
+    from pathlib import Path
+
+    zrodlo = Path("services/engine/gielda_exec.py").read_text(encoding="utf-8")
+    assert "fv.feature_def_id" in zrodlo
+    assert "fv.feature_id" not in zrodlo
+
+    # Kolumna musi istniec w migracji tworzacej tabele - inaczej test pilnuje
+    # wlasnego zalozenia zamiast schematu.
+    migracje = " ".join(
+        p.read_text(encoding="utf-8")
+        for p in sorted(Path("db/migrations").glob("*.sql")))
+    assert "feature_def_id" in migracje

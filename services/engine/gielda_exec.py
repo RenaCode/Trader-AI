@@ -346,7 +346,7 @@ async def zloz_oczekujace(cur, adapter, *, engine: str, mode: str,
         # awaryjne - ale zawezenie go realna zmiennoscia pary jest cala wartoscia
         # tego progu: stala liczba jest albo krzykliwa, albo bezuzyteczna.
         "       (SELECT fv.value FROM feat.feature_value fv"
-        "         JOIN feat.feature_def fd ON fd.id = fv.feature_id"
+        "         JOIN feat.feature_def fd ON fd.id = fv.feature_def_id"
         "        WHERE fv.instrument_id = p.instrument_id AND fd.name = %s"
         "        ORDER BY fv.event_time DESC LIMIT 1) AS atr_pct"
         "  FROM journal.planned_order p"
