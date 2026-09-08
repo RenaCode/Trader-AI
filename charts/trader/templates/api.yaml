@@ -32,9 +32,15 @@ spec:
                 secretKeyRef: { name: {{ .Values.secretName }}, key: POSTGRES_PASSWORD }
             - name: DATABASE_URL
               value: {{ include "trader.databaseUrl" . | quote }}
-            # Migrator ustawia tym haslo roli aplikacji (poza plikiem migracji,
-            # zeby nie trafilo do repozytorium ani do sumy kontrolnej).
+            # Migrator ustawia tym hasla ROL PROCESOW (poza plikami migracji,
+            # zeby nie trafily do repozytorium ani do sumy kontrolnej).
+            #
+            # To jedyny kontener, ktory widzi je wszystkie naraz - i tak byc
+            # musi, bo tylko wlasciciel moze zrobic ALTER ROLE. Gdyby haslo
+            # ustawial ktos inny, poswiadczenia dozorcy musialyby trafic do
+            # poda, ktory dozorca nie jest.
             {{- include "trader.appDbPasswordEnv" . | nindent 12 }}
+            {{- include "trader.rolaHaslaEnv" . | nindent 12 }}
       containers:
         - name: api
           image: "{{ .Values.api.image.repository }}:{{ .Values.api.image.tag }}"

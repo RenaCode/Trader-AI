@@ -35,3 +35,48 @@ postgresql://{{ .Values.db.appUsername }}:$(APP_DB_PASSWORD)@{{ include "trader.
   valueFrom:
     secretKeyRef: { name: {{ .Values.secretName }}, key: APP_DB_PASSWORD }
 {{- end -}}
+
+{{/*
+POŚWIADCZENIA PER PROCES (migracja 0034).
+
+Do tej pory silnik, dozorca ryzyka, czujka żywotności i próba pożarowa łączyły
+się do bazy JEDNĄ rolą `trader_app`. Nic nie WYMUSZAŁO, że silnik nie zwolni
+sobie kill-switcha — nie robił tego, bo nie miał takiego kodu, a nie dlatego,
+że nie mógł.
+
+Rozdział uprawnień jest wart tyle, ile rozdział poświadczeń: gdyby wszystkie
+role miały to samo hasło, proces o węższych nadaniach po prostu połączyłby się
+tą rolą, która ma szersze. Dlatego każda rola ma własny klucz w sekrecie.
+
+Wywołanie:  {{`{{- include "trader.rolaDbEnv" (dict "ctx" $ "rola" "silnik") | nindent 12 }}`}}
+
+Nazwa roli MUSI istnieć w .Values.db.role — literówka ma zatrzymać `helm
+template`, a nie po cichu wygenerować pusty login, na którym pod wstanie
+i połączy się jako nikt.
+*/}}
+{{- define "trader.rolaDbEnv" -}}
+{{- $ := .ctx -}}
+{{- $r := index $.Values.db.role .rola -}}
+{{- if not $r }}{{ fail (printf "Nie ma roli bazodanowej %q w .Values.db.role" .rola) }}{{ end }}
+- name: ROLA_DB_PASSWORD
+  valueFrom:
+    secretKeyRef: { name: {{ $.Values.secretName }}, key: {{ $r.secretKey }} }
+- name: DATABASE_URL
+  value: "postgresql://{{ $r.user }}:$(ROLA_DB_PASSWORD)@{{ include "trader.fullname" $ }}-db:5432/{{ $.Values.db.database }}"
+{{- end -}}
+
+{{/*
+Hasła WSZYSTKICH ról procesów — wyłącznie dla kontenera migracji.
+
+Migrator chodzi rolą właściciela i ustawia nimi hasła pozostałych ról (patrz
+db/migrate.py). Jest jedynym miejscem, które widzi je wszystkie naraz; gdyby
+robił to ktoś inny, hasło roli dozorcy musiałoby trafić do poda, który nie jest
+dozorcą.
+*/}}
+{{- define "trader.rolaHaslaEnv" -}}
+{{- range $nazwa, $r := .Values.db.role }}
+- name: {{ $r.secretKey }}
+  valueFrom:
+    secretKeyRef: { name: {{ $.Values.secretName }}, key: {{ $r.secretKey }} }
+{{- end }}
+{{- end -}}

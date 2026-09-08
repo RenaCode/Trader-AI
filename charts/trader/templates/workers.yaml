@@ -40,9 +40,16 @@ spec:
           imagePullPolicy: {{ $.Values.api.image.pullPolicy }}
           command: {{ toJson $w.command }}
           env:
-            {{- include "trader.appDbPasswordEnv" $ | nindent 12 }}
-            - name: DATABASE_URL
-              value: {{ include "trader.appDatabaseUrl" $ | quote }}
+            {{/*
+            ROLA BAZODANOWA PER WORKER (migracja 0034).
+
+            Domyslnie `silnik` - bo prawie kazdy worker zbiera dane albo
+            handluje. Wyjatkiem jest dozorca ryzyka, ktory deklaruje `dbRole`
+            jawnie w values.yaml. Domysl idzie w strone WEZSZYCH uprawnien:
+            worker, ktory zapomni sie zadeklarowac, dostanie role bez prawa
+            zwolnienia kill-switcha, a nie z nim.
+            */}}
+            {{- include "trader.rolaDbEnv" (dict "ctx" $ "rola" ($w.dbRole | default "silnik")) | nindent 12 }}
             - name: SECRETS_KEY
               valueFrom:
                 secretKeyRef: { name: {{ $.Values.secretName }}, key: SECRETS_KEY }

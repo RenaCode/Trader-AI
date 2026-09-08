@@ -54,9 +54,12 @@ spec:
                   python services/engine/dozor.py --bar {{ .Values.trainerCron.bar | quote }} --kod-trenera $RC
                   exit $RC
               env:
-                {{- include "trader.appDbPasswordEnv" . | nindent 16 }}
-                - name: DATABASE_URL
-                  value: {{ include "trader.appDatabaseUrl" . | quote }}
+                # Trener chodzi rola silnika (migracja 0034): pisze do learn.*,
+                # czyta dane rynkowe i cechy, a z ryzykiem nie ma nic wspolnego.
+                # Wczesniej mial te sama role co API, wiec mogl zwolnic
+                # kill-switcha - w procesie, ktory trwa dziesiatki minut i nikt
+                # w niego nie zaglada.
+                {{- include "trader.rolaDbEnv" (dict "ctx" $ "rola" "silnik") | nindent 16 }}
                 - name: PYTHONUNBUFFERED
                   value: "1"
               resources: {{- toYaml .Values.trainerCron.resources | nindent 16 }}

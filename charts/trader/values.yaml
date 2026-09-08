@@ -41,6 +41,48 @@ db:
   # Wlasciciel schematow - wylacznie migracje i konserwacja.
   username: trader
   # Rola aplikacji i procesow roboczych, bez prawa zmiany struktury.
+  # ROLA OSOBNA DLA KAZDEGO PROCESU (migracja 0034).
+  #
+  # Do 0034 silnik, dozorca ryzyka, czujka zywotnosci i proba pozarowa laczyly
+  # sie ta sama rola `trader_app`. Nic nie WYMUSZALO, ze silnik nie zwolni sobie
+  # kill-switcha - nie robil tego, bo nie mial takiego kodu, a nie dlatego, ze
+  # nie mogl. Wystarczyla jedna linijka dopisana w pospiechu albo jeden blad
+  # w module egzekucji, zeby proces, ktory wlasnie traci pieniadze, sam sobie
+  # zdjal hamulec.
+  #
+  # Rozdzial uprawnien jest wart tyle, ile rozdzial POSWIADCZEN: wspolne haslo
+  # znaczyloby, ze proces o wezszych nadaniach po prostu laczy sie ta rola,
+  # ktora ma szersze. Stad osobny klucz w sekrecie dla kazdej roli.
+  #
+  # UWAGA WDROZENIOWA: bez tych kluczy w sekrecie `trader-secret` role zostaja
+  # bez hasla i ich pody sie nie polacza. To jest zachowanie zamierzone - pod,
+  # ktory nie wstal, widac w `kubectl get pods`; proces chodzacy na cudzych
+  # poswiadczeniach nie widac wcale.
+  role:
+    # Petla decyzyjna i procesy zbierajace dane. HANDLUJE, wiec ma klucze
+    # gieldy - i wlasnie dlatego nie ma prawa zwolnic zatrzymania, ktore jej
+    # dotyczy (brak UPDATE na risk.killswitch_event) ani ruszyc limitu.
+    silnik:
+      user: trader_silnik
+      secretKey: SILNIK_DB_PASSWORD
+    # Nadzorca ryzyka. Jedyny proces automatyczny, ktory ZWALNIA kill-switch -
+    # i to wylacznie trzy kolumny zwolnienia, bez prawa przepisania powodu.
+    # Nie handluje i nie widzi kluczy gieldy (app.api_credential), bo docs/06
+    # wprost odrzuca awaryjne domykanie pozycji z tego procesu.
+    dozorca:
+      user: trader_dozorca
+      secretKey: DOZORCA_DB_PASSWORD
+    # Czujka zywotnosci i uzgodnienie z gielda. TYLKO CZYTA, poza
+    # powiadomieniami. Diagnoza, ktora potrafi zmienic stan, predzej czy pozniej
+    # go zmieni - i wtedy mierzy siebie.
+    czujka:
+      user: trader_czujka
+      secretKey: CZUJKA_DB_PASSWORD
+    # Proba pozarowa kill-switcha. Jedyna rola poza wlascicielem, ktora moze
+    # ruszyc wartosc limitu - i wylacznie `value`, nigdy `enabled` ani `action`.
+    proba:
+      user: trader_proba
+      secretKey: PROBA_DB_PASSWORD
   appUsername: trader_app
   resources:
     limits:   { cpu: 2000m, memory: 3Gi }
@@ -227,6 +269,10 @@ workers:
   # ten sam stan i moglyby zwolnic to samo zdarzenie dwukrotnie.
   dozorca:
     enabled: true
+    # JEDYNY worker, ktory NIE chodzi rola silnika (migracja 0034). Nadzorca
+    # zwalniajacy kill-switcha poswiadczeniami nadzorowanego nie jest nadzorca -
+    # jest ta sama awaria o jeden poziom wyzej.
+    dbRole: dozorca
     command: ["python", "services/engine/dozorca.py", "--engine", "crypto", "--mode", "demo"]
     resources:
       limits:   { cpu: 200m, memory: 256Mi }

@@ -39,29 +39,55 @@ def dsn() -> str:
     return url
 
 
-def ustaw_haslo_roli_aplikacji(conn) -> None:
-    """Ustawia haslo roli `trader_app` z APP_DB_PASSWORD.
+# Rola bazodanowa -> zmienna srodowiskowa z jej haslem.
+#
+# Kazdy proces ma WLASNA role (migracja 0034), bo wspolna rola znaczyla, ze
+# silnik moze zwolnic sobie kill-switcha - nie robil tego, bo nie mial takiego
+# kodu, a nie dlatego, ze nie mogl. Rozdzial uprawnien jest jednak wart tyle,
+# ile rozdzial POSWIADCZEN: jedno haslo do wszystkich rol oznaczaloby, ze proces
+# o wezszych nadaniach po prostu laczy sie ta rola, ktora ma szersze.
+ROLE_HASLA = {
+    "trader_app": "APP_DB_PASSWORD",
+    "trader_silnik": "SILNIK_DB_PASSWORD",
+    "trader_dozorca": "DOZORCA_DB_PASSWORD",
+    "trader_czujka": "CZUJKA_DB_PASSWORD",
+    "trader_proba": "PROBA_DB_PASSWORD",
+}
 
-    Robione POZA plikiem migracji swiadomie. Haslo w pliku .sql trafiloby do
+
+def ustaw_hasla_rol(conn) -> None:
+    """Ustawia hasla rol procesow ze zmiennych srodowiskowych.
+
+    Robione POZA plikami migracji swiadomie. Haslo w pliku .sql trafiloby do
     repozytorium i do sumy kontrolnej migracji - a wtedy jego rotacja wymagalaby
     edycji zastosowanego juz pliku, czego migrator slusznie zabrania.
 
     Krok jest idempotentny: przy kazdym uruchomieniu ustawia to, co jest
-    w zmiennej srodowiskowej. Dzieki temu rotacja hasla sprowadza sie do zmiany
-    sekretu i restartu - bez dotykania migracji.
+    w zmiennych srodowiskowych. Dzieki temu rotacja hasla sprowadza sie do
+    zmiany sekretu i restartu - bez dotykania migracji.
+
+    Rola, ktorej hasla nie podano, ZOSTAJE BEZ HASLA i jej pod sie nie polaczy.
+    To jest zamierzone: cicha praca procesu na cudzych poswiadczeniach byla by
+    gorsza niz pod, ktory nie wstal - ten drugi widac w `kubectl get pods`.
     """
-    haslo = os.environ.get("APP_DB_PASSWORD")
-    if not haslo:
-        print("APP_DB_PASSWORD nie ustawione - pomijam haslo roli aplikacji.")
-        return
-    exists = conn.execute(
-        "SELECT 1 FROM pg_roles WHERE rolname = 'trader_app'").fetchone()
-    if not exists:
-        print("Rola trader_app jeszcze nie istnieje - pomijam.")
-        return
-    conn.execute(
-        sql.SQL("ALTER ROLE trader_app WITH PASSWORD {}").format(sql.Literal(haslo)))
-    print("Haslo roli trader_app ustawione.")
+    istniejace = {
+        r[0] for r in conn.execute(
+            "SELECT rolname FROM pg_roles WHERE rolname = ANY(%s)",
+            (list(ROLE_HASLA),))
+    }
+    for rola, zmienna in ROLE_HASLA.items():
+        if rola not in istniejace:
+            print(f"Rola {rola} jeszcze nie istnieje - pomijam.")
+            continue
+        haslo = os.environ.get(zmienna)
+        if not haslo:
+            print(f"{zmienna} nie ustawione - rola {rola} zostaje bez hasla "
+                  f"i jej proces sie nie zaloguje.")
+            continue
+        conn.execute(
+            sql.SQL("ALTER ROLE {} WITH PASSWORD {}").format(
+                sql.Identifier(rola), sql.Literal(haslo)))
+        print(f"Haslo roli {rola} ustawione.")
 
 
 def main() -> int:
@@ -91,6 +117,12 @@ def main() -> int:
 
         if not pending:
             print(f"Baza aktualna ({len(applied)} migracji).")
+            # Hasla ustawiamy TAKZE gdy nie ma nic do zastosowania. Wczesniej ten
+            # krok byl za `return 0`, wiec rotacja hasla wymagala, zeby akurat
+            # czekala jakas migracja - a bez niej nowy sekret byl w podzie
+            # i nie byl w bazie. Roznica objawia sie dopiero przy restarcie,
+            # czyli najpozniej jak sie da.
+            ustaw_hasla_rol(conn)
             return 0
 
         for version, path, checksum in pending:
@@ -110,7 +142,7 @@ def main() -> int:
             print(f"ok ({duration} ms)")
 
         print(f"Zastosowano {len(pending)} migracji.")
-        ustaw_haslo_roli_aplikacji(conn)
+        ustaw_hasla_rol(conn)
     return 0
 
 

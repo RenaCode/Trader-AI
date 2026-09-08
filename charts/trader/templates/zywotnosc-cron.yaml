@@ -81,11 +81,13 @@ spec:
                   python services/engine/dozor.py --co poslizg
                   exit $RC
               env:
-                - name: APP_DB_PASSWORD
-                  valueFrom:
-                    secretKeyRef: { name: {{ .Values.secretName }}, key: APP_DB_PASSWORD }
-                - name: DATABASE_URL
-                  value: "postgresql://{{ .Values.db.appUsername }}:$(APP_DB_PASSWORD)@trader-db:5432/{{ .Values.db.database }}"
+                # ROLA TYLKO DO ODCZYTU (migracja 0034). Czujka odpowiada na
+                # pytanie "czy system jest w stanie, o ktorym czlowiek MUSI
+                # wiedziec". Odpowiedz na nie nigdy nie wymaga zapisu - poza
+                # samym powiadomieniem. Proces diagnostyczny z prawem zmiany
+                # stanu predzej czy pozniej ten stan zmieni i zacznie mierzyc
+                # siebie zamiast systemu.
+                {{- include "trader.rolaDbEnv" (dict "ctx" $ "rola" "czujka") | nindent 16 }}
                 - name: SECRETS_KEY
                   valueFrom:
                     secretKeyRef: { name: {{ .Values.secretName }}, key: SECRETS_KEY }

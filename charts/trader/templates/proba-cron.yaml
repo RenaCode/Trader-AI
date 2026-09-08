@@ -49,11 +49,13 @@ spec:
               imagePullPolicy: {{ .Values.api.image.pullPolicy }}
               command: ["python", "services/engine/proba_killswitcha.py"]
               env:
-                - name: APP_DB_PASSWORD
-                  valueFrom:
-                    secretKeyRef: { name: {{ .Values.secretName }}, key: APP_DB_PASSWORD }
-                - name: DATABASE_URL
-                  value: "postgresql://{{ .Values.db.appUsername }}:$(APP_DB_PASSWORD)@trader-db:5432/{{ .Values.db.database }}"
+                # WLASNA ROLA (migracja 0034). Proba jest jedynym procesem poza
+                # wlascicielem, ktory moze ruszyc wartosc limitu - i wylacznie
+                # kolumne `value`. Nie ma prawa ustawic `enabled = false`:
+                # wylaczony limit nie wraca sam po bledzie procesu, a wyglada
+                # dokladnie jak limit niespelniony, wiec nikt by tego nie
+                # zauwazyl az do chwili, w ktorej bylby potrzebny.
+                {{- include "trader.rolaDbEnv" (dict "ctx" $ "rola" "proba") | nindent 16 }}
                 - name: SECRETS_KEY
                   valueFrom:
                     secretKeyRef: { name: {{ .Values.secretName }}, key: SECRETS_KEY }

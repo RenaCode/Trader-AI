@@ -140,9 +140,39 @@ dozorca go nie ruszy i nie zwolni zdarzenia w połowie pomiaru.
   procesów ich nie zamknie. Awaryjne domknięcie z poziomu dozorcy to osobna
   decyzja — wymaga kluczy giełdy w kolejnym procesie, co poszerza powierzchnię
   ataku, więc nie jest oczywistą wygraną.
-- **Uprawnienia nie są rozdzielone.** Silnik i dozorca chodzą na tej samej roli
-  bazodanowej, więc nic nie *wymusza*, że silnik nie zwolni sobie kill-switcha.
-  Dziś nie robi tego, bo nie ma takiego kodu — nie dlatego, że nie może.
+- **~~Uprawnienia nie są rozdzielone.~~** Rozdzielone od migracji 0034 — patrz
+  niżej.
 - **Jedna replika.** Dozorca ma `replicas: 1` i `strategy: Recreate`. Dwie
   repliki oceniałyby ten sam stan i mogłyby zwolnić to samo zdarzenie
   dwukrotnie. Cena: podczas wdrożenia jest kilkusekundowa przerwa w nadzorze.
+
+## Kto czym może zwolnić kill-switcha (migracja 0034)
+
+Do 0032 wszystkie procesy łączyły się do bazy rolą `trader_app`. Zdanie
+„nadzorca nie może dzielić losu z nadzorowanym", na którym stoi cała ta
+architektura, było więc konwencją w komentarzu — nadzorowany miał poświadczenia
+nadzorcy. Teraz egzekwuje je `GRANT`:
+
+| rola | `risk.killswitch_event` | `risk.limit_def` | handluje | klucze giełdy |
+|---|---|---|---|---|
+| `trader_silnik` | `SELECT`, `INSERT` | `SELECT` | tak | tak |
+| `trader_dozorca` | `SELECT`, `INSERT`, `UPDATE` **tylko** `released_at`, `released_auto`, `release_note` | `SELECT` | **nie** | **nie** |
+| `trader_czujka` | `SELECT` | `SELECT` | nie | tak (uzgodnienie) |
+| `trader_proba` | `SELECT`, `UPDATE` trzech kolumn zwolnienia | `UPDATE` **tylko** `value`, `updated_at` | nie | nie |
+| `trader_app` | `SELECT`, `UPDATE` `released_at`, `released_by`, `release_note` | `SELECT` | nie | tak |
+
+Trzy rzeczy, które ta tabela mówi, a których nie mówi rysunek wyżej:
+
+1. **Silnik nie zwolni zatrzymania, które go dotyczy.** Próba kończy się
+   `InsufficientPrivilege`, czyli awarią widoczną w `kubectl get pods`, a nie
+   cichym powodzeniem.
+2. **Silnik nie podniesie sobie progu.** Zmiana limitu wyłącza bezpiecznik
+   skuteczniej niż zwolnienie zdarzenia i, w odróżnieniu od niego, nie zostawia
+   wiersza w dzienniku ani nie wysyła powiadomienia.
+3. **Dozorca nie handluje.** Brak zapisu na `exec.*` znaczy, że błąd
+   w nadzorcy nie może zamienić się w transakcję — mechanizm powołany do
+   ograniczania ryzyka nie stanie się jego źródłem.
+
+`released_auto` jest poza nadaniem dla API, a `released_by` poza nadaniem dla
+dozorcy: dzięki temu pytanie „czy system wrócił do handlu sam, czy wrócił go
+człowiek" jest rozstrzygalne z samej bazy, niezależnie od tego, co zapisał kod.
