@@ -137,6 +137,15 @@ ROLES = {
                      "czyli rynek jest wychylony na wzrost."),
     "funding_z":   ("features.derivatives:funding_z",
                     "Odchylenie stawki finansowania od średniej z 30 dni, w odchyleniach standardowych."),
+    "long_ratio":  ("features.derivatives:long_ratio",
+                    "Udział KONT po stronie długiej na perpetualu, w procentach. "
+                    "Nie udział kapitału — jeden duży gracz waży tyle samo co mały."),
+    "long_ratio_z": ("features.derivatives:long_ratio_z",
+                     "Odchylenie udziału kont długich od średniej z 30 dni, "
+                     "w odchyleniach standardowych. Skrajne wychylenie tłumu."),
+    "oi_zmiana":   ("features.derivatives:open_interest_change",
+                    "Zmiana otwartych pozycji wobec poprzedniej świecy, w procentach. "
+                    "Poziom nie jest porównywalny w czasie — informacją jest zmiana."),
     "book_imbalance": ("features.microstructure:imbalance",
                        "Nierównowaga arkusza zleceń uśredniona po świecy {bar}: "
                        "+1 = sama strona kupna, −1 = sama strona sprzedaży."),
@@ -591,6 +600,97 @@ def compute_funding(cur, instrument_id: int, h: Horizon, feat_ids: dict[str, int
     return insert_values(cur, rows)
 
 
+def compute_positioning(cur, instrument_id: int, h: Horizon,
+                        feat_ids: dict[str, int],
+                        since: datetime, until: datetime) -> int:
+    """Pozycjonowanie tłumu przeniesione na siatkę świec.
+
+    Ta sama konstrukcja co `compute_funding` i z tego samego powodu: instrumenty
+    spot nie mają własnych otwartych pozycji, więc bierzemy je z perpetuala na
+    tym samym aktywie (`meta.funding_from`). To jest sygnał o rynku, nie
+    o naszym instrumencie.
+
+    KAŻDA ŚWIECA DOSTAJE OSTATNI ODCZYT SPRZED SWOJEGO ZAMKNIĘCIA, nigdy
+    nadchodzący — `while ... <= t` niżej. Odczyt z 08:00 nie może wpływać na
+    decyzję z 04:00, choć opisuje sąsiadujące okno. Znacznik `znane_od` mówi
+    dodatkowo, od kiedy wartość była NAPRAWDĘ znana, więc backtest nie może jej
+    użyć wcześniej, niż istniała.
+
+    ZMIANA OTWARTYCH POZYCJI, NIE POZIOM. Poziom zależy od wielkości rynku
+    i rośnie latami, więc jako cecha byłby głównie zegarem — model nauczyłby się
+    z niego daty, nie zachowania. Porównujemy wobec POPRZEDNIEJ ŚWIECY tego
+    horyzontu, a nie wobec poprzedniego odczytu godzinowego: inaczej cecha
+    świecy czterogodzinnej opisywałaby jedną godzinę z czterech.
+    """
+    cur.execute("SELECT (meta->>'funding_from')::int AS src FROM ref.instrument WHERE id=%s",
+                (instrument_id,))
+    row = cur.fetchone()
+    src = row["src"] if row else None
+    if not src:
+        return 0
+
+    cur.execute(
+        "SELECT event_time, long_ratio, open_interest FROM market.positioning"
+        " WHERE instrument_id = %s AND event_time >= %s AND event_time <= %s"
+        "   AND (long_ratio IS NOT NULL OR open_interest IS NOT NULL)"
+        " ORDER BY event_time",
+        (src, since - timedelta(days=2), until),
+    )
+    odczyty = [(r["event_time"],
+                float(r["long_ratio"]) if r["long_ratio"] is not None else None,
+                float(r["open_interest"]) if r["open_interest"] is not None else None)
+               for r in cur.fetchall()]
+    if not odczyty:
+        return 0
+
+    # Siatka MUSI byc ta sama co dla cech cenowych - patrz na_siatce().
+    since = na_siatce(since, h)
+    until = na_siatce(until, h) - timedelta(minutes=h.bar_minutes)
+
+    step = timedelta(minutes=h.bar_minutes)
+    win = max(20, 30 * 1440 // h.bar_minutes)
+
+    rows: list[tuple] = []
+    hist: deque[float] = deque(maxlen=win)
+    j = 0
+    udzial: float | None = None
+    oi: float | None = None
+    oi_poprzednie: float | None = None
+    t = since
+    while t <= until:
+        while j < len(odczyty) and odczyty[j][0] <= t:
+            # Każde źródło niesie się osobno: brak jednego w danej godzinie nie
+            # może skasować ostatniej znanej wartości drugiego.
+            if odczyty[j][1] is not None:
+                udzial = odczyty[j][1]
+            if odczyty[j][2] is not None:
+                oi = odczyty[j][2]
+            j += 1
+
+        ingested = znane_od(t, h)
+        if udzial is not None:
+            hist.append(udzial)
+            rows.append((feat_ids["long_ratio"], instrument_id, t, udzial * 100, ingested))
+            if len(hist) >= 20:
+                mean = sum(hist) / len(hist)
+                sd = math.sqrt(sum((v - mean) ** 2 for v in hist) / len(hist))
+                if sd > 1e-12:
+                    z = (udzial - mean) / sd
+                    if math.isfinite(z):
+                        rows.append((feat_ids["long_ratio_z"], instrument_id, t, z,
+                                     ingested))
+        if oi is not None:
+            if oi_poprzednie is not None and oi_poprzednie > 0:
+                zmiana = (oi / oi_poprzednie - 1.0) * 100
+                if math.isfinite(zmiana):
+                    rows.append((feat_ids["oi_zmiana"], instrument_id, t, zmiana,
+                                 ingested))
+            oi_poprzednie = oi
+        t += step
+
+    return insert_values(cur, rows)
+
+
 def insert_values(cur, rows: list[tuple]) -> int:
     """Zapis wartosci cech, POPRAWIAJACY istniejace.
 
@@ -699,6 +799,7 @@ def przebieg(conn, h: Horizon, *, engine: str, tylko: list[str],
         m = compute_news(cur, inst["id"], h, feat_ids["news_sent"], since, now)
         conn.commit()
         f = compute_funding(cur, inst["id"], h, feat_ids, since, now)
+        f += compute_positioning(cur, inst["id"], h, feat_ids, since, now)
         conn.commit()
         b = compute_orderbook(cur, inst["id"], h, feat_ids, since, now)
         conn.commit()

@@ -361,6 +361,53 @@ class BybitAdapter:
         out.sort(key=lambda x: x[0])
         return out
 
+    async def fetch_positioning(self, symbol: str, start: datetime, end: datetime,
+                                limit: int = 200) -> list[tuple[datetime, float | None,
+                                                                float | None]]:
+        """Pozycjonowanie tlumu na perpetualu: udzial kont dlugich i otwarte pozycje.
+
+        Zwraca [(czas, udzial_dlugich, otwarte_pozycje)] rosnaco po czasie.
+        None w polu znaczy, ze TO ZRODLO nie oddalo danych dla tej godziny -
+        i jest to inna informacja niz zero. Zero w udziale dlugich znaczy
+        "wszyscy sa krotcy", a to jest stan, ktory nigdy nie zachodzi.
+
+        DWA WYWOLANIA, JEDEN WYNIK. Bybit wystawia te wielkosci osobno, ale
+        obie sa godzinowe i dotycza tego samego kontraktu, wiec sklejamy je po
+        znaczniku czasu. Rozdzielenie ich na dwie sciezki oznaczaloby dwa razy
+        te sama logike uzupelniania luk.
+
+        Kategoria zawsze `linear`: obie wielkosci istnieja wylacznie dla
+        kontraktow wieczystych. Host publiczny, bo podmiot unijny perpetuali
+        nie prowadzi - `BTCUSDT` zwraca tam "Symbol Invalid".
+        """
+        okno = {"startTime": int(start.timestamp() * 1000),
+                "endTime": int(end.timestamp() * 1000)}
+
+        udzial: dict[datetime, float] = {}
+        res = await self._get(
+            "/v5/market/account-ratio",
+            {"category": "linear", "symbol": symbol, "period": "1h",
+             "limit": min(limit, 500), **okno},
+            private=False, host=PUBLIC_HOST,
+        )
+        for row in res.get("list", []):
+            t = datetime.fromtimestamp(int(row["timestamp"]) / 1000, tz=timezone.utc)
+            udzial[t] = float(row["buyRatio"])
+
+        otwarte: dict[datetime, float] = {}
+        res = await self._get(
+            "/v5/market/open-interest",
+            {"category": "linear", "symbol": symbol, "intervalTime": "1h",
+             "limit": min(limit, 200), **okno},
+            private=False, host=PUBLIC_HOST,
+        )
+        for row in res.get("list", []):
+            t = datetime.fromtimestamp(int(row["timestamp"]) / 1000, tz=timezone.utc)
+            otwarte[t] = float(row["openInterest"])
+
+        return [(t, udzial.get(t), otwarte.get(t))
+                for t in sorted(set(udzial) | set(otwarte))]
+
     async def fetch_order_book(self, symbol: str, depth: int = 50) -> OrderBook:
         res = await self._get(
             "/v5/market/orderbook",

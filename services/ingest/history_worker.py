@@ -51,6 +51,7 @@ from psycopg.rows import dict_row
 
 from services.ingest import backfill as swiece
 from services.ingest import funding as stawki
+from services.ingest import pozycjonowanie as tlum
 from services.ingest import puls
 
 # Nazwa w `risk.worker_heartbeat`. To ROLA w potoku, a nie egzemplarz procesu:
@@ -108,6 +109,23 @@ async def cykl(url: str, *, engine: str, timeframe: str, days: int,
         except Exception as e:                                # noqa: BLE001
             conn.rollback()
             bledy.append(f"funding: {type(e).__name__}: {e}")
+
+        # POZYCJONOWANIE TLUMU - trzecie zadanie w tym samym cyklu i z tego
+        # samego powodu co funding: opisuje ustawienie innych uczestnikow, wiec
+        # nie jest przetworzona cena. Wlasny `try`, bo awaria tego zrodla nie
+        # moze skasowac swiec ani stawek pobranych przed chwila.
+        #
+        # NIE WPLYWA NA ANI JEDNO ZLECENIE. To jest zbieranie danych; czy z tych
+        # liczb plynie przewaga, rozstrzyga trener walk-forward.
+        try:
+            ile_tlumu, rynkow_t, bledy_t = await tlum.przebieg(
+                conn, engine=engine, since=since)
+            bledy += [f"pozycjonowanie {b}" for b in bledy_t]
+            if verbose:
+                print(f"  pozycjonowanie: {rynkow_t} rynków, {ile_tlumu} godzin")
+        except Exception as e:                                # noqa: BLE001
+            conn.rollback()
+            bledy.append(f"pozycjonowanie: {type(e).__name__}: {e}")
 
         # PULS TUTAJ, A NIE W `main`: polaczenie zyje tylko w tym bloku, wiec
         # zapis pulsu z zewnatrz wymagalby drugiego polaczenia - czyli sprawdzal
