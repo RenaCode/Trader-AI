@@ -26,6 +26,29 @@ może zostać wzięty za zlecenie z planu. Wiersz w `exec.order` opisywałby
 zlecenie, za którym nie stoi żadna decyzja — a dziennik decyzji ma być kompletny
 w drugą stronę też.
 
+IDENTYFIKATOR MUSI BYĆ ŚWIEŻY PRZY KAŻDYM URUCHOMIENIU — ODWROTNIE NIŻ
+W EGZEKUCJI
+
+W egzekucji `orderLinkId` jest wyprowadzony z planu i CELOWO stały: to on nie
+pozwala złożyć drugiego zlecenia z tej samej decyzji. Tutaj ta sama stałość
+unieważnia całą próbę. `stan_zlecenia` przeszukuje też historię zleceń (na demo
+siedem dni), a `zloz_zlecenie` pyta o stan ZANIM cokolwiek wyśle — więc drugie
+uruchomienie z tym samym identyfikatorem odnajduje wpis po pierwszym, melduje
+`juz_istnialo`, i NIE WYSYŁA ANI JEDNEGO ZAPYTANIA POST. Sprawdzenie
+idempotencji przechodzi wtedy tautologicznie (drugie złożenie „odnalazło"
+zlecenie, którego to uruchomienie nigdy nie złożyło), a anulowanie melduje „nie
+było czego", bo zlecenie zostało zdjęte dobę wcześniej.
+
+Narzędzie mające łapać regresję ścieżki egzekucji potwierdzało więc wszystko —
+od drugiego uruchomienia w górę. Dlatego identyfikator jest tu jednorazowy,
+a próba SPRAWDZA, że giełda go jeszcze nie znała: `juz_istnialo` przy PIERWSZYM
+złożeniu jest niezaliczeniem, nie sukcesem.
+
+CO PRÓBA MELDUJE, BIERZE Z ODPOWIEDZI GIEŁDY, nie z własnych zamiarów. Linia
+„złożone" wypisująca ilość, którą zamierzaliśmy wysłać, wygląda identycznie przy
+zleceniu złożonym i przy zleceniu, którego w ogóle nie było — a to jest dokładnie
+ta różnica, dla której ta próba istnieje.
+
 ANULOWANIE JEST W `finally`. Próba, która przy błędzie zostawia zlecenie
 w arkuszu, jest gorsza niż jej brak.
 """
@@ -34,7 +57,9 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
+import secrets
 import sys
+from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 
@@ -54,11 +79,27 @@ class Niezaliczona(RuntimeError):
     """Któryś krok obiegu nie zadziałał. Każdy ma własny komunikat."""
 
 
+def id_proby(znacznik: str) -> str:
+    """Identyfikator JEDNORAZOWY, inny przy każdym uruchomieniu.
+
+    Stały identyfikator sprawiał, że od drugiego uruchomienia próba nie wysyłała
+    na giełdę niczego — `zloz_zlecenie` odnajdywało w historii zlecenie
+    z poprzedniego przebiegu i zwracało `juz_istnialo` (patrz docstring modułu).
+
+    Znacznik czasu jest w nazwie dla człowieka, który będzie tego zlecenia
+    szukał w panelu giełdy; losowe cztery bajty są dla przypadku dwóch prób
+    uruchomionych w tej samej sekundzie. Całość mieści się w limicie długości
+    `orderLinkId` (36 znaków u Bybita).
+    """
+    stempel = datetime.now(timezone.utc).strftime("%m%d%H%M%S")
+    return f"{PREFIKS}-{znacznik}-{stempel}{secrets.token_hex(2)}"[:36]
+
+
 async def przebieg(adapter, *, symbol: str, f: Filtry, cena_rynkowa: Decimal,
                    znacznik: str, kategoria: str = "spot") -> list[str]:
     """Pełny obieg na giełdzie. Zwraca listę zaliczonych kroków."""
     kroki: list[str] = []
-    id_wlasne = f"{PREFIKS}-{znacznik}"
+    id_wlasne = id_proby(znacznik)
 
     cena_limitu = cena_rynkowa * UDZIAL_CENY
     # Ilosc z MINIMALNEJ WARTOSCI, nie z sufitu: proba ma kosztowac tyle, ile
@@ -72,23 +113,75 @@ async def przebieg(adapter, *, symbol: str, f: Filtry, cena_rynkowa: Decimal,
 
     zlozone = None
     try:
-        zlozone = await adapter.zloz_zlecenie(
-            symbol=symbol, strona="buy", ilosc=ilosc, cena_limitu=cena,
-            id_wlasne=id_wlasne, kategoria=kategoria)
-        kroki.append(f"złożone: {ilosc} @ {cena} (id giełdy {zlozone.id_gieldy})")
+        try:
+            zlozone = await adapter.zloz_zlecenie(
+                symbol=symbol, strona="buy", ilosc=ilosc, cena_limitu=cena,
+                id_wlasne=id_wlasne, kategoria=kategoria)
+        except ExchangeError as e:
+            # ODRZUCENIE ZLOZENIA JEST WYNIKIEM PROBY, NIE JEJ AWARIA. Tak
+            # wyglada parametr, ktorego ten podmiot nie przyjmuje - na przyklad
+            # `timeInForce`, ktory egzekucja wysyla dzis jako PostOnly. Bez tego
+            # przechwycenia konczyloby sie to sladem stosu, czyli komunikatem
+            # mowiacym o naszym kodzie zamiast o gieldzie.
+            raise Niezaliczona(
+                f"giełda ODRZUCIŁA złożenie zlecenia próbnego: {e} — tak samo "
+                f"zachowa się przy każdym zleceniu z decyzji") from e
+
+        if zlozone.juz_istnialo:
+            # PIERWSZE ZLOZENIE ODNALAZLO ZLECENIE = NIC NIE POSZLO NA GIELDE.
+            #
+            # Identyfikator jest jednorazowy, wiec gielda nie ma prawa go znac.
+            # Skoro zna - to nie jest zlecenie tego przebiegu i cala reszta proby
+            # ogladalaby cudzy wpis: idempotencja "potwierdzilaby sie" bez
+            # jednego zapytania POST, a anulowanie zdjeloby nie to zlecenie.
+            raise Niezaliczona(
+                f"giełda ZNAŁA JUŻ nasz jednorazowy identyfikator {id_wlasne} — "
+                f"nic nie zostało wysłane, więc próba nie sprawdziłaby niczego "
+                f"poza własnym echem")
+        kroki.append(f"złożone: giełda przyjęła zlecenie {id_wlasne}, id giełdy "
+                     f"{zlozone.id_gieldy}, status {zlozone.status} "
+                     f"(wysłaliśmy {ilosc} @ {cena})")
 
         stan = await adapter.stan_zlecenia(id_wlasne, kategoria=kategoria)
         if stan is None:
             raise Niezaliczona(
                 "giełda przyjęła zlecenie, ale nie zna go po NASZYM "
                 "identyfikatorze — cała idempotencja opiera się na tym odczycie")
-        kroki.append(f"odczytane po własnym id: status {stan.status}, "
-                     f"wypełnione {stan.wypelniono}/{stan.ilosc}")
+        # ODCZYT MA DOTYCZYC TEGO ZLECENIA, KTORE WLASNIE ZLOZYLISMY.
+        #
+        # Przy stalym identyfikatorze odczyt trafial w zlecenie sprzed doby
+        # i wygladal poprawnie - bo nikt nie porownywal go z odpowiedzia
+        # na zlozenie. Dwie liczby, ktore musza sie zgodzic: identyfikator
+        # gieldy i ilosc. Ceny limitu `StanZlecenia` nie niesie, wiec jej
+        # ta droga nie sprawdzimy.
+        if zlozone.id_gieldy and stan.id_gieldy and stan.id_gieldy != zlozone.id_gieldy:
+            raise Niezaliczona(
+                f"pod naszym identyfikatorem giełda ma zlecenie {stan.id_gieldy}, "
+                f"a właśnie złożyliśmy {zlozone.id_gieldy} — odczyt nie dotyczy "
+                f"tego zlecenia, więc nie potwierdza niczego")
+        if stan.ilosc != ilosc:
+            raise Niezaliczona(
+                f"giełda zna pod naszym identyfikatorem zlecenie na {stan.ilosc}, "
+                f"a wysłaliśmy {ilosc} — to nie jest to samo zlecenie")
+        kroki.append(f"odczytane po własnym id: id giełdy {stan.id_gieldy}, "
+                     f"status {stan.status}, ilość u giełdy {stan.ilosc}, "
+                     f"wypełnione {stan.wypelniono}")
 
         if stan.wypelniono > 0:
             raise Niezaliczona(
                 f"zlecenie próbne WYPEŁNIŁO SIĘ ({stan.wypelniono}) — limit miał "
                 f"być poza zasięgiem; sprawdź cenę rynkową i mnożnik")
+        if stan.status != "new":
+            # ZLECENIE SWIEZO ZLOZONE MA LEZEC W ARKUSZU. Kazdy inny stan znaczy,
+            # ze ogladamy cos innego, niz mysleliśmy: 'cancelled' to wpis
+            # z historii (tak wygladala tautologia przy stalym identyfikatorze),
+            # 'rejected' to zlecenie, ktorego gielda nie przyjela, a `nieznany:*`
+            # to status, ktorego adapter nie umie zmapowac - czyli luka w tym
+            # mapowaniu, przez ktora egzekucja podejmowalaby decyzje po omacku.
+            raise Niezaliczona(
+                f"świeżo złożone zlecenie ma status {stan.status!r}, a nie 'new' "
+                f"— nie leży w arkuszu, więc anulowanie i idempotencja badałyby "
+                f"zlecenie, którego już nie ma")
 
         # Idempotencja: drugie zlozenie tego samego id ma ODNALEZC pierwsze,
         # a nie utworzyc drugie. To jedyna ochrona przed podwojna pozycja przy
@@ -109,7 +202,32 @@ async def przebieg(adapter, *, symbol: str, f: Filtry, cena_rynkowa: Decimal,
             try:
                 zdjete = await adapter.anuluj_zlecenie(
                     symbol=symbol, id_wlasne=id_wlasne, kategoria=kategoria)
-                kroki.append(f"anulowane: {'tak' if zdjete else 'nie było czego'}")
+                if not zdjete:
+                    # "NIE BYLO CZEGO" TO NIEZALICZENIE, NIE SPOKOJNY WYNIK.
+                    # Zlecenie zlozylismy przed chwila i nie bylo wypelnione,
+                    # wiec giełda MUSI miec co zdjac. Odpowiedz "nie znam takiego"
+                    # znaczy albo ze anulowanie trafia gdzie indziej, albo ze
+                    # zlecenie zniknelo samo - a na obu tych zachowaniach opiera
+                    # sie kill-switch.
+                    kroki.append(
+                        f"ANULOWANIE NIE POWIODŁO SIĘ: giełda nie miała czego "
+                        f"zdjąć pod {id_wlasne}, choć zlecenie właśnie tam leżało")
+                else:
+                    # POTWIERDZAMY ODCZYTEM, a nie odpowiedzia na anulowanie.
+                    # Bybit na zlecenie juz wypelnione odpowiada kodem 110001,
+                    # ktory adapter tlumaczy na "nie bylo czego zdejmowac" - samo
+                    # "poszlo bez bledu" nie znaczy wiec, ze arkusz jest czysty.
+                    po = await adapter.stan_zlecenia(id_wlasne, kategoria=kategoria)
+                    if po is not None and po.status in ("new", "partial"):
+                        kroki.append(
+                            f"ANULOWANIE NIE POWIODŁO SIĘ: giełda potwierdziła "
+                            f"zdjęcie, ale zlecenie {id_wlasne} nadal ma status "
+                            f"{po.status} — zostaje w arkuszu")
+                    else:
+                        kroki.append("anulowane: zlecenie zdjęte i potwierdzone "
+                                     "odczytem" if po is None else
+                                     f"anulowane: potwierdzone odczytem "
+                                     f"(status {po.status})")
             except ExchangeError as e:
                 kroki.append(f"ANULOWANIE NIE POWIODŁO SIĘ: {e} — "
                              f"zlecenie {id_wlasne} zostaje w arkuszu")

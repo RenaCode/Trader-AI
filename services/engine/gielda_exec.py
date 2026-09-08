@@ -122,7 +122,19 @@ async def zloz_plan(cur, adapter, plan: dict, f: Filtry, *, engine: str,
 async def rozstrzygnij_plan(cur, adapter, plan: dict, f: Filtry, *, engine: str,
                             mode: str, kategoria: str, teraz: datetime,
                             kind: str) -> tuple[str, str]:
-    """Pyta giełdę o los planu i zapisuje wynik. Zwraca (rodzaj, komunikat)."""
+    """Pyta giełdę o los planu i zapisuje wynik. Zwraca (rodzaj, komunikat).
+
+    Rodzaj to zwykle wynik `co_z_wypelnieniem` ('pelne', 'czesciowe', 'brak',
+    'nie_do_zamkniecia'), ale dwa przypadki mają własne nazwy, bo NIE SĄ
+    rozstrzygnięciem planu i muszą być widoczne w statystyce cyklu:
+
+      * 'nie_zdjete'          — nic nie weszło, ale zlecenia nie udało się
+                                anulować; zostaje w arkuszu giełdy, więc plan
+                                zostaje `pending` i wracamy do niego w następnym
+                                cyklu,
+      * 'wyjscie_bez_pozycji' — sprzedaż wykonała się na giełdzie, a w bazie nie
+                                ma otwartej pozycji, którą miała zamknąć.
+    """
     id_w = id_zlecenia(plan["id"])
     stan = await adapter.stan_zlecenia(id_w, kategoria=kategoria)
 
@@ -159,27 +171,79 @@ async def rozstrzygnij_plan(cur, adapter, plan: dict, f: Filtry, *, engine: str,
     r = co_z_wypelnieniem(stan.wypelniono, wyslano,
                           Decimal(plan["limit_price"]), f)
 
+    # NIEUDANE ANULOWANIE ZAPAMIETUJEMY, bo decyduje o losie planu nizej.
+    # Sam dopisek do powodu trafia tylko na ekran, a ekran nikogo nie obudzi.
+    anulowanie_padlo: ExchangeError | None = None
+    anulowano = False
     if r.anuluj_reszte and stan.status not in ("filled", "cancelled", "rejected"):
         try:
             await adapter.anuluj_zlecenie(symbol=plan["symbol"], id_wlasne=id_w,
                                           kategoria=kategoria)
+            anulowano = True
         except ExchangeError as e:
-            # Nieudane anulowanie NIE UNIEWAZNIA reszty zapisu. Zlecenie zostaje
-            # otwarte na gieldzie i wylapie je uzgodnienie - a udawanie, ze
-            # rozstrzygniecia nie bylo, zgubiloby wypelnienie, ktore JUZ jest nasze.
+            # Nieudane anulowanie NIE UNIEWAZNIA reszty zapisu. Wypelnienie, ktore
+            # juz weszlo, JEST NASZE - udawanie, ze rozstrzygniecia nie bylo,
+            # zgubiloby pozycje, ktora naprawde mamy.
+            anulowanie_padlo = e
             r = type(r)(r.rodzaj, r.ilosc, r.anuluj_reszte, r.ulamek,
                         r.powod + f"; UWAGA: anulowanie reszty nie powiodło się ({e})")
 
+    meta = {"execution": "gielda", "kind": kind, "order": "limit",
+            "ulamek_wypelnienia": str(r.ulamek), "rodzaj": r.rodzaj,
+            "status_gieldy": stan.status, "venue_order_id": stan.id_gieldy}
+
     if r.rodzaj == "brak":
+        if anulowanie_padlo is not None:
+            # PLAN NIE WYGASA, DOPOKI ZLECENIE LEZY W ARKUSZU.
+            #
+            # Nic nie weszlo, wiec nie ma czego ksiegowac - ale zlecenie NADAL
+            # JEST NA GIELDZIE i nadal moze sie wypelnic po cenie, ktorej zadna
+            # decyzja juz nie popiera. Wygaszenie planu w tym miejscu zrywaloby
+            # jedyna nitke prowadzaca do tego zlecenia: rozstrzyganie szuka
+            # planow o statusie 'pending', wiec plan 'expired' nie zostalby juz
+            # nigdy dotkniety, a jedyne inne miejsce ponawiajace anulowanie
+            # (`anuluj_wejscia`) rusza wylacznie po kill-switchu.
+            #
+            # Skutek byl kumulatywny, a nie jednorazowy: nastepna swieca widzi
+            # brak pozycji, sygnal wciaz trzyma, wiec powstaje NOWY plan i NOWE
+            # zlecenie - i tak co swiece. Skok ceny wypelnia wszystkie naraz,
+            # czyli dokladnie ta nadmiarowa ekspozycja, ktorej risk kernel nie
+            # policzyl, bo w dzienniku nie bylo ani jednej pozycji.
+            #
+            # Zostawiony 'pending' plan wraca tu w kazdym cyklu i PONAWIA
+            # anulowanie az do skutku. Gdyby giełda nie dala go zdjac przez
+            # dluzszy czas, dozor zglosi to sam: `sprawdz_egzekucje` alarmuje
+            # o planach 'pending' po terminie ich waznosci.
+            cur.execute(
+                "UPDATE exec.order SET status=%s, updated_at=%s, reject_reason=%s,"
+                " raw = raw || %s WHERE planned_order_id=%s",
+                (stan.status, teraz,
+                 f"anulowanie przy rozstrzygnięciu nie powiodło się: {anulowanie_padlo}",
+                 json.dumps(dict(meta, anulowanie="nie_powiodlo_sie",
+                                 plan="pozostaje pending — ponowimy w następnym cyklu")),
+                 plan["id"]))
+            return "nie_zdjete", (r.powod + " — ZLECENIE ZOSTAJE W ARKUSZU GIEŁDY,"
+                                  " plan pozostaje do rozstrzygnięcia i anulowanie"
+                                  " zostanie ponowione")
+
         cur.execute("UPDATE journal.planned_order SET status='expired',"
                     " resolved_at=%s WHERE id=%s", (teraz, plan["id"]))
+        # WIERSZ ZLECENIA TEZ ZAMYKAMY. Zostawiony na 'new' opisywalby zlecenie
+        # otwarte, ktorego juz nie ma: kill-switch probowalby je co raz zdejmowac,
+        # a czujka zdrowia egzekucji liczylaby je jako przyjete i wiszace.
+        cur.execute(
+            "UPDATE exec.order SET status=%s, updated_at=%s, raw = raw || %s"
+            " WHERE planned_order_id=%s",
+            (stan.status if stan.status in ("cancelled", "rejected") else "cancelled",
+             teraz, json.dumps(dict(meta, anulowanie="zdjete" if anulowano
+                                    else f"niepotrzebne (giełda: {stan.status})")),
+             plan["id"]))
         return r.rodzaj, r.powod
 
     cena = stan.srednia_cena or Decimal(plan["limit_price"])
     prowizja = stan.prowizja
-    meta = {"execution": "gielda", "kind": kind, "order": "limit",
-            "ulamek_wypelnienia": str(r.ulamek), "rodzaj": r.rodzaj,
-            "status_gieldy": stan.status, "venue_order_id": stan.id_gieldy}
+    uwaga = None
+    rodzaj_zwrotny, powod_zwrotny = r.rodzaj, r.powod
 
     if plan["trigger"]["rodzaj"] == "wyjscie":
         cur.execute("SELECT id, side, qty, avg_price FROM exec.position"
@@ -189,6 +253,36 @@ async def rozstrzygnij_plan(cur, adapter, plan: dict, f: Filtry, *, engine: str,
         if poz:
             zapisz_wyjscie(cur, poz, cena, prowizja, teraz, plan["decision_id"],
                            ilosc=r.ilosc)
+        else:
+            # SPRZEDAZ SIE WYKONALA, A NIE MA CZEGO ZAMKNAC.
+            #
+            # Aktywo wyszlo z rachunku naprawde - niezaleznie od tego, czy
+            # znajdziemy pozycje, ktorej dotyczylo. Milczace przejscie dalej
+            # (samo `if poz:` bez `else`) zapisywalo plan jako 'triggered',
+            # czyli "rozstrzygniety pomyslnie", nie zostawiajac ani linijki
+            # na ekranie, ani wiersza w bazie. Rozjazd z gielda ujawnialby sie
+            # dopiero przy uzgodnieniu sald i wygladal jak blad uzgodnienia.
+            #
+            # DOKSIEGOWAC SIE TEGO NIE DA I NIE WOLNO ZGADYWAC. Zamkniecie
+            # dowolnej innej otwartej pozycji na tym instrumencie przypisaloby
+            # sprzedaz cudzej decyzji i sfalszowalo jej wynik. Zapisujemy wiec
+            # to, co wiemy, tam, gdzie ktos tego szuka: w wierszu zlecenia
+            # (`reject_reason` + `raw`), i zwracamy wlasny rodzaj, zeby petla
+            # wypisala to na ekranie i policzyla w statystyce cyklu, ktora idzie
+            # do heartbeatu silnika.
+            #
+            # Plan zostaje 'triggered', bo zlecenie FAKTYCZNIE sie wykonalo.
+            # 'pending' oznaczaloby "czekamy na gielde" i wracaloby tu co cykl,
+            # odczytujac w kolko to samo wypelnienie - bez szansy na zmiane.
+            uwaga = ("wyjście wykonane na giełdzie BEZ otwartej pozycji"
+                     f" (position_id={plan['trigger'].get('position_id')}):"
+                     f" sprzedano {r.ilosc} @ {cena}, nie ma czego zamknąć")
+            meta = dict(meta, anomalia="wyjscie_bez_pozycji",
+                        position_id=plan["trigger"].get("position_id"),
+                        sprzedano=str(r.ilosc), cena_wykonania=str(cena),
+                        prowizja=str(prowizja))
+            rodzaj_zwrotny = "wyjscie_bez_pozycji"
+            powod_zwrotny = uwaga + f" ({r.powod})"
     else:
         zapisz_wejscie(cur, engine, mode, plan["instrument_id"], plan["decision_id"],
                        plan["side"], r.ilosc, cena, prowizja, teraz,
@@ -199,11 +293,14 @@ async def rozstrzygnij_plan(cur, adapter, plan: dict, f: Filtry, *, engine: str,
 
     cur.execute("UPDATE journal.planned_order SET status='triggered',"
                 " resolved_at=%s WHERE id=%s", (teraz, plan["id"]))
-    cur.execute("UPDATE exec.order SET status=%s, updated_at=%s, raw = raw || %s"
+    # `COALESCE`, zeby zapis bez uwagi nie kasowal powodu wpisanego wczesniej
+    # (np. przez kill-switch albo poprzednie nieudane anulowanie).
+    cur.execute("UPDATE exec.order SET status=%s, updated_at=%s,"
+                " reject_reason = COALESCE(%s, reject_reason), raw = raw || %s"
                 " WHERE planned_order_id=%s",
-                (stan.status, teraz, json.dumps(meta), plan["id"]))
+                (stan.status, teraz, uwaga, json.dumps(meta), plan["id"]))
 
-    return r.rodzaj, r.powod
+    return rodzaj_zwrotny, powod_zwrotny
 
 
 async def zloz_oczekujace(cur, adapter, *, engine: str, mode: str,
@@ -257,8 +354,11 @@ async def rozstrzygnij_oczekujace(cur, adapter, *, engine: str, mode: str,
     """
     from services.engine.loop import termin_rozstrzygniecia
 
+    # `nie_zdjete` i `wyjscie_bez_pozycji` SA W SLOWNIKU OD POCZATKU, z zerem.
+    # Statystyka idzie do heartbeatu silnika; klucz pojawiajacy sie dopiero przy
+    # awarii nie da sie odroznic od klucza, ktorego nikt nie liczy.
     st = {"wypelnione": 0, "niewypelnione": 0, "czekaja": 0, "czesciowe": 0,
-          "nie_do_zamkniecia": 0}
+          "nie_do_zamkniecia": 0, "nie_zdjete": 0, "wyjscie_bez_pozycji": 0}
     filtry = filtry_z_bazy(cur, engine)
     cur.execute(
         "SELECT p.id, p.decision_id, p.instrument_id, p.side, p.qty, p.limit_price,"
@@ -277,6 +377,12 @@ async def rozstrzygnij_oczekujace(cur, adapter, *, engine: str, mode: str,
             kategoria=kategoria, teraz=now, kind=kind)
         if rodzaj == "brak":
             st["niewypelnione"] += 1
+        elif rodzaj == "nie_zdjete":
+            # NIE JEST TO ANI WYPELNIENIE, ANI ROZSTRZYGNIECIE. Zlecenie zostalo
+            # na gieldzie, plan wraca tu w nastepnym cyklu. Doliczenie go do
+            # `niewypelnione` mowiloby "zamkniete i nic nie weszlo", czyli
+            # dokladnie to, czego jeszcze nie wiemy.
+            st["nie_zdjete"] += 1
         else:
             st["wypelnione"] += 1
             if rodzaj in st:
