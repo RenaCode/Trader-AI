@@ -342,3 +342,24 @@ def test_prog_zywotnosci_dozorcy_jest_wielokrotnoscia_interwalu():
     assert "< 180" in api, "próg żywotności dozorcy nie jest w API"
     assert 180 >= 3 * INTERWAL_S, (
         f"próg 180 s przy interwale {INTERWAL_S} s to mniej niż trzy cykle")
+
+
+def test_proba_pozarowa_NIE_udaje_wznowienia_automatycznego():
+    """`released_auto` istnieje po to, żeby odpowiedzieć na jedno pytanie:
+    czy system wrócił do handlu SAM.
+
+    Ustawianie jej przez próbę zlewa dwa różne zdarzenia w jedno — a wtedy
+    odpowiedź wymaga czytania treści notatki, czyli flaga przestaje cokolwiek
+    rozstrzygać. Przy próbie dobowej takich wierszy przybywa jeden dziennie
+    i po miesiącu zdominowałyby statystykę wznowień automatycznych.
+    """
+    from pathlib import Path
+
+    zrodlo = Path("services/engine/proba_killswitcha.py").read_text(encoding="utf-8")
+    kod = "\n".join(w for w in zrodlo.splitlines()
+                    if not w.lstrip().startswith("#"))
+    fragment = kod.split("UPDATE risk.killswitch_event")[1].split("WHERE id")[0]
+    assert "released_auto = false" in fragment
+    assert "released_by" in fragment, (
+        "zwalniający musi być nazwany z imienia — inaczej wiersz mówi tylko, "
+        "że ktoś zwolnił, a nie kto")

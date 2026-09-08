@@ -436,12 +436,118 @@ def random_weights(rng: random.Random) -> dict[str, dict[str, float]]:
     return out
 
 
+# --------------------------------------------------- bramka promocji modelu
+#
+# CO TA BRAMKA ZAMYKA
+#
+# Do tej pory kazdy nocny przebieg, ktory nie wyszedl `degraded`, stawal sie
+# `active` - a `active_model` w petli decyzyjnej handluje aktywna wersja od
+# razu, bez pytania. Znaczylo to, ze liczby z docs/05-ochrona-kapitalu.md
+# (najnizszy punkt 9 997 USD, najgorsze obsuniecie -2,85%) opisywaly wagi,
+# ktorymi system moze juz nie handlowac tydzien pozniej. Nic sie przy tym nie
+# psuje i nic nie krzyczy: po prostu handluje co innego niz to, co zmierzono.
+#
+# Na rachunku papierowym 100 000 to byl poprawny wybor - szybka nauka jest tam
+# warta wiecej niz ostroznosc, bo pomylka kosztuje zero. Na 10 000 realnych ta
+# sama automatyka zmienia profil ryzyka bez niczyjej zgody.
+
+
+def tryb_handlu(cur, engine: str) -> str:
+    """Czy ten silnik handluje NA ZYWO. Czytane z bazy, nie z flagi trenera.
+
+    Tryb jest wlasnoscia dzialajacego silnika, nie przebiegu treningu. Gdyby
+    trener dostal wlasna flage `--mode`, powstalaby druga deklaracja tego samego
+    faktu - a rozjazd dwoch deklaracji nie objawia sie awaria, tylko otwarta
+    bramka przy zamknietych drzwiach (values.yaml ostrzega przed dokladnie tym
+    przy `--kind` i `--limit`). Silnik sam wpisuje swoj tryb do pulsu przy
+    kazdym cyklu, wiec pytamy jego.
+
+    Nieswiezosc pulsu jest tu CELOWO nieistotna. Silnik live zatrzymany na dobe
+    kill-switchem nadal ma otwarte pozycje i wroci do handlu - podmiana wag pod
+    nim jest wtedy tak samo niezapowiedziana jak przy silniku dzialajacym.
+
+    Zlecenia live sa drugim, trwalym swiadectwem: puls to jeden wiersz na
+    silnik i po powrocie na demo mowi juz tylko o terazniejszosci, a rachunek,
+    na ktorym cos kiedys kupiono za prawdziwe pieniadze, pozostaje rachunkiem
+    prawdziwym.
+    """
+    cur.execute(
+        "SELECT EXISTS (SELECT 1 FROM risk.engine_heartbeat"
+        "                WHERE engine::text = %s AND mode = 'live')"
+        "    OR EXISTS (SELECT 1 FROM exec.order"
+        "                WHERE engine::text = %s AND mode = 'live') AS zywe",
+        (engine, engine))
+    return "live" if cur.fetchone()["zywe"] else "demo"
+
+
+def status_nowej_wersji(status: str, tryb: str, zgoda: bool = False) -> tuple[str, str]:
+    """Czy nowa wersja wchodzi do produkcji sama: ('active'|'candidate', powod).
+
+    Czysta funkcja, tak jak `dozor.zmiany`: caly werdykt bramki da sie
+    sprawdzic bez bazy i bez przebiegu treningu.
+
+    Bramka jest ROZNA W ZALEZNOSCI OD TRYBU, bo cena bledu jest rozna. W demo
+    zla wersja kosztuje jeden dzien papierowego wyniku i wiedze, ze byla zla -
+    zatrzymywanie jej czlowiekiem opoznialoby nauke bez powodu. W live ta sama
+    podmiana zmienia strategie, na ktorej skalibrowano ochrone kapitalu, i robi
+    to o 4:40 nad ranem.
+
+    Zgoda jest JAWNA I JEDNORAZOWA (flaga przebiegu), a nie ustawieniem
+    w bazie: ustawienie raz wlaczone zostaje wlaczone na zawsze i po pol roku
+    nikt nie pamieta, ze bramka jest podniesiona.
+    """
+    if status == "degraded":
+        # Zachowanie sprzed bramki, zostawione bez zmian: wynik bez przewagi
+        # nie promuje sie w zadnym trybie.
+        return "candidate", "wynik degraded — wersja zostaje kandydatem"
+    if tryb == "live" and not zgoda:
+        return "candidate", ("tryb live — nowa wersja czeka na zatwierdzenie "
+                             "człowieka (`--zatwierdz-promocje`)")
+    if tryb == "live":
+        return "active", "tryb live, promocja zatwierdzona jawnie"
+    return "active", "tryb demo — promocja automatyczna"
+
+
+def zapisz_promocje(cur, model_id: int, mv_id: int, docelowy: str) -> None:
+    """Nadanie statusu nowej wersji. WYCOFANIE POPRZEDNIEJ TYLKO PRZY PROMOCJI.
+
+    Wycofanie bylo w kodzie bezwarunkowe, bo przed bramka nowa wersja zawsze
+    wchodzila na jej miejsce. Zostawione bezwarunkowo byloby gorsze niz brak
+    bramki: `active_model` nie znalazlby zadnej aktywnej wersji i cofnalby
+    produkcje do zalozen poczatkowych - czyli bramka majaca zapobiec cichej
+    zmianie strategii sama by ja co noc wywolywala.
+    """
+    if docelowy == "active":
+        # KOLEJNOSC MA ZNACZENIE: najpierw wycofujemy poprzednia wersje, dopiero
+        # potem promujemy nowa. Odwrotna kolejnosc lamie unikalny indeks
+        # "jedna aktywna wersja na model".
+        cur.execute("UPDATE learn.model_version SET status='retired', retired_at=now()"
+                    " WHERE model_id=%s AND id<>%s AND status='active'", (model_id, mv_id))
+        cur.execute("UPDATE learn.model_version SET status='active', promoted_at=now()"
+                    " WHERE id=%s", (mv_id,))
+    else:
+        # `promoted_at` zostaje puste: kandydat nie zostal promowany, a data
+        # promocji wpisana "na wszelki wypadek" klamie w jedynym miejscu, gdzie
+        # pozniej szuka sie odpowiedzi, kiedy strategia sie zmienila.
+        cur.execute("UPDATE learn.model_version SET status='candidate' WHERE id=%s",
+                    (mv_id,))
+
+
+def wersja_produkcyjna(cur, model_id: int, mv_id: int) -> int | None:
+    """Numer wersji, ktora zostaje na produkcji, gdy nowa nie wchodzi."""
+    cur.execute("SELECT version FROM learn.model_version"
+                " WHERE model_id=%s AND id<>%s AND status='active'", (model_id, mv_id))
+    row = cur.fetchone()
+    return row["version"] if row else None
+
+
 # ------------------------------------------------------------------ trening
 def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
           kind: str = "spot", egzekucja: Egzekucja | None = None,
           sucho: bool = False, wybor: str = "argmax",
           tylko: set[str] | None = None,
-          zakladane_pozycje: int | None = None) -> None:
+          zakladane_pozycje: int | None = None,
+          zgoda_na_promocje: bool = False) -> None:
     cur = conn.cursor()
     rng = random.Random(SEED)
     now = datetime.now(timezone.utc)
@@ -1087,15 +1193,26 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
                          "min_confidence": MIN_CONF,
                          "weights": prod_weights}), mv_id))
 
-        # KOLEJNOSC MA ZNACZENIE: najpierw wycofujemy poprzednia wersje, dopiero
-        # potem promujemy nowa. Odwrotna kolejnosc lamie unikalny indeks
-        # "jedna aktywna wersja na model".
-        cur.execute("UPDATE learn.model_version SET status='retired', retired_at=now()"
-                    " WHERE model_id=%s AND id<>%s AND status='active'", (model_id, mv_id))
-        cur.execute(
-            "UPDATE learn.model_version SET status = (CASE WHEN %s = 'degraded'"
-            " THEN 'candidate' ELSE 'active' END)::learn.mv_status,"
-            " promoted_at = now() WHERE id = %s", (status, mv_id))
+        # BRAMKA PROMOCJI. Do 2026-09-08 w tym miejscu stalo bezwarunkowe
+        # wycofanie poprzedniej wersji i promocja nowej dla kazdego wyniku poza
+        # `degraded` - patrz komentarz przy `status_nowej_wersji`.
+        tryb = tryb_handlu(cur, engine)
+        docelowy, powod_bramki = status_nowej_wersji(status, tryb, zgoda_na_promocje)
+        zostaje = wersja_produkcyjna(cur, model_id, mv_id) if docelowy != "active" else None
+        zapisz_promocje(cur, model_id, mv_id, docelowy)
+        # POWOD IDZIE DO `reason`, czyli do jedynego pola stanu nauki, ktore
+        # niesie ZDANIE dla czlowieka: /learning/state oddaje je wprost na
+        # zakladke. Bramka, o ktorej wie tylko log zadania cyklicznego, jest
+        # niewidzialna - a wtedy kandydat czeka na zatwierdzenie miesiacami
+        # i system handluje coraz starszym modelem, znowu po cichu.
+        #
+        # NUMER WERSJI PODAJEMY WPROST z tego samego powodu. `learning_state`
+        # wskazuje wersje z OSTATNIEGO przebiegu, wiec po wstrzymaniu promocji
+        # zakladka nazywa model, ktorym produkcja wlasnie nie handluje.
+        if docelowy != "active":
+            reason += (f" PROMOCJA WSTRZYMANA ({powod_bramki}); produkcja handluje "
+                       + (f"wersją {zostaje}." if zostaje
+                          else "założeniami początkowymi — NIE MA aktywnej wersji."))
         cur.execute("UPDATE learn.training_run SET status='done', finished_at=now(),"
                     " n_windows=%s WHERE id=%s", (total, run_id))
         cur.execute(
@@ -1198,6 +1315,17 @@ def main() -> int:
                     help="zlecenia z limitem zamiast rynkowych")
     ap.add_argument("--sucho", action="store_true",
                     help="nie zapisuj wyniku do bazy (do porownywania wariantow)")
+    # ZGODA CZLOWIEKA NA PODMIANE STRATEGII W TRYBIE LIVE.
+    #
+    # Flaga przebiegu, nie ustawienie w bazie i nie wpis w chart: zadanie
+    # cykliczne jej NIE MA i miec nie moze, bo caly sens bramki polega na tym,
+    # ze nocna automatyka nie potrafi jej podniesc. Podnosi ja czlowiek,
+    # uruchamiajac trening recznie, raz.
+    ap.add_argument("--zatwierdz-promocje", action="store_true",
+                    dest="zgoda_na_promocje",
+                    help="pozwol promowac nowa wersje modelu takze wtedy, gdy "
+                         "silnik handluje na zywo; bez tego wersja zostaje "
+                         "kandydatem, a produkcja handluje dalej poprzednia")
     ap.add_argument("--instrumenty", default="",
                     help="lista symboli po przecinku - NADPISUJE uniwersum decyzyjne "
                          "z bazy, takze o instrumenty jeszcze niehandlowalne. "
@@ -1259,7 +1387,8 @@ def main() -> int:
                   f"pozycji jednocześnie (wariant, nie produkcja)")
         train(conn, args.engine, args.days, args.trials, h, args.kind, egz,
               sucho=args.sucho, wybor=args.wybor, tylko=tylko or None,
-              zakladane_pozycje=args.zakladane_pozycje or None)
+              zakladane_pozycje=args.zakladane_pozycje or None,
+              zgoda_na_promocje=args.zgoda_na_promocje)
     return 0
 
 

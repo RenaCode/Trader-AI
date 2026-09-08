@@ -145,10 +145,23 @@ async def przeprowadz(fetch_all, fetch_one, execute, engine: str = "crypto",
                 "kill-switch zadziałał, a nikt się o tym nie dowiedział")
         print(f"  powiadomień: {n}")
 
+        # ZWOLNIENIE PRZEZ PROBE NIE JEST WZNOWIENIEM AUTOMATYCZNYM.
+        #
+        # `released_auto` istnieje po to, zeby dalo sie odpowiedziec na jedno
+        # pytanie: CZY SYSTEM WROCIL DO HANDLU SAM. Ustawianie jej przez probe
+        # zlewa dwa rozne zdarzenia w jedno - a wtedy odpowiedz na to pytanie
+        # wymaga czytania tresci notatki, czyli flaga przestaje cokolwiek
+        # rozstrzygac. Przy dobowej probie takich wierszy przybywa jeden dziennie
+        # i po miesiacu to one zdominowalyby statystyke wznowien automatycznych.
+        #
+        # Proba sprzata wiec po sobie jako ZWALNIAJACY NAZWANY Z IMIENIA, tak
+        # samo jak zrobilby to czlowiek w interfejsie.
         await execute(
             "UPDATE risk.killswitch_event SET released_at = now(),"
-            " released_auto = true, release_note = %s WHERE id = %s",
-            ("PRÓBA POŻAROWA — zdarzenie wywołane celowo przez "
+            " released_auto = false, released_by = %s, release_note = %s"
+            " WHERE id = %s",
+            ("proba-pozarowa",
+             "PRÓBA POŻAROWA — zdarzenie wywołane celowo przez "
              "services/engine/proba_killswitcha.py", z["id"]))
         print("\n=== PRÓBA ZALICZONA: wszystkie ogniwa zadziałały ===")
         return 0

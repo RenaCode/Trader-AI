@@ -1354,11 +1354,29 @@ async def zbuduj_adapter(url: str, mode: str):
     from services.exchanges.bybit import BybitAdapter
 
     with psycopg.connect(url, row_factory=dict_row) as conn:
-        cred = conn.execute(
-            "SELECT c.key_enc, c.secret_enc, v.demo_host, v.live_host"
+        # NAJNOWSZY KLUCZ, NIE NAJSTARSZY. Rotacja zostawia na chwile dwa
+        # aktywne wiersze; przy `ORDER BY c.id` wygrywal ten, ktory wlasnie
+        # zastapiono - i to bez sladu. Objaw pojawial sie dopiero w dniu
+        # wygasniecia starego klucza i wygladal jak awaria uwierzytelnienia
+        # bez przyczyny, bo nowy klucz w bazie byl przez caly czas poprawny.
+        # `c.id` zostaje jako rozstrzygniecie remisu: dwa klucze wgrane w tej
+        # samej milisekundzie maja dawac ten sam wybor przy kazdym starcie,
+        # inaczej silnik po restarcie handluje z innego rachunku.
+        klucze = conn.execute(
+            "SELECT c.id, c.key_hint, c.key_enc, c.secret_enc,"
+            "       v.demo_host, v.live_host"
             "  FROM app.api_credential c JOIN ref.venue v ON v.id = c.venue_id"
             " WHERE v.code = 'bybit' AND c.mode::text = %s AND c.active"
-            " ORDER BY c.id LIMIT 1", (mode,)).fetchone()
+            " ORDER BY c.created_at DESC, c.id DESC", (mode,)).fetchall()
+    cred = klucze[0] if klucze else None
+    # NIEDOKONCZONA ROTACJA MA BYC SLYSZALNA. Wybor jest juz jednoznaczny,
+    # ale dwa aktywne klucze naraz to stan, ktorego nikt nie zaplanowal:
+    # albo dezaktywacji starego zapomniano, albo ktos wgral klucz do zlego
+    # trybu. Cisza w tym miejscu byla polowa poprzedniego bledu.
+    if len(klucze) > 1:
+        print(f"  UWAGA: {len(klucze)} aktywnych kluczy dla trybu {mode} — "
+              f"używam najnowszego ({cred['key_hint']}); "
+              f"pozostałe dezaktywuj po zakończonej rotacji")
     if not cred:
         # BRAK KLUCZA PRZY WLACZONEJ EGZEKUCJI TO BLAD KONFIGURACJI, nie powod
         # do cichego zejscia na rachunek papierowy. Silnik udajacy, ze handluje,
