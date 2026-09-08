@@ -45,8 +45,28 @@ Egzekucja na koncie demo jest **włączona** (`--egzekucja gielda --mode demo`).
 Plan przestał być rozstrzygany przez świecę, a zaczął przez giełdę: ilość, cena
 i prowizja przestały być naszym założeniem.
 
-Nie ma jeszcze **ani jednego** wypełnienia, więc obie liczby poniżej nadal są
-stałymi w kodzie:
+**Stan na 2026-09-08, sprawdzony w bazie.** W rejestrze jest 18 wypełnień, ale
+**wszystkie** mają `raw->>'execution' = 'internal_paper'` — to rachunek
+papierowy, czyli nasze własne założenie zapisane do bazy i odczytane z powrotem.
+Pomiar je odrzuca i robi to słusznie: liczyłby wtedy `POSLIZG_*` przeciwko
+samemu sobie.
+
+Egzekucja giełdowa działa od 2026-09-07 wieczorem (silnik potwierdza w logu:
+*„EGZEKUCJA NA GIEŁDZIE (demo) — zlecenia idą naprawdę"*). Od tego czasu
+**nie powstał ani jeden plan zlecenia** — 0 w ostatniej dobie, przy progu
+wejścia 0,2795. Nie jest to awaria: silnik podejmuje jedną decyzję na świecę
+4 h i żaden sygnał nie przekroczył progu. Jest to natomiast powód, dla którego
+poniższe liczby wciąż są założeniem.
+
+**Czego to wymaga, żeby przestać być założeniem:** wypełnień Z GIEŁDY, a te
+zależą od tego, czy strategia w ogóle otworzy pozycję. Przy zmierzonej częstości
+z backtestu (20–60 transakcji na okno 30-dniowe dla dziesięciu instrumentów)
+pierwsze powinny pojawić się w ciągu dni, nie tygodni. **Jeśli po tygodniu nadal
+będzie ich zero, to samo w sobie jest wynikiem** — znaczy, że próg wejścia albo
+reguła limitu nie przepuszczają niczego, i wtedy pytanie brzmi „dlaczego",
+a nie „czekamy dalej".
+
+Obie liczby poniżej nadal są stałymi w kodzie:
 
 ```python
 POSLIZG_TAKER = 0.0004     # 4 punkty bazowe
@@ -99,16 +119,31 @@ w jakiej walucie brzmi warunek „bez minusa". Druga krzywa kapitału jest
 w budowie; czy próg ma stać w USDC czy w walucie właściciela, pozostaje jego
 decyzją.
 
-## 4. Dryf cech jest wysoki i milczący
+## 4. Dryf cech: zmierzony, czujka wpięta — czeka na trzeci odczyt
 
-Zmierzone na produkcji: PSI **0,695** przy progu alarmowym 0,25, utrzymujące się
-od dni. Powiadomienie `learning.drift_high` nie zostało wysłane **ani razu**.
+**Stan na 2026-09-08.** Dryf wynosi **0,69** przy progu trwałości **0,5**
+i progu pojedynczego odczytu **1,0**. Czujka jest wpięta w zadanie trenera
+i odpowiada: *„stan jeszcze nie utrwalony (za mało przebiegów lub za krótki
+odstęp) — cisza"*. Zadziała po trzech kolejnych odczytach powyżej progu,
+rozpiętych na co najmniej 48 godzin.
 
-Dozór zgłasza ZMIANĘ, nie stan — i jest to reguła świadoma, bo powiadomienie
-przychodzące zawsze przestaje cokolwiek znaczyć. Skutkiem ubocznym jest jednak
-to, że **stan trwale zły milczy na zawsze**: model handluje na cechach, których
-rozkład odjechał od treningowego prawie trzykrotnie ponad próg, i nikt się o tym
-nie dowie.
+Wcześniejsza wersja tej sekcji podawała **PSI 0,695 przy progu 0,25** i twierdziła,
+że stan trwale zły milczy na zawsze. Oba zdania były nieprawdziwe i oba
+poprawiono:
+
+- **To nie jest PSI.** `train.py` liczy wielkość efektu (d Cohena plus względna
+  zmiana rozrzutu). Próg 0,25 pochodzi z literatury o Population Stability Index
+  i przeniesiony na tę miarę nie znaczy nic. Interfejs malował od 0,25 na
+  czerwono stan, który system uznaje za normalny — poprawione w trzech miejscach
+  naraz, z progami branymi teraz z jednego źródła.
+- **Stan trwale zły ma własną czujkę.** Dozór zgłaszał wyłącznie ZMIANĘ, więc
+  dryf, który wszedł wysoko i tam stanął, był niewidoczny. Drugi tor wymaga
+  trzech odczytów rozpiętych na 48 h, bo trener bywa uruchamiany powtórnie tego
+  samego dnia i wtedy „trwały" znaczyłoby „chwilowy".
+
+**Co z tego zostaje jako otwarte:** nic strukturalnego. To jest stan
+oczekiwania, nie brak mechanizmu — i po trzech nocach trenera rozstrzygnie się
+sam, w jedną albo w drugą stronę.
 
 ## Czego świadomie NIE robimy
 
