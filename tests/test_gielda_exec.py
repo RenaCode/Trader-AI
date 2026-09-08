@@ -712,3 +712,98 @@ def test_zapytanie_o_ATR_uzywa_ISTNIEJACEJ_kolumny():
         p.read_text(encoding="utf-8")
         for p in sorted(Path("db/migrations").glob("*.sql")))
     assert "feature_def_id" in migracje
+
+
+# ------------------------------------ sprzątanie zleceń, które przeżyły plan
+
+def _sprzataj(wiersze, gielda):
+    from services.engine.gielda_exec import posprzataj_zlecenia
+
+    cur = Kursor(wiersze)
+    st = asyncio.run(posprzataj_zlecenia(cur, gielda, engine="crypto",
+                                         mode="demo", kategoria="spot",
+                                         verbose=False))
+    return cur, st
+
+
+def test_sprzatanie_ZDEJMUJE_zlecenie_ktore_przezylo_swoj_plan():
+    """Reszta po wypełnieniu częściowym, której nie udało się anulować, leży
+    w arkuszu i wypełni się po cenie, której żadna decyzja już nie popiera.
+
+    Rozstrzyganie do niej nie wróci — szuka planów `pending`. Jedynym miejscem
+    ponawiającym anulowanie było `anuluj_wejscia`, które rusza WYŁĄCZNIE po
+    kill-switchu: zlecenie porzucone przy zwykłym błędzie sieci czekało więc
+    na obsunięcie kapitału, żeby ktoś je zdjął.
+    """
+    g = Gielda(stan=_stan(D("4"), status="partial"))
+    cur, st = _sprzataj([{"id": 7, "client_order_id": "tai-p42",
+                          "status": "partial", "symbol": "SOLUSDC"}], g)
+    assert st["zdjete"] == 1
+    assert len(g.anulowane) == 1
+    assert any("status='cancelled'" in s for s, _ in cur.sql)
+
+
+def test_sprzatanie_ZAMYKA_wiersz_ktorego_gielda_NIE_ZNA():
+    """Wiersz `unknown` po nieudanej odpowiedzi zostawał otwarty na zawsze,
+    a czujka zdrowia egzekucji zgłaszała go CODZIENNIE jako kandydata na
+    pozycję-widmo. Lista rosła bez końca i uczyła odbiorcę ignorować alarm."""
+    g = Gielda(stan=None)
+    cur, st = _sprzataj([{"id": 8, "client_order_id": "tai-p43",
+                          "status": "unknown", "symbol": "SOLUSDC"}], g)
+    assert st["domkniete"] == 1
+    assert g.anulowane == []                 # nie ma czego anulować
+    assert any("nie zna tego zlecenia" in str(p) for _, p in cur.sql if p)
+
+
+def test_sprzatanie_NIE_RUSZA_planow_ktore_jeszcze_czekaja():
+    """Zlecenie czekające na swoją świecę nie jest sierotą. Ruszanie go
+    zabierałoby rozstrzyganiu jego własną pracę."""
+    cur, _ = _sprzataj([], Gielda())
+    (sql, _), = [(s, p) for s, p in cur.sql if "FROM exec.order o" in s]
+    assert "p.status::text <> 'pending'" in sql
+
+
+def test_sprzatanie_ZGLASZA_wypelnienie_po_fakcie_zamiast_je_ksiegowac():
+    """Księgowanie należy do rozstrzygania; robienie tego w dwóch miejscach
+    rozjechałoby się przy pierwszej zmianie. Ale pozycja poza dziennikiem musi
+    zostawić ślad — to jest realna ekspozycja, której risk kernel nie liczy."""
+    g = Gielda(stan=_stan(D("10"), status="filled"))
+    cur, st = _sprzataj([{"id": 9, "client_order_id": "tai-p44",
+                          "status": "new", "symbol": "SOLUSDC"}], g)
+    assert st["wypelnione_po_fakcie"] == 1
+    assert not any("INSERT INTO exec.position" in s for s, _ in cur.sql)
+    assert any("pozycja poza dziennikiem" in str(p) for _, p in cur.sql if p)
+
+
+def test_prowizja_ksiegowana_w_WALUCIE_Z_GIELDY_a_nie_kwotowanej():
+    """Na spocie Bybit pobiera prowizję od kupna W KUPIONYM AKTYWIE.
+
+    Wpisanie waluty kwotowanej dawało dwa błędy naraz, oba w tę samą stronę:
+    koszt wejścia zaniżony około stukrotnie (0,01 SOL zapisane jako 0,01 USDC
+    zamiast ~1 USDC), a ilość w dzienniku wyższa od faktycznego salda o wartość
+    prowizji — dokładnie na progu tolerancji uzgodnienia, więc rozjazd bywałby
+    zgłaszany losowo.
+
+    `Wypelnienie` miało pole `prowizja_w` od początku i uzgodnienie z niego
+    korzysta; ścieżka egzekucji czytała samą kwotę.
+    """
+    stan = StanZlecenia(id_wlasne="tai-p42", id_gieldy="G1", status="filled",
+                        ilosc=D("10"), wypelniono=D("10"),
+                        srednia_cena=D("100"), prowizja=D("0.01"),
+                        prowizja_w="SOL")
+    cur, _, _, _ = _rozstrzygnij(stan)
+    (_, params), = [(s, p) for s, p in cur.sql if "INSERT INTO exec.fill" in s]
+    assert "SOL" in params, "waluta prowizji musi pochodzić z giełdy"
+    assert "USDC" not in params
+
+
+def test_brak_waluty_prowizji_spada_na_kwotowana():
+    """Giełda nie zawsze poda to pole. Brak odczytu nie może zatrzymać zapisu —
+    ale nie może też udawać, że wiemy więcej, niż wiemy."""
+    stan = StanZlecenia(id_wlasne="tai-p42", id_gieldy="G1", status="filled",
+                        ilosc=D("10"), wypelniono=D("10"),
+                        srednia_cena=D("100"), prowizja=D("0.25"),
+                        prowizja_w=None)
+    cur, _, _, _ = _rozstrzygnij(stan)
+    (_, params), = [(s, p) for s, p in cur.sql if "INSERT INTO exec.fill" in s]
+    assert "USDC" in params

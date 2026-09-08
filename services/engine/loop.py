@@ -598,7 +598,8 @@ def zapisz_wejscie(cur, engine: str, mode: str, instrument_id: int, decision_id:
                    venue_order_id: str | None = None,
                    client_order_id: str | None = None,
                    venue_fill_id: str | None = None,
-                   order_id: int | None = None) -> int:
+                   order_id: int | None = None,
+                   prowizja_ccy: str | None = None) -> int:
     """Zapis wejscia w pozycje. JEDEN ZAPIS DLA OBU ZRODEL.
 
     DLACZEGO TO JEST WSPOLNE, A NIE SKOPIOWANE
@@ -641,7 +642,12 @@ def zapisz_wejscie(cur, engine: str, mode: str, instrument_id: int, decision_id:
     cur.execute(
         "INSERT INTO exec.fill (order_id, venue_fill_id, qty, price, fee, fee_ccy, event_time)"
         " VALUES (%s,%s,%s,%s,%s,%s,%s)",
-        (oid, venue_fill_id or f"paper-{oid}", qty, cena, prowizja, quote_ccy, as_of))
+        # WALUTA PROWIZJI Z GIELDY, gdy ja podala. Rachunek papierowy nalicza
+        # prowizje w walucie kwotowanej i tak zostaje; produkcja na spocie placi
+        # ja czesto w kupionym aktywie i wpisanie tam quote_ccy zanizaloby koszt
+        # wejscia o dwa rzedy wielkosci.
+        (oid, venue_fill_id or f"paper-{oid}", qty, cena, prowizja,
+         prowizja_ccy or quote_ccy, as_of))
     cur.execute(
         "INSERT INTO exec.position (engine, mode, instrument_id, side, qty, avg_price,"
         " opened_at, fees_paid, open_decision_id) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
@@ -1313,6 +1319,17 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
     # POWSTAJA nadal. Niewyslanie ich na gielde uwiezilo by pozycje dokladnie
     # w chwili, w ktorej system stwierdzil, ze ryzyko jest za duze. Bezpiecznik
     # ma wyprowadzac z ryzyka, a nie zamykac w nim.
+    # SPRZATANIE PRZED WYSYLKA, nie po niej. Zlecenie, ktore przezylo swoj plan,
+    # zajmuje miejsce w limicie zlecen na godzine i moze sie wypelnic obok
+    # decyzji - a nowe zlecenia nie maja pierwszenstwa przed posprzataniem po
+    # starych.
+    if limit and gielda is not None:
+        from services.engine.gielda_exec import posprzataj_zlecenia
+        stats.update(await posprzataj_zlecenia(
+            cur, gielda, engine=engine, mode=mode, kategoria=kategoria,
+            verbose=verbose))
+        conn.commit()
+
     if limit and gielda is not None:
         from services.engine.gielda_exec import zloz_oczekujace
         stats.update(await zloz_oczekujace(

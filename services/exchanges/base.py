@@ -136,6 +136,10 @@ class StanZlecenia:
     wypelniono: Decimal            # ILE JUŻ WESZŁO — wypełnienie częściowe
     srednia_cena: Decimal | None
     prowizja: Decimal
+    # Waluta, w ktorej gielda pobrala prowizje. Na spocie kupno placi ja
+    # W KUPIONYM AKTYWIE, wiec zalozenie "zawsze waluta kwotowana" zanizalo
+    # koszt wejscia o dwa rzedy wielkosci i zawyzalo ilosc w dzienniku.
+    prowizja_w: str | None = None
 
     @property
     def czesciowe(self) -> bool:

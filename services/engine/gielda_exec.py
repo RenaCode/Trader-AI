@@ -258,6 +258,11 @@ async def rozstrzygnij_plan(cur, adapter, plan: dict, f: Filtry, *, engine: str,
 
     cena = stan.srednia_cena or Decimal(plan["limit_price"])
     prowizja = stan.prowizja
+    # WALUTA PROWIZJI Z GIELDY, NIE Z ZALOZENIA. Kupno na spocie placi prowizje
+    # w kupionym aktywie, wiec wpisanie waluty kwotowanej zanizalo koszt wejscia
+    # o dwa rzedy wielkosci - a przy przewadze mierzonej w dziesiatych czesciach
+    # procenta to nie jest zaokraglenie.
+    prowizja_ccy = stan.prowizja_w or plan["quote_ccy"]
     uwaga = None
     rodzaj_zwrotny, powod_zwrotny = r.rodzaj, r.powod
 
@@ -305,7 +310,26 @@ async def rozstrzygnij_plan(cur, adapter, plan: dict, f: Filtry, *, engine: str,
                        plan["quote_ccy"], meta, planned_order_id=plan["id"],
                        venue_order_id=stan.id_gieldy, client_order_id=id_w,
                        venue_fill_id=f"{stan.id_gieldy}",
-                       order_id=id_zlecenia_w_bazie)
+                       order_id=id_zlecenia_w_bazie,
+                       prowizja_ccy=prowizja_ccy)
+
+    if anulowanie_padlo is not None:
+        # RESZTA ZLECENIA ZOSTAJE ZYWA NA GIELDZIE.
+        #
+        # Wypelnienie juz zaksiegowalismy - jest nasze. Ale reszta nadal lezy
+        # w arkuszu i nadal moze wejsc po cenie, ktorej zadna decyzja nie
+        # popiera. Plan idzie na 'triggered', bo wracanie do niego odczytywaloby
+        # w kolko to samo wypelnienie; wiersz ZLECENIA zostaje wiec otwarty
+        # i to on jest nitka, po ktorej sprzatanie (`posprzataj_zlecenia`)
+        # wraca tu w kazdym cyklu, a nie dopiero po kill-switchu.
+        cur.execute(
+            "UPDATE exec.order SET status=%s, updated_at=%s, reject_reason=%s,"
+            " raw = raw || %s WHERE planned_order_id=%s",
+            (stan.status, teraz,
+             f"anulowanie reszty nie powiodlo sie: {anulowanie_padlo}",
+             json.dumps(dict(meta, anulowanie="nie_powiodlo_sie",
+                             reszta="zostaje w arkuszu — sprzątanie ponowi")),
+             plan["id"]))
 
     cur.execute("UPDATE journal.planned_order SET status='triggered',"
                 " resolved_at=%s WHERE id=%s", (teraz, plan["id"]))
@@ -495,3 +519,108 @@ async def anuluj_wejscia(cur, adapter, *, kategoria: str, powod: str,
                         " resolved_at=now() WHERE id=%s", (o["planned_order_id"],))
         zdjete += 1
     return zdjete, wypelnione
+
+
+async def posprzataj_zlecenia(cur, adapter, *, engine: str, mode: str,
+                              kategoria: str, verbose: bool = True) -> dict:
+    """Zamyka zlecenia, które przeżyły swój plan. Zwraca statystykę.
+
+    DLACZEGO TO MUSI ISTNIEĆ OSOBNO
+
+    Plan jest rozstrzygnięty i nikt do niego nie wróci — rozstrzyganie szuka
+    planów `pending`. Zlecenie może jednak dalej żyć na giełdzie, i to na dwa
+    sposoby, z których żaden nie miał dotąd sprzątacza:
+
+      * anulowanie reszty przy wypełnieniu CZĘŚCIOWYM nie powiodło się. Reszta
+        leży w arkuszu i wypełni się po cenie, której żadna decyzja już nie
+        popiera — a risk kernel jej nie policzy, bo w dzienniku pozycja ma
+        wielkość samego wypełnienia,
+      * odpowiedź na złożenie nie dotarła i wiersz został na `unknown`. Jeżeli
+        giełda tego zlecenia nie zna, wiersz jest już tylko fałszywym alarmem:
+        czujka zdrowia egzekucji zgłasza go CODZIENNIE jako „kandydata na
+        pozycję-widmo", a lista rośnie bez końca i uczy odbiorcę ignorować.
+
+    Dotąd jedynym miejscem ponawiającym anulowanie było `anuluj_wejscia`, które
+    rusza WYŁĄCZNIE po kill-switchu. Zlecenie porzucone przy zwykłym błędzie
+    sieci czekało więc na obsunięcie kapitału, żeby ktoś je zdjął.
+
+    PYTAMY GIEŁDĘ, ZANIM COKOLWIEK ZAPISZEMY. Nasz status jest stary z definicji
+    — to on właśnie okazał się nieprawdziwy.
+    """
+    st = {"zdjete": 0, "domkniete": 0, "wypelnione_po_fakcie": 0}
+    cur.execute(
+        "SELECT o.id, o.client_order_id, o.status, i.symbol"
+        "  FROM exec.order o"
+        "  JOIN ref.instrument i ON i.id = o.instrument_id"
+        "  LEFT JOIN journal.planned_order p ON p.id = o.planned_order_id"
+        " WHERE o.status IN ('new','partial','unknown')"
+        "   AND o.engine::text = %s AND o.mode::text = %s"
+        "   AND o.client_order_id IS NOT NULL"
+        # WYLACZNIE zlecenia, ktorych plan JUZ sie rozstrzygnal. Zlecenia
+        # czekajace na swoja swiece nie sa sierotami i ruszanie ich zabieraloby
+        # rozstrzyganiu jego wlasna prace.
+        "   AND (p.id IS NULL OR p.status::text <> 'pending')",
+        (engine, mode))
+
+    for o in cur.fetchall():
+        try:
+            stan = await adapter.stan_zlecenia(o["client_order_id"],
+                                               kategoria=kategoria)
+        except ExchangeError as e:
+            if verbose:
+                print(f"  [sprzątanie] {o['symbol']}: nie da się odczytać stanu ({e})")
+            continue
+
+        if stan is None:
+            # GIELDA GO NIE ZNA. Zlecenie albo nigdy nie powstalo, albo dawno
+            # zniknelo - w obu przypadkach wiersz otwarty jest juz tylko
+            # zrodlem falszywego alarmu.
+            cur.execute(
+                "UPDATE exec.order SET status='cancelled', updated_at=now(),"
+                " reject_reason=%s WHERE id=%s",
+                ("sprzątanie: giełda nie zna tego zlecenia — wiersz zamknięty, "
+                 "żeby przestał być zgłaszany jako o nieznanym stanie", o["id"]))
+            st["domkniete"] += 1
+            continue
+
+        if stan.wypelniono > 0 and o["status"] != "partial":
+            # WYPELNILO SIE JUZ PO ROZSTRZYGNIECIU. Nie ksiegujemy tego tutaj -
+            # ksiegowanie nalezy do rozstrzygania i robienie tego w dwoch
+            # miejscach rozjechaloby sie przy pierwszej zmianie. Zglaszamy,
+            # bo jest to realna pozycja poza dziennikiem.
+            cur.execute(
+                "UPDATE exec.order SET status=%s, updated_at=now(), reject_reason=%s"
+                " WHERE id=%s",
+                (stan.status,
+                 f"sprzątanie: zlecenie wypełniło się PO rozstrzygnięciu planu "
+                 f"({stan.wypelniono}/{stan.ilosc}) — pozycja poza dziennikiem, "
+                 f"wyłapie ją uzgodnienie z giełdą", o["id"]))
+            st["wypelnione_po_fakcie"] += 1
+            if verbose:
+                print(f"  [sprzątanie] {o['symbol']}: WYPEŁNIŁO SIĘ po fakcie "
+                      f"{stan.wypelniono}/{stan.ilosc}")
+            continue
+
+        if stan.status in ("cancelled", "rejected", "filled"):
+            cur.execute("UPDATE exec.order SET status=%s, updated_at=now()"
+                        " WHERE id=%s", (stan.status, o["id"]))
+            st["domkniete"] += 1
+            continue
+
+        try:
+            await adapter.anuluj_zlecenie(symbol=o["symbol"],
+                                          id_wlasne=o["client_order_id"],
+                                          kategoria=kategoria)
+        except ExchangeError as e:
+            if verbose:
+                print(f"  [sprzątanie] {o['symbol']}: anulowanie nadal nie "
+                      f"wychodzi ({e}) — spróbujemy w następnym cyklu")
+            continue
+        cur.execute("UPDATE exec.order SET status='cancelled', updated_at=now(),"
+                    " reject_reason=%s WHERE id=%s",
+                    ("sprzątanie: zlecenie przeżyło swój plan i zostało zdjęte",
+                     o["id"]))
+        st["zdjete"] += 1
+        if verbose:
+            print(f"  [sprzątanie] {o['symbol']}: zdjęte z arkusza")
+    return st

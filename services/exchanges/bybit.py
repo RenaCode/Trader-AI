@@ -630,6 +630,18 @@ class BybitAdapter:
                     ilosc=ilosc, wypelniono=wyp,
                     srednia_cena=Decimal(str(cena)) if cena else None,
                     prowizja=Decimal(str(o.get("cumExecFee") or 0)),
+                    # WALUTA PROWIZJI, NIE ZALOZENIE. Na spocie Bybit pobiera
+                    # prowizje od kupna W KUPIONYM AKTYWIE, a nie w walucie
+                    # kwotowanej. `Wypelnienie` mialo to pole od poczatku
+                    # i uzgodnienie z niego korzysta; sciezka egzekucji czytala
+                    # sama kwote i zapisywala ja jako USDC.
+                    #
+                    # Skutek byl podwojny i oba razy w te sama strone: koszt
+                    # wejscia zanizony okolo stukrotnie (0,01 SOL zapisane jako
+                    # 0,01 USDC zamiast ~1 USDC), a ilosc w dzienniku wyzsza od
+                    # faktycznego salda o wartosc prowizji - dokladnie na progu
+                    # tolerancji uzgodnienia.
+                    prowizja_w=o.get("feeCurrency") or None,
                 )
         return None
 
