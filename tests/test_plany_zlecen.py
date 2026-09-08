@@ -103,3 +103,61 @@ def test_cena_decyzyjna_to_zamkniecie_swiecy_a_nie_ostatnia_minuta():
     # mark_price zostaje wyłącznie jako ścieżka awaryjna i do wyceny pozycji
     assert "stats[\"bez_swiecy\"]" in ZRODLO, \
         "użycie ceny zastępczej nie jest zliczane — byłaby to cicha zamiana źródła"
+
+
+# ============================ zero w regule to NIE jest komplet regul
+
+from decimal import Decimal as D  # noqa: E402
+
+def test_ZEROWY_krok_nie_jest_kompletem_regul():
+    """Znalezione w audycie, poprawione 2026-09-08.
+
+    `kompletne` sprawdzało wyłącznie „nie None", więc zero przechodziło jako
+    wartość ZNANA: instrument był dopuszczany do egzekucji, a dopiero głęboko
+    w zaokrąglaniu leciał goły `ValueError("krok musi byc dodatni")`. To nie
+    jest błąd giełdy, więc nie łapie go obsługa błędów egzekucji — jeden
+    instrument z zepsutą regułą wywracał CAŁY cykl decyzyjny.
+
+    Zero nie jest hipotezą: `tick_size` to NUMERIC bez ograniczenia
+    dodatniości, a wartości pochodzą wprost z odpowiedzi giełdy.
+    """
+    from services.engine.zlecenia import Filtry
+
+    pelne = Filtry(krok_ilosci=D("0.001"), krok_ceny=D("0.01"),
+                   min_wartosc=D("5"))
+    assert pelne.kompletne
+
+    for pole in ("krok_ilosci", "krok_ceny", "min_wartosc"):
+        zepsute = Filtry(krok_ilosci=D("0.001"), krok_ceny=D("0.01"),
+                         min_wartosc=D("5"))
+        object.__setattr__(zepsute, pole, D("0"))
+        assert not zepsute.kompletne, f"zero w {pole} nie może uchodzić za regułę"
+
+
+def test_UJEMNY_krok_tez_nie_jest_kompletem():
+    """Ujemna wartość jest jeszcze gorsza od zera: nie wywraca zaokrąglania
+    wyjątkiem, tylko liczy w drugą stronę."""
+    from services.engine.zlecenia import Filtry
+
+    f = Filtry(krok_ilosci=D("0.001"), krok_ceny=D("-0.01"), min_wartosc=D("5"))
+    assert not f.kompletne
+
+
+def test_bramka_egzekucji_i_FILTRY_uzywaja_TEJ_SAMEJ_reguly():
+    """Wcześniej stały tu dwie kopie i obie miały ten sam błąd. Rozjazd tej
+    akurat reguły znaczy „dopuszczony do handlu instrument, którym nie da się
+    handlować" — bramka mówi, że komplet reguł jest, a egzekucja się wywraca.
+    """
+    from services.ingest.instrumenty import niekompletne
+
+    wiersze = [
+        {"symbol": "OKUSDC", "tradeable": True, "lot_size": D("0.001"),
+         "tick_size": D("0.01"), "min_notional": D("5")},
+        {"symbol": "ZEROUSDC", "tradeable": True, "lot_size": D("0.001"),
+         "tick_size": D("0"), "min_notional": D("5")},
+        {"symbol": "BRAKUSDC", "tradeable": True, "lot_size": None,
+         "tick_size": D("0.01"), "min_notional": D("5")},
+        {"symbol": "NIEHANDLOWANY", "tradeable": False, "lot_size": None,
+         "tick_size": None, "min_notional": None},
+    ]
+    assert niekompletne(wiersze) == ["BRAKUSDC", "ZEROUSDC"]

@@ -400,10 +400,28 @@ def podmien_odpowiedz(z_gieldy: dict[str, dict], udawaj: list[str]) -> dict[str,
 
 
 def niekompletne(w_bazie: list[dict]) -> list[str]:
-    """Instrumenty dopuszczone do handlu, którym wciąż brakuje reguł."""
-    return sorted(r["symbol"] for r in w_bazie if r.get("tradeable")
-                  and (r.get("lot_size") is None or r.get("tick_size") is None
-                       or r.get("min_notional") is None))
+    """Instrumenty dopuszczone do handlu, którym wciąż brakuje reguł.
+
+    REGULA JEST JEDNA I MIESZKA W `Filtry.kompletne`. Wczesniej stala tu jej
+    druga kopia - i obie mialy ten sam blad: sprawdzaly wylacznie "nie None",
+    wiec zero przechodzilo jako wartosc znana. Bramka meldowala komplet regul,
+    a egzekucja wywracala sie na tym instrumencie golym `ValueError`.
+
+    Dwie kopie tej samej reguly rozjezdzaja sie przy pierwszej poprawce, a przy
+    tej akurat regule rozjazd znaczy "dopuszczony do handlu instrument, ktorym
+    nie da sie handlowac".
+    """
+    from services.engine.zlecenia import Filtry
+
+    braki = []
+    for r in w_bazie:
+        if not r.get("tradeable"):
+            continue
+        f = Filtry(krok_ilosci=r.get("lot_size"), krok_ceny=r.get("tick_size"),
+                   min_wartosc=r.get("min_notional"))
+        if not f.kompletne:
+            braki.append(r["symbol"])
+    return sorted(braki)
 
 
 # KODY WYJSCIA - ROZDZIELONE, bo mieszaly dwie rozne rzeczy.

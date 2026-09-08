@@ -557,7 +557,12 @@ async def posprzataj_zlecenia(cur, adapter, *, engine: str, mode: str,
     """
     st = {"zdjete": 0, "domkniete": 0, "wypelnione_po_fakcie": 0}
     cur.execute(
-        "SELECT o.id, o.client_order_id, o.status, i.symbol"
+        "SELECT o.id, o.client_order_id, o.status, i.symbol, i.lot_size,"
+        # ILE JUZ ZAKSIEGOWALISMY z tego zlecenia. Bez tej liczby jedynym
+        # sygnalem bylby status wiersza - a status mowi "bylo czesciowe",
+        # nie "ile z tego trafilo do dziennika".
+        "       coalesce((SELECT sum(f.qty) FROM exec.fill f"
+        "                  WHERE f.order_id = o.id), 0) AS zaksiegowane"
         "  FROM exec.order o"
         "  JOIN ref.instrument i ON i.id = o.instrument_id"
         "  LEFT JOIN journal.planned_order p ON p.id = o.planned_order_id"
@@ -591,30 +596,53 @@ async def posprzataj_zlecenia(cur, adapter, *, engine: str, mode: str,
             st["domkniete"] += 1
             continue
 
-        if stan.wypelniono > 0 and o["status"] != "partial":
-            # WYPELNILO SIE JUZ PO ROZSTRZYGNIECIU. Nie ksiegujemy tego tutaj -
-            # ksiegowanie nalezy do rozstrzygania i robienie tego w dwoch
-            # miejscach rozjechaloby sie przy pierwszej zmianie. Zglaszamy,
-            # bo jest to realna pozycja poza dziennikiem.
-            cur.execute(
-                "UPDATE exec.order SET status=%s, updated_at=now(), reject_reason=%s"
-                " WHERE id=%s",
-                (stan.status,
-                 f"sprzątanie: zlecenie wypełniło się PO rozstrzygnięciu planu "
-                 f"({stan.wypelniono}/{stan.ilosc}) — pozycja poza dziennikiem, "
-                 f"wyłapie ją uzgodnienie z giełdą", o["id"]))
-            st["wypelnione_po_fakcie"] += 1
-            if verbose:
-                print(f"  [sprzątanie] {o['symbol']}: WYPEŁNIŁO SIĘ po fakcie "
-                      f"{stan.wypelniono}/{stan.ilosc}")
-            continue
+        # ILE WYPELNILO SIE PONAD TO, CO JUZ ZAKSIEGOWANE.
+        #
+        # Warunek brzmial tu wczesniej `o["status"] != "partial"` i gubil przez
+        # to CALA reszte zlecenia czesciowo wypelnionego: wiersz `partial` mial
+        # juz zaksiegowane pierwsze wypelnienie, wiec kazde nastepne bylo
+        # wyciszane. Reszta dopelniala sie po rozstrzygnieciu planu, wiersz
+        # przechodzil na `filled` jako "domkniety" - i roznica miedzy dziennikiem
+        # a rachunkiem zostawala BEZ SLADU. Risk kernel liczy wtedy ekspozycje
+        # mniejsza niz faktyczna, a to jest wielkosc, na ktorej stoi kill-switch.
+        #
+        # Pytanie brzmi "czy jest wypelnienie, ktorego nie ma w dzienniku",
+        # a nie "czy wiersz byl czesciowy". Status odpowiada na drugie.
+        zaksiegowane = Decimal(str(o.get("zaksiegowane") or 0))
+        niezaksiegowane = stan.wypelniono - zaksiegowane
+        # Ponizej polowy kroku ilosci nie da sie kupic ani sprzedac, wiec taka
+        # roznica to zaokraglenie, nie wypelnienie. Bez kroku porownujemy scisle.
+        krok = Decimal(str(o.get("lot_size") or 0))
+        poza_dziennikiem = niezaksiegowane > (krok / 2 if krok > 0 else Decimal(0))
+        opis_roznicy = (
+            f"pozycja poza dziennikiem: {niezaksiegowane} "
+            f"(giełda {stan.wypelniono}/{stan.ilosc}, dziennik {zaksiegowane}) "
+            f"— wyłapie to uzgodnienie z giełdą")
 
         if stan.status in ("cancelled", "rejected", "filled"):
-            cur.execute("UPDATE exec.order SET status=%s, updated_at=now()"
-                        " WHERE id=%s", (stan.status, o["id"]))
-            st["domkniete"] += 1
+            # ZLECENIE SIE JUZ NIE RUSZY. Zostaje tylko pytanie, czy zostawilo
+            # po sobie wypelnienie, ktorego nie ma w dzienniku. Nie ksiegujemy
+            # go tutaj - ksiegowanie nalezy do rozstrzygania i robienie tego
+            # w dwoch miejscach rozjechaloby sie przy pierwszej zmianie.
+            if poza_dziennikiem:
+                cur.execute(
+                    "UPDATE exec.order SET status=%s, updated_at=now(),"
+                    " reject_reason=%s WHERE id=%s",
+                    (stan.status, f"sprzątanie: {opis_roznicy}", o["id"]))
+                st["wypelnione_po_fakcie"] += 1
+                if verbose:
+                    print(f"  [sprzątanie] {o['symbol']}: WYPEŁNIŁO SIĘ po fakcie "
+                          f"{stan.wypelniono}/{stan.ilosc}, poza dziennikiem "
+                          f"{niezaksiegowane}")
+            else:
+                cur.execute("UPDATE exec.order SET status=%s, updated_at=now()"
+                            " WHERE id=%s", (stan.status, o["id"]))
+                st["domkniete"] += 1
             continue
 
+        # ZLECENIE NADAL ZYJE - reszte trzeba zdjac z arkusza NIEZALEZNIE od
+        # tego, czy cos juz sie z niego wypelnilo. To sa dwie osobne sprawy
+        # i potraktowanie ich jako jednej zostawialo zywa reszte w arkuszu.
         try:
             await adapter.anuluj_zlecenie(symbol=o["symbol"],
                                           id_wlasne=o["client_order_id"],
@@ -624,11 +652,15 @@ async def posprzataj_zlecenia(cur, adapter, *, engine: str, mode: str,
                 print(f"  [sprzątanie] {o['symbol']}: anulowanie nadal nie "
                       f"wychodzi ({e}) — spróbujemy w następnym cyklu")
             continue
+        powod = "sprzątanie: zlecenie przeżyło swój plan i zostało zdjęte"
+        if poza_dziennikiem:
+            powod += f"; UWAGA: {opis_roznicy}"
+            st["wypelnione_po_fakcie"] += 1
         cur.execute("UPDATE exec.order SET status='cancelled', updated_at=now(),"
-                    " reject_reason=%s WHERE id=%s",
-                    ("sprzątanie: zlecenie przeżyło swój plan i zostało zdjęte",
-                     o["id"]))
+                    " reject_reason=%s WHERE id=%s", (powod, o["id"]))
         st["zdjete"] += 1
         if verbose:
-            print(f"  [sprzątanie] {o['symbol']}: zdjęte z arkusza")
+            print(f"  [sprzątanie] {o['symbol']}: zdjęte z arkusza"
+                  + (f" (poza dziennikiem {niezaksiegowane})"
+                     if poza_dziennikiem else ""))
     return st

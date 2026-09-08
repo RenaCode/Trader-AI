@@ -58,7 +58,17 @@ class Filtry:
     def kompletne(self) -> bool:
         # Krok ceny i ilosci sa niezbedne do ZLOZENIA zlecenia. Minimalna
         # wartosc jest niezbedna do stwierdzenia, czy da sie z niego WYJSC.
-        return None not in (self.krok_ilosci, self.krok_ceny, self.min_wartosc)
+        #
+        # DODATNIE, nie tylko "nie None". Zero przechodzilo tedy jako wartosc
+        # ZNANA, instrument byl dopuszczany do egzekucji, a dopiero gleboko
+        # w zaokraglaniu lecial goly `ValueError("krok musi byc dodatni")`.
+        # Nie jest to blad gieldy, wiec nie lapie go obsluga bledow egzekucji -
+        # wywracal CALY cykl decyzyjny przez jeden instrument z zepsuta regula.
+        #
+        # Zero w `tick_size` nie jest hipoteza: kolumna jest NUMERIC bez
+        # ograniczenia dodatniosci, a wartosci pochodza z odpowiedzi gieldy.
+        return all(w is not None and w > 0
+                   for w in (self.krok_ilosci, self.krok_ceny, self.min_wartosc))
 
 
 def bez_ogona(d: Decimal) -> Decimal:

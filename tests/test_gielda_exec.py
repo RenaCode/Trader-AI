@@ -807,3 +807,59 @@ def test_brak_waluty_prowizji_spada_na_kwotowana():
     cur, _, _, _ = _rozstrzygnij(stan)
     (_, params), = [(s, p) for s, p in cur.sql if "INSERT INTO exec.fill" in s]
     assert "USDC" in params
+
+
+def test_sprzatanie_ZGLASZA_reszte_wypelniona_na_wierszu_CZESCIOWYM():
+    """Znalezione w audycie, poprawione 2026-09-08.
+
+    Warunek brzmiał tu `o["status"] != "partial"` i gubił przez to CAŁĄ resztę
+    zlecenia częściowo wypełnionego. Wiersz `partial` miał już zaksięgowane
+    pierwsze wypełnienie, więc każde następne było wyciszane: reszta dopełniała
+    się po rozstrzygnięciu planu, wiersz przechodził niżej na `filled` jako
+    „domknięty", a różnica między dziennikiem a rachunkiem zostawała BEZ ŚLADU.
+
+    Risk kernel liczy wtedy ekspozycję mniejszą niż faktyczna — a to jest
+    dokładnie ta wielkość, na której stoi kill-switch.
+    """
+    g = Gielda(stan=_stan(D("1.0"), status="filled"))
+    cur, st = _sprzataj([{"id": 11, "client_order_id": "tai-p60",
+                          "status": "partial", "symbol": "SOLUSDC",
+                          "lot_size": D("0.001"), "zaksiegowane": D("0.4")}], g)
+    assert st["wypelnione_po_fakcie"] == 1, (
+        "reszta wypełniona po rozstrzygnięciu musi zostawić ślad")
+    assert any("poza dziennikiem" in str(p) for _, p in cur.sql if p)
+    assert any("0.6" in str(p) for _, p in cur.sql if p), (
+        "zgłoszenie ma podawać ILOŚĆ POZA DZIENNIKIEM, nie sumę wypełnienia")
+
+
+def test_sprzatanie_MILCZY_gdy_wszystko_juz_zaksiegowane():
+    """Druga granica: gdyby zgłaszane było każde wypełnienie, wiersz częściowy
+    z w pełni zaksięgowanym wypełnieniem alarmowałby przy każdym przebiegu
+    sprzątania — czyli codziennie, o czymś, co jest w porządku."""
+    g = Gielda(stan=_stan(D("0.4"), status="filled"))
+    cur, st = _sprzataj([{"id": 12, "client_order_id": "tai-p61",
+                          "status": "partial", "symbol": "SOLUSDC",
+                          "lot_size": D("0.001"), "zaksiegowane": D("0.4")}], g)
+    assert st["wypelnione_po_fakcie"] == 0
+    assert st["domkniete"] == 1
+
+
+def test_sprzatanie_NIE_ALARMUJE_o_roznicy_MNIEJSZEJ_NIZ_KROK():
+    """Różnicy poniżej połowy kroku ilości nie da się kupić ani sprzedać, więc
+    jest to zaokrąglenie, a nie wypełnienie. Alarm na nim byłby alarmem
+    o granicy zapisu liczby."""
+    g = Gielda(stan=_stan(D("0.4000004"), status="filled"))
+    cur, st = _sprzataj([{"id": 13, "client_order_id": "tai-p62",
+                          "status": "partial", "symbol": "SOLUSDC",
+                          "lot_size": D("0.001"), "zaksiegowane": D("0.4")}], g)
+    assert st["wypelnione_po_fakcie"] == 0
+
+
+def test_sprzatanie_pyta_baze_o_ILOSC_ZAKSIEGOWANA():
+    """Bez tej kolumny funkcja nie ma jak odróżnić „wypełniło się ponad to, co
+    zapisaliśmy" od „wypełniło się to, co już mamy" — i musiałaby wnioskować ze
+    statusu wiersza, czyli wrócić do wady, którą to naprawia."""
+    from pathlib import Path
+
+    zrodlo = Path("services/engine/gielda_exec.py").read_text(encoding="utf-8")
+    assert "FROM exec.fill f" in zrodlo and "AS zaksiegowane" in zrodlo
