@@ -727,6 +727,58 @@ def close_paper(cur, position: dict, price: Decimal, as_of: datetime,
     return zapisz_wyjscie(cur, position, exit_px, fee, as_of, decision_id)
 
 
+def zapisz_wyjscie_bez_pozycji(cur, engine: str, mode: str, plan: dict,
+                               cena: Decimal, wypelniono: datetime,
+                               now: datetime) -> str:
+    """Slad po wyjsciu, ktore rozstrzygnelo sie, a nie mialo czego zamknac.
+
+    TEN SAM STAN CO `wyjscie_bez_pozycji` W `gielda_exec.rozstrzygnij_plan`,
+    nazwany tak samo. Rozjazd nazw miedzy rachunkiem papierowym a produkcja
+    ukrylby ten przypadek dokladnie tam, gdzie sie go szuka: w porownaniu obu
+    sciezek. Trener porownuje wynik z rachunkiem papierowym, wiec kazdy stan,
+    ktory produkcja umie nazwac, a symulacja przemilcza, przesuwa porownanie
+    w strone "symulacja wyglada lepiej".
+
+    DLACZEGO WPIS DO `exec.order`, A NIE DO `exec.fill` I `exec.position`
+
+    Doksiegowac sie tego NIE DA i NIE WOLNO ZGADYWAC. Zamkniecie dowolnej innej
+    otwartej pozycji na tym instrumencie przypisaloby sprzedaz cudzej decyzji
+    i sfalszowalo jej wynik. Zapisujemy wiec tylko to, co wiemy, tam, gdzie
+    ktos tego szuka - w wierszu zlecenia, ze statusem 'rejected' ("nigdy sie
+    nie zaksiegowalo") i z powodem czytelnym bez zagladania w kod.
+
+    `client_order_id` jest WYPROWADZONY Z PLANU i rozny od `tai-{decision_id}`
+    uzywanego przez `zapisz_wejscie`: gdyby ta sama decyzja zdazyla wczesniej
+    otworzyc pozycje, drugi wiersz zlamalby UNIQUE (mode, client_order_id)
+    i wywrocil cala transakcje cyklu - czyli anomalia jednego instrumentu
+    kasowalaby rozstrzygniecie wszystkich pozostalych planow.
+    """
+    powod = ("wyjście rozstrzygnięte BEZ otwartej pozycji (position_id="
+             f"{plan['trigger'].get('position_id')}): plan {plan['id']} "
+             f"na {plan['qty']} @ {cena} — nie ma czego zamknąć")
+    cur.execute(
+        "INSERT INTO exec.order (decision_id, planned_order_id, engine, mode,"
+        " instrument_id, client_order_id, side, order_type, qty, limit_price,"
+        " status, reject_reason, submitted_at, raw)"
+        " VALUES (%s,%s,%s,%s,%s,%s,%s,'limit',%s,%s,'rejected',%s,%s,%s)",
+        (plan["decision_id"], plan["id"], engine, mode, plan["instrument_id"],
+         f"tai-p{plan['id']}-bez-pozycji", plan["side"],
+         Decimal(plan["qty"]), cena, powod, now,
+         json.dumps({"execution": "internal_paper",
+                     "anomalia": "wyjscie_bez_pozycji",
+                     "position_id": plan["trigger"].get("position_id"),
+                     "cena_wypelnienia": str(cena),
+                     "wypelniono_o": wypelniono.isoformat()})))
+    # PLAN JEST ROZSTRZYGNIETY, wiec nie moze zostac 'pending'. Swieca, ktora go
+    # rozstrzygnela, jest juz domknieta i przy kazdym nastepnym cyklu dalaby te
+    # sama odpowiedz - plan wracalby tu w kolko, bez szansy na zmiane wyniku.
+    # 'expired' klamaloby w druga strone ("limit nie zostal trafiony"), wiec
+    # zostaje 'triggered', tak samo jak na sciezce gieldowej.
+    cur.execute("UPDATE journal.planned_order SET status='triggered',"
+                " resolved_at=%s WHERE id=%s", (now, plan["id"]))
+    return powod
+
+
 def zaplanuj(cur, decision_id: int, instrument_id: int, side: str, qty: Decimal,
              limit_price: Decimal, h: Horizon, bar_start: datetime,
              rodzaj: str, position_id: int | None = None) -> None:
@@ -786,7 +838,11 @@ def rozstrzygnij_plany(cur, engine: str, mode: str, h: Horizon, now: datetime,
     ktora rozstrzyga to w symulacji. Dwie kopie tej samej reguly rozjechalyby
     sie przy pierwszej zmianie, a roznica bylaby niewidoczna.
     """
-    st = {"wypelnione": 0, "niewypelnione": 0, "czekaja": 0}
+    # `wyjscie_bez_pozycji` W SLOWNIKU OD POCZATKU, z zerem - tak samo jak na
+    # sciezce gieldowej. Klucz pojawiajacy sie dopiero przy anomalii znaczylby,
+    # ze jego brak i jego zero to dwie rozne rzeczy, a sa tym samym.
+    st = {"wypelnione": 0, "niewypelnione": 0, "czekaja": 0,
+          "wyjscie_bez_pozycji": 0}
     cur.execute(
         "SELECT p.id, p.decision_id, p.instrument_id, p.side, p.qty, p.limit_price,"
         "       p.trigger, p.valid_until, i.symbol, i.quote_ccy"
@@ -829,6 +885,33 @@ def rozstrzygnij_plany(cur, engine: str, mode: str, h: Horizon, now: datetime,
                 poz = cur.fetchone()
             if poz:
                 close_paper(cur, poz, cena, wypelniono, plan["decision_id"], kind, True)
+            else:
+                # WYJSCIE, KTORE NIE MA CZEGO ZAMKNAC. Pozycji nie ma, bo
+                # zamknal ja w miedzyczasie ktos inny (dozor, kill-switch)
+                # albo plan nigdy nie niosl `position_id`.
+                #
+                # Samo `if poz:` bez `else` zapisywalo plan jako 'triggered',
+                # czyli "rozstrzygniety pomyslnie", doliczalo go do
+                # `wypelnione` i nie zostawialo ani linijki na ekranie, ani
+                # wiersza w bazie. Cisza jest tu grozniejsza niz na gieldzie:
+                # rachunek papierowy jest wzorcem, z ktorym trener porownuje
+                # produkcje, wiec przemilczany przypadek przesuwa porownanie
+                # w strone "symulacja wyglada lepiej" - a taki rozjazd nie
+                # wyglada na awarie, tylko na lepszy wynik.
+                powod = zapisz_wyjscie_bez_pozycji(
+                    cur, engine, mode, plan, cena, wypelniono, now)
+                # NIE DOLICZAMY DO `wypelnione`, inaczej niz na sciezce
+                # gieldowej - i ta roznica jest zamierzona. Tam aktywo NAPRAWDE
+                # wyszlo z rachunku, wiec wypelnienie jest faktem mimo braku
+                # pozycji. Tutaj nie powstal ani wiersz w `exec.fill`, ani
+                # zmiana w `exec.position` - nic sie nie wypelnilo w zadnej
+                # ksiedze, a policzenie tego jako wypelnienia zawyzaloby
+                # licznik rachunku papierowego wobec produkcji.
+                st["wyjscie_bez_pozycji"] += 1
+                if verbose:
+                    print(f"  [wyjscie_bez_pozycji] {plan['symbol']} "
+                          f"{plan['side']} @ {limit_px:.6g} — {powod}")
+                continue
         else:
             execute_paper(cur, engine, mode, plan["instrument_id"], plan["decision_id"],
                           plan["side"], Decimal(plan["qty"]), cena, wypelniono,

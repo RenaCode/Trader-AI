@@ -31,6 +31,13 @@ w `market.candle` wystarczy, żeby zlecenie weszło natychmiast po drugiej stron
 księgi. Księga podmiotu unijnego jest dla naszych par kilkukrotnie płytsza niż
 globalna (docs/03), więc przejechanie przez nią jest realną stratą, a w dzienniku
 wygląda jak zwykła transakcja. Stąd PASMO CENY — patrz `ocena_pasma`.
+
+PASMO NIE JEST JEDNAK ODPOWIEDZIĄ NA PYTANIE WYJŚCIA. Wejściu wystarczy, że
+zła cena nie pójdzie na giełdę — pozycji wtedy po prostu nie ma. Wyjście musi
+się WYPEŁNIĆ, bo inaczej pozycja zostaje otwarta wbrew decyzji, a zlecenia
+idą jako `PostOnly`: cena zbyt daleko od rynku leży bezczynnie, a cena
+przecinająca spread jest odrzucana. Dlatego wyjście nie dostaje granicy
+tolerancji, tylko cenę z księgi docelowej — patrz `cena_makera`.
 """
 from __future__ import annotations
 
@@ -187,6 +194,32 @@ def prog_pasma(atr_pct: float | None, *, bary: float = BARY_ZYCIA_PLANU) -> Deci
     return min(ROZJAZD_GIELD + ruch, SUFIT_PASMA)
 
 
+def cena_makera(odniesienie: Decimal, krok: Decimal, *, kupno: bool) -> Decimal:
+    """Najbliższa rynkowi cena po NASZEJ stronie księgi. CZYSTA FUNKCJA.
+
+    DLACZEGO O KROK OD ODNIESIENIA, A NIE DOKŁADNIE NA NIM. Odniesienie to
+    ostatnia cena transakcyjna z księgi docelowej, więc leży między najlepszym
+    kupnem a najlepszą sprzedażą. Kupno o krok PONIŻEJ niej jest tym samym
+    poniżej najlepszej sprzedaży, a sprzedaż o krok POWYŻEJ — powyżej
+    najlepszego kupna; żadne z nich nie może się skojarzyć w chwili złożenia,
+    więc `PostOnly` przyjmuje je jako zlecenie makera zamiast odrzucić.
+    Postawione dokładnie na odniesieniu mogłoby już przecinać spread, bo nie
+    wiadomo, po której jego stronie ta transakcja się odbyła.
+
+    DLACZEGO DOKŁADNIE JEDEN KROK, A NIE ZAPAS. Każdy kolejny krok oddala
+    zlecenie od rynku, a to zmniejsza szansę wypełnienia — czyli dokładnie to,
+    czego wyjściu potrzeba najbardziej. Zapas kupowałby pewność ZŁOŻENIA za
+    cenę pewności WYKONANIA.
+    """
+    if krok <= 0:
+        raise ValueError("krok musi byc dodatni")
+    if kupno:
+        w_dol = do_kroku_w_dol(odniesienie, krok)
+        return bez_ogona(w_dol - krok) if w_dol == odniesienie else w_dol
+    w_gore = cena_do_kroku(odniesienie, krok, kupno=False)
+    return bez_ogona(w_gore + krok) if w_gore == odniesienie else w_gore
+
+
 @dataclass(frozen=True)
 class Pasmo:
     """Rozstrzygnięcie pasma dla jednej ceny. Dane, nie decyzja."""
@@ -262,28 +295,51 @@ def sprawdz_zlecenie(ilosc: Decimal, cena: Decimal, f: Filtry, *,
     czytelna jako zdarzenie krytyczne już w treści, a nie dopiero w kodzie,
     który ją odbiera.
 
-    PRZY PAŚMIE CENY `wyjscie` zmienia coś więcej — samą reakcję, i to jest
-    jedyne miejsce w tym module, w którym tak jest:
+    PRZY CENIE ODNIESIENIA `wyjscie` zmienia coś więcej — samą reakcję, i to
+    jest jedyne miejsce w tym module, w którym tak jest. Pasmo i odniesienie
+    służą tu do dwóch różnych rzeczy:
 
       * WEJŚCIE poza pasmem → ODMOWA. Kosztuje okazję, czyli nic, czego byśmy
-        już nie stracili, gdyby ceny nie było w ogóle.
-      * WYJŚCIE poza pasmem → CENA PRZYCIĄGNIĘTA DO KRAWĘDZI PASMA, nie odmowa.
-        Odmowa zostawiłaby otwartą pozycję wbrew decyzji — dokładnie ten skutek,
-        przed którym ostrzega docstring modułu. Przyciągnięcie zostawia wyjście
-        wykonalnym i JEDNOCZEŚNIE odbiera mu zdolność do przejechania księgi:
-        dalej niż krawędź pasma zlecenie już nie sięgnie.
+        już nie stracili, gdyby ceny nie było w ogóle. Pasmo jest tu OBRONĄ
+        PRZED ABSURDALNĄ CENĄ i niczym więcej.
+      * WYJŚCIE → CENA Z KSIĘGI DOCELOWEJ, o jeden krok po naszej stronie
+        rynku (`cena_makera`). Odmowa zostawiłaby otwartą pozycję wbrew
+        decyzji — dokładnie ten skutek, przed którym ostrzega docstring modułu —
+        więc wyjściu nie jest potrzebna granica tolerancji, tylko cena, po
+        której da się dziś WYJŚĆ.
 
-    PRZYCIĄGNIĘCIE MA SENS TAKŻE PRZY `PostOnly`. Zlecenie przecinające spread
-    jest przez giełdę odrzucane, a nie wypełniane jako taker — więc cena wzięta
-    z cudzej księgi nie kosztuje poślizgu, tylko odrzucenie z kodem parametru.
-    To znowu ta sama cisza co na początku modułu: wyjście nie wychodzi, a w logu
-    nie ma awarii. Przyciągnięcie do księgi DOCELOWEJ jest jedyną z tych trzech
-    reakcji (odmowa / przepuszczenie / przyciągnięcie), po której pozycja
-    naprawdę ma szansę się zamknąć.
+    DLACZEGO NIE KRAWĘDŹ PASMA, choć tak to tu kiedyś działało. Półszerokość
+    pasma to `ROZJAZD_GIELD + 6×ATR×√2`, czyli 10,5% przy ATR 1% i 25% przy ATR
+    nieznanym. Sprzedaż wyjścia przyciągnięta do `gorna` stoi więc dziesięć
+    procent NAD rynkiem — a jako `PostOnly` jest przez giełdę PRZYJMOWANA (nie
+    przecina spreadu) i po prostu leży. Po dwóch świecach plan wygasa, zlecenie
+    idzie do anulowania, POZYCJA ZOSTAJE OTWARTA, a następna świeca powtarza to
+    samo: w trwającym spadku wyjście goni cenę, tracąc po cztery godziny za
+    każdym razem. W dzienniku wygląda to na porządek, bo zlecenia były składane.
+    Symetrycznie w dół: przyciągnięcie do `dolna` daje sprzedaż pod rynkiem,
+    czyli cenę przecinającą spread, którą `PostOnly` ODRZUCA — wyjścia znowu
+    nie ma. Krawędź pasma nie jest ceną, po której ktoś handluje; jest granicą
+    tego, co jeszcze uznajemy za nie-awarię.
 
-    ŚLAD PO PRZYCIĄGNIĘCIU zostaje w danych: `journal.planned_order.limit_price`
-    trzyma cenę pierwotną, `exec.order.limit_price` — przyciągniętą. Różnica
-    między tymi dwiema kolumnami JEST zapisem zdarzenia.
+    DLACZEGO WYJŚCIE DOSTAJE TĘ CENĘ ZAWSZE, A NIE DOPIERO POZA PASMEM. Pasmo
+    mierzy, czy cena jest SENSOWNA, a nie czy jest WYKONALNA; wyjście wewnątrz
+    pasma potrafi stać osiem procent od rynku i leżeć dokładnie tak samo.
+    Cena limitu wyjścia nie niesie zresztą żadnej intencji poza „wyjść":
+    `loop.zaplanuj` dostaje dla wejścia i wyjścia tę samą `mark_price` z księgi
+    GLOBALNEJ sprzed maks. dwóch świec. Skoro znamy ostatnią cenę z księgi,
+    w której zlecenie naprawdę wyląduje, to ona jest lepszą odpowiedzią na
+    pytanie „po ile da się teraz wyjść".
+
+    ZEPSUTE ODNIESIENIE NIE KUPUJE NAM ZŁEGO WYPEŁNIENIA. Gdyby cena z księgi
+    docelowej była nieprawdziwa, wyjście albo poleży (za daleko od rynku), albo
+    zostanie odrzucone przez `PostOnly` (przecina spread). Ryzykiem zostaje więc
+    brak wyjścia — ten sam, który mamy bez odniesienia — a nie sprzedaż poniżej
+    rynku. Bez odniesienia (`ocena_pasma` zwraca None) cena zostaje planowa:
+    tak działa `czy_zamykalna`, które pyta o KSZTAŁT zlecenia, nie o rynek.
+
+    ŚLAD PO PODMIANIE CENY zostaje w danych: `journal.planned_order.limit_price`
+    trzyma cenę pierwotną, `exec.order.limit_price` — wysłaną. Różnica między
+    tymi dwiema kolumnami JEST zapisem zdarzenia.
     """
     rola = "WYJŚCIE" if wyjscie else "wejście"
     if not f.kompletne:
@@ -299,13 +355,19 @@ def sprawdz_zlecenie(ilosc: Decimal, cena: Decimal, f: Filtry, *,
     c = cena_do_kroku(cena, f.krok_ceny, kupno=kupno)
 
     pasmo = ocena_pasma(c, cena_odniesienia, atr_pct, bary=bary)
-    if pasmo is not None and pasmo.poza:
+    if pasmo is not None:
         if not wyjscie:
-            return i, c, f"{rola}: {pasmo.opis()}"
-        # Przyciagniecie ZANIM policzymy min_wartosc - inaczej sprawdzalibysmy
-        # minimum na cenie, ktorej i tak nie wyslemy.
-        c = cena_do_kroku(min(max(c, pasmo.dolna), pasmo.gorna),
-                          f.krok_ceny, kupno=kupno)
+            if pasmo.poza:
+                return i, c, f"{rola}: {pasmo.opis()}"
+        else:
+            # Podmiana ceny ZANIM policzymy min_wartosc - inaczej sprawdzalibysmy
+            # minimum na cenie, ktorej i tak nie wyslemy.
+            rynkowa = cena_makera(pasmo.odniesienie, f.krok_ceny, kupno=kupno)
+            # Krok ceny wiekszy od samej ceny to regula bez sensu dla tego
+            # instrumentu; cena zero lub ujemna nie jest lepsza od planowej,
+            # a o wartosci zlecenia wypowiada sie ponizej minimum wartosci.
+            if rynkowa > 0:
+                c = rynkowa
 
     if i <= 0:
         return i, c, (f"{rola}: ilość {ilosc} po zaokrągleniu do kroku "
