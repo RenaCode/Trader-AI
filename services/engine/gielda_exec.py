@@ -71,9 +71,25 @@ async def zloz_plan(cur, adapter, plan: dict, f: Filtry, *, engine: str,
     """
     wyjscie = plan["trigger"]["rodzaj"] == "wyjscie"
     kupno = plan["side"] == "buy"
+
+    # CENA ODNIESIENIA Z KSIEGI, W KTOREJ ZLECENIE WYLADUJE.
+    #
+    # Cena limitu powstaje ze swiec podmiotu GLOBALNEGO - to jego ksiega
+    # posluzyla do trenowania modelu. Sprawdzanie jej wzgledem tej samej ksiegi
+    # byloby porownaniem liczby z sama soba i przeszloby zawsze, takze dla ticka
+    # zepsutego. Rozjazd miedzy ksiegami jest zmierzony i duzy: w 16,8% swiec
+    # przekracza cala runde kosztowa.
+    #
+    # Brak odczytu NIE BLOKUJE zlecenia, ale zostawia slad - inaczej awaria
+    # jednego endpointu zatrzymywalaby handel, a to gorsze lekarstwo niz choroba.
+    # `ocena_pasma` przy braku odniesienia zwraca None i mowi o tym wprost.
+    odniesienie = await adapter.cena_odniesienia(plan["symbol"], kategoria)
+    atr = float(plan["atr_pct"]) if plan.get("atr_pct") is not None else None
+
     ilosc, cena, powod = sprawdz_zlecenie(
         Decimal(plan["qty"]), Decimal(plan["limit_price"]), f,
-        kupno=kupno, wyjscie=wyjscie)
+        kupno=kupno, wyjscie=wyjscie,
+        cena_odniesienia=odniesienie, atr_pct=atr)
     if powod:
         cur.execute("UPDATE journal.planned_order SET status='rejected',"
                     " resolved_at=now() WHERE id=%s", (plan["id"],))
@@ -325,13 +341,20 @@ async def zloz_oczekujace(cur, adapter, *, engine: str, mode: str,
     filtry = filtry_z_bazy(cur, engine)
     cur.execute(
         "SELECT p.id, p.decision_id, p.instrument_id, p.side, p.qty, p.limit_price,"
-        "       p.trigger, p.valid_until, i.symbol, i.quote_ccy"
+        "       p.trigger, p.valid_until, i.symbol, i.quote_ccy,"
+        # ATR do pasma ceny. Nieznana zmiennosc nie wylacza pasma - daje pasmo
+        # awaryjne - ale zawezenie go realna zmiennoscia pary jest cala wartoscia
+        # tego progu: stala liczba jest albo krzykliwa, albo bezuzyteczna.
+        "       (SELECT fv.value FROM feat.feature_value fv"
+        "         JOIN feat.feature_def fd ON fd.id = fv.feature_id"
+        "        WHERE fv.instrument_id = p.instrument_id AND fd.name = %s"
+        "        ORDER BY fv.event_time DESC LIMIT 1) AS atr_pct"
         "  FROM journal.planned_order p"
         "  JOIN ref.instrument i ON i.id = p.instrument_id"
         " WHERE p.status = 'pending'"
         "   AND NOT EXISTS (SELECT 1 FROM exec.order o WHERE o.planned_order_id = p.id)"
         "   AND (NOT %s OR p.trigger->>'rodzaj' = 'wyjscie')"
-        " ORDER BY p.id", (tylko_wyjscia,))
+        " ORDER BY p.id", ("atr_pct__4h", tylko_wyjscia))
     for plan in cur.fetchall():
         f = filtry.get(plan["instrument_id"], Filtry())
         ok, msg = await zloz_plan(cur, adapter, plan, f, engine=engine,

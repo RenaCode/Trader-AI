@@ -58,7 +58,8 @@ class Kursor:
 
 class Gielda:
     def __init__(self, *, zlozenie=None, stan=None, blad_zlozenia=None,
-                 blad_anulowania=None):
+                 blad_anulowania=None, odniesienie=None):
+        self._odniesienie = odniesienie
         self._zlozenie = zlozenie
         self._stan = stan
         self._blad_zlozenia = blad_zlozenia
@@ -74,6 +75,10 @@ class Gielda:
 
     async def stan_zlecenia(self, id_wlasne, kategoria="spot"):
         return self._stan
+
+    async def cena_odniesienia(self, symbol, kategoria=None):
+        """Cena z ksiegi PODMIOTU. None znaczy „nie da sie odczytac"."""
+        return self._odniesienie
 
     async def anuluj_zlecenie(self, **kw):
         if self._blad_anulowania:
@@ -243,7 +248,7 @@ def test_wysylka_przy_killswitchu_obejmuje_TYLKO_wyjscia():
                                 tylko_wyjscia=True))
     (sql, params), = [(s, p) for s, p in cur.sql if "journal.planned_order" in s]
     assert "p.trigger->>'rodzaj' = 'wyjscie'" in sql
-    assert params == (True,)
+    assert params == ("atr_pct__4h", True)
 
 
 def test_wysylka_bez_killswitcha_obejmuje_WSZYSTKIE_plany():
@@ -253,7 +258,7 @@ def test_wysylka_bez_killswitcha_obejmuje_WSZYSTKIE_plany():
     asyncio.run(zloz_oczekujace(cur, Gielda(), engine="crypto", mode="demo",
                                 kategoria="spot", verbose=False))
     (_, params), = [(s, p) for s, p in cur.sql if "journal.planned_order" in s]
-    assert params == (False,)
+    assert params == ("atr_pct__4h", False)
 
 
 def test_nieudane_anulowanie_zostawia_SLAD_a_nie_cisze():
@@ -537,3 +542,64 @@ def test_identyfikator_proby_jest_JEDNORAZOWY():
 
     assert id_proby("crypto") != id_proby("crypto")
     assert len(id_proby("crypto")) <= 36        # limit orderLinkId u Bybita
+
+
+# ------------------------------------------------- pasmo ceny przy składaniu
+
+def test_cena_oderwana_od_ksiegi_docelowej_BLOKUJE_wejscie():
+    """Cena limitu powstaje ze świec podmiotu GLOBALNEGO, a zlecenie ląduje
+    w księdze UNIJNEJ. Sprawdzanie limitu względem tej samej księgi, z której
+    powstał, byłoby porównaniem liczby z samą sobą — przeszłoby zawsze, także
+    dla zepsutego ticka.
+
+    Rozjazd między księgami jest zmierzony i duży: w 16,8% świec przekracza
+    całą rundę kosztową. Przy księdze podmiotu unijnego kilkukrotnie płytszej
+    niż globalna przejechanie przez nią jest realną stratą, a w dzienniku
+    wygląda jak zwykła transakcja.
+    """
+    plan = dict(PLAN, atr_pct=1.0)
+    # Ksiega docelowa mowi 100, a limit stoi na 200 - dwukrotnie obok.
+    g = Gielda(odniesienie=D("100"))
+    cur, gielda, ok, msg = _zloz(plan=dict(plan, limit_price=D("200")), gielda=g)
+
+    assert ok is False
+    assert gielda.zlozone == []              # nic nie poszlo na gielde
+    assert "odbiega od księgi docelowej" in msg
+
+
+def test_cena_w_pasmie_przechodzi():
+    """Druga granica: zlecenie zgodne z księgą docelową ma iść normalnie."""
+    plan = dict(PLAN, atr_pct=1.0)
+    g = Gielda(odniesienie=D("100"))
+    _, gielda, ok, _ = _zloz(plan=dict(plan, limit_price=D("100")), gielda=g)
+
+    assert ok is True
+    assert len(gielda.zlozone) == 1
+
+
+def test_brak_odczytu_ksiegi_NIE_zatrzymuje_handlu():
+    """Awaria jednego endpointu, która wstrzymuje handel, jest gorszym
+    lekarstwem niż choroba. Brak odniesienia wyłącza samo pasmo, a nie
+    zlecenie — ale zostawia to widoczne w opisie."""
+    plan = dict(PLAN, atr_pct=1.0)
+    g = Gielda(odniesienie=None)
+    _, gielda, ok, _ = _zloz(plan=dict(plan, limit_price=D("200")), gielda=g)
+
+    assert ok is True
+    assert len(gielda.zlozone) == 1
+
+
+def test_WYJSCIE_poza_pasmem_jest_PRZYCIAGANE_a_nie_odrzucane():
+    """Odmowa wyjścia zostawia otwartą pozycję wbrew decyzji — to zdarzenie
+    krytyczne, a nie oszczędność. Cena jest więc przyciągana do pasma zamiast
+    blokować zlecenie."""
+    wyjscie = dict(PLAN, id=45, side="sell", atr_pct=1.0,
+                   limit_price=D("200"),
+                   trigger={"rodzaj": "wyjscie", "bar": "x", "position_id": 1})
+    g = Gielda(odniesienie=D("100"))
+    _, gielda, ok, _ = _zloz(plan=wyjscie, gielda=g)
+
+    assert ok is True
+    assert len(gielda.zlozone) == 1
+    # Cena zeszla z 200 do gornej krawedzi pasma wokol 100.
+    assert gielda.zlozone[0]["cena_limitu"] < D("200")

@@ -22,9 +22,19 @@ BRAK REGUŁY TO NIE JEST REGUŁA SPEŁNIONA. Gdy giełda nie podała kroku, nie
 wolno przyjąć „to pewnie dowolna precyzja" — bo wtedy pierwsze zlecenie ginie
 na produkcji. Nieznana reguła blokuje zlecenie tak samo jak reguła złamana,
 tyle że z innym komunikatem.
+
+REGUŁY GIEŁDY NIE PYTAJĄ, CZY CENA MA SENS. Krok, minimum ilości i minimum
+wartości sprawdzają KSZTAŁT zlecenia; wszystkie cztery przechodzą dla zlecenia
+sprzedaży po jednej dziesiątej ceny rynkowej. Cena limitu bierze się u nas
+z `mark_price`, czyli z zamknięcia ostatniej świecy 1m — więc jeden zepsuty tick
+w `market.candle` wystarczy, żeby zlecenie weszło natychmiast po drugiej stronie
+księgi. Księga podmiotu unijnego jest dla naszych par kilkukrotnie płytsza niż
+globalna (docs/03), więc przejechanie przez nią jest realną stratą, a w dzienniku
+wygląda jak zwykła transakcja. Stąd PASMO CENY — patrz `ocena_pasma`.
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from decimal import ROUND_DOWN, Decimal
 
@@ -91,8 +101,154 @@ def cena_do_kroku(cena: Decimal, krok: Decimal, kupno: bool) -> Decimal:
     return bez_ogona(w_dol + krok)
 
 
+# ------------------------------------------------------------------ pasmo ceny
+#
+# PRÓG WYPROWADZONY ZE ZMIENNOŚCI INSTRUMENTU, NIE Z LICZBY DOBRANEJ NA OKO.
+#
+# Stały próg procentowy jest w tym projekcie znanym antywzorcem (patrz
+# `atr_percentile_80` w loop.py i SWIEC_ZWLOKI w dozor.py): 1% to szok dla pary
+# stabilnej i szum dla SOL-a, więc jedna liczba jest albo krzykliwa, albo
+# bezużyteczna. Jednostką odległości jest tu ATR instrumentu — ta sama wielkość,
+# którą silnik już liczy (`atr_pct`, w PROCENTACH ceny) i którą już skaluje
+# pierwiastkiem z liczby świec (`signals._oczekiwany_ruch`: `atr * sqrt(bars)`).
+#
+# DLACZEGO PIERWIASTEK Z LICZBY ŚWIEC. Cena limitu powstaje na zamknięciu świecy
+# T, a plan żyje do końca świecy T+1 (`zaplanuj`: valid_until = bar_start
+# + 2 * bar_minutes). W chwili wysyłki wolno mu więc być rozjechanym z rynkiem
+# o tyle, ile rynek przechodzi w dwie świece — a to skaluje się pierwiastkiem,
+# nie liniowo.
+#
+# DLACZEGO SZEŚĆ. Próg nie ma odróżniać dobrej ceny od kiepskiej — od tego jest
+# model. Ma odróżniać cenę od AWARII DANYCH. Zwykły ruch to ułamek ATR, a błąd,
+# którego się boimy, to rząd wielkości, czyli 900%. Między jednym a drugim są
+# dwa rzędy wielkości zapasu, więc dokładna krotność w przedziale 4–10 niczego
+# nie zmienia; zmienia to, że skaluje się ze zmiennością pary.
+KROTNOSC_PASMA = 6
+
+# ROZJAZD MIĘDZY KSIĘGAMI — SKŁADNIK DODAWANY, NIE PODŁOGA.
+#
+# Dane publiczne bierzemy z podmiotu GLOBALNEGO (`bybit.PUBLIC_HOST` to
+# api.bybit.com — „to on ma księgę, na której model był trenowany"), a zlecenie
+# ląduje w księdze UNIJNEJ (api.bybit.eu, host z `ref.venue`). To dwie różne
+# księgi i różnica między nimi NIE JEST awarią, tylko stanem codziennym.
+#
+# Zmierzone na 1600 świecach 4h (2026-09-07):
+#
+#     razem       mediana  5,9 pb   p90 28,4 pb   max 153 pb   16,8% świec > 20 pb
+#     NEARUSDC    mediana 18,8 pb   p90 51,3 pb   max 153 pb   49,5% świec > 20 pb
+#
+# Runda kosztowa to 20 pb, więc w jednej świecy na sześć sam rozjazd ksiąg
+# przekracza całą przewagę strategii. Dla pasma znaczy to jedno: ten składnik
+# musi w progu BYĆ, i to jako dodawany, a nie jako `max(...)`. Podłoga
+# znikałaby dokładnie tam, gdzie zmienność jest duża — a rozjazd ksiąg nie
+# znika wtedy, gdy rynek się rusza; wtedy jest największy.
+#
+# 200 pb to zmierzone maksimum (153 pb) z zapasem na dłuższą próbkę. Próg
+# węższy odmawiałby zleceń w stanie, który sami zmierzyliśmy jako normalny —
+# a alarm, który dzwoni co szóstą świecę, uczy odbiorcę, że można go pomijać.
+ROZJAZD_GIELD = Decimal("0.02")
+
+# SUFIT. Powyżej ćwierci ceny pasmo przestaje cokolwiek wykluczać, a sam ATR
+# przestaje być wiarygodny — jeśli wyszedł tak duży, to prawdopodobnie policzono
+# go z tych samych zepsutych świec. Ten sam sufit jest pasmem AWARYJNYM, gdy
+# zmienności nie znamy: nie twierdzimy wtedy nic poza tym, że rzędu wielkości
+# nie przepuścimy.
+SUFIT_PASMA = Decimal("0.25")
+
+# Ile świec plan może przeżyć między powstaniem ceny a wysyłką - patrz `zaplanuj`.
+BARY_ZYCIA_PLANU = 2.0
+
+
+def _zmiennosc_znana(atr_pct: float | None) -> bool:
+    # NaN nie jest > 0, wiec ten warunek zalatwia takze wartosc zepsuta.
+    return atr_pct is not None and atr_pct > 0
+
+
+def prog_pasma(atr_pct: float | None, *, bary: float = BARY_ZYCIA_PLANU) -> Decimal:
+    """Względna półszerokość pasma. CZYSTA FUNKCJA — bez bazy i bez sieci.
+
+    Dwa składniki, bo dwie są przyczyny, dla których cena limitu ma prawo
+    odbiegać od księgi docelowej, i żadna nie zastępuje drugiej:
+
+      * RUCH RYNKU między powstaniem ceny a wysyłką — skaluje się ze
+        zmiennością pary, `KROTNOSC_PASMA * atr * sqrt(bary)`,
+      * ROZJAZD KSIĄG globalnej i unijnej — nie zależy od tego, ile świec
+        minęło, więc wchodzi jako stały składnik `ROZJAZD_GIELD`.
+
+    `atr_pct` w procentach ceny, tak jak w `feat.feature_value` (features.atr_pct
+    mnoży przez 100). Nieznana zmienność daje pasmo awaryjne, nie brak pasma:
+    „nie wiem, jak bardzo ta para się rusza" nie jest powodem, żeby przepuścić
+    cenę dziesięciokrotnie oderwaną od rynku.
+    """
+    if not _zmiennosc_znana(atr_pct) or bary <= 0:
+        return SUFIT_PASMA
+    ruch = (Decimal(str(atr_pct)) / 100
+            * Decimal(str(math.sqrt(bary))) * KROTNOSC_PASMA)
+    return min(ROZJAZD_GIELD + ruch, SUFIT_PASMA)
+
+
+@dataclass(frozen=True)
+class Pasmo:
+    """Rozstrzygnięcie pasma dla jednej ceny. Dane, nie decyzja."""
+    odniesienie: Decimal
+    prog: Decimal
+    dolna: Decimal
+    gorna: Decimal
+    odchylenie: Decimal
+    ze_zmiennosci: bool
+
+    @property
+    def poza(self) -> bool:
+        return self.odchylenie > self.prog
+
+    def opis(self) -> str:
+        skad = ("rozjazd ksiąg + 6×ATR×√świec" if self.ze_zmiennosci
+                else "pasmo awaryjne (ATR nieznany)")
+        return (f"cena limitu odbiega od księgi docelowej o "
+                f"{self.odchylenie * 100:.2f}% przy dopuszczalnych "
+                f"{self.prog * 100:.2f}% [{skad}]; odniesienie "
+                f"{self.odniesienie}, pasmo {self.dolna}–{self.gorna}")
+
+
+def ocena_pasma(cena: Decimal, odniesienie: Decimal | None,
+                atr_pct: float | None = None, *,
+                bary: float = BARY_ZYCIA_PLANU) -> Pasmo | None:
+    """Czy cena limitu leży w rozsądnej odległości od rynku. CZYSTA FUNKCJA.
+
+    `odniesienie` MUSI POCHODZIĆ Z KSIĘGI, W KTÓREJ ZLECENIE WYLĄDUJE — czyli
+    z podmiotu UNIJNEGO (api.bybit.eu; świece i arkusz wystawia publicznie, bez
+    klucza). To nie jest szczegół implementacyjny, tylko cały sens tej funkcji:
+
+      * cena limitu powstaje z `mark_price`, czyli z zamknięcia świecy 1m
+        pobranej z `bybit.PUBLIC_HOST` = api.bybit.com — podmiotu GLOBALNEGO,
+      * porównanie jej z tą samą księgą jest porównaniem liczby z samą sobą:
+        przejdzie zawsze, także dla ticka zepsutego,
+      * a rozjazd między księgą globalną a unijną jest zmierzony i duży
+        (patrz ROZJAZD_GIELD) — to on jest tu głównym wykrywanym zjawiskiem,
+        nie hipotetyczna awaria danych.
+
+    Zwraca None, gdy odniesienia nie ma — bo wtedy nie ma czego porównywać.
+    Brak odniesienia jest LUKĄ, nie zgodą; wywołujący, który go nie poda,
+    zostaje z zabezpieczeniem wyłączonym.
+    """
+    if odniesienie is None or odniesienie <= 0:
+        return None
+    prog = prog_pasma(atr_pct, bary=bary)
+    return Pasmo(
+        odniesienie=odniesienie,
+        prog=prog,
+        dolna=odniesienie * (Decimal(1) - prog),
+        gorna=odniesienie * (Decimal(1) + prog),
+        odchylenie=abs(cena - odniesienie) / odniesienie,
+        ze_zmiennosci=_zmiennosc_znana(atr_pct),
+    )
+
+
 def sprawdz_zlecenie(ilosc: Decimal, cena: Decimal, f: Filtry, *,
-                     kupno: bool, wyjscie: bool) -> tuple[Decimal, Decimal, str | None]:
+                     kupno: bool, wyjscie: bool,
+                     cena_odniesienia: Decimal | None = None,
+                     atr_pct: float | None = None,
+                     bary: float = BARY_ZYCIA_PLANU) -> tuple[Decimal, Decimal, str | None]:
     """Zwraca (ilosc, cena, powod_odmowy). `powod_odmowy is None` znaczy: wolno.
 
     `kupno` i `wyjscie` SĄ ROZDZIELONE CELOWO. Kusi, żeby wyprowadzić jedno
@@ -101,10 +257,33 @@ def sprawdz_zlecenie(ilosc: Decimal, cena: Decimal, f: Filtry, *,
     przyciągałoby cenę limitu w złą stronę: o krok drożej przy każdym zamknięciu
     shorta. Koszt mały, systematyczny i niewidoczny.
 
-    `wyjscie` nie zmienia reguł — zmienia WAGĘ odmowy, i dlatego wchodzi
+    `wyjscie` nie zmienia reguł giełdy — zmienia WAGĘ odmowy, i dlatego wchodzi
     do komunikatu. Odmowa wyjścia zostawia otwartą pozycję, więc musi być
     czytelna jako zdarzenie krytyczne już w treści, a nie dopiero w kodzie,
     który ją odbiera.
+
+    PRZY PAŚMIE CENY `wyjscie` zmienia coś więcej — samą reakcję, i to jest
+    jedyne miejsce w tym module, w którym tak jest:
+
+      * WEJŚCIE poza pasmem → ODMOWA. Kosztuje okazję, czyli nic, czego byśmy
+        już nie stracili, gdyby ceny nie było w ogóle.
+      * WYJŚCIE poza pasmem → CENA PRZYCIĄGNIĘTA DO KRAWĘDZI PASMA, nie odmowa.
+        Odmowa zostawiłaby otwartą pozycję wbrew decyzji — dokładnie ten skutek,
+        przed którym ostrzega docstring modułu. Przyciągnięcie zostawia wyjście
+        wykonalnym i JEDNOCZEŚNIE odbiera mu zdolność do przejechania księgi:
+        dalej niż krawędź pasma zlecenie już nie sięgnie.
+
+    PRZYCIĄGNIĘCIE MA SENS TAKŻE PRZY `PostOnly`. Zlecenie przecinające spread
+    jest przez giełdę odrzucane, a nie wypełniane jako taker — więc cena wzięta
+    z cudzej księgi nie kosztuje poślizgu, tylko odrzucenie z kodem parametru.
+    To znowu ta sama cisza co na początku modułu: wyjście nie wychodzi, a w logu
+    nie ma awarii. Przyciągnięcie do księgi DOCELOWEJ jest jedyną z tych trzech
+    reakcji (odmowa / przepuszczenie / przyciągnięcie), po której pozycja
+    naprawdę ma szansę się zamknąć.
+
+    ŚLAD PO PRZYCIĄGNIĘCIU zostaje w danych: `journal.planned_order.limit_price`
+    trzyma cenę pierwotną, `exec.order.limit_price` — przyciągniętą. Różnica
+    między tymi dwiema kolumnami JEST zapisem zdarzenia.
     """
     rola = "WYJŚCIE" if wyjscie else "wejście"
     if not f.kompletne:
@@ -118,6 +297,15 @@ def sprawdz_zlecenie(ilosc: Decimal, cena: Decimal, f: Filtry, *,
 
     i = do_kroku_w_dol(ilosc, f.krok_ilosci)
     c = cena_do_kroku(cena, f.krok_ceny, kupno=kupno)
+
+    pasmo = ocena_pasma(c, cena_odniesienia, atr_pct, bary=bary)
+    if pasmo is not None and pasmo.poza:
+        if not wyjscie:
+            return i, c, f"{rola}: {pasmo.opis()}"
+        # Przyciagniecie ZANIM policzymy min_wartosc - inaczej sprawdzalibysmy
+        # minimum na cenie, ktorej i tak nie wyslemy.
+        c = cena_do_kroku(min(max(c, pasmo.dolna), pasmo.gorna),
+                          f.krok_ceny, kupno=kupno)
 
     if i <= 0:
         return i, c, (f"{rola}: ilość {ilosc} po zaokrągleniu do kroku "

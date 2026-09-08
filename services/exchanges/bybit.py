@@ -418,6 +418,38 @@ class BybitAdapter:
             }
         return out
 
+    async def cena_odniesienia(self, symbol: str,
+                               kategoria: str | None = None) -> Decimal | None:
+        """Ostatnia cena Z KSIEGI TEGO PODMIOTU, w ktorym ladzie zlecenie.
+
+        DLACZEGO NIE Z HOSTA PUBLICZNEGO. Swiece i arkusz bierzemy swiadomie
+        z podmiotu globalnego - to jego ksiega posluzyla do trenowania modelu.
+        Do sprawdzenia, czy cena limitu ma sens, sluzy jednak wylacznie ksiega,
+        W KTOREJ ZLECENIE WYLADUJE. Porownanie z ta sama ksiega, z ktorej cena
+        powstala, jest porownaniem liczby z sama soba: przejdzie zawsze, takze
+        dla ticka zepsutego.
+
+        Zmierzone 2026-09-07 na 1600 swiecach 4h: mediana rozjazdu zamkniec
+        miedzy podmiotami 5,9 pb, p90 28,4 pb, a w 16,8% swiec rozjazd
+        przekracza cala runde kosztowa. To nie jest szum pomiarowy.
+
+        Endpoint jest publiczny, wiec nie wymaga klucza. Zwraca None, gdy nie da
+        sie odczytac - BRAK ODCZYTU TO LUKA, NIE ZGODA, i wolajacy ma o tym
+        wiedziec.
+        """
+        try:
+            res = await self._get("/v5/market/tickers",
+                                  {"category": kategoria or self._category,
+                                   "symbol": symbol},
+                                  private=False, host=self._host)
+        except ExchangeError:
+            return None
+        lista = res.get("list") or []
+        if not lista:
+            return None
+        cena = lista[0].get("lastPrice") or lista[0].get("markPrice")
+        return Decimal(str(cena)) if cena else None
+
     async def dryf_zegara(self) -> tuple[int, str | None]:
         """Roznica miedzy naszym zegarem a zegarem gieldy, w milisekundach.
 
