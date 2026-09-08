@@ -629,11 +629,164 @@ async def sprawdz_kopie(fetch_all, notify, sucho: bool = False) -> int:
     return 1 if powody else 0
 
 
+# --- czujka dostepnosci instrumentow ----------------------------------------
+#
+# Ile moze minac od ostatniego POTWIERDZENIA statusu u gieldy.
+#
+# Zadanie `services/ingest/instrumenty.py` chodzi raz na dobe, wiec 26 godzin
+# daje dwie godziny zapasu - tak samo jak przy kopiach zapasowych. Krotszy prog
+# zglaszalby falszywy alarm przy kazdym przesunietym przebiegu, dluzszy pozwala
+# przespac cala dobe delistingu.
+PRZEGLAD_STATUSU_H = 26
+
+
+def ocen_instrumenty(wiersze: list[dict], prog_h: int = PRZEGLAD_STATUSU_H
+                     ) -> list[tuple[str, str, str]]:
+    """Czy uniwersum nadal istnieje u giełdy. CZYSTA FUNKCJA.
+
+    Zwraca listę (kod_zdarzenia, tytuł, treść).
+
+    DLACZEGO DOZOR PYTA O TO DRUGI RAZ
+
+    Status pobiera i zapisuje `services/ingest/instrumenty.py` — i on też zdejmuje
+    `tradeable`, i on też wysyła alarm o ZMIANIE. Ta czujka pilnuje trzech rzeczy,
+    których tamten proces z definicji nie dopilnuje:
+
+      1. że w ogóle chodzi. Zadanie, które przestało się uruchamiać, zostawia
+         kolumnę statusu zamrożoną na „Trading" — i od tej chwili baza codziennie
+         zapewnia, że wszystko handluje. BRAK ODCZYTU TO NIE JEST ZGODNOŚĆ,
+         a milczące zero mówi „sprawdzone i w porządku" o czymś, czego nikt nie
+         sprawdził;
+      2. że reakcja faktycznie nastąpiła — instrument poza handlem, który wciąż
+         ma `tradeable`, znaczy, że bramka się nie zamknęła;
+      3. że o ZAMROŻONYM KAPITALE ktoś przypomina. Wycofanie trwa miesiącami,
+         a alarm o zmianie stanu idzie raz. Pozycja na wycofywanym instrumencie
+         jest problemem codziennie, aż do zamknięcia albo konwersji.
+
+    Słownik statusów jest importowany, nie przepisany: druga lista słów
+    rozjechałaby się przy pierwszym nowym statusie giełdy i to właśnie ta czujka
+    twierdziłaby wtedy, że jest spokojnie.
+    """
+    from services.ingest.instrumenty import klasyfikuj_status
+
+    powody: list[tuple[str, str, str]] = []
+
+    nieswiezy = [r for r in wiersze
+                 if r["sprawdzony_h"] is None or r["sprawdzony_h"] > prog_h]
+    if nieswiezy:
+        opis = ", ".join(
+            f"{r['symbol']} ({'nigdy' if r['sprawdzony_h'] is None else str(r['sprawdzony_h']) + ' h temu'})"
+            for r in nieswiezy[:12])
+        powody.append((
+            "instrument.suspended",
+            f"Status {len(nieswiezy)} instrumentów nie był sprawdzany u giełdy",
+            f"Próg to {prog_h} h (zadanie chodzi raz na dobę).\n\n{opis}\n\n"
+            f"Kolumna `status_gieldy` pokazuje wtedy ostatnią znaną wartość i "
+            f"wygląda dokładnie tak, jakby giełda właśnie potwierdziła handel. "
+            f"Delisting w tym stanie przechodzi niezauważony aż do chwili, gdy "
+            f"zlecenie zostanie odrzucone — a odrzucenie w logu wygląda jak brak "
+            f"sygnału.\n\nSprawdź zadanie services/ingest/instrumenty.py."))
+
+    for r in wiersze:
+        # NIGDY NIESPRAWDZONY NIE JEST WYCOFANY - jest NIEZNANY. Zarzut wobec
+        # niego postawiono wyzej ("nikt nie pytal") i drugi, o delisting, byly
+        # falszywy: tuz po migracji 0033 zadna data sprawdzenia jeszcze nie
+        # istnieje, wiec cale uniwersum krzyczaloby o wycofaniu.
+        if r["sprawdzony_h"] is None:
+            continue
+        # NULL przy niepustej dacie sprawdzenia znaczy juz co innego: pytalismy,
+        # a gielda tego instrumentu NIE ZNA.
+        obecny = r["status_gieldy"] is not None
+        klasa = klasyfikuj_status(r["status_gieldy"], obecny_u_gieldy=obecny)
+        if klasa == "handel":
+            continue
+        czym = (f"status „{r['status_gieldy']}”" if obecny
+                else "giełda nie zna tego instrumentu")
+        pozycji, wartosc = r["pozycji"], float(r["wartosc"] or 0)
+
+        if pozycji:
+            powody.append((
+                "instrument.delisted" if klasa == "wycofanie" else "instrument.suspended",
+                f"{r['symbol']}: otwarta pozycja na instrumencie poza handlem"
+                f" ({klasa})",
+                f"{czym}. Otwartych pozycji: {pozycji}, wartość wejścia ≈{wartosc:.2f}.\n\n"
+                f"Kapitał jest ZAMROŻONY: wyjścia nie da się złożyć, dopóki giełda "
+                f"nie prowadzi handlu, a przy wycofaniu niewycofane środki są po "
+                f"zamknięciu wypłat konwertowane po ówczesnej cenie rynkowej. Limity "
+                f"ryzyka liczą tę pozycję jak każdą inną, więc blokuje ona budżet "
+                f"kolejnym wejściom.\n\nZamknięcie jest DECYZJĄ HANDLOWĄ i żaden "
+                f"automat go za nikogo nie podejmie."))
+        elif r["tradeable"]:
+            powody.append((
+                "instrument.delisted" if klasa == "wycofanie" else "instrument.suspended",
+                f"{r['symbol']}: poza handlem u giełdy, a wciąż w uniwersum",
+                f"{czym}, a instrument ma nadal `tradeable = true`. Bramka, która "
+                f"miała go zdjąć, nie zadziałała — silnik może wystawić zlecenie na "
+                f"rynek, którego nie ma.\n\nSprawdź ostatni przebieg "
+                f"services/ingest/instrumenty.py."))
+    return powody
+
+
+async def sprawdz_instrumenty(fetch_all, notify, sucho: bool = False, *,
+                              engine: str = "crypto", mode: str = "demo",
+                              prog_h: int | None = None) -> int:
+    """Czy któryś instrument uniwersum przestał istnieć u giełdy.
+
+    ZAKRES: instrument w uniwersum decyzyjnym ALBO z otwartą pozycją. Migracja
+    0020 wyłączyła czternaście par USDT, których podmiot unijny nie oferuje —
+    alarm o nich przy każdym przebiegu nauczyłby czytać tę czujkę nieuważnie
+    akurat wtedy, gdy dotyczy pary, którą naprawdę handlujemy.
+    """
+    prog = PRZEGLAD_STATUSU_H if prog_h is None else prog_h
+    wiersze = await fetch_all(
+        "SELECT i.symbol, i.tradeable, i.status_gieldy,"
+        "       round(extract(epoch from (now() - i.status_sprawdzony_at))/3600)::int"
+        "         AS sprawdzony_h,"
+        "       count(p.id) AS pozycji,"
+        "       coalesce(sum(p.qty * p.avg_price), 0) AS wartosc"
+        "  FROM ref.instrument i"
+        "  LEFT JOIN exec.position p ON p.instrument_id = i.id"
+        "       AND p.closed_at IS NULL AND p.mode::text = %(mode)s"
+        " WHERE i.active AND i.engine::text = %(engine)s"
+        " GROUP BY i.id, i.symbol, i.tradeable, i.status_gieldy, i.status_sprawdzony_at"
+        " HAVING i.tradeable OR count(p.id) > 0"
+        " ORDER BY i.symbol",
+        {"engine": engine, "mode": mode})
+    print(f"instrumenty ({engine}/{mode}): {len(wiersze)} w uniwersum lub z pozycją")
+
+    powody = ocen_instrumenty(wiersze, prog)
+    if not powody:
+        print("  bez zastrzeżeń")
+        return 0
+
+    # TLUMIENIE DOBOWE. `instrument.delisted` jest always_on, wiec omija zwykly
+    # cooldown - a wycofanie trwa miesiacami. Bez wlasnego tlumienia czujka
+    # krzyczalaby przy kazdym przebiegu i nauczylaby ignorowac wlasnie ten alarm.
+    juz = await fetch_all(
+        "SELECT 1 FROM notify.notification WHERE event_code = 'instrument.delisted'"
+        "   AND created_at > now() - make_interval(hours => 24) LIMIT 1")
+
+    odbiorcy = await fetch_all('SELECT id FROM app."user" WHERE is_active')
+    for kod, tytul, tresc in powody:
+        print(f"  {tytul}")
+        if sucho:
+            continue
+        if kod == "instrument.delisted" and juz:
+            print("    (zgłoszone w ciągu ostatniej doby — cisza)")
+            continue
+        sev = "critical" if kod == "instrument.delisted" else "warning"
+        for u in odbiorcy:
+            await notify(u["id"], kod, tytul, tresc, engine=engine, severity=sev)
+    if sucho:
+        print("Tryb suchy — powiadomienie nie wysyłane.")
+    return len(powody)
+
+
 async def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--co", default="stan-nauki",
                     choices=("stan-nauki", "zywotnosc", "ryzyko", "kopie",
-                             "swiezosc", "egzekucja", "poslizg"),
+                             "swiezosc", "egzekucja", "poslizg", "instrumenty"),
                     help="stan-nauki: czy wynik treningu sie zmienil; "
                          "zywotnosc: czy silniki bija; "
                          "ryzyko: czy kill-switch zadzialal; "
@@ -642,7 +795,13 @@ async def main() -> int:
                          "nie sa przestarzale; "
                          "egzekucja: czy zlecenia dochodza do gieldy; "
                          "poslizg: ile NAPRAWDE kosztuje egzekucja - raport, "
-                         "nie czujka")
+                         "nie czujka; "
+                         "instrumenty: czy uniwersum nadal istnieje u gieldy "
+                         "(wycofanie, zawieszenie, nieaktualny odczyt statusu)")
+    ap.add_argument("--prog-statusu-h", type=int, default=None, dest="prog_statusu_h",
+                    help="prog nieswiezosci odczytu statusu w godzinach dla "
+                         "--co instrumenty; do wywolania sciezki alarmowej na "
+                         "zadanie. Domyslnie stala PRZEGLAD_STATUSU_H")
     ap.add_argument("--prog-min", type=int, default=None, dest="prog_min",
                     help="prog martwoty w minutach; do wywolania sciezki alarmowej "
                          "na zadanie. Domyslnie stala MARTWY_PO_MIN")
@@ -687,6 +846,10 @@ async def main() -> int:
         if args.co == "poslizg":
             return await sprawdz_poslizg(fetch_all, engine=args.engine,
                                          mode=args.mode, okno_h=args.okno_h)
+        if args.co == "instrumenty":
+            return await sprawdz_instrumenty(fetch_all, notify, sucho=args.sucho,
+                                             engine=args.engine, mode=args.mode,
+                                             prog_h=args.prog_statusu_h)
 
         wiersze = await fetch_all(
             "SELECT status, windows_total, windows_positive, positive_ci_low,"
