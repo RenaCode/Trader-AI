@@ -52,6 +52,14 @@ spec:
                   # maja wlasny stan, ale alarm o modelu, ktorym nikt nie handluje,
                   # bylby halasem.
                   python services/engine/dozor.py --bar {{ .Values.trainerCron.bar | quote }} --kod-trenera $RC
+                  # Czujka stanu TRWALEGO, osobno od czujki zmiany powyzej.
+                  # Bez tego wiersza dryf, ktory wszedl wysoko i tam stanal,
+                  # jest niewidoczny: dozor stanu nauki zglasza ZMIANE, a stan,
+                  # ktory stoi, sie nie zmienia. Kod wyjscia jest tu swiadomie
+                  # pomijany - zadanie ma zawiesc, gdy zawiodl TRENER, a dryf
+                  # jest stanem znanym i czekajacym na reakcje, nie awaria
+                  # przebiegu.
+                  python services/engine/dozor.py --co dryf --bar {{ .Values.trainerCron.bar | quote }} || true
                   exit $RC
               env:
                 # Trener chodzi rola silnika (migracja 0034): pisze do learn.*,

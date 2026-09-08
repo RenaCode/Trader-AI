@@ -28,6 +28,21 @@ CO UZNAJEMY ZA ZMIANE ISTOTNA
 
 Wszystko inne to cisza - wypisana w logu razem z powodem, zeby dalo sie
 sprawdzic, ze dozor dziala, a nie zamilkl.
+
+CZEGO REGULA "ZGLASZAJ ZMIANE" NIE ZLAPIE - I DLACZEGO JEST NA TO OSOBNA CZUJKA
+
+Regula ma jeden skutek uboczny, ktory kosztowal ten projekt tygodnie ciszy:
+STAN TRWALE ZLY NIE JEST ZMIANA. Dryf cech, ktory wszedl wysoko i tam ZOSTAL,
+przestaje rosnac - a warunek z punktu 5 wymaga wzrostu, wiec od drugiego
+przebiegu nie ma o czym mowic. Model handluje na rozkladzie, ktory odjechal od
+treningowego, i nikt sie o tym nie dowiaduje.
+
+To najgorsza kategoria ciszy, jaka ten system moze wyprodukowac, bo jest
+NIEODROZNIALNA od spokoju. Dlatego dryf ma tutaj drugi, niezalezny tor:
+`ocen_dryf_trwaly` + `sprawdz_dryf` (--co dryf). Nie zastepuje punktu 5,
+tylko odpowiada na inne pytanie: nie "czy sie zmienilo", a "czy nadal jest zle".
+Ma wlasny prog, wlasny warunek utrzymywania sie i wlasny rytm przypominania -
+patrz komentarz przy DRYF_TRWALY_PROG.
 """
 from __future__ import annotations
 
@@ -35,13 +50,88 @@ import argparse
 import asyncio
 import os
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-# Prog dryfu. Powyzej niego rozklad cech przestaje przypominac ten, na ktorym
-# model byl uczony - patrz learn.drift_metric.
+# --------------------------------------------------------------- dryf cech
+#
+# CO TA LICZBA NAPRAWDE MIERZY - bo NIE jest tym, czym sie nazywa.
+#
+# Kolumna nazywa sie `max_psi`, katalog zdarzen (migracja 0011) obiecuje "PSI
+# powyzej 0,25", a dashboard maluje na czerwono powyzej 0,25. Wszystkie trzy
+# odwoluja sie do progu z literatury o Population Stability Index (Siddiqi:
+# <0,10 bez zmiany, 0,10-0,25 umiarkowana, >0,25 istotna).
+#
+# Tymczasem `services/engine/train.py` PSI nie liczy. Liczy to:
+#
+#     d = |srednia_nowa - srednia_stara| / sd_stare
+#         + |sd_nowe / sd_stare - 1|
+#
+# czyli standaryzowane przesuniecie sredniej - dokladnie d Cohena - powiekszone
+# o wzgledna zmiane rozrzutu. PSI to suma po kubelkach (p-q)*ln(p/q); ma inna
+# konstrukcje i inna skale. Prog przeniesiony z jednej miary na druga nie znaczy
+# nic, a wyglada na uzasadniony - i to jest pierwszy powod, dla ktorego liczby
+# w tym systemie sie nie zgadzaly.
+#
+# Skoro miara jest w rdzeniu wielkoscia efektu, wlasciwa jest literatura
+# o wielkosci efektu, nie o PSI. Cohen: 0,2 maly, 0,5 sredni, 0,8 duzy. Oba
+# progi ponizej sa z tego wyprowadzone, a nie dobrane na oko.
+
+# Prog czujki ZMIANY (punkt 5 w docstringu modulu). Srednia cechy przesunieta
+# o cale historyczne odchylenie - efekt wyraznie ponad "duzy" u Cohena. Tak
+# wysoko, bo ta czujka odzywa sie po JEDNYM odczycie, a pojedynczy odczyt jest
+# halasliwy: trener porownuje ostatnia jedna trzecia okresu z poprzednimi dwiema
+# trzecimi tego samego okresu, na szeregu finansowym, gdzie zmiana rezimu o pol
+# odchylenia jest zdarzeniem cotygodniowym.
 PSI_PROG = 1.0
+
+# Prog czujki STANU TRWALEGO. Efekt "sredni" u Cohena: srednia cechy przesunieta
+# o pol historycznego odchylenia. Nizszy niz PSI_PROG i to jest celowe - drugim
+# warunkiem jest tu UTRZYMYWANIE SIE, ktore samo w sobie jest dowodem. Jeden
+# odczyt 0,7 moze byc artefaktem okna; trzy kolejne noce z rzedu nie sa.
+DRYF_TRWALY_PROG = 0.5
+
+# Ile KOLEJNYCH przebiegow musi przekroczyc prog, zanim uznamy stan za trwaly.
+#
+# Trzy, a nie dwa - z tego samego powodu co SWIEC_ZWLOKI, CYKLI_ZWLOKI
+# i MARTWY_PO_MIN nizej. Prog dwoch lezy na gornej granicy normalnego wahania,
+# wiec czujka migalaby przy kazdym mocniejszym tygodniu na rynku. Czujka, ktora
+# miga, jest tak samo bezuzyteczna jak czujka falszywa: obie ucza odbiorce, ze
+# mozna je pomijac.
+DRYF_TRWALY_PRZEBIEGOW = 3
+
+# Ile godzin musza obejmowac te przebiegi. NIE JEST TO OZDOBA.
+#
+# "Trzy przebiegi" i "trzy noce" to nie to samo. Trener bywa uruchamiany
+# powtornie tego samego dnia - po awarii, przy nadrabianiu zaleglosci, przy
+# recznym przebiegu - i wtedy trzy najnowsze wiersze dziennika moga pochodzic
+# z jednej godziny. Liczylyby ten sam odczyt trzy razy i "trwaly" znaczyloby
+# "chwilowy". Doba miedzy przebiegami razy dwa odstepy to 48 godzin; ciasniejsze
+# okno oznacza, ze czekamy jeszcze jedna noc, i tak ma byc.
+DRYF_TRWALY_GODZIN = 48
+
+# Rytm przypominania o stanie, ktory sie nie poprawia.
+#
+# Ani cisza, ani powtorka przy kazdym przebiegu. Trener chodzi raz na dobe, wiec
+# przypominanie przy kazdym przebiegu byloby powiadomieniem codziennym - a takie
+# przestaje cokolwiek znaczyc dokladnie tak samo jak cisza. Domyslny cooldown
+# zdarzenia w katalogu (86400 s) tego NIE zalatwia: doba to wlasnie odstep
+# miedzy przebiegami, wiec przepuszcza kazdy z nich.
+#
+# Tydzien to najkrotszy odstep, ktory nie jest "przy kazdym przebiegu", i jest
+# rzedu czasu potrzebnego na REAKCJE: przetrenowanie modelu na nowym rozkladzie
+# to praca na dni, nie na godziny. Przypominanie czesciej, niz da sie
+# zareagowac, uczy tylko odklikiwac.
+DRYF_PRZYPOMNIENIE_DNI = 7
+
+# Ile cech wymieniamy w tresci powiadomienia. "Cos sie zmienilo" bez wskazania
+# CZEGO nie prowadzi do zadnego dzialania - a lista wszystkich cech prowadzi do
+# przewijania. Piec czolowych mowi, czy dryf jest skupiony w jednej rodzinie
+# cech (do naprawy), czy rozlany po wszystkich (zmiana rezimu rynku).
+DRYF_CECH_W_TRESCI = 5
+
 # Ubytek okien informatywnych, ktory traktujemy jako utrate dowodow.
 UBYTEK_OKIEN = 0.25
 
@@ -82,11 +172,110 @@ def zmiany(poprzedni: dict | None, biezacy: dict) -> list[str]:
     if sp is not None and sb is not None and (sp > 0) != (sb > 0):
         powody.append(f"mediana Sharpe zmienila znak: {sp:+.3f} → {sb:+.3f}")
 
+    # WARUNEK WZROSTU ZOSTAJE - ale dopiero teraz jest bezpieczny.
+    #
+    # `pb > pp` jest tu poprawny dla czujki ZMIANY: dryf, ktory opada, sam sie
+    # cofa i nie wymaga uwagi. Dopoki jednak byl to JEDYNY tor zgloszenia dryfu,
+    # ten sam warunek uciszal stan trwale zly - bo stan, ktory stoi, nie rosnie.
+    # Za "nadal jest zle" odpowiada `ocen_dryf_trwaly`; tutaj zostaje wylacznie
+    # "wlasnie sie pogorszylo".
     pp, pb = poprzedni.get("max_psi") or 0.0, biezacy.get("max_psi") or 0.0
     if pb > PSI_PROG and pb > pp:
         powody.append(f"dryf cech {pb:.2f} powyzej progu {PSI_PROG} i rosnie")
 
     return powody
+
+
+def ocen_dryf_trwaly(historia: list[dict], *,
+                     ostatnie_zgloszenie: datetime | None = None,
+                     zgloszony_dryf: float | None = None,
+                     teraz: datetime | None = None) -> dict | None:
+    """Czy dryf jest wysoki OD DAWNA i czy wypada juz o tym przypomniec.
+
+    Zwraca None, gdy nalezy milczec. Funkcja jest czysta - caly werdykt, razem
+    z rytmem przypominania, da sie przetestowac bez bazy i bez zegara.
+
+    `historia` to wiersze `learn.learning_state_log` dla JEDNEJ pary
+    (engine, bar), najnowszy pierwszy, z kluczami `max_psi` i `run_at`. Filtr po
+    `bar` nalezy do wolajacego i jest konieczny: swieca 4h i 1h maja osobne
+    przebiegi tej samej nocy (migracja 0025), wiec bez filtra "trzy kolejne
+    przebiegi" mieszalyby dwa rozne modele.
+
+    TRZY WARUNKI, WSZYSTKIE KONIECZNE
+
+      1. dosc dowodow - DRYF_TRWALY_PRZEBIEGOW wierszy w dzienniku,
+      2. kazdy z nich powyzej DRYF_TRWALY_PROG - jeden odczyt ponizej progu
+         rozbraja czujke natychmiast, bo problem sie cofnal,
+      3. rozpietosc w czasie co najmniej DRYF_TRWALY_GODZIN - inaczej "trwaly"
+         znaczyloby "trzy razy uruchomiony tej samej nocy".
+
+    Warunki 2 i 3 sa asymetryczne wzgledem uzbrajania i rozbrajania, i to jest
+    celowe: zaczac przypominac ma byc trudno, przestac - latwo. Odwrotna
+    asymetria daje czujke, ktora nadaje jeszcze dlugo po naprawie.
+    """
+    if len(historia) < DRYF_TRWALY_PRZEBIEGOW:
+        return None
+
+    okno = historia[:DRYF_TRWALY_PRZEBIEGOW]
+    wartosci = [(w.get("max_psi") or 0.0) for w in okno]
+    if min(wartosci) <= DRYF_TRWALY_PROG:
+        return None
+
+    rozpietosc_h = (okno[0]["run_at"] - okno[-1]["run_at"]).total_seconds() / 3600.0
+    if rozpietosc_h < DRYF_TRWALY_GODZIN:
+        return None
+
+    biezacy = wartosci[0]
+    # Pasmo, a nie sama liczba: przejscie ponad PSI_PROG to jedyna zmiana, ktora
+    # lamie rytm tygodniowy. Rozroznienie musi wiec byc jawne i porownywalne
+    # miedzy przebiegami, a nie ukryte w tresci komunikatu.
+    pasmo = "duzy" if biezacy > PSI_PROG else "sredni"
+
+    pierwsze = ostatnie_zgloszenie is None
+    eskalacja = False
+    if not pierwsze:
+        # POGORSZENIE PASMA LAMIE RYTM. Stan, ktory z "sredniego" przeszedl
+        # w "duzy", to nowa informacja, a nie to samo przypomnienie - trzymanie
+        # jej tydzien w kolejce byloby cisza wtedy, gdy akurat cos sie dzieje.
+        eskalacja = (zgloszony_dryf is not None
+                     and zgloszony_dryf <= PSI_PROG < biezacy)
+        odkad = ((teraz or datetime.now(timezone.utc)) - ostatnie_zgloszenie)
+        if odkad.total_seconds() < DRYF_PRZYPOMNIENIE_DNI * 86400 and not eskalacja:
+            return None
+
+    if pierwsze:
+        powod = (f"dryf cech {biezacy:.2f} utrzymuje sie powyzej "
+                 f"{DRYF_TRWALY_PROG} w {DRYF_TRWALY_PRZEBIEGOW} kolejnych "
+                 f"przebiegach — to nie jest wahniecie")
+    elif eskalacja:
+        powod = (f"dryf cech pogorszyl sie z {zgloszony_dryf:.2f} do "
+                 f"{biezacy:.2f} — przekroczyl {PSI_PROG}")
+    else:
+        powod = (f"dryf cech {biezacy:.2f} NADAL powyzej {DRYF_TRWALY_PROG} — "
+                 f"przypomnienie po {DRYF_PRZYPOMNIENIE_DNI} dniach bez poprawy")
+
+    return {"powod": powod, "dryf": biezacy, "pasmo": pasmo,
+            "przebiegow": DRYF_TRWALY_PRZEBIEGOW, "godzin": round(rozpietosc_h),
+            "pierwsze": pierwsze, "eskalacja": eskalacja}
+
+
+def podsumuj_dryf_cech(wiersze: list[dict],
+                       limit: int = DRYF_CECH_W_TRESCI) -> list[str]:
+    """KTORE cechy odjechaly - bo "cos sie zmienilo" nie prowadzi do dzialania.
+
+    `wiersze` to `learn.drift_metric` zlaczone z `feat.feature_def`, posortowane
+    malejaco, z kluczami `feature` i `psi`.
+
+    Wymieniamy tylko cechy ponad progiem. Cecha spokojna dopisana do listy nie
+    dodaje informacji, a rozciaga komunikat - i po kilku takich odbiorca
+    przestaje go czytac do konca, czyli do miejsca, gdzie stoi ta wazna.
+    """
+    istotne = [w for w in wiersze if (w.get("psi") or 0.0) > DRYF_TRWALY_PROG]
+    # Gdy zadna cecha nie przekracza progu, a maksimum z dziennika owszem,
+    # rozjechal sie sam dziennik z tabela dryfu. Pokazujemy wtedy czolowke bez
+    # filtra: czujka nie moze milczec o powodzie, dla ktorego wlasnie krzyknela.
+    wybrane = (istotne or list(wiersze))[:limit]
+    return [f"{w['feature']}: {(w.get('psi') or 0.0):.2f}" for w in wybrane]
 
 
 # Ile moze minac od ostatniego uderzenia serca, zanim uznamy silnik za martwy.
@@ -982,13 +1171,153 @@ async def sprawdz_puls_workerow(fetch_all, notify, sucho: bool = False,
     return len(powody)
 
 
+async def sprawdz_dryf(fetch_all, notify, sucho: bool = False, *,
+                       engine: str = "crypto", bar: str = "4h",
+                       teraz: datetime | None = None) -> int:
+    """Czy rozklad cech odjechal od treningowego I TAK ZOSTAL.
+
+    DLACZEGO TO JEST OSOBNA CZUJKA, A NIE KOLEJNY POWOD W `zmiany`
+
+    `zmiany` odpowiada na pytanie "czy cos sie zmienilo od wczoraj" i to jest
+    dobra regula: powiadomienie, ktore przychodzi zawsze, przestaje cokolwiek
+    znaczyc. Ale stan trwale zly NIE JEST zmiana. Dryf, ktory wszedl wysoko
+    i tam stoi, nie rosnie, wiec warunek z `zmiany` go nie przepuszcza - od
+    drugiego przebiegu w gore panuje cisza nieodrozialna od spokoju.
+
+    DLACZEGO ZDARZENIE `learning.drift_high`, A NIE `learning.state_changed`
+
+    Typ `learning.drift_high` istnieje w katalogu od migracji 0011, jest
+    wlaczony domyslnie dla wszystkich odbiorcow - i NIE BYL WYSYLANY ANI RAZU,
+    bo zadna linia kodu go nie uzywala. Doklejenie dryfu do "zmiany stanu
+    uczenia" mialoby ten sam skutek co przy kopiach zapasowych: alarm
+    o niewlasciwej nazwie uczy czytac alarmy nieuwaznie, a preferencja
+    odbiorcy dotyczaca dryfu nadal nie mialaby czego wlaczac.
+
+    RYTM PRZYPOMINANIA JEST TU, A NIE W COOLDOWNIE ZDARZENIA
+
+    Katalogowy cooldown to 86400 s, czyli dokladnie odstep miedzy przebiegami
+    trenera - przepuscilby wiec kazdy. Wlasciwe tlumienie liczy sie z historii
+    powiadomien (ten sam chwyt co przy `engine.down`: bez dodatkowej kolumny),
+    per (engine, bar), i jest ostrzejsze niz katalogowe - wiec sie z nim nie
+    bije.
+    """
+    historia = await fetch_all(
+        "SELECT max_psi, run_at FROM learn.learning_state_log"
+        " WHERE engine = %s AND bar = %s ORDER BY run_at DESC LIMIT %s",
+        (engine, bar, DRYF_TRWALY_PRZEBIEGOW))
+    if len(historia) < DRYF_TRWALY_PRZEBIEGOW:
+        print(f"dziennik stanu ma {len(historia)} z {DRYF_TRWALY_PRZEBIEGOW}"
+              f" potrzebnych przebiegow dla {engine}/{bar} — za wcześnie na werdykt")
+        return 0
+
+    # PER (engine, bar), bo rytm przypominania o swiecy 4h nie moze uciszac
+    # swiecy 1h ani odwrotnie. `bar` siedzi w `data`, bo tabela powiadomien nie
+    # ma na niego kolumny - i nie potrzebuje jej mieć dla jednego zdarzenia.
+    poprzednie = await fetch_all(
+        "SELECT created_at, data->>'dryf' AS dryf FROM notify.notification"
+        " WHERE event_code = 'learning.drift_high' AND engine::text = %s"
+        " AND data->>'bar' = %s ORDER BY created_at DESC LIMIT 1",
+        (engine, bar))
+    ostatnie = poprzednie[0]["created_at"] if poprzednie else None
+    zgloszony = None
+    if poprzednie and poprzednie[0]["dryf"] is not None:
+        zgloszony = float(poprzednie[0]["dryf"])
+
+    werdykt = ocen_dryf_trwaly(historia, ostatnie_zgloszenie=ostatnie,
+                               zgloszony_dryf=zgloszony, teraz=teraz)
+
+    biezacy = historia[0].get("max_psi") or 0.0
+    print(f"Dryf {engine}/{bar}: {biezacy:.2f} "
+          f"(próg trwałości {DRYF_TRWALY_PROG}, próg wzrostu {PSI_PROG})")
+    if werdykt is None:
+        # Cisza jest wynikiem, wiec musi byc widoczna w logu razem z powodem.
+        # Inaczej nie da sie odroznic czujki, ktora nic nie znalazla, od czujki,
+        # ktora padla - a to jest dokladnie ten blad, ktory ta czujka naprawia.
+        if biezacy <= DRYF_TRWALY_PROG:
+            print("  poniżej progu trwałości — cisza")
+        elif ostatnie is not None:
+            print(f"  zgłoszone {ostatnie:%Y-%m-%d %H:%M} UTC, przypomnienie "
+                  f"co {DRYF_PRZYPOMNIENIE_DNI} dni — cisza")
+        else:
+            print("  stan jeszcze nie utrwalony (za mało przebiegów lub za "
+                  "krótki odstęp między nimi) — cisza")
+        return 0
+
+    print(f"  • {werdykt['powod']}")
+
+    # KTORE CECHY, a nie tylko ze maksimum wynosi tyle a tyle.
+    #
+    # UWAGA NA ZAKRES: `learn.drift_metric` jest kluczowana po model_version,
+    # a nie po horyzoncie, a trener liczy dryf z `feat.feature_value` bez filtru
+    # po swiecy. Ta rozpiska mowi wiec, ktore CECHY odjechaly - nie ktory
+    # horyzont. To i tak jest jedyna dostepna odpowiedz na pytanie "co
+    # naprawiac", a udawanie precyzji per-horyzont byloby gorsze niz jej brak.
+    cechy = await fetch_all(
+        "SELECT fd.name || '@' || fd.version AS feature, d.psi"
+        " FROM learn.drift_metric d"
+        " JOIN feat.feature_def fd ON fd.id = d.feature_def_id"
+        " JOIN learn.model_version mv ON mv.id = d.model_version_id"
+        " JOIN learn.model m ON m.id = mv.model_id"
+        " WHERE m.engine = %s"
+        "   AND d.event_time = (SELECT max(event_time) FROM learn.drift_metric"
+        "                       WHERE model_version_id = d.model_version_id)"
+        " ORDER BY d.psi DESC NULLS LAST LIMIT %s",
+        (engine, DRYF_CECH_W_TRESCI))
+    rozpiska = podsumuj_dryf_cech(cechy)
+    for c in rozpiska:
+        print(f"      {c}")
+
+    if sucho:
+        print("Tryb suchy — powiadomienie nie wysyłane.")
+        return 1
+
+    odbiorcy = await fetch_all('SELECT id FROM app."user" WHERE is_active')
+    if not odbiorcy:
+        print("Brak odbiorców — powiadomienie nie ma do kogo pójść.")
+        return 1
+
+    tytul = f"Dryf cech utrzymuje się ({engine}/{bar})"
+    # MIARA NAZWANA PO IMIENIU. Odbiorca, ktory porowna te liczbe z progiem
+    # 0,25 obiecanym w katalogu i na dashboardzie, wyciagnie zly wniosek -
+    # to nie jest PSI i nie ma tej skali.
+    tresc = (f"{werdykt['powod']}.\n\n"
+             f"Miara to standaryzowane przesunięcie rozkładu cechy "
+             f"(przesunięcie średniej w jednostkach historycznego odchylenia "
+             f"plus zmiana rozrzutu), NIE PSI — próg {DRYF_TRWALY_PROG} to "
+             f"„efekt średni”, {PSI_PROG} to „duży”.\n\n"
+             + ("Cechy, które odjechały najbardziej:\n"
+                + "\n".join(f"• {c}" for c in rozpiska) + "\n\n"
+                if rozpiska else "")
+             + "Handel NIE jest wstrzymany — to czujka, nie blokada.")
+    for u in odbiorcy:
+        await notify(u["id"], "learning.drift_high", tytul, tresc,
+                     engine=engine,
+                     data={"bar": bar, "dryf": round(werdykt["dryf"], 4),
+                           "pasmo": werdykt["pasmo"],
+                           "przebiegow": werdykt["przebiegow"],
+                           "eskalacja": werdykt["eskalacja"],
+                           "cechy": rozpiska})
+    print(f"Powiadomiono odbiorców: {len(odbiorcy)}")
+
+    # KOD NIEZEROWY TYLKO WTEDY, GDY COS WYSLANO - czyli najwyzej raz na
+    # DRYF_PRZYPOMNIENIE_DNI. Ten sam kompromis co przy kill-switchu: stan znany
+    # i czekajacy na reakcje nie moze malowac `kubectl get jobs` na czerwono co
+    # noc, bo wtedy czerwony przestaje cokolwiek znaczyc. Ale przy samym
+    # zgloszeniu drugi, niezalezny od kanalu powiadomien slad jest wart tyle
+    # samo co przy martwym silniku.
+    return 1
+
+
 async def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--co", default="stan-nauki",
                     choices=("stan-nauki", "zywotnosc", "ryzyko", "kopie",
                              "swiezosc", "egzekucja", "poslizg", "instrumenty",
-                             "workery"),
+                             "workery", "dryf"),
                     help="stan-nauki: czy wynik treningu sie zmienil; "
+                         "dryf: czy rozklad cech odjechal od treningowego I TAK "
+                         "ZOSTAL - stan trwaly, ktorego 'stan-nauki' z definicji "
+                         "nie widzi, bo tam zdarzeniem jest ZMIANA; "
                          "zywotnosc: czy silniki bija; "
                          "ryzyko: czy kill-switch zadzialal; "
                          "kopie: czy jest swieza kopia zapasowa; "
@@ -1056,6 +1385,9 @@ async def main() -> int:
             return await sprawdz_instrumenty(fetch_all, notify, sucho=args.sucho,
                                              engine=args.engine, mode=args.mode,
                                              prog_h=args.prog_statusu_h)
+        if args.co == "dryf":
+            return await sprawdz_dryf(fetch_all, notify, sucho=args.sucho,
+                                      engine=args.engine, bar=args.bar)
 
         wiersze = await fetch_all(
             "SELECT status, windows_total, windows_positive, positive_ci_low,"
