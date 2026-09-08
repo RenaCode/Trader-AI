@@ -106,9 +106,17 @@ def test_rezim_trendu_tez_jest_bezwymiarowy():
 
 # ------------------------------------------------------ skladanie
 def test_evaluate_zwraca_wszystkie_sygnaly_takze_zerowe():
-    """Dashboard ma pokazywac, co zostalo ROZWAZONE, nie tylko co zadzialalo."""
+    """Dashboard ma pokazywac, co zostalo ROZWAZONE, nie tylko co zadzialalo.
+
+    Sygnaly EKSPERYMENTALNE sa z tej liczby wylaczone i to jest cala roznica
+    miedzy "policzony" a "uzywany": dopoki pomiar walk-forward nie pokaze
+    przewagi, sygnal nie bierze udzialu w decyzji i nie ma go w wynikach.
+    """
+    from services.engine.signals import EKSPERYMENTALNE
+
     _, _, wklady = evaluate(cechy(), "range", None, H4)
-    assert len(wklady) == len(SIGNALS)
+    assert len(wklady) == len(SIGNALS) - len(EKSPERYMENTALNE)
+    assert not (EKSPERYMENTALNE & {w["name"] for w in wklady})
 
 
 def test_wynik_zlozony_miesci_sie_w_zakresie():
@@ -126,7 +134,7 @@ def test_szybka_sciezka_daje_ten_sam_wynik():
     czyta. Ale optymalizacja, ktora po cichu zmienia wynik, jest gorsza niz brak
     optymalizacji - stad ten test.
     """
-    from services.engine.signals import combine, precompute
+    from services.engine.signals import EKSPERYMENTALNE, combine, precompute
 
     for f in (
         cechy(rsi=78.0, rel_strength=0.9, ret_short=12.0, ret_mid=25.0, ret_long=60.0),
@@ -140,7 +148,10 @@ def test_szybka_sciezka_daje_ten_sam_wynik():
             szybkie = combine(pc, rezim, None, with_contributions=False)
             assert pelne[0] == szybkie[0], f"wynik rozjechany w reżimie {rezim}"
             assert pelne[1] == szybkie[1], f"pewność rozjechana w reżimie {rezim}"
-            assert len(pelne[2]) == len(SIGNALS) and szybkie[2] == []
+            # Bez sygnalow eksperymentalnych - patrz
+            # test_evaluate_zwraca_wszystkie_sygnaly_takze_zerowe.
+            assert len(pelne[2]) == len(SIGNALS) - len(EKSPERYMENTALNE)
+            assert szybkie[2] == []
 
 
 # ------------------------------------------------------ siatka swiec

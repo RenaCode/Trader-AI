@@ -27,6 +27,7 @@ decyzja tych zalozen - i tak nalezy ja czytac.
 from __future__ import annotations
 
 import math
+import os
 from dataclasses import dataclass
 
 from services.engine.horizons import Horizon
@@ -173,6 +174,47 @@ def funding_carry(f: dict, h: Horizon) -> SignalOutput | None:
                         {"funding_z": round(z, 2), "stawka_pct": rate})
 
 
+def pozycjonowanie_tlumu(f: dict, h: Horizon) -> SignalOutput | None:
+    """Skrajne wychylenie tlumu na perpetualu - sygnal KONTRARIANSKI.
+
+    HIPOTEZA, FALSYFIKOWALNA: gdy udzial kont po stronie dlugiej odjezdza od
+    swojej normy, a otwarte pozycje przy tym rosna, to znaczy, ze do
+    wychylonej juz strony dokladaja sie nowi lewarowani uczestnicy. Historycznie
+    taki uklad konczy sie wycisnieciem tej strony, a nie jej dalszym zyskiem.
+    Stad znak minus przy `long_ratio_z`.
+
+    DWA WARUNKI, NIE JEDEN. Sam skrajny udzial dlugich moze byc trwalym stanem
+    rynku w hossie - to nie jest sygnal, tylko opis. Dopiero ROSNACE otwarte
+    pozycje mowia, ze wychylenie jest SWIEZE i lewarowane. Iloczyn tych dwoch
+    rzeczy jest wezszy niz kazda z osobna, i o to chodzi: sygnal ma sie odzywac
+    rzadko.
+
+    CZYM TO NIE JEST: kopiowaniem najlepszych traderow. Ranking "najlepszych"
+    to prawy ogon rozkladu, zdominowany przez szczescie razy dzwignia; wybor po
+    fakcie, bez proby out-of-sample. Tutaj patrzymy na CALY tlum, zagregowany,
+    i to KONTRARIANSKO - zakladamy, ze wiekszosc myli sie na skrajnosciach,
+    a nie ze ma racje.
+
+    OGRANICZENIE, ktore trzeba znac czytajac wynik: `long_ratio` to udzial KONT,
+    nie kapitalu, i pochodzi z perpetuala kwotowanego w USDT, podczas gdy
+    handlujemy spotem w USDC. To jest sygnal o TYM SAMYM aktywie z innego rynku.
+    """
+    z = f.get("long_ratio_z")
+    oi = f.get("oi_zmiana")
+    if z is None or oi is None:
+        return None
+    if abs(z) < 1.0 or oi <= 0:
+        return SignalOutput(0.0, 0.1, {"long_ratio_z": round(z, 2),
+                                       "oi_zmiana_pct": round(oi, 2),
+                                       "uwaga": "brak swiezego wychylenia"})
+    # Sila rosnie z wychyleniem, pewnosc - z tego, jak mocno przybywa pozycji.
+    # Obie przyciete, bo pojedynczy skok otwartych pozycji o 20% to czesciej
+    # zdarzenie techniczne (wygasniecie, migracja) niz naplyw kapitalu.
+    return SignalOutput(_clip(-z / 2.5),
+                        min(1.0, (abs(z) - 1.0) / 2.0) * min(1.0, oi / 5.0),
+                        {"long_ratio_z": round(z, 2), "oi_zmiana_pct": round(oi, 2)})
+
+
 def cross_section(f: dict, h: Horizon) -> SignalOutput | None:
     """Sila wzgledna wobec calego zbioru rynkow - momentum przekrojowe.
 
@@ -211,7 +253,35 @@ SIGNALS = {
     "news_shock":         (news_shock,         "news",           "Sentyment newsowy ważony nowością"),
     "funding_carry":      (funding_carry,      "derivatives",    "Skrajne finansowanie perpetuala (kontrariańsko)"),
     "cross_section":      (cross_section,      "cross_section",  "Siła względna wobec pozostałych rynków"),
+    "pozycjonowanie_tlumu": (pozycjonowanie_tlumu, "derivatives",
+                             "Skrajne wychylenie tłumu przy rosnących pozycjach (kontrariańsko)"),
 }
+
+# SYGNAŁY EKSPERYMENTALNE - policzone, ale NIEUŻYWANE w decyzjach.
+#
+# Dopisanie sygnału do `SIGNALS` wystarczyłoby, żeby przy najbliższej kalibracji
+# dostał wagę z IC i zaczął wpływać na produkcję - bez niczyjej decyzji. To jest
+# dokładnie ten sposób, w jaki niesprawdzony pomysł wchodzi do systemu po cichu.
+#
+# Sygnał wychodzi stąd dopiero wtedy, gdy pomiar walk-forward pokaże przewagę
+# NETTO po kosztach. Do tego czasu `precompute` go pomija, więc nie ma go
+# w wynikach ani w wagach; włącza się go wyłącznie świadomie, na czas pomiaru:
+#
+#     SYGNALY_EKSPERYMENTALNE="" python services/engine/train.py --sucho
+EKSPERYMENTALNE = {"pozycjonowanie_tlumu"}
+
+
+def wlaczone_eksperymenty() -> set[str]:
+    """Które sygnały eksperymentalne są dopuszczone w tym procesie.
+
+    Pusta zmienna środowiskowa znaczy „wszystkie" - tak wygodniej uruchamiać
+    pomiar. Brak zmiennej znaczy „żaden", i to jest stan produkcji.
+    """
+    if "SYGNALY_EKSPERYMENTALNE" not in os.environ:
+        return set()
+    wpisane = {s.strip() for s in os.environ["SYGNALY_EKSPERYMENTALNE"].split(",")
+               if s.strip()}
+    return EKSPERYMENTALNE if not wpisane else (wpisane & EKSPERYMENTALNE)
 
 # Wagi per rezim. ZALOZENIA POCZATKOWE - do zastapienia kalibracja walk-forward.
 # Logika: w trendzie ufamy momentum, w konsolidacji powrotom do sredniej,
@@ -278,7 +348,10 @@ def precompute(features: dict, horizon: Horizon) -> dict[str, SignalOutput]:
     raz i uzyc przy kazdej probie.
     """
     out = {}
+    dopuszczone = wlaczone_eksperymenty()
     for name, (fn, _family, _label) in SIGNALS.items():
+        if name in EKSPERYMENTALNE and name not in dopuszczone:
+            continue
         res = fn(features, horizon)
         if res is not None:
             out[name] = res

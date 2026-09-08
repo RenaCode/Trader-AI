@@ -46,7 +46,14 @@ def test_zerowanie_renormalizuje_do_jednosci():
     for rezim, wagi in w.items():
         assert wagi["news_shock"] == 0.0
         assert sum(wagi.values()) == pytest.approx(1.0, abs=1e-3)
-        assert set(wagi) == set(SIGNALS), "komplet sygnałów musi zostać zachowany"
+        # Komplet sygnalow PRODUKCYJNYCH. Eksperymentalne celowo NIE MAJA wagi
+        # domyslnej: gdyby ja mialy, wystarczyloby wlaczyc sygnal, zeby zaczal
+        # wplywac na decyzje z waga, ktorej nikt nie zmierzyl. Wage nadaje mu
+        # dopiero kalibracja z IC, i tylko w przebiegu, w ktorym jest wlaczony.
+        from services.engine.signals import EKSPERYMENTALNE
+
+        assert set(wagi) == set(SIGNALS) - EKSPERYMENTALNE, (
+            "komplet sygnałów produkcyjnych musi zostać zachowany")
 
 
 def test_zerowanie_zwieksza_wagi_pozostalych():

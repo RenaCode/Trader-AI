@@ -234,3 +234,65 @@ def test_KAZDY_uruchamialny_skrypt_ma_korzen_na_sciezce_importu():
     assert not winne, (
         "skrypty uruchamialne bez korzenia na sys.path — padną przy "
         "`python <plik>`: " + ", ".join(winne))
+
+
+# ============================== sygnal istnieje, ale NIE HANDLUJE
+
+def test_sygnal_pozycjonowania_NIE_WCHODZI_do_decyzji_bez_wlaczenia():
+    """Dopisanie sygnału do `SIGNALS` wystarczyłoby, żeby przy najbliższej
+    kalibracji dostał wagę z IC i zaczął wpływać na produkcję — bez niczyjej
+    decyzji. To jest dokładnie ten sposób, w jaki niesprawdzony pomysł wchodzi
+    do systemu po cichu.
+
+    Właściciel wybrał „zbierz i ZMIERZ, nie handluj". Ten test jest tego
+    wyborem zapisanym w kodzie.
+    """
+    import os
+
+    from services.engine.horizons import get as get_h
+    from services.engine.signals import EKSPERYMENTALNE, precompute
+
+    cechy = {"long_ratio_z": 2.4, "oi_zmiana": 6.0}
+    poprzednie = os.environ.pop("SYGNALY_EKSPERYMENTALNE", None)
+    try:
+        assert "pozycjonowanie_tlumu" in EKSPERYMENTALNE
+        assert "pozycjonowanie_tlumu" not in precompute(cechy, get_h("4h"))
+    finally:
+        if poprzednie is not None:
+            os.environ["SYGNALY_EKSPERYMENTALNE"] = poprzednie
+
+
+def test_sygnal_DA_SIE_wlaczyc_na_czas_pomiaru(monkeypatch):
+    """Druga granica: bramka, której nie da się otworzyć, uniemożliwiałaby
+    pomiar — czyli zamieniłaby „jeszcze nie zmierzone" w „nigdy nie zmierzone"."""
+    from services.engine.horizons import get as get_h
+    from services.engine.signals import precompute
+
+    monkeypatch.setenv("SYGNALY_EKSPERYMENTALNE", "")
+    wynik = precompute({"long_ratio_z": 2.4, "oi_zmiana": 6.0}, get_h("4h"))
+    assert "pozycjonowanie_tlumu" in wynik
+    assert wynik["pozycjonowanie_tlumu"].score < 0, (
+        "przy tłumie wychylonym na długo sygnał ma być KONTRARIAŃSKI")
+
+
+def test_sygnal_eksperymentalny_NIE_MA_wagi_domyslnej():
+    """Gdyby miał, wystarczyłoby go włączyć, żeby handlował z wagą, której nikt
+    nie zmierzył."""
+    from services.engine.signals import DEFAULT_WEIGHTS, EKSPERYMENTALNE
+
+    for rezim, wagi in DEFAULT_WEIGHTS.items():
+        assert not (EKSPERYMENTALNE & set(wagi)), (
+            f"reżim {rezim} nadaje wagę sygnałowi eksperymentalnemu")
+
+
+def test_sygnal_MILCZY_gdy_wychylenie_nie_jest_swieze():
+    """Sam skrajny udział długich może być trwałym stanem rynku w hossie — to
+    opis, nie sygnał. Dopiero rosnące otwarte pozycje mówią, że wychylenie jest
+    świeże i lewarowane."""
+    from services.engine.horizons import get as get_h
+    from services.engine.signals import pozycjonowanie_tlumu
+
+    h = get_h("4h")
+    assert pozycjonowanie_tlumu({"long_ratio_z": 2.4, "oi_zmiana": -3.0}, h).score == 0.0
+    assert pozycjonowanie_tlumu({"long_ratio_z": 0.3, "oi_zmiana": 9.0}, h).score == 0.0
+    assert pozycjonowanie_tlumu({"long_ratio_z": 2.4, "oi_zmiana": 6.0}, h).score < 0
