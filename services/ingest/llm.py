@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sys
 import time
 from typing import Any
 
@@ -364,6 +365,17 @@ class DostawcaMieszany(Dostawca):
 
     nazwa = "mieszany"
 
+    # Ile odmow triazu POD RZAD wystarczy, zeby przestac pytac wyczerpanego
+    # dostawce. Dwie, a nie jedna: pojedyncze 429 to zwykly limit tempa, ktory
+    # ponowienia zalatwiaja i po ktorym nie ma powodu zmieniac modelu. Dwie
+    # z rzedu, KAZDA po pieciu ponowieniach, to juz nie tempo, tylko wyczerpany
+    # klucz - i wtedy dalsze proby sa czysta strata czasu.
+    PROG_ZWARCIA = 2
+    # Po tym czasie probujemy znowu. Limity dostawcow sa OKRESOWE (na minute,
+    # na dobe), wiec trwale odciecie zamienialoby chwilowy limit w trwala
+    # zmiane modelu triazu - czyli cicha zmiane probki artykulow.
+    ZWARCIE_S = 600.0
+
     def __init__(self, triaz: Dostawca, analiza: Dostawca):
         if triaz.model_triazu == analiza.model_analizy:
             raise ValueError(
@@ -371,6 +383,10 @@ class DostawcaMieszany(Dostawca):
                 "rozstrzygnac, do ktorego dostawcy skierowac zapytanie")
         self._triaz = triaz
         self._analiza = analiza
+        # Licznik odmow triazu POD RZAD i chwila, do ktorej nie pytamy
+        # wyczerpanego dostawcy. Patrz `zapytaj`.
+        self._odmowy_triazu = 0
+        self._zwarcie_do = 0.0
         self.model_triazu = triaz.model_triazu
         self.model_analizy = analiza.model_analizy
         self.nazwa = f"{triaz.nazwa}+{analiza.nazwa}"
@@ -391,11 +407,29 @@ class DostawcaMieszany(Dostawca):
 
     async def zapytaj(self, *, model: str, system: str, user: str,
                       schema: dict, max_tokens: int) -> tuple[dict, dict]:
+        # BEZPIECZNIK NA WYCZERPANY KLUCZ TRIAZU.
+        #
+        # Zejscie awaryjne nizej dziala poprawnie, ale wlacza sie DOPIERO po
+        # wyczerpaniu piatki ponowien - okolo 80 sekund na artykul. Gdy klucz
+        # jest wyczerpany CALKOWICIE, kazde zapytanie konczy sie 429 w 0,2 s,
+        # wiec te 80 sekund to czysta kara, placona od nowa przy KAZDYM
+        # artykule. Zmierzone na produkcji 2026-09-08: dwie decyzje triazu na
+        # piec minut, cykl nie konczyl sie nigdy, puls milczal, a czujka
+        # zywotnosci meldowala martwego workera.
+        #
+        # Po dwoch takich odmowach z rzedu przestajemy pytac wyczerpanego
+        # dostawce i idziemy wprost do zapasowego. Po ZWARCIE_S sprobujemy
+        # znowu - limity sa okresowe, wiec trwale odciecie zmienialoby chwilowy
+        # limit w trwala zmiane modelu triazu.
+        if model == self.model_triazu and self._zwarcie_otwarte():
+            return await self._triaz_zapasowy(system, user, schema, max_tokens)
         try:
             data, usage = await self._dla(model).zapytaj(
                 model=model, system=system, user=user, schema=schema,
                 max_tokens=max_tokens)
             usage["model_uzyty"] = model
+            if model == self.model_triazu:
+                self._odmowy_triazu = 0
             return data, usage
         except Przeciazony:
             if model != self.model_triazu:
@@ -410,12 +444,18 @@ class DostawcaMieszany(Dostawca):
             # Zmiana modelu zmienia probke, nie wartosc cechy - a triaz, ktory
             # padl, zatrzymuje CALA analize, co widac wlasnie na produkcji:
             # darmowy klucz Gemini odbil 94% wywolan i potok stanal.
-            zapasowy = self._analiza.model_triazu
-            data, usage = await self._analiza.zapytaj(
-                model=zapasowy, system=system, user=user, schema=schema,
-                max_tokens=max_tokens)
-            usage["model_uzyty"] = zapasowy
-            return data, usage
+            self._odmowy_triazu += 1
+            if (self._odmowy_triazu >= self.PROG_ZWARCIA
+                    and not self._zwarcie_otwarte()):
+                self._zwarcie_do = time.monotonic() + self.ZWARCIE_S
+                # GLOSNO, raz na zwarcie. Cicha zmiana modelu triazu znaczy, ze
+                # probka artykulow zmienia sie bez sladu - a to widac dopiero
+                # w wynikach, tygodnie pozniej.
+                print(f"[llm] {self._triaz.nazwa} odrzuca zapytania triazu "
+                      f"({self._odmowy_triazu} razy pod rzad) — przechodze na "
+                      f"{self._analiza.nazwa} na {self.ZWARCIE_S / 60:.0f} min",
+                      file=sys.stderr, flush=True)
+            return await self._triaz_zapasowy(system, user, schema, max_tokens)
 
     def koszt(self, model: str, usage: dict) -> float:
         # CENNIK BIERZE TEN DOSTAWCA, KTORY WYKONAL WYWOLANIE. Wspolna tablica
@@ -424,6 +464,23 @@ class DostawcaMieszany(Dostawca):
         # rozni sie od tego, o ktory prosilismy.
         faktyczny = self.uzyty_model(model, usage)
         return self._dla(faktyczny).koszt(faktyczny, usage)
+
+    def _zwarcie_otwarte(self) -> bool:
+        return time.monotonic() < self._zwarcie_do
+
+    async def _triaz_zapasowy(self, system: str, user: str, schema: dict,
+                              max_tokens: int) -> tuple[dict, dict]:
+        """TRIAZ WOLNO PRZERZUCIC, bo on WYBIERA artykuly, a nie ocenia ich.
+
+        Zmiana modelu zmienia probke, nie wartosc cechy. Analiza takiego zejscia
+        NIE MA i to jest osobna decyzja, opisana wyzej.
+        """
+        zapasowy = self._analiza.model_triazu
+        data, usage = await self._analiza.zapytaj(
+            model=zapasowy, system=system, user=user, schema=schema,
+            max_tokens=max_tokens)
+        usage["model_uzyty"] = zapasowy
+        return data, usage
 
     def _dla_triazu_zapasowy(self) -> str:
         return self._analiza.model_triazu

@@ -468,3 +468,126 @@ def test_zwykly_blad_NIE_uruchamia_dostawcy_zapasowego():
         asyncio.run(m.zapytaj(model=m.model_triazu, system="", user="",
                               schema={}, max_tokens=1))
     assert drogi.pytania == []
+
+
+# ============================== bezpiecznik na wyczerpany klucz triazu
+
+class _Odmawiajacy:
+    """Dostawca, ktory odrzuca KAZDE zapytanie - jak wyczerpany klucz."""
+    nazwa = "odmawiajacy"
+    model_analizy = "duzy"
+    model_triazu = "maly"
+
+    def __init__(self):
+        self.wywolan = 0
+
+    async def zapytaj(self, **kw):
+        from services.ingest.llm import Przeciazony
+        self.wywolan += 1
+        raise Przeciazony("HTTP 429")
+
+    def koszt(self, model, usage):
+        return 0.0
+
+    async def zamknij(self):
+        return None
+
+
+class _Dzialajacy:
+    nazwa = "dzialajacy"
+    model_analizy = "opus"
+    model_triazu = "haiku"
+
+    def __init__(self):
+        self.wywolan = 0
+
+    async def zapytaj(self, **kw):
+        self.wywolan += 1
+        return {"ok": True}, {"input": 1, "output": 1, "cache_read": 0}
+
+    def koszt(self, model, usage):
+        return 0.0
+
+    async def zamknij(self):
+        return None
+
+
+def _mieszany():
+    from services.ingest.llm import DostawcaMieszany
+    triaz, analiza = _Odmawiajacy(), _Dzialajacy()
+    return DostawcaMieszany(triaz, analiza), triaz, analiza
+
+
+def _pytaj(ai, model):
+    return asyncio.run(ai.zapytaj(model=model, system="s", user="u",
+                                  schema={"type": "object"}, max_tokens=16))
+
+
+def test_wyczerpany_dostawca_triazu_PRZESTAJE_BYC_PYTANY():
+    """Zejście awaryjne działało, ale włączało się DOPIERO po pięciu
+    ponowieniach — około 80 sekund na artykuł. Przy kluczu wyczerpanym
+    całkowicie każde zapytanie kończy się 429 w 0,2 s, więc te 80 sekund to
+    czysta kara, płacona od nowa przy KAŻDYM artykule.
+
+    Zmierzone na produkcji 2026-09-08: dwie decyzje triażu na pięć minut, cykl
+    nie kończył się nigdy, puls milczał, a czujka żywotności meldowała martwego
+    workera — który przez cały czas pracował.
+    """
+    ai, triaz, analiza = _mieszany()
+    for _ in range(5):
+        _pytaj(ai, ai.model_triazu)
+    assert triaz.wywolan == ai.PROG_ZWARCIA, (
+        f"po {ai.PROG_ZWARCIA} odmowach z rzędu dostawca ma nie być pytany, "
+        f"a dostał {triaz.wywolan} zapytań")
+    assert analiza.wywolan == 5, "wszystkie zapytania mają trafić do zapasowego"
+
+
+def test_POJEDYNCZA_odmowa_nie_zmienia_modelu_triazu():
+    """Jedno 429 to zwykły limit tempa, który załatwiają ponowienia. Zwarcie
+    przy pierwszej odmowie zmieniałoby model — czyli próbkę artykułów —
+    z powodu, który mija sam."""
+    ai, triaz, _ = _mieszany()
+    _pytaj(ai, ai.model_triazu)
+    assert not ai._zwarcie_otwarte(), "jedna odmowa nie może odciąć dostawcy"
+
+
+def test_zwarcie_jest_CZASOWE_a_nie_trwale():
+    """Limity dostawców są okresowe. Trwałe odcięcie zamieniłoby chwilowy limit
+    w trwałą zmianę modelu triażu — cichą zmianę próbki artykułów."""
+    ai, triaz, _ = _mieszany()
+    for _ in range(ai.PROG_ZWARCIA):
+        _pytaj(ai, ai.model_triazu)
+    assert ai._zwarcie_otwarte()
+    ai._zwarcie_do = 0.0                      # symulacja uplywu ZWARCIE_S
+    _pytaj(ai, ai.model_triazu)
+    assert triaz.wywolan == ai.PROG_ZWARCIA + 1, (
+        "po odczekaniu dostawca musi dostać kolejną szansę")
+
+
+def test_UDANE_zapytanie_zeruje_licznik_odmow():
+    """Bez zerowania odmowy rozsiane po całej dobie sumowałyby się i w końcu
+    odcięłyby dostawcę, który działa poprawnie."""
+    from services.ingest.llm import Przeciazony
+
+    ai, triaz, _ = _mieszany()
+    _pytaj(ai, ai.model_triazu)
+    assert ai._odmowy_triazu == 1
+
+    async def raz_dobrze(**kw):
+        return {"ok": True}, {"input": 1, "output": 1, "cache_read": 0}
+    triaz.zapytaj = raz_dobrze
+    _pytaj(ai, ai.model_triazu)
+    assert ai._odmowy_triazu == 0
+
+
+def test_ANALIZA_nadal_nie_ma_zejscia_awaryjnego():
+    """Analiza WYTWARZA wartość cechy `news_sent`. Podmiana modelu w połowie
+    doby wstawiłaby w środek szeregu uskok, którego kalibracja wagi nie zakłada
+    — a brakująca analiza to tylko brakujący wiersz, który widać. Bezpiecznik
+    nie może tego przypadkiem poluzować."""
+    from services.ingest.llm import Przeciazony
+
+    ai, _, analiza = _mieszany()
+    analiza.zapytaj = _Odmawiajacy().zapytaj
+    with pytest.raises(Przeciazony):
+        _pytaj(ai, ai.model_analizy)
