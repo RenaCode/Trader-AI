@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import math
 import os
+from collections.abc import Iterable
 from dataclasses import dataclass
 
 from services.engine.horizons import Horizon
@@ -358,12 +359,76 @@ def precompute(features: dict, horizon: Horizon) -> dict[str, SignalOutput]:
     return out
 
 
+def budzet_wag(regime: str, weights: dict[str, float] | None,
+               policzone: Iterable[str] = ()) -> float:
+    """Suma |wag| KOMPLETU sygnalow, czyli mianownik pelnego pokrycia.
+
+    Komplet to sygnaly, ktore `precompute` w tym procesie w ogole probuje
+    policzyc: wszystkie nieeksperymentalne plus te eksperymentalne, ktore
+    faktycznie sie policzyly (wlaczone zmienna SYGNALY_EKSPERYMENTALNE).
+    Sygnal eksperymentalny wylaczony w tym procesie NIE jest brakiem - nikt go
+    nie oczekiwal - wiec nie moze zanizac pokrycia.
+    """
+    w = weights or DEFAULT_WEIGHTS.get(regime, DEFAULT_WEIGHTS["range"])
+    komplet = (set(SIGNALS) - EKSPERYMENTALNE) | set(policzone)
+    return sum(abs(w.get(name, 0.0)) for name in komplet)
+
+
+def pokrycie_wag(policzone: Iterable[str], regime: str,
+                 weights: dict[str, float] | None) -> float:
+    """Jaka CZESC budzetu wag stoi za wynikiem, 0..1.
+
+    1,0 znaczy "policzyl sie caly komplet sygnalow". 0,85 znaczy, ze wynik
+    powstal z 85% wagi, a pozostale 15% nie mialo czym sie odezwac. Ta liczba
+    NIE wynika juz z samego wyniku - po renormalizacji (patrz `combine`) wynik
+    ma te sama skale niezaleznie od pokrycia, i wlasnie dlatego trzeba ja
+    zapisac osobno. Bez niej decyzja z jednego sygnalu wyglada w dzienniku
+    identycznie jak decyzja z osmiu.
+    """
+    w = weights or DEFAULT_WEIGHTS.get(regime, DEFAULT_WEIGHTS["range"])
+    policzone = list(policzone)          # moze byc jednorazowym generatorem
+    obecne = sum(abs(w.get(name, 0.0)) for name in policzone)
+    pelne = budzet_wag(regime, weights, policzone)
+    return (obecne / pelne) if pelne else 0.0
+
+
 def combine(precomputed: dict[str, SignalOutput], regime: str,
             weights: dict[str, float] | None,
             with_contributions: bool = True) -> tuple[float, float, list[dict]]:
     """Skleja policzone wczesniej sygnaly w jeden wynik wedlug wag.
 
     Musi dawac DOKLADNIE to samo co evaluate() - jest na to test.
+
+    BRAKUJACY SYGNAL RENORMALIZUJE OBIE WIELKOSCI, NIE TYLKO PEWNOSC.
+
+    Wagi sa z konstrukcji simplexem: `random_weights`, `ic_weights`
+    i `_bez_martwych` normalizuja je do sumy |wag| = 1, a DEFAULT_WEIGHTS tez
+    sumuja sie do 1. Wynik jest wiec SREDNIA WAZONA, a nie suma - i mianownikiem
+    tej sredniej moze byc tylko waga, ktora faktycznie sie odezwala.
+
+    Wczesniej mianownik mial tylko `confidence`; wynik dzielil sie milczaco
+    przez 1. Brakujacy sygnal wnosil wtedy zero do licznika przy niezmienionym
+    mianowniku, czyli byl liczony jako GLOS NA NEUTRALNOSC - hipoteza, ktorej
+    nikt nie postawil, bo sygnal nie mial danych, zeby cokolwiek powiedziec.
+    Skutek: kazdy niedostepny sygnal sciagal wynik ku zeru proporcjonalnie do
+    swojej wagi, a poniewaz progi wejscia i wyjscia sa CENTYLAMI rozkladu |wyniku|
+    z panelu treningowego (`train.score_threshold`), skala wyniku musi byc ta
+    sama w treningu i w produkcji. Nie byla: w oknie 27.08-09.09.2026 cecha
+    `funding_z` byla w 12,1% decyzji produkcyjnych i w 96,3% swiec, ktore na tych
+    samych barach widzi trener. Srednie pokrycie wag w produkcji wynosilo 0,893
+    (najgorzej 0,762 w konsolidacji), czyli produkcja porownywala z progiem
+    wielkosc srednio o 11% mniejsza od tej, na ktorej prog byl dobrany.
+
+    To ten sam rozjazd, ktory ten kod naprawial juz raz po stronie trenera -
+    patrz komentarz przy `bazowe = _bez_martwych(...)` w train.py: prog liczony
+    z pelnych wag przy handlu wagami po renormalizacji podniosl liczbe transakcji
+    z ~40 do ~120 na okno. Tutaj rozjazd dziala w druga strone i tlumi wejscia.
+
+    CENA TEJ SEMANTYKI, ktora trzeba znac: renormalizacja mowi "pozostale sygnaly
+    reprezentuja calosc", wiec wynik z jednego sygnalu moze siegnac pelnej sily.
+    Dlatego pokrycie jest osobna, ZAPISYWANA liczba (`pokrycie_wag`), a nie
+    ukrytym tlumikiem wyniku - zeby decyzja "od jakiego pokrycia nie handlujemy"
+    zapadla jawnie i na widocznych danych, a nie sama z siebie.
 
     `with_contributions=False` pomija budowanie rozbicia na wklady. Rozbicie jest
     potrzebne WYLACZNIE do zapisu w dzienniku i pokazania w interfejsie; symulacja
@@ -373,16 +438,21 @@ def combine(precomputed: dict[str, SignalOutput], regime: str,
     """
     w = weights or DEFAULT_WEIGHTS.get(regime, DEFAULT_WEIGHTS["range"])
     total = 0.0
-    conf_num = conf_den = 0.0
+    conf_num = 0.0
+    # Jeden mianownik dla WYNIKU I PEWNOSCI. Dwa osobne znaczylyby, ze te same
+    # sygnaly z tymi samymi wagami tworza dwie rozne srednie - a to nie jest
+    # projekt, tylko przeoczenie.
+    waga_obecna = 0.0
 
     if not with_contributions:
         for name, out in precomputed.items():
             weight = w.get(name, 0.0)
             total += out.score * weight * out.confidence
             conf_num += out.confidence * abs(weight)
-            conf_den += abs(weight)
-        confidence = (conf_num / conf_den) if conf_den else 0.0
-        return _clip(total), min(1.0, confidence), []
+            waga_obecna += abs(weight)
+        if not waga_obecna:
+            return 0.0, 0.0, []
+        return _clip(total / waga_obecna), min(1.0, conf_num / waga_obecna), []
 
     contributions = []
     for name, (_fn, family, label) in SIGNALS.items():
@@ -395,7 +465,7 @@ def combine(precomputed: dict[str, SignalOutput], regime: str,
         # Wartosc bezwzgledna: sygnal uzyty ODWROTNIE nadal wnosi tyle samo
         # pewnosci co uzyty wprost - odwrocenie zmienia kierunek, nie sile.
         conf_num += out.confidence * abs(weight)
-        conf_den += abs(weight)
+        waga_obecna += abs(weight)
         contributions.append({
             "name": name, "family": family, "label": label,
             "score": round(out.score, 4), "confidence": round(out.confidence, 4),
@@ -403,8 +473,9 @@ def combine(precomputed: dict[str, SignalOutput], regime: str,
             "inputs": out.inputs,
         })
 
-    confidence = (conf_num / conf_den) if conf_den else 0.0
-    return _clip(total), min(1.0, confidence), contributions
+    if not waga_obecna:
+        return 0.0, 0.0, contributions
+    return _clip(total / waga_obecna), min(1.0, conf_num / waga_obecna), contributions
 
 
 def evaluate(features: dict, regime: str, weights: dict[str, float] | None,

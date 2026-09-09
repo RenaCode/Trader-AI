@@ -45,7 +45,8 @@ from services.engine.risk_rules import (
     MIN_CONFIDENCE, START_EQUITY as START_EQUITY_WSPOLNY, RiskVerdict,
     position_budget, udzial_budzetu,
 )
-from services.engine.signals import SIGNALS, classify_regime, evaluate
+from services.engine.signals import (SIGNALS, classify_regime, evaluate,
+                                     pokrycie_wag)
 
 # Progi awaryjne - obowiazuja WYLACZNIE, dopoki nie ma aktywnej wersji modelu.
 # Docelowo pochodza z rejestru (learn.model_version.params), gdzie zapisuje je
@@ -499,7 +500,8 @@ def record_decision(cur, engine: str, mode: str, instrument_id: int, as_of: date
                     action: str, qty, price, confidence: float, regime: str,
                     features: dict, verdict, rationale: str, contributions: list[dict],
                     signal_ids: dict[str, int], latency_ms: int,
-                    model_version_id: int | None = None) -> int | None:
+                    model_version_id: int | None = None,
+                    pokrycie_sygnalow: float | None = None) -> int | None:
     # model_version_id mowi, KTORA wersja modelu podjela te decyzje. Kolumna
     # istniala z kluczem obcym od migracji 0006, ale nikt jej nie wypelnial -
     # bo do tej pory petla nie uzywala zadnego modelu, wiec nie bylo czego
@@ -510,14 +512,15 @@ def record_decision(cur, engine: str, mode: str, instrument_id: int, as_of: date
         INSERT INTO journal.decision (engine, mode, instrument_id, decided_at, action,
             target_qty, target_price, confidence, regime, feature_snapshot,
             risk_verdict, risk_reason, rationale, rationale_model, latency_ms,
-            model_version_id)
-        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'reguły',%s,%s)
+            model_version_id, pokrycie_sygnalow)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'reguły',%s,%s,%s)
         ON CONFLICT (engine, instrument_id, decided_at) DO NOTHING
         RETURNING id
         """,
         (engine, mode, instrument_id, as_of, action, qty, price, confidence, regime,
          json.dumps({k: round(v, 6) for k, v in features.items()}),
-         verdict.verdict, verdict.reason, rationale, latency_ms, model_version_id))
+         verdict.verdict, verdict.reason, rationale, latency_ms, model_version_id,
+         pokrycie_sygnalow))
     row = cur.fetchone()
     if not row:
         return None
@@ -1178,7 +1181,12 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
               f", próg wejścia {model['enter']:.4f}")
     stats = {"rozwazone": 0, "wejscia": 0, "wyjscia": 0, "wstrzymane": 0,
              "zablokowane": 0, "poza_swieca": 0, "bez_swiecy": 0,
-             "wypelnione": 0, "niewypelnione": 0, "czekaja": 0}
+             "wypelnione": 0, "niewypelnione": 0, "czekaja": 0,
+             # Ile decyzji zapadlo na NIEPELNYM komplecie sygnalow. Idzie do
+             # heartbeatu, bo poza tym stanu tego nie widac z zewnatrz w ogole:
+             # od czasu renormalizacji wyniku (services/engine/signals.combine)
+             # decyzja z trzech sygnalow ma te sama skale co decyzja z osmiu.
+             "niepelne_sygnaly": 0}
 
     # ROZSTRZYGNIECIE PLANOW IDZIE PRZED OCENA, nie po niej.
     #
@@ -1269,11 +1277,19 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
         regime, regime_conf = classify_regime(features, atr_percentile_80(cur, iid, now, h))
         weights = (model["weights"] or {}).get(regime)
         score, confidence, contributions = evaluate(features, regime, weights, h)
+        # Pokrycie liczymy z TEGO SAMEGO rozbicia, ktore trafia do dziennika,
+        # a nie z osobnego wywolania precompute() - inaczej dwa przebiegi tych
+        # samych sygnalow mogly by sie rozjechac i pokrycie opisywaloby
+        # decyzje, ktorej nie podjeto.
+        pokrycie = pokrycie_wag([c["name"] for c in contributions], regime, weights)
+        if pokrycie < 1.0 - 1e-9:
+            stats["niepelne_sygnaly"] += 1
         oceny.append({"iid": iid, "symbol": symbol, "kind": inst["kind"],
                       "quote_ccy": inst["quote_ccy"],
                       "features": features, "price": price,
                       "regime": regime, "regime_conf": regime_conf, "score": score,
                       "confidence": confidence, "contributions": contributions,
+                      "pokrycie": pokrycie,
                       "position": open_position(cur, engine, mode, iid)})
 
     # PRZEBIEG DRUGI: najpierw wyjscia (nie konkuruja o kapital i zwalniaja go),
@@ -1288,7 +1304,7 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
         features, price = ocena["features"], ocena["price"]
         regime, regime_conf = ocena["regime"], ocena["regime_conf"]
         score, confidence = ocena["score"], ocena["confidence"]
-        contributions = ocena["contributions"]
+        contributions, pokrycie = ocena["contributions"], ocena["pokrycie"]
 
         position = ocena["position"]
 
@@ -1336,6 +1352,12 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
         rationale = (
             f"Reżim: {regime}. Wynik złożony {score:+.3f} przy pewności {confidence:.0%}. "
             f"Największy wkład: {top_txt}."
+            # Niepelny komplet mowimy WPROST w uzasadnieniu, bo wynik go juz nie
+            # zdradza: po renormalizacji +0,45 z trzech sygnalow wyglada tak samo
+            # jak +0,45 z osmiu. Czytelnik "Ruchow" ma prawo wiedziec, ile
+            # sygnalow za ta liczba stalo.
+            + (f" Niepełny komplet sygnałów: {pokrycie:.0%} budżetu wag."
+               if pokrycie < 1.0 - 1e-9 else "")
             + (f" Ryzyko: {verdict.reason}." if verdict.reason else "")
         )
 
@@ -1345,7 +1367,7 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
                                   position["qty"] if position else None),
                               price, confidence, regime, features, verdict,
                               rationale, contributions, signal_ids, latency,
-                              model.get("model_version_id"))
+                              model.get("model_version_id"), pokrycie)
 
         risk.record_usage(verdict.usage)
         risk.record_violations(verdict.violations, did)

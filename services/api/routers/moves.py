@@ -50,7 +50,12 @@ async def decision_detail(engine: str, decision_id: int):
     head = await fetch_one(
         """
         SELECT d.id, d.decided_at, d.action, d.confidence, d.regime, d.risk_verdict,
-               d.risk_reason, d.rationale, d.feature_snapshot, i.symbol
+               d.risk_reason, d.rationale, d.feature_snapshot, i.symbol,
+               -- Ile sygnalow stalo za wynikiem. Sam wynik tego nie zdradza:
+               -- combine() renormalizuje go po wadze faktycznie obecnej, wiec
+               -- +0,34 z trzech sygnalow wyglada tak samo jak +0,34 z osmiu.
+               -- NULL = decyzja sprzed migracji 0039, nie "pelne pokrycie".
+               d.pokrycie_sygnalow
         FROM journal.decision d
         JOIN ref.instrument i ON i.id = d.instrument_id
         WHERE d.id = %s AND d.engine = %s
