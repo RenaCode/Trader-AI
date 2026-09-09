@@ -241,3 +241,35 @@ def test_petla_liczy_decyzje_na_niepelnym_komplecie():
         "licznik zadeklarowany, ale nigdy nie rośnie"
     # stats trafia do risk.engine_heartbeat.detail w tym samym pliku.
     assert "json.dumps(stats)" in zrodlo
+
+
+def test_wynik_DA_SIE_ODTWORZYC_z_samego_dziennika():
+    """Dziennik musi odpowiadać na pytanie „dlaczego ta decyzja", bez
+    uruchamiania modelu od nowa.
+
+    Reguła odtwarzania ZMIENIŁA SIĘ wraz z renormalizacją: wcześniej wynikiem
+    była suma wkładów, teraz jest to suma wkładów podzielona przez sumę wag
+    obecnych. Kto użyje starego wzoru na nowych danych, dostanie liczbę mniejszą
+    od prawdziwej — i to dokładnie o tyle, o ile brakowało pokrycia.
+
+    Zdarzyło się to naprawdę: odtwarzając wyniki produkcyjne 2026-09-09 sumowałem
+    wkłady i wyszło mi średnie |score| = 0,127 przy progu 0,2795. Liczba była
+    poprawna dla ówczesnego kodu, ale ten sam wzór na danych po zmianie już by
+    kłamał.
+
+    Granicę epok znaczy `pokrycie_sygnalow`: NULL = wiersz sprzed migracji 0039.
+    """
+    from services.engine.signals import SignalOutput, combine
+
+    pc = {"momentum_multi": SignalOutput(0.8, 0.9, {}),
+          "trend_follow": SignalOutput(-0.4, 0.5, {})}
+    wagi = {"momentum_multi": 0.3, "trend_follow": 0.2}
+
+    score, _pewnosc, wklady = combine(pc, "range", wagi, with_contributions=True)
+
+    suma = sum(w["contribution"] for w in wklady)
+    masa = sum(abs(w["weight"]) for w in wklady)
+    assert masa > 0
+    assert abs(score - suma / masa) < 1e-6, (
+        "wyniku nie da się odtworzyć z dziennika — audyt decyzji wymagałby "
+        "ponownego uruchomienia modelu na danych, których już nie ma")
