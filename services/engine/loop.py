@@ -381,6 +381,12 @@ class Wycena:
     """
     unrealized: Decimal = Decimal(0)
     exposure: Decimal = Decimal(0)
+    # Ta sama ekspozycja w rozbiciu na instrument. Potrzebuje jej risk kernel do
+    # limitu `max_position_notional`, ktory jest limitem NA INSTRUMENT - a bez
+    # tego pola musialby wyliczac ekspozycje po raz drugi, wlasnym zapytaniem
+    # i wlasna regula wyceny. Dwie reguly wyceny tej samej wielkosci to
+    # dokladnie ten rozjazd, przed ktorym ostrzega docstring `wycen()`.
+    per_instrument: dict[int, Decimal] = field(default_factory=dict)
     bez_swiezej_ceny: list[dict] = field(default_factory=list)
 
     @property
@@ -445,6 +451,9 @@ def wycen(pozycje: list[dict]) -> Wycena:
         diff = (px - entry) if pos["side"] == "long" else (entry - px)
         w.unrealized += diff * qty
         w.exposure += qty * px
+        iid = pos.get("instrument_id")
+        if iid is not None:
+            w.per_instrument[iid] = w.per_instrument.get(iid, Decimal(0)) + qty * px
         if not swieza:
             w.bez_swiezej_ceny.append({
                 "instrument_id": pos.get("instrument_id"),
@@ -1189,6 +1198,35 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
     # umiemy wycenic, jest ruchem ZMNIEJSZAJACYM to, czego nie mierzymy.
     pomiar = wycen(pozycje_do_wyceny(cur, engine, mode, datetime.now(timezone.utc)))
 
+    # UNIWERSUM I BUDZET LICZYMY PRZED ZEBRANIEM POWODOW WSTRZYMANIA, bo brak
+    # budzetu JEST jednym z tych powodow i musi trafic do tej samej listy.
+    # Uniwersum to czysty odczyt `ref.instrument` - nie zalezy od niczego, co
+    # dzieje sie nizej, wiec przesuniecie go tutaj niczego nie zmienia poza tym,
+    # ze wszystkie warunki wejscia zapadaja w JEDNYM miejscu.
+    #
+    # `tradeable`, nie `active`: historię zbieramy szerzej, niż handlujemy.
+    # Obstawianie instrumentu, którego giełda z kontem nie oferuje, to decyzja
+    # niewykonalna - a trener kalibruje wagi na tym samym zbiorze (0020).
+    cur.execute("SELECT id, symbol, kind, quote_ccy FROM ref.instrument WHERE engine=%s"
+                " AND active AND tradeable AND kind <> 'perp' ORDER BY symbol", (engine,))
+    instrumenty = cur.fetchall()
+
+    # BUDZET NA POZYCJE LICZY SIE Z KAPITALU, NIE ZE STALEJ.
+    #
+    # Do 2026-09-09 `position_budget` wolane bylo bez kapitalu i spadalo wewnatrz
+    # na START_EQUITY = 100 000. Na demo tego nie bylo widac, bo kapital (100 063)
+    # byl przypadkiem rowny tej stalej - profil ryzyka trzymal sie wiec na
+    # ZBIEZNOSCI DWOCH LICZB, a nie na kontroli. Na zapowiadanym rachunku 10 000
+    # dawalo to budzet 1500 przy limicie lacznej ekspozycji rownym 1500, czyli
+    # dziesiec zlecen po 500 (obcietych przez `max_position_notional`) i 50%
+    # rachunku w rynku zamiast 15%.
+    #
+    # Kapital bierzemy z `risk.kapital()`, czyli z DOKLADNIE tego samego wiersza,
+    # ktorym `evaluate_limits` mierzy potem oba limity procentowe. Dwa zrodla tej
+    # samej liczby byly cala trescia tej wady.
+    kapital = risk.kapital()
+    baza = position_budget(risk.limits, len(instrumenty), kapital)
+
     powody_wstrzymania = []
     if konto.verdict != "allow":
         powody_wstrzymania.append(konto.reason)
@@ -1196,6 +1234,23 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
         powody_wstrzymania.append(
             f"pomiar niepełny: {len(pomiar.bez_swiezej_ceny)} "
             f"pozycji bez świeżej ceny ({pomiar.opis_brakow()})")
+    if baza is None:
+        # BRAK POMIARU WSTRZYMUJE WEJSCIA - ta sama sciezka i z tego samego
+        # powodu co pozycja bez swiezej ceny wyzej. `position_budget` oddaje
+        # None tylko wtedy, gdy wielkosci zlecenia NIE DA SIE wyprowadzic:
+        # nie ma punktu krzywej kapitalu, kapital jest niedodatni albo w
+        # `risk.limit_def` nie ma limitu lacznej ekspozycji, z ktorego budzet
+        # powstaje. Kazda liczba wstawiona tu zamiast wstrzymania bylaby
+        # zgadnieta, a zgadnieta wielkosc zlecenia to zgadniete ryzyko.
+        powody_wstrzymania.append(
+            "budżetu na pozycję nie da się wyprowadzić: "
+            + ("brak pomiaru kapitału (exec.equity_point pusty)" if kapital is None
+               else f"kapitał {kapital} nie jest dodatni" if kapital <= 0
+               else "brak limitu max_total_exposure w risk.limit_def"))
+        # Zero, a nie stala: nizej `baza` mnozy sie przez udzial budzetu, a przy
+        # wstrzymanych wejsciach ta liczba i tak nigdzie nie idzie. Zero sprawia,
+        # ze gdyby kiedys poszla, bylaby zleceniem pustym, a nie zgadnietym.
+        baza = Decimal(0)
 
     wejscia_wstrzymane = bool(powody_wstrzymania)
     powod_wstrzymania = " | ".join(powody_wstrzymania)
@@ -1280,23 +1335,11 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
                                         kind_kosztow, verbose))
         conn.commit()
 
-    # `tradeable`, nie `active`: historię zbieramy szerzej, niż handlujemy.
-    # Obstawianie instrumentu, którego giełda z kontem nie oferuje, to decyzja
-    # niewykonalna - a trener kalibruje wagi na tym samym zbiorze (0020).
-    cur.execute("SELECT id, symbol, kind, quote_ccy FROM ref.instrument WHERE engine=%s"
-                " AND active AND tradeable AND kind <> 'perp' ORDER BY symbol", (engine,))
-    instrumenty = cur.fetchall()
     stats["instrumenty"] = len(instrumenty)
 
     # IDENTYFIKATORY CECH DOPIERO TERAJ, bo cechy przekrojowe sa filtrowane
     # odciskiem uniwersum - a uniwersum znamy dopiero po tym zapytaniu.
     feature_ids = horizon_feature_ids(cur, h, [i["symbol"] for i in instrumenty])
-
-    # Budzet na pozycje wyprowadzony z limitu lacznej ekspozycji i liczby
-    # obserwowanych instrumentow. Stala 3000 przy limicie 15 000 i dwunastu
-    # instrumentach oznaczala, ze system chce zaangazowac 36 000 - dwa i pol
-    # raza ponad limit - i realnie miescilo sie piec pozycji zamiast dwunastu.
-    baza = position_budget(risk.limits, len(instrumenty))
 
     # PRZEBIEG PIERWSZY: ocena wszystkich instrumentow, bez podejmowania akcji.
     #

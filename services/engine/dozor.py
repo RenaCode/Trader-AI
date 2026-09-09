@@ -70,6 +70,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+# Prog i komplet limitow koniecznych czytamy z risk kernela, a nie przepisujemy
+# tutaj: druga kopia rozjechalaby sie z pierwsza przy pierwszej zmianie rytmu
+# pomiaru, a czujka pilnowalaby wtedy progu, ktorego nikt juz nie stosuje.
+# Uzywa ich `sprawdz_cisze_pomiaru` nizej. Import musi byc PO sys.path.insert,
+# bo ten plik bywa uruchamiany jako skrypt.
+from services.engine.risk import LIMITY_KONIECZNE, POMIAR_CO_S  # noqa: E402
+
 # --------------------------------------------------------------- dryf cech
 #
 # CO TA LICZBA NAPRAWDE MIERZY - bo NIE jest tym, czym sie nazywa.
@@ -490,6 +497,223 @@ def ocen_kill_switch(wiek_min: float,
             "pierwsze": False, "odstep_h": odstep_h}
 
 
+# --------------------------------------------------- cisza samego bezpiecznika
+#
+# TRZECIA PRZYCZYNA, OSOBNA OD DWOCH WYZEJ I OD NICH GORSZA
+#
+# Punkty wyzej odpowiadaja na pytanie "czy zauwazylismy, ze bezpiecznik
+# ZADZIALAL". Nie odpowiadaja na pytanie wczesniejsze: "czy bezpiecznik w ogole
+# MIERZY". A to jest jedyne pytanie, ktore ma znaczenie, dopoki nic sie nie
+# stalo - czyli przez wieksza czesc zycia systemu.
+#
+# Stan zastany, zmierzony na produkcji 2026-09-09: `check_account()` liczylo
+# zuzycie kazdego limitu konta w kazdym cyklu i NIE ZAPISYWALO GO. Ostatni
+# wiersz w `risk.limit_usage` pochodzil z dnia ostatniego WEJSCIA w pozycje,
+# bo tylko sciezka decyzyjna cokolwiek pisala. Przez trzy doby silnik pracowal,
+# oceniat limity co cykl i nie zostawial po tym niczego. Zdanie "ochrona
+# kapitalu czuwa" bylo zalozeniem: gdyby ocena przestala byc wolana albo zaczela
+# sie wywracac po cichu, dane wygladalyby DOKLADNIE TAK SAMO.
+#
+# Od zmiany w services/engine/risk.py pomiar zapisuje sie w stalym rytmie
+# (POMIAR_CO_S), wiec cisza w tej tabeli znaczy juz tylko jedno: NIKT NIE MIERZY.
+# Ta czujka zamienia to w widoczny stan.
+#
+# DLACZEGO TUTAJ, A NIE W NOWYM MECHANIZMIE. Bo pytanie jest tym samym pytaniem
+# co wyzej - "czy bezpiecznik dziala i czy ktos o tym wie" - tylko zadanym
+# o poziom nizej. Osobna czujka znaczylaby osobne zadanie, osobny harmonogram
+# i osobne miejsce do zapomnienia.
+
+# Ile moze minac od ostatniego zapisanego pomiaru, zanim uznamy, ze bezpiecznik
+# przestal raportowac.
+#
+# Trzy rytmy pomiaru - ta sama zasada co CYKLI_ZWLOKI przy pulsie workerow
+# i MARTWY_PO_MIN przy silniku: jedno spoznienie to wahanie, trzy to sygnal.
+# Prog dwoch lezalby na gornej granicy normy i migalby kilka razy dziennie,
+# a czujka, ktora miga, uczy sie odklikiwac.
+#
+# 15 minut jest tez wieksze niz wlasna rozdzielczosc tej czujki (zadanie
+# cykliczne chodzi co 10 minut) - prog krotszy opisywalby stan, ktorego ta
+# czujka nie umie zobaczyc.
+POMIAR_CISZA_S = 3 * POMIAR_CO_S
+
+
+def ocen_cisze_pomiaru(wiek_s: float | None, nigdy: list[str] | None,
+                       od_zgloszenia_min: float | None,
+                       prog_s: int = POMIAR_CISZA_S) -> dict | None:
+    """Czy bezpiecznik przestal zostawiac slad po pomiarze. CZYSTA FUNKCJA.
+
+    `wiek_s`  - wiek NAJNOWSZEGO pomiaru sposrod limitow koniecznych, None gdy
+                nie ma ani jednego;
+    `nigdy`   - nazwy limitow koniecznych, ktore nie maja ANI JEDNEGO pomiaru
+                w calej historii;
+    `od_zgloszenia_min` - ile minut od ostatniego powiadomienia o tej ciszy.
+
+    Zwraca None, gdy pomiar jest swiezy i komplety. Inaczej dict z `powod`,
+    `zglos` (czy TERAZ wypada sie odezwac) i `odstep_h`.
+
+    LIMIT BEZ ANI JEDNEGO POMIARU TO TEZ CISZA, nawet gdy pozostale mierza sie
+    co pieciu minut. Sredni wiek po wszystkich limitach wygladalby wtedy
+    znakomicie, a jeden z trzech filarow podlogi kapitalu nie bylby mierzony
+    przez nikogo - dokladnie w tym stanie byl `min_equity` do 2026-09-09.
+    """
+    braki = list(nigdy or [])
+    stary = wiek_s is not None and wiek_s > prog_s
+    if not braki and not stary and wiek_s is not None:
+        return None
+
+    if wiek_s is None:
+        opis = ("ANI JEDNEGO zapisanego pomiaru limitów konta w całej historii "
+                "— nie ma czym udowodnić, że podłoga kapitału jest liczona")
+        wiek_min_do_rytmu = KS_RYTM_ROSNIE_PO_H * 60
+    elif stary:
+        opis = (f"ostatni zapisany pomiar limitów konta {wiek_s / 60:.0f} min temu "
+                f"(próg {prog_s / 60:.0f} min = {prog_s // POMIAR_CO_S} rytmy po "
+                f"{POMIAR_CO_S} s) — bezpiecznik nie raportuje")
+        wiek_min_do_rytmu = wiek_s / 60
+    else:
+        # Pomiar swiezy, ale niekompletny: czesc limitow mierzy sie, czesc nigdy.
+        opis = "pomiar limitów konta jest NIEPEŁNY"
+        wiek_min_do_rytmu = KS_RYTM_ROSNIE_PO_H * 60
+
+    if braki:
+        opis += f"; bez ani jednego pomiaru: {', '.join(braki)}"
+
+    odstep_h = odstep_przypomnienia_ks(wiek_min_do_rytmu)
+    return {"powod": opis, "odstep_h": odstep_h,
+            "zglos": od_zgloszenia_min is None or od_zgloszenia_min >= odstep_h * 60}
+
+
+async def sprawdz_cisze_pomiaru(fetch_all, notify, zatrzymane: set[tuple[str, str]],
+                                sucho: bool = False) -> int:
+    """Czy pomiar limitow konta zostawia slad. Zwraca 0 albo 1 (kod wyjscia).
+
+    `zatrzymane` to zbior par (engine, mode) z AKTYWNYM kill-switchem. Dla nich
+    cisza jest SPODZIEWANA i nie jest alarmem: `evaluate_account` wraca
+    w punkcie 1, przed jakimkolwiek pomiarem, wiec zatrzymane konto z zalozenia
+    nie produkuje wierszy. Drugi alarm o systemie, ktory juz alarmuje, uczy
+    odbiorce odklikiwac oba - a stan i tak jest widoczny, bo kill-switch trzyma
+    kod wyjscia niezerowy.
+    """
+    wiersze = await fetch_all(
+        "SELECT d.engine::text AS engine, d.mode::text AS mode,"
+        "       round(extract(epoch from (now() - max(u.ostatni)))) AS wiek_s,"
+        "       array_agg(d.name ORDER BY d.name)"
+        "         FILTER (WHERE u.ostatni IS NULL) AS nigdy,"
+        "       h.status AS status,"
+        "       round(extract(epoch from (now() - h.last_beat_at))/60)"
+        "         AS puls_silnika_min,"
+        "       round(extract(epoch from (now() - dh.last_beat_at))/60)"
+        "         AS puls_dozorcy_min"
+        "  FROM risk.limit_def d"
+        "  LEFT JOIN LATERAL (SELECT max(event_time) AS ostatni"
+        "                       FROM risk.limit_usage WHERE limit_def_id = d.id)"
+        "         u ON true"
+        "  LEFT JOIN risk.engine_heartbeat h"
+        "         ON h.engine = d.engine AND h.mode = d.mode"
+        "  LEFT JOIN risk.dozorca_heartbeat dh"
+        "         ON dh.nazwa = 'dozorca-ryzyka:' || d.engine::text"
+        "                       || ':' || d.mode::text"
+        " WHERE d.enabled AND d.name = ANY(%s)"
+        " GROUP BY d.engine, d.mode, h.status, h.last_beat_at, dh.last_beat_at"
+        " ORDER BY 1, 2",
+        (list(LIMITY_KONIECZNE),))
+
+    kod = 0
+    odbiorcy = None
+    for w in wiersze:
+        para = (w["engine"], w["mode"])
+        wiek_s = None if w["wiek_s"] is None else float(w["wiek_s"])
+
+        # CZY KTOKOLWIEK, KTO MIALBY MIERZYC, W OGOLE ZYJE.
+        #
+        # `risk.limit_def` ma wlaczone limity takze dla silnikow, ktorych jeszcze
+        # nie ma: `equity` stoi ze statusem `halted` od 2026-08-27 i nie ma ani
+        # jednego pomiaru w historii. Bez tego warunku ta czujka alarmowalaby
+        # o nim przy kazdym przebiegu, w nieskonczonosc - a czujka, ktora
+        # krzyczy o rzeczy zatrzymanej swiadomie, uczy przewijac takze te, ktora
+        # krzyczy o awarii.
+        #
+        # To NIE JEST poszerzenie wyjatku na kazdy martwy proces. Sedno tej
+        # czujki brzmi "procesy zyja, a limity nie sa mierzone" - stan, ktorego
+        # `--co zywotnosc` nie widzi z definicji. Gdy zaden z dwoch pulsow nie
+        # bije, opis stanu nalezy do TAMTEJ czujki (`engine.down`, krytyczne,
+        # zawsze wlaczone) i powtarzanie go tutaj byloby echem, nie informacja.
+        #
+        # Wystarczy JEDEN zywy puls, bo do zapisu pomiaru wystarczy jeden proces:
+        # zawieszony silnik przy zywym dozorcy nadal produkuje wiersze, wiec ich
+        # brak jest wtedy prawdziwym znaleziskiem.
+        mierzacy = [w["puls_silnika_min"] if w["status"] == "running" else None,
+                    w["puls_dozorcy_min"]]
+        zywy = any(p is not None and float(p) <= MARTWY_PO_MIN for p in mierzacy)
+        if not zywy:
+            print(f"pomijam pomiar limitów {w['engine']}/{w['mode']} — "
+                  f"ani silnik (status {w['status'] or 'brak pulsu'}), ani dozorca "
+                  f"nie bije; to opisuje `--co żywotność`, nie ta czujka")
+            continue
+
+        ostatnie = await fetch_all(
+            "SELECT round(extract(epoch from (now() - max(created_at)))/60)"
+            "         AS od_zgloszenia_min"
+            " FROM notify.notification"
+            " WHERE event_code = 'risk.pomiar_zamilkl' AND engine::text = %s",
+            (w["engine"],))
+        od_min = ostatnie[0]["od_zgloszenia_min"] if ostatnie else None
+        od_min = None if od_min is None else float(od_min)
+
+        werdykt = ocen_cisze_pomiaru(wiek_s, w["nigdy"], od_min)
+        if werdykt is None:
+            print(f"pomiar limitów {w['engine']}/{w['mode']}: świeży "
+                  f"({wiek_s / 60:.0f} min temu)")
+            continue
+
+        if para in zatrzymane:
+            # Cisza wyjasniona, a nie przeoczona - i to musi byc w logu, bo
+            # inaczej nie da sie odroznic "wiemy dlaczego" od "nie zauwazylismy".
+            print(f"  pomiar limitów {w['engine']}/{w['mode']}: {werdykt['powod']} "
+                  f"— SPODZIEWANE przy aktywnym kill-switchu (ocena kończy się "
+                  f"przed pomiarem); kod wyjścia i tak niezerowy")
+            continue
+
+        kod = 1
+        print(f"  BEZPIECZNIK NIE RAPORTUJE {w['engine']}/{w['mode']}: "
+              f"{werdykt['powod']}")
+
+        if not werdykt["zglos"]:
+            print(f"    (zgłoszone {od_min:.0f} min temu, przypomnienie co "
+                  f"{werdykt['odstep_h']} h — cisza w kanale powiadomień, "
+                  f"kod wyjścia zostaje niezerowy)")
+            continue
+        if sucho:
+            print("    tryb suchy, powiadomienie nie wysyłane.")
+            continue
+
+        if odbiorcy is None:
+            odbiorcy = await fetch_all('SELECT id FROM app."user" WHERE is_active')
+        tytul = f"Bezpiecznik przestał raportować ({w['engine']})"
+        tresc = (
+            f"{werdykt['powod']}.\n\n"
+            f"To NIE jest informacja o stracie. To informacja o tym, że nie "
+            f"wiadomo, czy strata byłaby zauważona: ocena limitów konta "
+            f"(`RiskKernel.check_account`) zapisuje pomiar co {POMIAR_CO_S} s "
+            f"i przestała to robić.\n\n"
+            f"Handel może iść dalej — a to jest właśnie powód do niepokoju, bo "
+            f"kill-switch nie zadziała na podstawie liczby, której nikt nie "
+            f"policzył.\n\n"
+            f"Sprawdź w tej kolejności:\n"
+            f"  kubectl logs deploy/trader-dozorca --tail=50\n"
+            f"  kubectl logs deploy/trader-silnik --tail=50\n"
+            f"  SELECT max(event_time) FROM risk.limit_usage;")
+        for u in odbiorcy:
+            await notify(u["id"], "risk.pomiar_zamilkl", tytul, tresc,
+                         engine=w["engine"], severity="critical",
+                         data={"mode": w["mode"], "wiek_s": wiek_s,
+                               "nigdy": list(w["nigdy"] or []),
+                               "prog_s": POMIAR_CISZA_S})
+        print(f"    powiadomiono: {len(odbiorcy)} odbiorców")
+
+    return kod
+
+
 async def sprawdz_ryzyko(fetch_all, notify, sucho: bool = False) -> int:
     """Czy kill-switch zadzialal i nikt sie o tym nie dowiedzial.
 
@@ -528,9 +752,17 @@ async def sprawdz_ryzyko(fetch_all, notify, sucho: bool = False) -> int:
         " FROM risk.killswitch_event k"
         " WHERE k.released_at IS NULL"
         " ORDER BY k.triggered_at")
+
+    # CISZA SAMEGO POMIARU - patrz `sprawdz_cisze_pomiaru`. Idzie PRZED wyjsciem
+    # po pustej liscie zdarzen, bo to wlasnie wtedy jest jedynym pytaniem, jakie
+    # zostaje: brak zatrzyman znaczy albo "nic zlego sie nie dzieje", albo
+    # "nikt nie patrzy", a te dwa stany wygladaly do tej pory identycznie.
+    zatrzymane = {(z["engine"], z["mode"]) for z in zdarzenia}
+    kod = await sprawdz_cisze_pomiaru(fetch_all, notify, zatrzymane, sucho=sucho)
+
     if not zdarzenia:
         print("kill-switch: brak aktywnych zdarzeń")
-        return 0
+        return kod
 
     odbiorcy = await fetch_all('SELECT id FROM app."user" WHERE is_active')
     for z in zdarzenia:

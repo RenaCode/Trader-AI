@@ -66,6 +66,29 @@ async def stan_konta(fetch_one, engine: str, mode: str) -> dict | None:
         "SELECT equity FROM exec.equity_point WHERE engine=%s AND mode=%s"
         " AND event_time <= now() - interval '24 hours'"
         " ORDER BY event_time DESC LIMIT 1", (engine, mode))
+    if not doba:
+        # TEN SAM FALLBACK CO W RiskKernel._equity() I Z TEGO SAMEGO POWODU.
+        #
+        # Brak punktu sprzed 24 h znaczy, ze CALA krzywa jest mlodsza niz doba
+        # (gdyby istnial starszy punkt, zapytanie wyzej by go zwrocilo).
+        # Odniesieniem jest wiec POCZATEK historii - dla rachunku istniejacego
+        # od trzech godzin "od poczatku" i "od doby" to to samo pytanie.
+        #
+        # Spadek na punkt biezacy dawal `day_ago == equity`, czyli strate
+        # dzienna 0,00% zawsze - a tutaj kierunek tego bledu jest GORSZY niz
+        # w kernelu. Tam limit nie zadzialal; tu `warunek_ustal` meldowalo
+        # "strata dzienna 0,00% < 1,00%" i ZWALNIALO kill-switcha na podstawie
+        # pomiaru, ktorego nie bylo. Bezpiecznik zdejmowal sam siebie.
+        #
+        # ROZJAZD Z KERNELEM JEST TU GROZNIEJSZY NIZ SAMA LICZBA: gdyby kernel
+        # mierzyl od poczatku historii, a ta funkcja od punktu biezacego, kazdy
+        # swiezy rachunek wpadalby w petle - kernel zatrzymuje przy 4%,
+        # wznowienie widzi 0,00% i zwalnia, kernel zatrzymuje ponownie. Oba
+        # ogniwa "poprawne" z osobna, a z zewnatrz widac tylko silnik, ktory
+        # dziwnie sie zachowuje. Dlatego ta poprawka nie moze isc bez tamtej.
+        doba = await fetch_one(
+            "SELECT equity FROM exec.equity_point WHERE engine=%s AND mode=%s"
+            " ORDER BY event_time ASC LIMIT 1", (engine, mode))
     equity = float(biez["equity"])
     return {
         "equity": equity,

@@ -203,7 +203,26 @@ def simulate_portfolio(panels: dict[str, list[dict]],
     # portfel, ktory nigdy nie powstaje. To pole sluzy do zmierzenia, co sie
     # stanie przy innym zalozeniu; limit lacznej ekspozycji i tak jest
     # sprawdzany osobno w kazdej swiecy, wiec przekroczyc go sie nie da.
-    baza = float(position_budget(limits, zakladane_pozycje or len(panels)))
+    # KAPITAL PODAJEMY JAWNIE. Symulacja startuje z START_EQUITY, wiec liczba
+    # jest ta sama, ktora `position_budget` bralo wczesniej z domyslu - ale
+    # domysl znaczyl "kapital nieznany, zgadujemy", a ten argument znaczy
+    # "kapital tego przebiegu wynosi tyle". Roznica jest cala trescia naprawy
+    # z 2026-09-09: to wlasnie po tym domysle produkcja liczyla budzet od
+    # 100 000 na rachunku 10 000.
+    #
+    # BUDZET STOI W MIEJSCU PRZEZ CALY PRZEBIEG, choc `equity` nizej sie zmienia.
+    # Tak bylo od zawsze i tak zostaje: przeliczanie go co swiece zmienialoby
+    # zmierzony wynik (wielkosc pozycji rosnie po zyskach), a ta zmiana ma
+    # naprawic produkcje, nie przesunac linie odniesienia.
+    budzet = position_budget(limits, zakladane_pozycje or len(panels),
+                             Decimal(str(START_EQUITY)))
+    if budzet is None:
+        # Symulacja bez budzetu nie ma czego mierzyc. Cicha stala dawalaby
+        # wynik wygladajacy na zmierzony przy limitach, ktorych w ogole nie ma.
+        raise ValueError(
+            "nie da się wyprowadzić budżetu na pozycję: brak limitu "
+            "max_total_exposure albo puste uniwersum instrumentów")
+    baza = float(budzet)
     # Bez podanej pamieci podrecznej liczymy ja tutaj - wygodne przy pojedynczym
     # wywolaniu, kosztowne przy dziesiatkach prob na tym samym oknie.
     cache = cache if cache is not None else precompute_panels(panels, atr_thresholds, h)
@@ -312,7 +331,15 @@ def simulate_portfolio(panels: dict[str, list[dict]],
         # samego trzymania pozycji tez musi uruchomic kill-switch - inaczej
         # limit dziala tylko wtedy, gdy system probuje wejsc, czyli nie wtedy,
         # kiedy jest najbardziej potrzebny.
-        per_inst = {ids[s]: Decimal(str(p.qty * p.entry)) for s, p in positions.items()}
+        # EKSPOZYCJA PO CENIE RYNKOWEJ, nie po cenie wejscia - ta sama regula co
+        # w produkcji (`risk.RiskKernel._open_exposure` i `loop.wycen`), z tym
+        # samym spadkiem na cene wejscia, gdy swiecy dla instrumentu nie ma.
+        # Kosztem liczyly do 2026-09-09 obie strony i obu zwyzka cicho zwalniala
+        # miejsce pod kolejne zakupy: limit luzowal sie dokladnie wtedy, gdy
+        # zaangazowanie roslo.
+        per_inst = {ids[s]: Decimal(str(
+            p.qty * (present[s]["row"]["price"] if s in present else p.entry)))
+            for s, p in positions.items()}
         exposure = sum(per_inst.values(), Decimal(0))
         hour_ago = t - timedelta(hours=1)
         orders_h = sum(1 for ot in order_times if ot > hour_ago)

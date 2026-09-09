@@ -61,6 +61,10 @@ class RiskState:
     # Suma wplat pomniejszona o wyplaty. Odniesienie dla progu kapitalu
     # wyrazonego ulamkiem (`pct_wplat`).
     wplaty_netto: Decimal | None = None
+    # Czy krzywa `nav` siega POCZATKU rachunku, czy tylko chwili, w ktorej
+    # kolumna zaczela byc wypelniana. Patrz `_nav_wiarygodne` - to jest cala
+    # tresc tego pola.
+    nav_od_poczatku: bool = True
 
     # --- widoki uzywane przez reguly -------------------------------------
     #
@@ -68,16 +72,50 @@ class RiskState:
     # RAZ, ktora liczba jest wynikiem - zamiast powtarzac ten wybor przy kazdym
     # limicie, gdzie predzej czy pozniej jeden z nich zostalby pominiety.
     @property
+    def _nav_wiarygodne(self) -> bool:
+        """Czy wolno mierzyc wynik jednostka. Decyzja jest JEDNA dla calej trojki.
+
+        DWA POWODY, DLA KTORYCH TO NIE JEST TRZYKROTNE `is not None`.
+
+        PIERWSZY: JEDNOSTKI. `nav` krazy wokol 1.0, `equity` wokol 100 000.
+        Gdyby kazda wlasnosc spadala na kapital osobno, stan z `nav` bez
+        `nav_peak` dalby obsuniecie (100000 - 1) / 100000 = 99,999% - czyli
+        kill-switch z arytmetyki, nie z rynku. Albo cala trojka jest w
+        jednostkach, albo cala w pieniadzach; trzeciej mozliwosci nie ma.
+
+        DRUGI, I TO JEST POWOD ISTNIENIA `nav_od_poczatku`: SZCZYT Z OKROJONEJ
+        HISTORII. Kolumna `nav` powstala w migracji 0031 i nie zostala
+        uzupelniona wstecz, wiec `max(nav)` bylo szczytem liczonym od dnia
+        migracji, a nie od poczatku rachunku. Na produkcji 2026-09-09 dawalo to
+        obsuniecie 0,0101% zamiast rzeczywistych 0,0429% - zaniżenie 4,2x przy
+        86% krzywej niewidocznej dla tej miary.
+
+        Kierunek bledu jest JEDNOSTRONNY i to czyni go grozniejszym niz sama
+        skala: obsuniecie liczone od pozniejszego szczytu jest zawsze mniejsze
+        albo rowne prawdziwemu, nigdy wieksze. Gdyby `nav` zaczelo sie zapisywac
+        w dolku (nowy tryb, purge_demo.py, migracja przerwana w polowie),
+        rachunek juz 9% pod woda dostalby do dyspozycji kolejne 10% - lacznie
+        19% przy progu 10%, bez jednego bledu w dzienniku.
+
+        Dlatego brak pelnej historii cofa pomiar na `equity`, ktorego szczyt
+        liczy sie z CALEJ krzywej. Kapital rosnie od wplat, wiec ten szczyt bywa
+        zawyzony - i to jest wlasnie kierunek, ktory chcemy: nie wiedzac, gdzie
+        byl szczyt, zatrzymujemy sie za wczesnie, a nie za pozno.
+        """
+        return (self.nav is not None and self.nav_peak is not None
+                and self.nav_day_ago is not None and self.nav_od_poczatku)
+
+    @property
     def wynik(self) -> Decimal:
-        return self.nav if self.nav is not None else self.equity
+        return self.nav if self._nav_wiarygodne else self.equity
 
     @property
     def wynik_szczyt(self) -> Decimal:
-        return self.nav_peak if self.nav_peak is not None else self.peak
+        return self.nav_peak if self._nav_wiarygodne else self.peak
 
     @property
     def wynik_doba(self) -> Decimal:
-        return self.nav_day_ago if self.nav_day_ago is not None else self.day_ago
+        return self.nav_day_ago if self._nav_wiarygodne else self.day_ago
 
 
 @dataclass
@@ -263,14 +301,24 @@ def evaluate_limits(state: RiskState, limits: dict[str, dict],
     lim = limits.get("max_total_exposure")
     if lim:
         after = state.exposure + notional
+        # PROG W PIENIADZACH, nie w zapisie limitu - tak samo jak nizej przy
+        # `max_position_notional`, ktory robil to poprawnie od poczatku.
+        #
+        # `lim["value"]` przy jednostce `pct_equity` to LICZBA PROCENTOWA (15),
+        # a `used` jest kwota. Slad zostawiany w risk.limit_usage mowil wiec
+        # "zuzyto 1350 z 15", czyli wykorzystanie 9000% - i tak samo liczyl to
+        # wiersz w risk.violation oraz zdanie pokazywane czlowiekowi. Limit,
+        # ktorego wykorzystania nie da sie odczytac, jest limitem niewidocznym,
+        # a ten wlasnie przestal byc martwy i zaczal blokowac wejscia.
+        cap = wartosc_limitu(lim, state.equity)
         usage.append({"name": "max_total_exposure", "used": float(state.exposure),
-                      "threshold": float(lim["value"])})
-        if after > wartosc_limitu(lim, state.equity):
+                      "threshold": float(cap)})
+        if after > cap:
             violations.append({"limit": "max_total_exposure", "observed": float(after),
-                               "threshold": float(lim["value"]), "action": lim["action"]})
+                               "threshold": float(cap), "action": lim["action"]})
             return RiskVerdict(
                 "block",
-                f"Ekspozycja po wejściu wyniosłaby {after:.0f} przy limicie {lim['value']:.0f}",
+                f"Ekspozycja po wejściu wyniosłaby {after:.0f} przy limicie {cap:.0f}",
                 violations=violations, usage=usage)
 
     # 6. Wielkosc pojedynczej pozycji - tutaj obcinamy zamiast blokowac.
@@ -367,9 +415,31 @@ def udzial_budzetu(score: float) -> float:
 
 
 def position_budget(limits: dict[str, dict], n_instruments: int,
-                    kapital: Decimal | None = None,
-                    fallback: Decimal = Decimal("3000")) -> Decimal:
+                    kapital: Decimal | None) -> Decimal | None:
     """Bazowa wielkosc zlecenia wyprowadzona z limitu lacznej ekspozycji.
+
+    ZWRACA None, GDY BUDZETU NIE DA SIE POLICZYC - i to jest cala zmiana
+    z 2026-09-09. Nie ma tu zadnej wartosci zastepczej, bo kazda z nich byla
+    LICZBA UDAJACA POMIAR.
+
+    Do tego dnia `kapital` mial domysl START_EQUITY (100 000), a przy braku
+    limitu lacznej ekspozycji funkcja oddawala stala 3000. Skutek na rachunku
+    wlasciciela, ktory zamierza wplacic 10 000 przy dziesieciu instrumentach:
+
+        budzet bazowy = 15% * 100 000 / 10 = 1500          (a mial byc 150)
+        kazde zlecenie obciete przez max_position_notional do 5% * 10 000 = 500
+        dziesiec zlecen po 500 = 5000, czyli 50% rachunku
+        limit lacznej ekspozycji: 15% * 10 000 = 1500 -> przekroczony 3,3 raza
+
+    Na demo nie bylo tego widac, bo kapital (100 063) byl przypadkiem rowny
+    stalej. Profil ryzyka trzymal sie wiec na ZBIEZNOSCI DWOCH LICZB, a nie na
+    kontroli, i rozjechalby sie dokladnie w chwili wplaty innej kwoty. Domysl
+    parametru byl tu grozniejszy niz jego brak: wywolanie bez kapitalu
+    wygladalo na poprawne i nie zostawialo sladu.
+
+    Wolajacy ma na None jedna sensowna odpowiedz: NIE WCHODZIC. Petla decyzyjna
+    dopisuje wtedy powod do `powody_wstrzymania` - tej samej sciezki, ktora
+    wstrzymuje wejscia przy niepelnym pomiarze kapitalu.
 
     DLACZEGO NIE STALA
 
@@ -390,13 +460,22 @@ def position_budget(limits: dict[str, dict], n_instruments: int,
     """
     lim = limits.get("max_total_exposure")
     if not lim or n_instruments <= 0:
-        return fallback
-    # `kapital` jest potrzebny wylacznie wtedy, gdy limit zapisano procentowo.
-    # Domyslnie START_EQUITY, zeby stare wywolania nie zmienily zachowania -
-    # przy limicie kwotowym ta wartosc i tak nie jest uzywana.
-    budzet = wartosc_limitu(
-        lim, kapital if kapital is not None else Decimal(str(START_EQUITY))
-    ) / Decimal(n_instruments)
+        # Brak limitu lacznej ekspozycji nie znaczy "budzet dowolny". Ta sama
+        # nieobecnosc sprawia, ze `evaluate_limits` w ogole pomija kontrole
+        # ekspozycji (`if lim:`), wiec stala odesłana stad bylaby wielkoscia
+        # pozycji, ktorej NIC juz nie ogranicza.
+        return None
+    # KAPITAL JEST WYMAGANY, nawet gdy limit zapisano kwotowo. Sprawdzamy go
+    # przed `wartosc_limitu`, a nie w jej srodku, bo przy jednostce `quote_ccy`
+    # kapital nie wchodzi do wzoru - i wywolanie bez pomiaru przechodziloby
+    # niezauwazone dopoty, dopoki ktos nie zmieni jednostki limitu na
+    # procentowa. Zgoda na handel nie moze zalezec od zapisu limitu.
+    if kapital is None or kapital <= 0:
+        return None
+    budzet = wartosc_limitu(lim, kapital) / Decimal(n_instruments)
     # Zlecenie mniejsze niz minimum gieldowe nie ma sensu - wtedy lepiej
-    # obserwowac mniej instrumentow niz handlowac pylem.
+    # obserwowac mniej instrumentow niz handlowac pylem. Podloga moze wyniesc
+    # budzet ponad udzial przypadajacy na instrument; laczna ekspozycja i tak
+    # sie nie przekroczy, bo od 2026-09-09 kumuluje sie W OBREBIE CYKLU
+    # (risk.RiskKernel._open_exposure) i po prostu utnie ostatnie wejscia.
     return max(budzet, Decimal("50"))

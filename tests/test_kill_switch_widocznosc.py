@@ -147,21 +147,39 @@ TERAZ = datetime(2026, 9, 9, 7, 20, tzinfo=timezone.utc)
 
 
 class AtrapaBazy:
-    """Minimalna atrapa: rozpoznaje zapytania po fragmencie, nie udaje bazy."""
+    """Minimalna atrapa: rozpoznaje zapytania po fragmencie, nie udaje bazy.
 
-    def __init__(self, zdarzenia, od_zgloszenia_min=None, odbiorcy=(1, 2)):
+    `pomiar_wiek_s` / `pomiar_nigdy` opisuja stan `risk.limit_usage` widziany
+    przez czujke ciszy pomiaru. Domyslnie pomiar jest SWIEZY i kompletny, zeby
+    testy kill-switcha mierzyly kill-switcha, a nie druga czujke w tym samym
+    przebiegu.
+    """
+
+    def __init__(self, zdarzenia, od_zgloszenia_min=None, odbiorcy=(1, 2),
+                 pomiar_wiek_s=120, pomiar_nigdy=None,
+                 od_zgloszenia_pomiar_min=None):
         self.zdarzenia = zdarzenia
         self.od_zgloszenia_min = od_zgloszenia_min
         self.odbiorcy = odbiorcy
+        self.pomiar_wiek_s = pomiar_wiek_s
+        self.pomiar_nigdy = pomiar_nigdy
+        self.od_zgloszenia_pomiar_min = od_zgloszenia_pomiar_min
         self.zapytania: list[str] = []
 
     async def fetch_all(self, sql, params=None):
         self.zapytania.append(sql)
         if "risk.killswitch_event" in sql:
             return list(self.zdarzenia)
+        if "risk.limit_usage" in sql:
+            return [{"engine": "crypto", "mode": "demo",
+                     "wiek_s": self.pomiar_wiek_s, "nigdy": self.pomiar_nigdy,
+                     "status": "running", "puls_silnika_min": 1,
+                     "puls_dozorcy_min": 0}]
         if "notify.notification" in sql:
             # Agregat po zbiorze pustym oddaje wiersz z NULL-em, a nie zero
             # wierszy - i czujka musi umiec odczytac wlasnie to.
+            if "risk.pomiar_zamilkl" in sql:
+                return [{"od_zgloszenia_min": self.od_zgloszenia_pomiar_min}]
             return [{"od_zgloszenia_min": self.od_zgloszenia_min}]
         if 'app."user"' in sql:
             return [{"id": u} for u in self.odbiorcy]
@@ -230,8 +248,12 @@ def test_czujka_pyta_o_WIEK_ostatniego_zgloszenia_a_nie_o_jego_ISTNIENIE():
     """
     a = AtrapaBazy([zdarzenie(237)], od_zgloszenia_min=60)
     uruchom(a)
-    pytanie = [s for s in a.zapytania if "notify.notification" in s]
-    assert pytanie, "czujka nie pyta o historię powiadomień"
+    # WYRAZNIE o zapytanie kill-switcha: od czasu dolozenia czujki ciszy pomiaru
+    # przebieg zadaje DWA pytania do notify.notification i `[0]` trafialoby
+    # w to drugie - test przechodzilby, mierzac nie to, co opisuje.
+    pytanie = [s for s in a.zapytania
+               if "notify.notification" in s and "killswitch.triggered" in s]
+    assert pytanie, "czujka nie pyta o historię powiadomień o kill-switchu"
     assert "max(created_at)" in pytanie[0], \
         "bez wieku ostatniego zgłoszenia rytm przypominania nie ma z czego wyjść"
 
