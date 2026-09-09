@@ -43,6 +43,21 @@ NIEODROZNIALNA od spokoju. Dlatego dryf ma tutaj drugi, niezalezny tor:
 tylko odpowiada na inne pytanie: nie "czy sie zmienilo", a "czy nadal jest zle".
 Ma wlasny prog, wlasny warunek utrzymywania sie i wlasny rytm przypominania -
 patrz komentarz przy DRYF_TRWALY_PROG.
+
+TEN SAM WZORZEC ZLAPAL POTEM KILL-SWITCHA - I TAM BYL GROZNIEJSZY
+
+Tlumienie w `sprawdz_ryzyko` brzmialo "istnieje juz powiadomienie mlodsze niz
+`triggered_at`", a ten warunek raz spelniony jest spelniony na zawsze, bo
+`triggered_at` sie nie zmienia. Aktywny bezpiecznik zglaszal sie wiec RAZ,
+a potem czujka milczala - przy czym tu stan trwale zly nie znaczyl "model
+handluje na odjechanym rozkladzie", tylko "system w ogole nie handluje".
+
+Odpowiedz jest dwutorowa i kazdy tor odpowiada na inne pytanie: rytm
+przypominania rosnacy z wiekiem zdarzenia (`ocen_kill_switch`, komentarz przy
+KS_PRZYPOMNIENIE_H) mowi, ze cos sie stalo, a kod wyjscia zadania mowi, w jakim
+STANIE jest system - i jest niezerowy przez caly czas blokady, takze w oknach
+ciszy. Powiadomienie da sie przespac i da sie zgubic; `kubectl get jobs`
+pokazuje stan kazdemu, kto spojrzy, i nie wymaga, zeby ktos pamietal.
 """
 from __future__ import annotations
 
@@ -386,6 +401,95 @@ async def sprawdz_zywotnosc(fetch_all, notify, sucho: bool = False,
     return 1
 
 
+# ------------------------------------------------------- czujka kill-switcha
+#
+# Rytm przypominania o AKTYWNYM kill-switchu. NAJWAZNIEJSZA LICZBA W TEJ CZUJCE.
+#
+# Do 2026-09-09 rytmu nie bylo wcale. Tlumienie brzmialo "istnieje juz
+# powiadomienie mlodsze niz `triggered_at`", a ten warunek, raz spelniony, jest
+# spelniony NA ZAWSZE - bo `triggered_at` sie nie zmienia. Pierwsze zgloszenie
+# szlo, a po nim zapadala cisza bez konca.
+#
+# Zmierzone na produkcji: zdarzenie z 03:20 blokowalo wejscia czwarta godzine,
+# czujka je widziala, wypisywala "(juz zgloszone — cisza)" i zadanie konczylo
+# sie POWODZENIEM. To ten sam wzorzec, ktory kosztowal ten projekt tygodnie
+# ciszy przy dryfie cech: regula "zglaszaj ZMIANE" nie widzi STANU, ktory stoi,
+# a stan stojacy jest NIEODROZNIALNY od spokoju.
+#
+# Zniesienie tlumienia nie jest jednak naprawa. Zadanie chodzi co 10 minut
+# (values.yaml, zywotnoscCron.schedule), wiec "zglaszaj zawsze" znaczy szesc
+# powiadomien na godzine o rzeczy, ktora sie nie zmienia - a powiadomienie,
+# ktore przychodzi zawsze, przestaje cokolwiek znaczyc dokladnie tak samo jak
+# cisza. Dlatego odstep ROSNIE z wiekiem zdarzenia, i to z dwoch roznych
+# powodow, bo przez pierwsza dobe pytanie jest inne niz pozniej:
+#
+#   * przez pierwsza dobe pytamy "czy ktos to w ogole zobaczyl". Szesc godzin
+#     to najkrotszy odstep, ktory nie powtarza sie dwa razy w ciagu jednej nocy,
+#     a jednoczesnie gwarantuje, ze zdarzenie ze srodka nocy dostanie
+#     przypomnienie rano - wlasciciel ma nie klikac w nocy;
+#   * pozniej pytamy juz tylko "czy ktos o tym pamieta". Stan jest znany,
+#     zwolnienie `min_equity` jest RECZNE z zalozenia, a decyzja handlowa moze
+#     trwac. Doba to ten sam rytm, ktorym czujka delistingu przypomina
+#     o ZAMROZONYM KAPITALE, i z tego samego powodu: problem jest problemem
+#     codziennie, az do zamkniecia.
+#
+# Rytm NIE zastepuje kodu wyjscia i nie moze go zastapic. Powiadomienie idzie
+# kanalem, ktory potrafi zawiesc po cichu, i opisuje ZDARZENIE; kod wyjscia
+# widzi monitoring klastra i opisuje STAN - patrz komentarz na koncu
+# `sprawdz_ryzyko`.
+KS_PRZYPOMNIENIE_H = 6
+KS_PRZYPOMNIENIE_DLUGIE_H = 24
+
+# Od kiedy przypominamy rzadziej. Doba - bo to granica miedzy "moglo umknac"
+# a "jest znane": kill-switch nierozwiazany po calym dniu nie rozwiaze sie
+# szybciej dlatego, ze zapytamy o niego cztery razy czesciej. Od tej chwili
+# wartosc przypomnienia spada, a koszt (nauka odklikiwania) rosnie.
+KS_RYTM_ROSNIE_PO_H = 24
+
+
+def odstep_przypomnienia_ks(wiek_min: float) -> int:
+    """Co ile godzin przypominac o kill-switchu w tym wieku. CZYSTA FUNKCJA.
+
+    Wydzielona, bo potrzebuja jej dwie sciezki: werdykt (czy zglaszac) i log
+    ciszy (dlaczego nie zglaszamy). Druga kopia tej liczby w komunikacie
+    rozjechalaby sie z pierwsza przy pierwszej zmianie progu, a rozjazd byl by
+    widoczny wylacznie dla kogos, kto porownalby log z zachowaniem.
+    """
+    return (KS_PRZYPOMNIENIE_H if wiek_min < KS_RYTM_ROSNIE_PO_H * 60
+            else KS_PRZYPOMNIENIE_DLUGIE_H)
+
+
+def ocen_kill_switch(wiek_min: float,
+                     od_zgloszenia_min: float | None) -> dict | None:
+    """Czy o aktywnym kill-switchu wypada sie TERAZ odezwac. CZYSTA FUNKCJA.
+
+    `wiek_min` to czas od `triggered_at`; `od_zgloszenia_min` - czas od
+    OSTATNIEGO powiadomienia `killswitch.triggered` wyslanego po tym zdarzeniu,
+    albo None, gdy nie poszlo jeszcze zadne. Oba w minutach i oba liczone
+    zegarem bazy: drugi zegar, w Pythonie, rozjechalby sie z pierwszym i rytm
+    zalezalby od tego, ktory pod akurat wstal.
+
+    Zwraca None, gdy nalezy milczec. TO NIE ZNACZY "wszystko dobrze": kod
+    wyjscia czujki zostaje niezerowy tak dlugo, jak zdarzenie jest aktywne.
+    Cisza dotyczy wylacznie kanalu powiadomien.
+    """
+    odstep_h = odstep_przypomnienia_ks(wiek_min)
+
+    if od_zgloszenia_min is None:
+        # Nowe zdarzenie idzie NATYCHMIAST, bez wzgledu na rytm. Kill-switch
+        # zatrzymal handel i to jest jedyny moment, w ktorym powiadomienie
+        # niesie informacje, a nie przypomnienie.
+        return {"powod": "kill-switch zadziałał", "pierwsze": True,
+                "odstep_h": odstep_h}
+
+    if od_zgloszenia_min < odstep_h * 60:
+        return None
+
+    return {"powod": (f"kill-switch NADAL aktywny — {wiek_min / 60:.0f} h bez "
+                      f"zwolnienia"),
+            "pierwsze": False, "odstep_h": odstep_h}
+
+
 async def sprawdz_ryzyko(fetch_all, notify, sucho: bool = False) -> int:
     """Czy kill-switch zadzialal i nikt sie o tym nie dowiedzial.
 
@@ -405,9 +509,17 @@ async def sprawdz_ryzyko(fetch_all, notify, sucho: bool = False) -> int:
     NA STALE - byla widoczna wylacznie dla kogos, kto zajrzalby do
     risk.killswitch_event.
 
-    Tlumienie jak przy zywotnosci: sprawdzamy, czy powiadomienie poszlo juz po
-    `triggered_at`. Zdarzenie zwolnione (released_at) pomijamy - problem zostal
-    obsluzony przez czlowieka.
+    DWA NIEZALEZNE SYGNALY, BO KAZDY Z NICH ODPOWIADA NA INNE PYTANIE
+
+      * powiadomienie mowi, ze COS SIE STALO. Idzie raz przy zadzialaniu,
+        a potem w rytmie rosnacym z wiekiem zdarzenia (`ocen_kill_switch`) -
+        bo alarm powtarzany co dziesiec minut uczy sie odklikiwac;
+      * kod wyjscia mowi, w JAKIM STANIE JEST SYSTEM. Jest niezerowy przez caly
+        czas trwania blokady, takze w oknach ciszy powiadomien.
+
+    Zdarzenie zwolnione (`released_at`) pomijamy w calosci - problem zostal
+    obsluzony przez czlowieka, a powtarzanie alarmu o nim nauczyloby ignorowac
+    alarm o nastepnym.
     """
     zdarzenia = await fetch_all(
         "SELECT k.id, k.engine::text AS engine, k.mode::text AS mode, k.reason,"
@@ -421,36 +533,91 @@ async def sprawdz_ryzyko(fetch_all, notify, sucho: bool = False) -> int:
         return 0
 
     odbiorcy = await fetch_all('SELECT id FROM app."user" WHERE is_active')
-    nowe = 0
     for z in zdarzenia:
+        wiek_min = float(z["wiek_min"])
         print(f"  KILL-SWITCH {z['engine']}/{z['mode']}: {z['reason']} "
-              f"({z['wiek_min']:.0f} min temu)")
-        juz = await fetch_all(
-            "SELECT 1 FROM notify.notification WHERE event_code = 'killswitch.triggered'"
-            " AND engine::text = %s AND created_at > %s LIMIT 1",
+              f"({wiek_min:.0f} min temu)")
+
+        # WIEK ostatniego zgloszenia, a nie sam fakt jego istnienia. Warunek
+        # "istnieje powiadomienie mlodsze niz triggered_at" byl prawdziwy na
+        # zawsze od pierwszego wyslania - i to on produkowal cisze bez konca.
+        # `max(...)` po zbiorze pustym daje NULL, wiec zapytanie ma jeden ksztalt
+        # w obu przypadkach i nie ma tu drugiej sciezki do rozjechania.
+        ostatnie = await fetch_all(
+            "SELECT round(extract(epoch from (now() - max(created_at)))/60)"
+            "         AS od_zgloszenia_min"
+            " FROM notify.notification"
+            " WHERE event_code = 'killswitch.triggered'"
+            "   AND engine::text = %s AND created_at > %s",
             (z["engine"], z["triggered_at"]))
-        if juz:
-            print("    (już zgłoszone — cisza)")
+        od_min = ostatnie[0]["od_zgloszenia_min"] if ostatnie else None
+        od_min = None if od_min is None else float(od_min)
+
+        werdykt = ocen_kill_switch(wiek_min, od_min)
+        if werdykt is None:
+            # Cisza jest wynikiem, wiec musi byc widoczna w logu razem
+            # z powodem ORAZ z jawnym zastrzezeniem, ze nie jest zgoda na stan.
+            # Inaczej nie da sie odroznic czujki, ktora milczy z rytmu, od
+            # czujki, ktora zamilkla na dobre - a to jest dokladnie ten blad,
+            # ktory ta zmiana naprawia.
+            print(f"    (zgłoszone {od_min:.0f} min temu, przypomnienie co "
+                  f"{odstep_przypomnienia_ks(wiek_min)} h — cisza w kanale "
+                  f"powiadomień, kod wyjścia zostaje niezerowy)")
             continue
-        nowe += 1
+
         if sucho:
+            print(f"    {werdykt['powod']} — tryb suchy, powiadomienie nie wysyłane.")
             continue
-        tresc = (f"{z['reason']}\n\nSilnik NIE WEJDZIE w żadną pozycję do czasu "
-                 f"ręcznego zwolnienia — kill-switch nie wygasa sam, bo automatyczne "
-                 f"wznowienie po obsunięciu to najprostsza droga do powtórzenia tej "
-                 f"samej straty.\n\nZwolnienie: zakładka Ryzyko w interfejsie.")
+
+        godzin = wiek_min / 60
+        if werdykt["pierwsze"]:
+            tytul = f"Kill-switch zadziałał ({z['engine']})"
+            wstep = ""
+        else:
+            tytul = (f"Kill-switch NADAL aktywny ({z['engine']}) — "
+                     f"{godzin:.0f} h bez zwolnienia")
+            # PRZYPOMNIENIE MA SIE PRZEDSTAWIC. Powtorka nieodrozialna od nowego
+            # alarmu kaze odbiorcy sprawdzac od zera, czy to nie druga awaria.
+            wstep = (f"To PRZYPOMNIENIE, nie nowe zdarzenie: handel stoi od "
+                     f"{godzin:.0f} h. Kolejne za {werdykt['odstep_h']} h, "
+                     f"dopóki kill-switch nie zostanie zwolniony.\n\n")
+        tresc = (f"{wstep}{z['reason']}\n\nSilnik NIE WEJDZIE w żadną pozycję do "
+                 f"czasu ręcznego zwolnienia — kill-switch nie wygasa sam, bo "
+                 f"automatyczne wznowienie po obsunięciu to najprostsza droga do "
+                 f"powtórzenia tej samej straty.\n\nZwolnienie: zakładka Ryzyko "
+                 f"w interfejsie.")
         for u in odbiorcy:
-            await notify(u["id"], "killswitch.triggered",
-                         f"Kill-switch zadziałał ({z['engine']})", tresc,
+            await notify(u["id"], "killswitch.triggered", tytul, tresc,
                          engine=z["engine"], severity="critical",
-                         data={"reason": z["reason"], "event_id": z["id"]})
+                         data={"reason": z["reason"], "event_id": z["id"],
+                               "wiek_min": wiek_min,
+                               "przypomnienie": not werdykt["pierwsze"],
+                               "odstep_h": werdykt["odstep_h"]})
         print(f"    powiadomiono: {len(odbiorcy)} odbiorców")
 
-    if sucho and nowe:
-        print("Tryb suchy — powiadomienie nie wysyłane.")
-    # Kod niezerowy tylko przy NOWYM zdarzeniu. Kill-switch czekajacy na
-    # zwolnienie jest stanem znanym, a nie powtarzajaca sie awaria zadania.
-    return 1 if nowe else 0
+    # KOD WYJSCIA MOWI O STANIE, A NIE O ZDARZENIU. Niezerowy tak dlugo, jak
+    # istnieje niezwolniony kill-switch - takze w oknach ciszy powiadomien.
+    #
+    # Poprzednia wersja zwracala 1 wylacznie przy NOWYM zdarzeniu, z uzasadnieniem
+    # "stan znany i czekajacy na reakcje nie moze malowac `kubectl get jobs` na
+    # czerwono, bo wtedy czerwony przestaje cokolwiek znaczyc". Ten argument jest
+    # sluszny przy dryfie cech i tam zostaje: tam HANDEL IDZIE DALEJ, wiec
+    # czerwone zadanie opisywaloby system, ktory dziala, i faktycznie uczyloby
+    # ignorowac czerwien.
+    #
+    # Przy kill-switchu jest dokladnie odwrotnie: system JEST ZATRZYMANY.
+    # Czerwone zadanie nie jest wtedy szumem, tylko jedynym prawdziwym opisem
+    # stanu - i gasnie samo w chwili zwolnienia bezpiecznika, bez zadnej
+    # dodatkowej czynnosci. Zmierzone na produkcji 2026-09-09: przy zdarzeniu
+    # blokujacym wejscia od czterech godzin `trader-zywotnosc` konczylo sie
+    # POWODZENIEM, czyli monitoring klastra meldowal zdrowie zatrzymanego
+    # systemu.
+    #
+    # To jest tez jedyny z dwoch sygnalow, ktory NIE WYMAGA, ZEBY CZLOWIEK
+    # PAMIETAL. Powiadomienie mozna przespac i mozna je zgubic - kanal potrafi
+    # zawiesc po cichu. `kubectl get jobs` pokazuje stan za kazdym razem, gdy
+    # ktos spojrzy, i pokazuje go tak dlugo, jak stan trwa.
+    return 1
 
 
 # Ile moze minac od ostatniej udanej kopii, zanim uznamy to za problem.
@@ -1319,7 +1486,9 @@ async def main() -> int:
                          "ZOSTAL - stan trwaly, ktorego 'stan-nauki' z definicji "
                          "nie widzi, bo tam zdarzeniem jest ZMIANA; "
                          "zywotnosc: czy silniki bija; "
-                         "ryzyko: czy kill-switch zadzialal; "
+                         "ryzyko: czy kill-switch zadzialal i CZY NADAL JEST "
+                         "AKTYWNY - kod wyjscia jest niezerowy przez caly czas "
+                         "blokady, nie tylko przy nowym zdarzeniu; "
                          "kopie: czy jest swieza kopia zapasowa; "
                          "swiezosc: czy dane, na ktorych silnik decyduje, "
                          "nie sa przestarzale; "

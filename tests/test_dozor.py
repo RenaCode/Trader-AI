@@ -160,19 +160,27 @@ def test_kanaly_makro_zostaja_przy_filtrze_silnika():
 
 
 def _cialo(nazwa: str) -> str:
-    """Ciało jednej funkcji z dozor.py.
+    """Ciało jednej funkcji z dozor.py — do NASTĘPNEJ konstrukcji najwyższego
+    poziomu, czyli do pierwszego wiersza zaczynającego się od pierwszej kolumny.
 
     Cięcie „od tej funkcji do `async def main`" było kruche: wstawienie nowej
     funkcji pomiędzy nie psuło kodu, tylko test — czyli zgłaszało fałszywy
-    problem tam, gdzie go nie było.
+    problem tam, gdzie go nie było. Cięcie do następnej KORUTYNY było kruche tak
+    samo, tylko ciszej: dopisanie stałej albo zwykłej funkcji tuż za sprawdzaną
+    czujką doklejało ją do jej ciała, więc asercja o OSTATNIEJ instrukcji
+    przestawała cokolwiek znaczyć — a test dalej przechodził.
     """
+    import re
     from pathlib import Path
 
     zrodlo = Path("services/engine/dozor.py").read_text()
     start = zrodlo.index(f"async def {nazwa}")
-    reszta = zrodlo[start + 1:]
-    kolejna = reszta.find("\nasync def ")
-    return reszta[:kolejna] if kolejna >= 0 else reszta
+    reszta = zrodlo[start:]
+    # Naglowek moze byc lamany, ale jego dalsze wiersze sa wciete - wiec pierwszy
+    # wiersz od pierwszej kolumny po naglowku to juz cos poza ta funkcja.
+    po_naglowku = reszta.index("\n") + 1
+    kolejna = re.search(r"\n(?=\S)", reszta[po_naglowku:])
+    return reszta[:po_naglowku + kolejna.start()] if kolejna else reszta
 
 
 # --- czujka zywotnosci silnikow --------------------------------------------
@@ -232,11 +240,22 @@ def test_czujka_ryzyka_tlumi_powtorne_zgloszenie():
     assert "created_at > %s" in cialo
 
 
-def test_czujka_ryzyka_alarmuje_tylko_o_NOWYM_zdarzeniu():
-    """Kill-switch czekający na zwolnienie jest stanem znanym, a nie
-    powtarzającą się awarią zadania — inaczej `kubectl get jobs` pokazywałby
-    porażkę co dziesięć minut aż do ręcznej interwencji."""
-    assert "return 1 if nowe else 0" in _cialo("sprawdz_ryzyko")
+def test_czujka_ryzyka_konczy_sie_kodem_niezerowym_PRZEZ_CALY_CZAS_BLOKADY():
+    """Kod wyjścia opisuje STAN, a nie zdarzenie.
+
+    Poprzednia wersja (`return 1 if nowe else 0`) zwracała zero, gdy tłumienie
+    powiadomień akurat milczało — więc zatrzymany handel meldował `Complete`.
+    Argument „stan znany nie może malować `kubectl get jobs` na czerwono" jest
+    słuszny przy dryfie, gdzie HANDEL IDZIE DALEJ; przy kill-switchu czerwień
+    jest jedynym prawdziwym opisem systemu i gaśnie sama w chwili zwolnienia.
+
+    Reszta tej czujki — rytm przypominania i cała ścieżka wysyłki — siedzi
+    w `test_kill_switch_widocznosc.py`.
+    """
+    ogon = _cialo("sprawdz_ryzyko")
+    assert "return 1 if nowe else 0" not in ogon
+    assert ogon.rstrip().endswith("return 1"), \
+        "czujka kończy się zerem mimo aktywnego kill-switcha"
 
 
 # --- czujka kopii zapasowych ------------------------------------------------
