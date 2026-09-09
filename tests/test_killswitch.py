@@ -352,14 +352,27 @@ def test_proba_pozarowa_NIE_udaje_wznowienia_automatycznego():
     odpowiedź wymaga czytania treści notatki, czyli flaga przestaje cokolwiek
     rozstrzygać. Przy próbie dobowej takich wierszy przybywa jeden dziennie
     i po miesiącu zdominowałyby statystykę wznowień automatycznych.
+
+    ZWALNIAJĄCYM NIE JEST JEDNAK CZŁOWIEK, więc `released_by` zostaje puste.
+    Ta kolumna to bigint z kluczem obcym do app."user" — mieści się w niej
+    identyfikator konta, nie nazwa procesu. Źródło zwolnienia rozstrzyga trójka
+    kolumn: `released_auto` prawdziwe to usługa wznowienia, fałszywe z podanym
+    `released_by` to człowiek, fałszywe bez niego to właśnie próba.
     """
     from pathlib import Path
 
     zrodlo = Path("services/engine/proba_killswitcha.py").read_text(encoding="utf-8")
     kod = "\n".join(w for w in zrodlo.splitlines()
                     if not w.lstrip().startswith("#"))
-    fragment = kod.split("UPDATE risk.killswitch_event")[1].split("WHERE id")[0]
+    ogon = kod.split("UPDATE risk.killswitch_event")[1]
+    fragment = ogon.split("WHERE id")[0]
     assert "released_auto = false" in fragment
-    assert "released_by" in fragment, (
-        "zwalniający musi być nazwany z imienia — inaczej wiersz mówi tylko, "
-        "że ktoś zwolnił, a nie kto")
+    assert "released_by" not in fragment, (
+        "próba zapisuje `released_by` — a to bigint wskazujący na konto "
+        "człowieka. Napis nie wejdzie tam wcale, a ID właściciela byłoby "
+        "fałszem: interfejs pokazuje ten login jako tego, kto pozwolił "
+        "systemowi znowu ryzykować pieniądze")
+    # Notatka jest już w argumentach wywołania, za treścią zapytania.
+    assert "PRÓBA POŻAROWA" in ogon[:800], (
+        "notatka musi nazywać źródło zwolnienia — bez `released_by` to ona "
+        "jest jedynym miejscem, w którym stoi, co to było")

@@ -154,14 +154,33 @@ async def przeprowadz(fetch_all, fetch_one, execute, engine: str = "crypto",
         # rozstrzygac. Przy dobowej probie takich wierszy przybywa jeden dziennie
         # i po miesiacu to one zdominowalyby statystyke wznowien automatycznych.
         #
-        # Proba sprzata wiec po sobie jako ZWALNIAJACY NAZWANY Z IMIENIA, tak
-        # samo jak zrobilby to czlowiek w interfejsie.
+        # Proba sprzata wiec po sobie jako zwolnienie NIEAUTOMATYCZNE.
+        #
+        # ALE ZWALNIAJACYM NIE JEST CZLOWIEK, wiec `released_by` zostaje puste.
+        # Ta kolumna jest typu bigint z kluczem obcym do app."user" (migracja
+        # 0007) - miesci sie w niej wylacznie IDENTYFIKATOR KONTA, nie nazwa
+        # procesu. Wpisanie tam napisu wywraca zapytanie na wiazaniu parametru,
+        # a wpisanie ID wlasciciela byloby falszem w jedynym miejscu, ktore
+        # odpowiada na pytanie "kto pozwolil systemowi znowu ryzykowac
+        # pieniadze": interfejs pokazuje login wziety wlasnie stad
+        # (services/api/routers/risk.py). Proba nie ma zreszta nadania na te
+        # kolumne - 0034 daje jej UPDATE tylko na (released_at, released_auto,
+        # release_note) - i to jest decyzja, a nie przeoczenie: proba nie jest
+        # osoba i nie ma jej czym byc.
+        #
+        # Zrodlo zwolnienia rozstrzyga wiec TROJKA KOLUMN, bez czytania notatki:
+        #
+        #   released_auto = true                       -> wznowila sie uslugą
+        #                                                 wznowienia (system SAM)
+        #   released_auto = false, released_by = ID    -> zwolnil czlowiek
+        #   released_auto = false, released_by = NULL  -> zwolnila proba pozarowa
+        #
+        # Notatka niesie reszte: co to bylo i skad przyszlo.
         await execute(
             "UPDATE risk.killswitch_event SET released_at = now(),"
-            " released_auto = false, released_by = %s, release_note = %s"
+            " released_auto = false, release_note = %s"
             " WHERE id = %s",
-            ("proba-pozarowa",
-             "PRÓBA POŻAROWA — zdarzenie wywołane celowo przez "
+            ("PRÓBA POŻAROWA — zdarzenie wywołane celowo przez "
              "services/engine/proba_killswitcha.py", z["id"]))
         print("\n=== PRÓBA ZALICZONA: wszystkie ogniwa zadziałały ===")
         return 0

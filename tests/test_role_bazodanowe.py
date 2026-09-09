@@ -365,6 +365,59 @@ def test_proba_NIE_MOZE_wstawic_wlasnego_zatrzymania(nadania):
     assert "INSERT" not in nadania.na_tabeli("trader_proba", "risk.killswitch_event")
 
 
+def _kolumny_zapisywane(plik: Path, tabela: str) -> set[str]:
+    """Kolumny, które kod TEGO pliku ustawia w `UPDATE <tabela> SET ...`.
+
+    Przez AST, nie przez czytanie pliku jako tekstu: zapytania są w źródle
+    posklejane z kilku literałów, więc w surowym tekście między `SET` a nazwą
+    kolumny stoją cudzysłowy i wcięcia. Parser Pythona skleja je za nas.
+    """
+    import ast as _ast
+
+    kolumny: set[str] = set()
+    for wezel in _ast.walk(_ast.parse(plik.read_text(encoding="utf-8"))):
+        if not (isinstance(wezel, _ast.Constant) and isinstance(wezel.value, str)):
+            continue
+        for m in re.finditer(rf"UPDATE\s+{re.escape(tabela)}\s+SET\s+(.*?)"
+                             rf"(?:\s+WHERE\b|$)", wezel.value, re.I | re.S):
+            kolumny |= {k.strip('" ') for k in
+                        re.findall(r"([\w\"]+)\s*=", m.group(1))}
+    return kolumny
+
+
+def test_proba_zapisuje_WYLACZNIE_kolumny_na_ktore_ma_nadanie(nadania):
+    """Klasa błędu, nie jedna literówka: kod pisze do kolumny, której rola nie
+    ma prawa ruszyć.
+
+    Rozdział uprawnień z 0034 jest tu ostrzejszy niż zdrowy rozsądek autora
+    zapytania — i o to chodzi. Ale nadanie i kod są w dwóch różnych plikach,
+    a Postgres mówi o rozjeździe dopiero przy WYKONANIU, czyli w środku
+    prawdziwego zadziałania kill-switcha. Zapytanie odrzucone w tym miejscu
+    zostawia zdarzenie NIEZWOLNIONE, czyli zatrzymany handel: próba pożarowa
+    sama staje się awarią, przed którą miała ostrzegać.
+
+    `released_by` jest tu kluczowe. To bigint z kluczem obcym do app."user";
+    nadanie go pomija świadomie, bo próba nie jest osobą i nie ma ID, którym
+    mogłaby się podpisać bez kłamstwa.
+    """
+    zapisywane = _kolumny_zapisywane(
+        KORZEN / "services" / "engine" / "proba_killswitcha.py",
+        "risk.killswitch_event")
+    assert zapisywane, "nie znaleziono w próbie żadnego zapisu do zdarzenia"
+    wolno = nadania.kolumnowe("trader_proba", "risk.killswitch_event", "UPDATE")
+    assert zapisywane <= wolno, (
+        f"próba zapisuje {sorted(zapisywane - wolno)}, a 0034 daje jej "
+        f"UPDATE tylko na {sorted(wolno)} — zapytanie padnie na produkcji "
+        f"w środku zadziałania kill-switcha")
+
+    # To samo dla limitu: podniesienie progu i jego przywrócenie.
+    prog = _kolumny_zapisywane(
+        KORZEN / "services" / "engine" / "proba_killswitcha.py", "risk.limit_def")
+    assert prog and prog <= nadania.kolumnowe(
+        "trader_proba", "risk.limit_def", "UPDATE"), \
+        f"próba zapisuje w limicie {sorted(prog)} — poza nadaniem"
+
+
 # ---------------------------------------------------------------- rola API
 
 def test_api_zwalnia_recznie_ale_NIE_udaje_automatu(nadania):
