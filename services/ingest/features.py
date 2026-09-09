@@ -112,6 +112,10 @@ MIN_UNIVERSE = 8
 # niz o rynku. Przy tempie ~45 snapshotow na godzine swieca 4h ma ich ~180.
 MIN_SNAPSHOTS = 20
 
+# Ponizej tylu obserwacji w oknie odchylenie standardowe opisuje glownie samo
+# okno, a nie szereg - ten sam prog co w `zscore()` dla cech cenowych.
+MIN_PROBEK_Z = 20
+
 # rola -> (code_ref, szablon opisu). {okno} podstawia sie z etykiet horyzontu.
 ROLES = {
     "rsi":         ("features.momentum:rsi",
@@ -547,6 +551,26 @@ def compute_funding(cur, instrument_id: int, h: Horizon, feat_ids: dict[str, int
     wykonywala 8 400 osobnych wyszukiwan na instrument po hipertabeli i zajmowala
     ponad dwie minuty na instrument; to samo przejsciem scalajacym trwa ulamek
     sekundy.
+
+    OKNO Z-SCORE ROZGRZEWAMY HISTORIA, tak samo jak `compute_prices` rozgrzewa
+    RSI i EMA. Bez tego odchylenie liczylo sie WYLACZNIE ze swiec objetych
+    biezacym przebiegiem, a nie z 30 dni, ktore cecha deklaruje w swoim opisie -
+    i skutek zalezal od dlugosci okna przebiegu, nie od rynku:
+
+      * Cykliczny worker liczy okno JEDNEJ DOBY (features.py: `since = now - 1
+        dzien` bez --backfill). Na swiecy 4-godzinnej to 6 punktow siatki, wiec
+        `len(hist) >= MIN_PROBEK_Z` nie zachodzilo NIGDY i `funding_z` nie
+        powstawal w ogole. Cecha pojawiala sie w bazie tylko po recznym
+        `--backfill`, ktory dopisywal ja WSTECZ z datowaniem `znane_od` - wiec
+        wygladala na znana o czasie, choc w chwili decyzji wiersza nie bylo.
+        Sygnal `funding_carry` - jedyny w zestawie niepochodzacy z ceny - wypadal
+        po cichu z kazdej decyzji, bo `f.get("funding_z")` zwracalo None.
+        Zmierzone na produkcji 2026-09-08: w 48 h ZERO decyzji z `funding_z`
+        w migawce, przy komplecie wierszy `funding_z__4h` w `feat.feature_value`.
+      * Na swiecy 1-godzinnej doba to 24 punkty, wiec prog przechodzil - ale
+        z-score liczyl sie z okna 20-godzinnego zamiast 30-dniowego. Cecha
+        istniala i znaczyla co innego, niz mowi jej definicja. To gorszy
+        przypadek niz brak: brak widac.
     """
     cur.execute("SELECT (meta->>'funding_from')::int AS src FROM ref.instrument WHERE id=%s",
                 (instrument_id,))
@@ -555,46 +579,51 @@ def compute_funding(cur, instrument_id: int, h: Horizon, feat_ids: dict[str, int
     if not src:
         return 0
 
-    # Zapas przed poczatkiem okresu, zeby pierwsza swieca tez miala czym byc
-    # wypelniona (stawka ogloszona jeszcze przed `since`).
+    step = timedelta(minutes=h.bar_minutes)
+    # Okno z-score: 30 dni wyrazone w swiecach tego horyzontu.
+    win = max(MIN_PROBEK_Z, 30 * 1440 // h.bar_minutes)
+    rozgrzewka = step * win
+
+    # Zapas przed poczatkiem okresu: rozgrzewka okna z-score plus dwie doby na
+    # to, zeby pierwszy punkt siatki mial czym byc wypelniony (stawka ogloszona
+    # jeszcze przed nim - Bybit oglasza co 8 h).
     cur.execute(
         "SELECT event_time, rate FROM market.funding_rate"
         " WHERE instrument_id = %s AND event_time >= %s AND event_time <= %s"
         " ORDER BY event_time",
-        (src, since - timedelta(days=2), until),
+        (src, since - rozgrzewka - timedelta(days=2), until),
     )
     rates = [(r["event_time"], float(r["rate"])) for r in cur.fetchall()]
     if not rates:
         return 0
 
     # Siatka MUSI byc ta sama co dla cech cenowych - patrz na_siatce().
-    since = na_siatce(since, h)
-    until = na_siatce(until, h) - timedelta(minutes=h.bar_minutes)
-
-    step = timedelta(minutes=h.bar_minutes)
-    # Okno z-score: 30 dni wyrazone w swiecach tego horyzontu.
-    win = max(20, 30 * 1440 // h.bar_minutes)
+    od = na_siatce(since, h)                 # od tad ZAPISUJEMY
+    until = na_siatce(until, h) - step
 
     rows: list[tuple] = []
     hist: deque[float] = deque(maxlen=win)
     j = 0
     last: float | None = None
-    t = since
+    t = od - rozgrzewka                      # od tad tylko LICZYMY
     while t <= until:
         while j < len(rates) and rates[j][0] <= t:
             last = rates[j][1]
             j += 1
         if last is not None:
-            ingested = znane_od(t, h)
             hist.append(last)
-            rows.append((feat_ids["funding_rate"], instrument_id, t, last * 100, ingested))
-            if len(hist) >= 20:
-                mean = sum(hist) / len(hist)
-                sd = math.sqrt(sum((v - mean) ** 2 for v in hist) / len(hist))
-                if sd > 1e-12:
-                    z = (last - mean) / sd
-                    if math.isfinite(z):
-                        rows.append((feat_ids["funding_z"], instrument_id, t, z, ingested))
+            if t >= od:
+                ingested = znane_od(t, h)
+                rows.append((feat_ids["funding_rate"], instrument_id, t, last * 100,
+                             ingested))
+                if len(hist) >= MIN_PROBEK_Z:
+                    mean = sum(hist) / len(hist)
+                    sd = math.sqrt(sum((v - mean) ** 2 for v in hist) / len(hist))
+                    if sd > 1e-12:
+                        z = (last - mean) / sd
+                        if math.isfinite(z):
+                            rows.append((feat_ids["funding_z"], instrument_id, t, z,
+                                         ingested))
         t += step
 
     return insert_values(cur, rows)
@@ -621,6 +650,11 @@ def compute_positioning(cur, instrument_id: int, h: Horizon,
     z niego daty, nie zachowania. Porównujemy wobec POPRZEDNIEJ ŚWIECY tego
     horyzontu, a nie wobec poprzedniego odczytu godzinowego: inaczej cecha
     świecy czterogodzinnej opisywałaby jedną godzinę z czterech.
+
+    OKNO Z-SCORE ROZGRZEWAMY HISTORIĄ — z tego samego powodu i tym samym
+    sposobem co `compute_funding`; opis przyczyny jest tam. W skrócie: liczone
+    wyłącznie ze świec objętych bieżącym przebiegiem, `long_ratio_z` nie
+    powstawał w cyklicznym workerze ani razu, bo doba to sześć świec 4 h.
     """
     cur.execute("SELECT (meta->>'funding_from')::int AS src FROM ref.instrument WHERE id=%s",
                 (instrument_id,))
@@ -629,12 +663,16 @@ def compute_positioning(cur, instrument_id: int, h: Horizon,
     if not src:
         return 0
 
+    step = timedelta(minutes=h.bar_minutes)
+    win = max(MIN_PROBEK_Z, 30 * 1440 // h.bar_minutes)
+    rozgrzewka = step * win
+
     cur.execute(
         "SELECT event_time, long_ratio, open_interest FROM market.positioning"
         " WHERE instrument_id = %s AND event_time >= %s AND event_time <= %s"
         "   AND (long_ratio IS NOT NULL OR open_interest IS NOT NULL)"
         " ORDER BY event_time",
-        (src, since - timedelta(days=2), until),
+        (src, since - rozgrzewka - timedelta(days=2), until),
     )
     odczyty = [(r["event_time"],
                 float(r["long_ratio"]) if r["long_ratio"] is not None else None,
@@ -644,11 +682,8 @@ def compute_positioning(cur, instrument_id: int, h: Horizon,
         return 0
 
     # Siatka MUSI byc ta sama co dla cech cenowych - patrz na_siatce().
-    since = na_siatce(since, h)
-    until = na_siatce(until, h) - timedelta(minutes=h.bar_minutes)
-
-    step = timedelta(minutes=h.bar_minutes)
-    win = max(20, 30 * 1440 // h.bar_minutes)
+    od = na_siatce(since, h)                 # od tad ZAPISUJEMY
+    until = na_siatce(until, h) - step
 
     rows: list[tuple] = []
     hist: deque[float] = deque(maxlen=win)
@@ -656,7 +691,7 @@ def compute_positioning(cur, instrument_id: int, h: Horizon,
     udzial: float | None = None
     oi: float | None = None
     oi_poprzednie: float | None = None
-    t = since
+    t = od - rozgrzewka                      # od tad tylko LICZYMY
     while t <= until:
         while j < len(odczyty) and odczyty[j][0] <= t:
             # Każde źródło niesie się osobno: brak jednego w danej godzinie nie
@@ -670,17 +705,19 @@ def compute_positioning(cur, instrument_id: int, h: Horizon,
         ingested = znane_od(t, h)
         if udzial is not None:
             hist.append(udzial)
-            rows.append((feat_ids["long_ratio"], instrument_id, t, udzial * 100, ingested))
-            if len(hist) >= 20:
-                mean = sum(hist) / len(hist)
-                sd = math.sqrt(sum((v - mean) ** 2 for v in hist) / len(hist))
-                if sd > 1e-12:
-                    z = (udzial - mean) / sd
-                    if math.isfinite(z):
-                        rows.append((feat_ids["long_ratio_z"], instrument_id, t, z,
-                                     ingested))
+            if t >= od:
+                rows.append((feat_ids["long_ratio"], instrument_id, t, udzial * 100,
+                             ingested))
+                if len(hist) >= MIN_PROBEK_Z:
+                    mean = sum(hist) / len(hist)
+                    sd = math.sqrt(sum((v - mean) ** 2 for v in hist) / len(hist))
+                    if sd > 1e-12:
+                        z = (udzial - mean) / sd
+                        if math.isfinite(z):
+                            rows.append((feat_ids["long_ratio_z"], instrument_id, t, z,
+                                         ingested))
         if oi is not None:
-            if oi_poprzednie is not None and oi_poprzednie > 0:
+            if oi_poprzednie is not None and oi_poprzednie > 0 and t >= od:
                 zmiana = (oi / oi_poprzednie - 1.0) * 100
                 if math.isfinite(zmiana):
                     rows.append((feat_ids["oi_zmiana"], instrument_id, t, zmiana,
