@@ -75,6 +75,23 @@ EXIT_THRESHOLD = 0.12
 
 START_EQUITY = Decimal(str(START_EQUITY_WSPOLNY))
 
+# Powody bezczynnosci, po jednym na galaz wyboru akcji w `run_once`.
+#
+# KLUCZE SA WPISANE W SCHEMAT (migracja 0040 ma CHECK na dokladnie ten zbior),
+# wiec literowka konczy sie odrzuceniem INSERT-a przez baze, a nie cicho
+# zapisanym napisem, ktorego pozniej nikt nie policzy. Opisy sluza wylacznie
+# uzasadnieniu czytanemu przez czlowieka - zapytania analityczne maja chodzic
+# po kolumnie, nie po tekscie.
+OPIS_POWODU_HOLDU = {
+    "slaby_wynik": "Nie wchodzimy: |wynik| poniżej progu wejścia.",
+    "niska_pewnosc": "Nie wchodzimy: pewność poniżej progu.",
+    "short_niewykonalny": "Nie wchodzimy: sygnał na spadek, a na tym "
+                          "instrumencie nie da się zająć krótkiej pozycji.",
+    "trzyma_pozycje": "Trzymamy otwartą pozycję: sygnał nadal w jej stronę "
+                      "i powyżej progu wyjścia.",
+    "wstrzymanie_ryzykiem": "Nie wchodzimy: wejścia wstrzymane przez ryzyko.",
+}
+
 
 def ensure_signal_defs(cur, engine: str) -> dict[str, int]:
     ids = {}
@@ -199,6 +216,35 @@ def decided_for_bar(cur, engine: str, mode: str, instrument_id: int,
         " AND decided_at >= %s LIMIT 1",
         (engine, mode, instrument_id, okno_decyzji(bar_start, h)))
     return cur.fetchone() is not None
+
+
+# Ponizej tylu cech nie ma czego skladac w wynik: `evaluate()` dostalby wektor,
+# w ktorym wiekszosc wag nie ma czym sie odezwac. Stala byla wpisana wprost
+# w warunku, przez co komunikat o pominieciu nie mogl powiedziec, ILU cech
+# zabraklo - a to jest cala roznica miedzy "worker cech stoi" a "jedna cecha
+# sie nie liczy".
+MIN_CECH = 4
+
+
+def zapisz_pominiecie(cur, engine: str, mode: str, instrument_id: int,
+                      bar_start: datetime, powod: str, szczegol: str) -> None:
+    """POMINIECIE ZOSTAWIA SLAD. Patrz migracja 0041.
+
+    Instrument, ktory wypadl z przebiegu przed ocena, nie zostawial w bazie
+    NICZEGO - ani decyzji, ani informacji, ze decyzji miec nie mialo. Z zewnatrz
+    bylo to nieodroznialne od przestoju silnika i od instrumentu, ktory
+    rozwazono i odrzucono.
+
+    JEDEN WIERSZ NA (instrument, swieca, powod), nie jeden na przebieg: petla
+    budzi sie co 300 s, a swieca trwa 4 h, wiec bez klucza ten sam brak danych
+    zapisalby sie kilkadziesiat razy. `ON CONFLICT DO NOTHING` zostawia wiec
+    znacznik PIERWSZEGO wystapienia - czyli chwili, w ktorej problem sie zaczal.
+    """
+    cur.execute(
+        "INSERT INTO journal.pominiecie (engine, mode, instrument_id, bar_start,"
+        " powod, szczegol) VALUES (%s,%s,%s,%s,%s,%s)"
+        " ON CONFLICT (engine, mode, instrument_id, bar_start, powod) DO NOTHING",
+        (engine, mode, instrument_id, bar_start, powod, szczegol))
 
 
 def atr_percentile_80(cur, instrument_id: int, as_of: datetime,
@@ -501,7 +547,16 @@ def record_decision(cur, engine: str, mode: str, instrument_id: int, as_of: date
                     features: dict, verdict, rationale: str, contributions: list[dict],
                     signal_ids: dict[str, int], latency_ms: int,
                     model_version_id: int | None = None,
-                    pokrycie_sygnalow: float | None = None) -> int | None:
+                    pokrycie_sygnalow: float | None = None,
+                    powod_holdu: str | None = None,
+                    prog_wejscia: float | None = None,
+                    prog_wyjscia: float | None = None) -> int | None:
+    # PROGI ZAPISUJEMY PRZY DECYZJI, a nie zostawiamy ich w wersji modelu.
+    #
+    # Wersja modelu zyje krocej niz decyzja: purge_demo.py kasuje cala tabele
+    # learn.model_version, a journal.decision jest niemutowalna i wieczna. Bez
+    # tych dwoch liczb pytanie "czy ten wynik byl ponad progiem" traci
+    # odpowiedz w chwili, w ktorej ktos posprzata rejestr modeli.
     # model_version_id mowi, KTORA wersja modelu podjela te decyzje. Kolumna
     # istniala z kluczem obcym od migracji 0006, ale nikt jej nie wypelnial -
     # bo do tej pory petla nie uzywala zadnego modelu, wiec nie bylo czego
@@ -512,15 +567,16 @@ def record_decision(cur, engine: str, mode: str, instrument_id: int, as_of: date
         INSERT INTO journal.decision (engine, mode, instrument_id, decided_at, action,
             target_qty, target_price, confidence, regime, feature_snapshot,
             risk_verdict, risk_reason, rationale, rationale_model, latency_ms,
-            model_version_id, pokrycie_sygnalow)
-        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'reguły',%s,%s,%s)
+            model_version_id, pokrycie_sygnalow, powod_holdu,
+            prog_wejscia, prog_wyjscia)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'reguły',%s,%s,%s,%s,%s,%s)
         ON CONFLICT (engine, instrument_id, decided_at) DO NOTHING
         RETURNING id
         """,
         (engine, mode, instrument_id, as_of, action, qty, price, confidence, regime,
          json.dumps({k: round(v, 6) for k, v in features.items()}),
          verdict.verdict, verdict.reason, rationale, latency_ms, model_version_id,
-         pokrycie_sygnalow))
+         pokrycie_sygnalow, powod_holdu, prog_wejscia, prog_wyjscia))
     row = cur.fetchone()
     if not row:
         return None
@@ -1186,7 +1242,26 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
              # heartbeatu, bo poza tym stanu tego nie widac z zewnatrz w ogole:
              # od czasu renormalizacji wyniku (services/engine/signals.combine)
              # decyzja z trzech sygnalow ma te sama skale co decyzja z osmiu.
-             "niepelne_sygnaly": 0}
+             "niepelne_sygnaly": 0,
+             # ZERO TEZ JEST WYNIKIEM. Licznik byl wczesniej zakladany przez
+             # `stats.get(...) + 1`, wiec klucz pojawial sie w heartbeacie
+             # WYLACZNIE w cyklach, w ktorych byl niezerowy - a `detail` jest
+             # nadpisywany co przebieg (ON CONFLICT (engine) DO UPDATE). Brak
+             # klucza znaczyl wtedy jednoczesnie "zadnego shorta nie odrzucono"
+             # i "ten silnik w ogole tego nie liczy", czyli nie znaczyl nic.
+             "short_niewykonalny": 0,
+             # POMINIECIA Z ROZBICIEM NA POWOD. Obie te sciezki konczyly sie
+             # samym `continue`: instrument wypadal z przebiegu, nie zostawiajac
+             # ani wiersza, ani liczby. Tu odpowiadaja na pytanie "ile pominieto
+             # TERAZ i dlaczego"; na pytanie "co sie stalo WTEDY" odpowiada
+             # journal.pominiecie (0041), bo heartbeat ma `engine` w kluczu
+             # glownym i kazdy przebieg kasuje poprzedni.
+             "pominiete_bez_cech": 0, "pominiete_bez_ceny": 0,
+             # Rozmiar uniwersum decyzyjnego. Bez tej liczby przebieg na PUSTEJ
+             # liscie instrumentow - `tradeable` zdjete pomylkowo, migracja
+             # w polowie - wyglada w heartbeacie identycznie jak przebieg,
+             # w ktorym po prostu nie bylo czego robic: same zera.
+             "instrumenty": 0}
 
     # ROZSTRZYGNIECIE PLANOW IDZIE PRZED OCENA, nie po niej.
     #
@@ -1211,6 +1286,7 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
     cur.execute("SELECT id, symbol, kind, quote_ccy FROM ref.instrument WHERE engine=%s"
                 " AND active AND tradeable AND kind <> 'perp' ORDER BY symbol", (engine,))
     instrumenty = cur.fetchall()
+    stats["instrumenty"] = len(instrumenty)
 
     # IDENTYFIKATORY CECH DOPIERO TERAJ, bo cechy przekrojowe sa filtrowane
     # odciskiem uniwersum - a uniwersum znamy dopiero po tym zapytaniu.
@@ -1236,7 +1312,15 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
             stats["poza_swieca"] += 1
             continue
         features = latest_features(cur, iid, now, h, feature_ids)
-        if len(features) < 4:
+        if len(features) < MIN_CECH:
+            # SLAD ZANIM `continue`. Bez tego wiersza instrument znikal
+            # z przebiegu bezglosnie i z bazy nie dalo sie odroznic "pominiety
+            # z braku cech" od "silnik w ogole nie chodzil".
+            stats["pominiete_bez_cech"] += 1
+            zapisz_pominiecie(
+                cur, engine, mode, iid, bar_start, "za_malo_cech",
+                f"{len(features)} z wymaganych {MIN_CECH}: "
+                + (", ".join(sorted(features)) if features else "żadnej"))
             if verbose:
                 print(f"  {symbol:10s} pominięty — za mało cech ({len(features)})")
             continue
@@ -1272,6 +1356,18 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
                 print(f"  UWAGA {symbol}: brak domkniętej świecy {h.bar} "
                       f"{bar_start:%m-%d %H:%M} — cena z ostatniej minuty")
         if price is None:
+            # NAJCICHSZA ze wszystkich sciezek w tej petli: bez licznika, bez
+            # wiersza i bez komunikatu nawet przy `--verbose`. Instrument, dla
+            # ktorego gielda przestala oddawac ceny, wypadal z uniwersum
+            # decyzyjnego tak, ze nie bylo tego widac NIGDZIE.
+            stats["pominiete_bez_ceny"] += 1
+            zapisz_pominiecie(
+                cur, engine, mode, iid, bar_start, "brak_ceny",
+                f"brak świecy {h.bar} {bar_start:%Y-%m-%d %H:%M} "
+                f"i brak ceny minutowej na {now:%Y-%m-%d %H:%M}")
+            if verbose:
+                print(f"  {symbol:10s} pominięty — BRAK CENY "
+                      f"(świeca {h.bar} {bar_start:%m-%d %H:%M} i minutówka)")
             continue
         stats["rozwazone"] += 1
         regime, regime_conf = classify_regime(features, atr_percentile_80(cur, iid, now, h))
@@ -1292,6 +1388,16 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
                       "pokrycie": pokrycie,
                       "position": open_position(cur, engine, mode, iid)})
 
+    # SLAD POMINIEC ZATWIERDZAMY OD RAZU, nie razem z decyzjami.
+    #
+    # Drugi przebieg sklada zlecenia i wola gielde, wiec potrafi sie wywrocic.
+    # Gdyby wiersze pominiec czekaly na wspolny commit, wyjatek w drugim
+    # przebiegu kasowalby jedyny slad po tym, ze pierwszy przebieg cos odrzucil -
+    # czyli awaria zacieralaby dowod na inna awarie. Tu nie ma czego cofac:
+    # pominiecie JUZ zaszlo, niezaleznie od tego, co stanie sie dalej.
+    if stats["pominiete_bez_cech"] or stats["pominiete_bez_ceny"]:
+        conn.commit()
+
     # PRZEBIEG DRUGI: najpierw wyjscia (nie konkuruja o kapital i zwalniaja go),
     # potem wejscia w kolejnosci malejacej sily sygnalu.
     def priorytet(o):
@@ -1309,6 +1415,16 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
         position = ocena["position"]
 
         # --- wybor akcji ----------------------------------------------------
+        #
+        # KAZDA GALAZ KONCZACA SIE HOLDEM USTAWIA `powod_holdu`.
+        #
+        # Bez tego dziennik zapisywal 782 holdy na 818 decyzji i o zadnym z nich
+        # nie mowil, dlaczego. Najgorszy przypadek: wynik -0,644 przy progu
+        # 0,278 - dwa i pol raza ponad progiem - z werdyktem ryzyka 'allow'
+        # i pustym powodem, bo blokada krotkiej pozycji podmienia akcje na hold
+        # PRZED galezia ryzyka. Powod jest wiec czescia WYBORU AKCJI, a nie
+        # czescia werdyktu ryzyka, i musi powstawac tutaj, w tym samym `if`.
+        powod_holdu = None
         if position:
             same_way = (position["side"] == "long" and score > 0) or \
                        (position["side"] == "short" and score < 0)
@@ -1316,6 +1432,7 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
                 action = "exit"
             else:
                 action = "hold"
+                powod_holdu = "trzyma_pozycje"
         elif abs(score) >= model["enter"] and confidence >= model["min_conf"]:
             action = "enter_long" if score > 0 else "enter_short"
             # Krotkiej pozycji na spocie nie da sie zajac bez pozyczki marzowej.
@@ -1323,9 +1440,23 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
             # shorty na instrumentach spotowych, czyli transakcje niewykonalne.
             if action == "enter_short" and not koszty(ocena["kind"]).krotka_pozycja:
                 action = "hold"
-                stats["short_niewykonalny"] = stats.get("short_niewykonalny", 0) + 1
+                powod_holdu = "short_niewykonalny"
+                stats["short_niewykonalny"] += 1
+        elif abs(score) < model["enter"]:
+            # SLABY WYNIK MA PIERWSZENSTWO PRZED NISKA PEWNOSCIA.
+            #
+            # Warunek wyzej laczy oba progi jednym `and`, wiec sama akcja nie
+            # mowi, ktory z nich nie przeszedl. Rozdzielamy je w tej samej
+            # kolejnosci, w ktorej czyta je czlowiek: najpierw pytamy, czy
+            # sygnal byl dosc silny, a dopiero potem, czy byl dosc pewny.
+            # Gdy nie przeszly oba, powodem jest slaby wynik - bo to on jest
+            # warunkiem, ktory na produkcji wiaze (progu pewnosci nie naruszyla
+            # ani jedna z 818 decyzji).
+            action = "hold"
+            powod_holdu = "slaby_wynik"
         else:
             action = "hold"
+            powod_holdu = "niska_pewnosc"
 
         # Wielkosc pozycji rosnie z sila sygnalu, ale nigdy powyzej limitu -
         # o tym decyduje risk kernel, nie ten kod.
@@ -1341,6 +1472,7 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
             # dziennik pokazywal, ze system CHCIAL wejsc i co go zatrzymalo.
             verdict = werdykt_wstrzymania
             action = "hold"
+            powod_holdu = "wstrzymanie_ryzykiem"
         elif action.startswith("enter"):
             verdict = risk.check(iid, notional, qty)
         else:
@@ -1359,6 +1491,14 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
             + (f" Niepełny komplet sygnałów: {pokrycie:.0%} budżetu wag."
                if pokrycie < 1.0 - 1e-9 else "")
             + (f" Ryzyko: {verdict.reason}." if verdict.reason else "")
+            # POWOD BEZCZYNNOSCI TAKZE SLOWAMI, nie tylko w kolumnie.
+            #
+            # Uzasadnienie jest tym, co widzi czlowiek w zakladce "Ruchy",
+            # i do tej pory przy holdzie konczylo sie na wyniku i pewnosci -
+            # czyli na liczbach, ktore CZESTO PRZECZYLY decyzji. Wpis "wynik
+            # -0,644 przy pewnosci 70%" pod progiem 0,278 czytalo sie jak
+            # awarie, a byla to poprawnie odrzucona krotka pozycja.
+            + (f" {OPIS_POWODU_HOLDU[powod_holdu]}" if powod_holdu else "")
         )
 
         latency = int((time.perf_counter() - started) * 1000)
@@ -1367,7 +1507,8 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
                                   position["qty"] if position else None),
                               price, confidence, regime, features, verdict,
                               rationale, contributions, signal_ids, latency,
-                              model.get("model_version_id"), pokrycie)
+                              model.get("model_version_id"), pokrycie,
+                              powod_holdu, model["enter"], model["exit"])
 
         risk.record_usage(verdict.usage)
         risk.record_violations(verdict.violations, did)
@@ -1598,6 +1739,12 @@ async def main() -> int:
                      if args.limit else "")
             if s.get("bez_swiecy"):
                 plany += f", BEZ ŚWIECY {s['bez_swiecy']}"
+            # POMINIECIA W JEDNEJ LINII PODSUMOWANIA, a nie tylko w komunikatach
+            # `--verbose` wewnatrz przebiegu: przy `--quiet` (tak chodzi produkcja)
+            # tamtych nie ma wcale, a ta linia jest zawsze.
+            if s.get("pominiete_bez_cech") or s.get("pominiete_bez_ceny"):
+                plany += (f", POMINIĘTE: bez cech {s['pominiete_bez_cech']}, "
+                          f"bez ceny {s['pominiete_bez_ceny']}")
             print(f"[{t0:%H:%M:%S}] rozważone {s['rozwazone']}, wejścia {s['wejscia']}, "
                   f"wyjścia {s['wyjscia']}, wstrzymane {s['wstrzymane']}, "
                   f"zablokowane {s['zablokowane']}, "

@@ -54,7 +54,9 @@ from services.engine.statystyka import spearman, wilson
 from services.engine.uniwersum import odcisk
 from services.engine.signals import (
     DEFAULT_WEIGHTS, REGIMES, SIGNALS, classify_regime, combine, evaluate,
+    wlaczone_eksperymenty,
 )
+from services.engine.wersja import sha_kodu
 
 # Prog wejscia NIE jest stala. Jest percentylem rozkladu |wyniku| policzonego
 # na oknie TRENINGOWYM - a wiec dobieranym pod zadana CZESTOTLIWOSC handlu,
@@ -622,16 +624,32 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
     cur.execute("SELECT array_agg(id) AS ids FROM sig.signal_def WHERE engine = %s", (engine,))
     signal_ids = cur.fetchone()["ids"] or []
 
+    # SHA KODU I SKLAD SYGNALOW - RAZEM, BO OSOBNO NIE ZNACZA NIC.
+    #
+    # `git_sha` istnieje od migracji 0006 i do tej pory nikt go nie wypelnial:
+    # 131 wierszy, 131 NULL-i. Bez niego przy metrykach modelu nie da sie
+    # powiedziec, jaki kod je policzyl - a rozjazd trening-produkcja zdarzyl sie
+    # w tym projekcie kilka razy i za kazdym razem pierwsze pytanie brzmialo
+    # "od kiedy?".
+    #
+    # Sam commit jednak nie wystarcza: `SYGNALY_EKSPERYMENTALNE` zmienia sklad
+    # sygnalow zmienna srodowiskowa, wiec ten sam commit potrafi wytrenowac dwa
+    # rozne modele. Zapisujemy ROZSTRZYGNIETY zbior (to, co faktycznie weszlo do
+    # `precompute`), a nie surowa tresc zmiennej - pusta zmienna znaczy
+    # "wszystkie eksperymenty", i taki napis nie mowilby, ktore to byly.
+    eksperymenty = sorted(wlaczone_eksperymenty())
     cur.execute(
         "INSERT INTO learn.model_version (model_id, version, status, params, feature_def_ids,"
-        " signal_def_ids, trained_from, trained_to) VALUES (%s,%s,'training',%s,%s,%s,%s,%s)"
+        " signal_def_ids, trained_from, trained_to, git_sha)"
+        " VALUES (%s,%s,'training',%s,%s,%s,%s,%s,%s)"
         " RETURNING id",
         (model_id, version,
          json.dumps({"bar": h.bar, "train_days": h.train_days, "test_days": h.test_days,
                      "step_days": h.step_days, "min_trades": h.min_trades,
                      "trials_per_window": trials_per_window, "seed": SEED,
-                     "wybor": wybor}),
-         feature_ids, signal_ids, now - timedelta(days=days), now))
+                     "wybor": wybor,
+                     "sygnaly_eksperymentalne": eksperymenty}),
+         feature_ids, signal_ids, now - timedelta(days=days), now, sha_kodu()))
     mv_id = cur.fetchone()["id"]
 
     cur.execute(

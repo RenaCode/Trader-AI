@@ -68,6 +68,16 @@ spec:
                 # kill-switcha - w procesie, ktory trwa dziesiatki minut i nikt
                 # w niego nie zaglada.
                 {{- include "trader.rolaDbEnv" (dict "ctx" $ "rola" "silnik") | nindent 16 }}
+                # Z JAKIEGO KODU POLICZONO TEN MODEL.
+                #
+                # `learn.model_version.git_sha` istnieje od migracji 0006 i przez
+                # cały ten czas był NULL-em we wszystkich wierszach, bo w klastrze
+                # nie było skąd wziąć commita. Tag obrazu (`sha-<commit>`, nadaje
+                # go workflow docker-publish) jest jedynym miejscem, które go zna.
+                # Przedrostek `sha-` ścina services/engine/wersja.py — reguła ma
+                # jedno miejsce i test, zamiast szablonu bez żadnego z dwóch.
+                - name: GIT_SHA
+                  value: {{ .Values.api.image.tag | quote }}
                 - name: PYTHONUNBUFFERED
                   value: "1"
               resources: {{- toYaml .Values.trainerCron.resources | nindent 16 }}
