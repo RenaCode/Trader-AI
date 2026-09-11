@@ -248,14 +248,39 @@ def test_kazdy_budowniczy_adaptera_bierze_HOST_Z_BAZY():
             f"odbije się od globalnego z kodem nie do odróżnienia od złego klucza")
 
 
+# Reguly instrumentu tak, jak oddaje je gielda — z produkcji (`ref.instrument`).
+# Trzymane w jednym miejscu, bo prog bezwzgledny uzgodnienia liczy sie WLASNIE
+# z nich i test na wymyslonych liczbach mierzylby wtedy wlasna atrape.
+D = Decimal
+
+REGULY_Z_PRODUKCJI = {
+    # aktywo: (lot_size, min_notional, ostatnia cena)
+    "BTC": (D("0.000001"), D("5"), D("50000")),
+    "LINK": (D("0.01"), D("5"), D("12.02")),
+    "ADA": (D("0.1"), D("5"), D("0.74")),
+    "SOL": (D("0.001"), D("5"), D("116.06")),
+}
+
+
+def _wiersze_regul(aktywa):
+    """Odpowiedz na zapytanie `progi_bezwzgledne` — kolumny jak w SQL."""
+    out = []
+    for a in aktywa:
+        lot, minw, cena = REGULY_Z_PRODUKCJI.get(a, (D("0.001"), D("5"), D("1")))
+        out.append({"aktywo": a, "lot": lot, "min_wartosc": minw, "cena": cena})
+    return out
+
+
 def _fetch_all_stub(pozycje, symbole=(("BTCUSDC", "BTC"),), od=None):
-    """Rozdziela zapytania po treści SQL — jeden stub na trzy różne pytania."""
+    """Rozdziela zapytania po treści SQL — jeden stub na cztery różne pytania."""
     async def fetch_all(sql, params=None):
         # Rozroznienie po NAJWEZSZYM markerze. Zapytanie o pozycje takze
         # dotyka ref.instrument, wiec dopasowanie po nazwie tabeli laczyloby
         # dwa rozne pytania w jedno - i test padalby na wlasnym stubie.
         if "sum(p.qty)" in sql:
             return pozycje
+        if "min(i.lot_size)" in sql:
+            return _wiersze_regul([b for _, b in symbole])
         if "min(p.opened_at)" in sql:
             return [{"od": od}]
         return [{"symbol": s, "base_ccy": b} for s, b in symbole]
@@ -526,6 +551,8 @@ def test_uzgodnienie_WIDZI_aktywo_ktorego_nie_ma_w_dzienniku():
             return []                       # nasz dziennik jest PUSTY
         if "DISTINCT base_ccy" in sql:
             return [{"base_ccy": "SOL"}, {"base_ccy": "XRP"}]
+        if "min(i.lot_size)" in sql:
+            return _wiersze_regul(["SOL", "XRP"])
         if "min(p.opened_at)" in sql:
             return [{"od": None}]
         return [{"id": 1}]
@@ -561,6 +588,8 @@ def test_uzgodnienie_nadal_pomija_walute_kwotowana():
             return []
         if "DISTINCT base_ccy" in sql:
             return [{"base_ccy": "SOL"}]
+        if "min(i.lot_size)" in sql:
+            return _wiersze_regul(["SOL"])
         if "min(p.opened_at)" in sql:
             return [{"od": None}]
         return [{"id": 1}]

@@ -22,6 +22,7 @@ jednokierunkowymi — a powiadomienie o jego zadziałaniu odsyłało do zakładk
 w interfejsie, która pokazywała komunikat „odblokowanie wymaga ręcznego
 potwierdzenia" i nie dawała czym potwierdzić.
 """
+import asyncio
 from decimal import Decimal
 from pathlib import Path
 
@@ -180,9 +181,153 @@ def test_proba_przywraca_prog_w_FINALLY_a_nie_na_koncu_bloku():
 
 def test_proba_odmawia_przy_juz_aktywnym_killswitchu():
     """Gdyby ruszyła przy zastanym zdarzeniu, nie odróżniłaby swojego od cudzego
-    i zwolniłaby cudze z notatką o próbie."""
+    i zwolniłaby cudze z notatką o próbie. Odmowa nie jest jednak wynikiem
+    pomiaru — patrz testy niżej."""
     zrodlo = Path("services/engine/proba_killswitcha.py").read_text(encoding="utf-8")
     assert "jest już aktywny" in zrodlo
+
+
+# ----------------------------------- trzy wyniki próby, nie dwa
+#
+# Do 2026-09-10 próba znała dwa zakończenia: ZALICZONA i NIEZALICZONA. Sytuacja
+# „kill-switch już stoi, więc nie ma czego wywołać ze stanu spoczynku" wpadała
+# do drugiego worka, czyli była zgłaszana jako AWARIA ZABEZPIECZENIA. To błąd
+# rozpoznania: „nie dało się zmierzyć" to nie to samo co „zmierzono i wyszło
+# źle". Kosztował dwa kolejne czerwone przebiegi CronJoba, aplikację ArgoCD
+# w stanie Degraded i mail o awarii — dokładnie wtedy, gdy człowiek i tak
+# wiedział o kill-switchu. A prawdziwa awaria łańcucha wyglądałaby identycznie
+# i utonęłaby w tych powtórkach.
+
+
+def _baza_proby(*, aktywnych=1, dni_blokady=0.0, dni_od_potwierdzenia=None,
+                zdarzenie=None, powiadomien=0):
+    """Atrapa bazy dla próby: odpowiada po fragmencie zapytania.
+
+    Nie udaje Postgresa — oddaje dokładnie te wiersze, o które próba pyta,
+    i wywraca się na zapytaniu, którego nie zna. Ciche `None` na nieznanym
+    zapytaniu zamieniłoby każdy test poniżej w test ścieżki błędu.
+    """
+    async def fetch_one(sql, params=None):
+        p = " ".join(sql.split())
+        if "exec.equity_point" in p:
+            return {"equity": 10_000}
+        if "count(*)" in p and "released_at IS NULL" in p:
+            return {"n": aktywnych, "dni_blokady": dni_blokady}
+        if "released_auto = false" in p and "released_by IS NULL" in p:
+            return {"dni": dni_od_potwierdzenia}
+        if "risk.killswitch_event" in p:
+            return zdarzenie
+        if "notify.notification" in p:
+            return {"n": powiadomien}
+        if "risk.limit_def" in p:
+            return {"value": 8_000}
+        raise AssertionError(f"atrapa nie zna zapytania: {p}")
+
+    async def fetch_all(sql, params=None):
+        return []
+
+    wykonane = []
+
+    async def execute(sql, params=None):
+        wykonane.append((" ".join(sql.split()), params))
+
+    return fetch_one, fetch_all, execute, wykonane
+
+
+def test_proba_przy_aktywnym_killswitchu_jest_NIEROZSTRZYGNIETA_nie_niezaliczona(capsys):
+    """Kill-switch już stoi: próby NIE DA SIĘ przeprowadzić, bo nie ma czego
+    wywołać ze stanu spoczynku. To nie jest awaria zabezpieczenia i nie ma
+    prawa świecić na czerwono — kod wyjścia zero.
+
+    Ale nie może też przejść jako sukces: nikt w tym cyklu nie sprawdził, czy
+    bezpiecznik działa. Komunikat musi to powiedzieć wprost.
+    """
+    from services.engine.proba_killswitcha import uruchom
+
+    fetch_one, fetch_all, execute, wykonane = _baza_proby(
+        aktywnych=1, dni_od_potwierdzenia=0.5)
+    kod = asyncio.run(uruchom(fetch_all, fetch_one, execute))
+
+    assert kod == 0, "niemożność pomiaru zgłoszona jako awaria zabezpieczenia"
+    wyjscie = capsys.readouterr()
+    tekst = wyjscie.out + wyjscie.err
+    assert "NIEROZSTRZYGNIĘTA" in tekst
+    assert "NIE ZOSTAŁO W TYM CYKLU SPRAWDZONE" in tekst, (
+        "wynik zerowy bez tego zdania to zamiecenie sprawy pod dywan: "
+        "przebieg wygląda jak potwierdzenie, że bezpiecznik działa")
+    assert not wykonane, "próba ruszyła limit mimo że nie mogła się wykonać"
+
+
+def test_zabezpieczenie_ktore_NIE_zadzialalo_daje_kod_niezerowy(monkeypatch, capsys):
+    """Kanarek do poprzedniego. Gdyby rozdział trzech wyników poszedł za
+    daleko, próba przestałaby krzyczeć także wtedy, gdy silnik naprawdę nie
+    uruchomił kill-switcha — czyli zabezpieczenie byłoby zepsute po cichu.
+    """
+    from services.engine import proba_killswitcha as pk
+
+    monkeypatch.setattr(pk, "CZEKAJ_SILNIK_S", 0)      # bez czekania na cykl
+    fetch_one, fetch_all, execute, _ = _baza_proby(aktywnych=0, zdarzenie=None)
+    kod = asyncio.run(pk.uruchom(fetch_all, fetch_one, execute))
+
+    assert kod != 0, "silnik nie zatrzymał handlu, a próba to przemilczała"
+    assert "NIEZALICZONA" in capsys.readouterr().err
+
+
+def test_wiele_dob_bez_potwierdzenia_SAMO_staje_sie_awaria(capsys):
+    """Trzeci wynik nie może być workiem bez dna. Bezpiecznik niesprawdzony od
+    tygodnia to osobne ryzyko — po przekroczeniu progu sama cisza jest awarią
+    i musi dać kod niezerowy, mimo że próby nadal nie da się przeprowadzić."""
+    from services.engine.proba_killswitcha import MAX_DNI_BEZ_POTWIERDZENIA, uruchom
+
+    fetch_one, fetch_all, execute, _ = _baza_proby(
+        aktywnych=1, dni_od_potwierdzenia=MAX_DNI_BEZ_POTWIERDZENIA + 1)
+    kod = asyncio.run(uruchom(fetch_all, fetch_one, execute))
+
+    assert kod != 0, (
+        f"kill-switch aktywny od ponad {MAX_DNI_BEZ_POTWIERDZENIA} dób, "
+        f"bezpiecznik przez ten czas ani razu niesprawdzony — i cisza")
+    assert "NIESPRAWDZONE" in capsys.readouterr().err
+
+
+def test_swieze_potwierdzenie_NIE_alarmuje(capsys):
+    """Kanarek do progu. Alarm bijący od pierwszego dnia blokady zostanie
+    wyłączony w tydzień i wtedy nie zadziała także w tym jednym przypadku,
+    w którym miał."""
+    from services.engine.proba_killswitcha import MAX_DNI_BEZ_POTWIERDZENIA, uruchom
+
+    fetch_one, fetch_all, execute, _ = _baza_proby(
+        aktywnych=1, dni_od_potwierdzenia=MAX_DNI_BEZ_POTWIERDZENIA - 1)
+    assert asyncio.run(uruchom(fetch_all, fetch_one, execute)) == 0
+    assert "NIESPRAWDZONE" not in capsys.readouterr().err
+
+
+def test_brak_sladu_poprzedniej_proby_liczy_sie_od_POCZATKU_blokady():
+    """System bez ani jednej zaliczonej próby w dzienniku (świeże wdrożenie,
+    albo taki, w którym próba nigdy nie doszła do końca). Gdyby brak śladu
+    znaczył „zero dób", licznik nigdy by nie ruszył i próg byłby martwy.
+    Dolną granicą ciszy jest wtedy wiek najstarszego czynnego zdarzenia."""
+    from services.engine.proba_killswitcha import MAX_DNI_BEZ_POTWIERDZENIA, uruchom
+
+    fetch_one, fetch_all, execute, _ = _baza_proby(
+        aktywnych=1, dni_od_potwierdzenia=None,
+        dni_blokady=MAX_DNI_BEZ_POTWIERDZENIA + 2)
+    assert asyncio.run(uruchom(fetch_all, fetch_one, execute)) != 0
+
+
+def test_slad_poprzednich_prob_czytany_z_TROJKI_KOLUMN_a_nie_z_notatki():
+    """Wiek ostatniego potwierdzenia da się policzyć bez nowej tabeli: każda
+    zaliczona próba zostawia zwolnienie o `released_auto = false` i pustym
+    `released_by`, a taka para nie powstaje inaczej — usługa wznowienia pisze
+    `released_auto = true`, człowiek przez API zostawia `released_by`.
+
+    Rozpoznawanie tego po treści notatki działałoby do pierwszej zmiany
+    sformułowania — to ten sam błąd, przed którym ostrzega migracja 0029."""
+    zrodlo = Path("services/engine/proba_killswitcha.py").read_text(encoding="utf-8")
+    kod = "\n".join(w for w in zrodlo.splitlines()
+                    if not w.lstrip().startswith("#"))
+    assert "released_auto = false AND released_by IS NULL" in \
+        " ".join(kod.split()), "ślad próby wyszukiwany inaczej niż po kolumnach"
+    assert "release_note LIKE" not in kod and "release_note ILIKE" not in kod
 
 
 def test_proba_traktuje_brak_powiadomienia_jako_NIEZALICZONA():
@@ -228,10 +373,10 @@ def test_kazdy_limit_krytyczny_niesie_SWOJA_NAZWE():
 
 @pytest.mark.parametrize("limit,limit_pct,stan,oczekiwane", [
     # Histereza: wznowienie przy POŁOWIE limitu, nie na jego granicy.
-    ("max_drawdown", 10.0, {"equity": 96_000, "peak": 100_000, "day_ago": 96_000}, True),
-    ("max_drawdown", 10.0, {"equity": 94_000, "peak": 100_000, "day_ago": 94_000}, False),
-    ("max_daily_loss", 2.0, {"equity": 99_500, "peak": 100_000, "day_ago": 100_000}, True),
-    ("max_daily_loss", 2.0, {"equity": 98_800, "peak": 100_000, "day_ago": 100_000}, False),
+    ("max_drawdown", 10.0, {"wynik": 96_000, "szczyt": 100_000, "doba": 96_000}, True),
+    ("max_drawdown", 10.0, {"wynik": 94_000, "szczyt": 100_000, "doba": 94_000}, False),
+    ("max_daily_loss", 2.0, {"wynik": 99_500, "szczyt": 100_000, "doba": 100_000}, True),
+    ("max_daily_loss", 2.0, {"wynik": 98_800, "szczyt": 100_000, "doba": 100_000}, False),
 ])
 def test_histereza_wznawia_ciasniej_niz_zatrzymuje(limit, limit_pct, stan, oczekiwane):
     """Bez histerezy system oscylowałby wokół granicy: wznowienie przy tym samym
@@ -250,7 +395,7 @@ def test_nieznany_limit_NIE_jest_wznawiany():
     from services.engine.wznowienie import warunek_ustal
 
     ustal, dowod = warunek_ustal("cos_nowego", 10.0,
-                                 {"equity": 100_000, "peak": 100_000, "day_ago": 100_000})
+                                 {"wynik": 100_000, "szczyt": 100_000, "doba": 100_000})
     assert ustal is False and "brak reguły" in dowod
 
 

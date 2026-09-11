@@ -12,8 +12,8 @@ import httpx
 import pytest
 
 from services.ingest.llm import (
-    BladOdpowiedzi, DostawcaGemini, Odmowa, Przeciazony,
-    _bez_additional_properties, limit_dobowy_usd,
+    BladOdpowiedzi, BrakDostawcy, Dostawca, DostawcaGemini, Odmowa, Przeciazony,
+    Wyczerpany, _bez_additional_properties, limit_dobowy_usd,
 )
 from services.ingest.news_worker import ANALYSIS_SCHEMA, TRIAGE_SCHEMA
 
@@ -253,13 +253,33 @@ def test_wyczerpane_proby_mowia_ZE_TO_LIMIT_a_nie_zly_klucz(monkeypatch):
 def test_blad_klienta_NIE_jest_ponawiany(monkeypatch):
     """Kanarek do poprzednich. Zly klucz (401) albo zly schemat (400) to nie
     stan przejsciowy - ponawianie ich tylko opoznia komunikat o prawdziwej
-    przyczynie i zuzywa limit."""
+    przyczynie i zuzywa limit.
+
+    401 to przy tym awaria TRWALA: sam nie minie, wiec ma odciac dostawce,
+    a nie wracac przy kazdym artykule (patrz `Wyczerpany`).
+    """
     bez_czekania(monkeypatch)
     d, licznik = gemini_sekwencja([(401, {"error": {"message": "bad key"}}, None)])
-    with pytest.raises(httpx.HTTPStatusError):
+    with pytest.raises(Wyczerpany):
         asyncio.run(d.zapytaj(model="m", system="s", user="u",
                               schema=TRIAGE_SCHEMA, max_tokens=100))
     assert licznik["n"] == 1, f"401 ma isc bez ponawiania, prob bylo {licznik['n']}"
+
+
+def test_ZLY_SCHEMAT_zostaje_glosny_a_nie_udaje_awarii_dostawcy(monkeypatch):
+    """Druga granica do poprzedniego testu. 400 dostajemy ZAROWNO za martwy
+    klucz, JAK I za nasz wlasny blad w schemacie (`additionalProperties`).
+    Gdyby oba szly jako awaria dostawcy, blad w kodzie zamieniłby się w „dostawca
+    chwilowo niedostepny" i czekalibysmy na cud zamiast poprawic schemat."""
+    bez_czekania(monkeypatch)
+    d, licznik = gemini_sekwencja([(400, {"error": {"message": "Invalid JSON payload "
+                                                   "received. Unknown name "
+                                                   "\"additionalProperties\""}}, None)])
+    with pytest.raises(httpx.HTTPStatusError):
+        asyncio.run(d.zapytaj(model="m", system="s", user="u",
+                              schema=TRIAGE_SCHEMA, max_tokens=100))
+    assert licznik["n"] == 1
+    assert d.czy_ma_czym_pytac(), "nasz blad nie moze odcinac dostawcy"
 
 
 def test_retry_after_od_dostawcy_bije_nasze_zgadywanie():
@@ -294,7 +314,7 @@ def test_przepustnica_rozklada_zapytania_w_czasie(monkeypatch):
 
 # ------------------------------------------------------------- mieszanka
 
-class _Fałszywy:
+class _Fałszywy(Dostawca):
     """Dostawca-atrapa: zapisuje, o co go pytano, i nic nie wysyła."""
 
     def __init__(self, nazwa, triaz, analiza, cena):
@@ -472,7 +492,7 @@ def test_zwykly_blad_NIE_uruchamia_dostawcy_zapasowego():
 
 # ============================== bezpiecznik na wyczerpany klucz triazu
 
-class _Odmawiajacy:
+class _Odmawiajacy(Dostawca):
     """Dostawca, ktory odrzuca KAZDE zapytanie - jak wyczerpany klucz."""
     nazwa = "odmawiajacy"
     model_analizy = "duzy"
@@ -493,7 +513,7 @@ class _Odmawiajacy:
         return None
 
 
-class _Dzialajacy:
+class _Dzialajacy(Dostawca):
     nazwa = "dzialajacy"
     model_analizy = "opus"
     model_triazu = "haiku"
@@ -558,7 +578,7 @@ def test_zwarcie_jest_CZASOWE_a_nie_trwale():
     for _ in range(ai.PROG_ZWARCIA):
         _pytaj(ai, ai.model_triazu)
     assert ai._zwarcie_otwarte()
-    ai._zwarcie_do = 0.0                      # symulacja uplywu ZWARCIE_S
+    ai._triaz._niedostepny_do = 0.0           # symulacja uplywu ZWARCIE_S
     _pytaj(ai, ai.model_triazu)
     assert triaz.wywolan == ai.PROG_ZWARCIA + 1, (
         "po odczekaniu dostawca musi dostać kolejną szansę")
@@ -571,13 +591,13 @@ def test_UDANE_zapytanie_zeruje_licznik_odmow():
 
     ai, triaz, _ = _mieszany()
     _pytaj(ai, ai.model_triazu)
-    assert ai._odmowy_triazu == 1
+    assert ai._triaz._odmowy_pod_rzad == 1
 
     async def raz_dobrze(**kw):
         return {"ok": True}, {"input": 1, "output": 1, "cache_read": 0}
     triaz.zapytaj = raz_dobrze
     _pytaj(ai, ai.model_triazu)
-    assert ai._odmowy_triazu == 0
+    assert ai._triaz._odmowy_pod_rzad == 0
 
 
 def test_ANALIZA_nadal_nie_ma_zejscia_awaryjnego():
@@ -704,3 +724,396 @@ def test_OBA_klucze_znacza_mieszanke_a_nie_zapas():
     assert "+" in oba.nazwa
     assert oba.model_triazu.startswith("gemini"), "filtrowanie ma iść na tańszy model"
     assert oba.model_analizy.startswith("claude"), "analiza ma zostać na mocniejszym"
+
+
+# ============ awaria TRWALA to nie to samo co awaria PRZEJSCIOWA ============
+#
+# Log produkcyjny (poda trader-news, 2026-09-10), powtorzony 52-62 razy
+# w KAZDYM cyklu, cykl co piec minut — okolo 15 tysiecy bezuzytecznych wywolan
+# API na dobe:
+#
+#   BŁĄD triaż gemini-3.5-flash-lite: BadRequestError: Error code: 400 -
+#   {'type': 'error', 'error': {'type': 'invalid_request_error', 'message':
+#   'Your credit balance is too low to access the Anthropic API. Please go to
+#   Plans & Billing to upgrade or purchase credits.'}}
+#
+# Wyczerpany kredyt wracal jako HTTP 400, wiec nie byl `Przeciazony`, wiec
+# zaden bezpiecznik nie mial czego zewrzec i kazdy artykul kupowal sobie wlasna
+# odmowe.
+
+ODMOWA_KREDYTOWA = {
+    "type": "error",
+    "error": {"type": "invalid_request_error",
+              "message": ("Your credit balance is too low to access the Anthropic "
+                          "API. Please go to Plans & Billing to upgrade or "
+                          "purchase credits.")},
+}
+
+
+def blad_sdk(kod: int, tresc: dict):
+    """PRAWDZIWY wyjatek SDK, a nie atrapa.
+
+    Atrapa z wygodnie ustawionymi polami udowodnilaby tylko, ze test i kod
+    zgadzaja sie co do wlasnej konwencji. Klasyfikacja czyta `status_code`
+    i `body`, wiec musi zobaczyc to, co SDK naprawde wypelnia.
+    """
+    import anthropic
+
+    odpowiedz = httpx.Response(
+        kod, json=tresc,
+        request=httpx.Request("POST", "https://api.anthropic.com/v1/messages"))
+    klasa = {400: anthropic.BadRequestError,
+             401: anthropic.AuthenticationError,
+             403: anthropic.PermissionDeniedError,
+             429: anthropic.RateLimitError}[kod]
+    return klasa(tresc["error"]["message"], response=odpowiedz, body=tresc)
+
+
+def anthropic_odmawiajacy(blad):
+    """DostawcaAnthropic z podstawionym klientem — bez sieci i bez klucza."""
+    from services.ingest.llm import DostawcaAnthropic
+
+    class _Klient:
+        def __init__(self):
+            self.wywolan = 0
+            self.messages = self
+
+        async def create(self, **kw):
+            self.wywolan += 1
+            raise blad
+
+    d = DostawcaAnthropic("klucz-testowy")
+    d._c = _Klient()
+    return d, d._c
+
+
+def _pytaj_anthropic(d, model="claude-haiku-4-5"):
+    return asyncio.run(d.zapytaj(model=model, system="s", user="u",
+                                 schema={"type": "object"}, max_tokens=16))
+
+
+def test_WYCZERPANY_KREDYT_jest_awaria_TRWALA_a_nie_zwyklym_bledem():
+    """Kanarek na blad z produkcji 2026-09-10.
+
+    400 z komunikatem o kredycie NIE JEST bledem w naszym zapytaniu — jest
+    odmowa dostawcy, ktora nie minie sama. Zanim to rozroznienie powstalo,
+    wyjatek leciał jako goly `BadRequestError`: nikt go nie klasyfikowal, wiec
+    nic sie po nim nie zmienialo i nastepny artykul szedl do tego samego
+    martwego dostawcy.
+    """
+    d, klient = anthropic_odmawiajacy(blad_sdk(400, ODMOWA_KREDYTOWA))
+    with pytest.raises(Wyczerpany) as e:
+        _pytaj_anthropic(d)
+    assert klient.wywolan == 1
+    assert "srodkow" in str(e.value) or "środków" in str(e.value)
+    assert not d.czy_ma_czym_pytac(), (
+        "po odmowie rozliczeniowej dostawca ma byc odciety, a nie czekac "
+        "na kolejny artykul")
+
+
+def test_400_ZE_ZLEGO_SCHEMATU_zostaje_naszym_bledem():
+    """Druga granica. 400 to u Anthropica ZAROWNO wyczerpany kredyt, JAK I nasz
+    wlasny blad w zapytaniu. Gdyby oba szly jako awaria dostawcy, blad w kodzie
+    zamilkłby na szesc godzin zamiast krzyknac przy pierwszym artykule."""
+    import anthropic
+
+    zly_schemat = {"type": "error",
+                   "error": {"type": "invalid_request_error",
+                             "message": "output_config.format.schema: unknown field"}}
+    d, klient = anthropic_odmawiajacy(blad_sdk(400, zly_schemat))
+    with pytest.raises(anthropic.BadRequestError):
+        _pytaj_anthropic(d)
+    assert d.czy_ma_czym_pytac(), "nasz blad nie moze odcinac dostawcy"
+
+
+def test_LIMIT_TEMPA_zostaje_awaria_PRZEJSCIOWA():
+    """Trzecia granica. 429 mija w sekundy — gdyby wpadl do jednego worka
+    z brakiem kredytu, chwilowy limit tempa odcinalby dostawce na szesc godzin."""
+    tempo = {"type": "error", "error": {"type": "rate_limit_error",
+                                        "message": "Number of requests has exceeded "
+                                                   "your rate limit"}}
+    d, _ = anthropic_odmawiajacy(blad_sdk(429, tempo))
+    with pytest.raises(Przeciazony) as e:
+        _pytaj_anthropic(d)
+    assert not isinstance(e.value, Wyczerpany), "limit tempa nie jest awaria trwala"
+    assert d.czy_ma_czym_pytac()
+
+
+def test_MARTWY_KLUCZ_jest_awaria_TRWALA():
+    """401 i 403 nie mijaja same tak samo jak brak kredytu: uniewazniony klucz
+    i brak uprawnien do modelu czekaja na czlowieka, nie na zegar."""
+    for kod in (401, 403):
+        tresc = {"type": "error", "error": {"type": "authentication_error",
+                                            "message": "invalid x-api-key"}}
+        d, klient = anthropic_odmawiajacy(blad_sdk(kod, tresc))
+        with pytest.raises(Wyczerpany):
+            _pytaj_anthropic(d)
+        assert not d.czy_ma_czym_pytac(), f"HTTP {kod} ma odcinac dostawce"
+
+
+def test_awaria_TRWALA_jest_podklasa_PRZECIAZONEGO():
+    """To nie jest szczegol implementacji, tylko warunek dzialania zejscia
+    awaryjnego. `Przeciazony` znaczy „dostawca odmawia, a nie my sie mylimy"
+    i jest jedynym wyjatkiem, po ktorym wolno siegnac po drugiego dostawce
+    w triazu. Martwy klucz spelnia ten warunek tak samo jak limit tempa —
+    a osobna galaz wymagalaby drugiego `except` w kazdym takim miejscu."""
+    assert issubclass(Wyczerpany, Przeciazony)
+    assert not issubclass(BrakDostawcy, Przeciazony), (
+        "po `BrakDostawcy` nie ma juz do kogo zejsc — lapanie go razem "
+        "z `Przeciazony` wrocilo by do wolania martwego dostawcy")
+
+
+def test_po_awarii_TRWALEJ_dostawca_NIE_JEST_JUZ_PYTANY():
+    """SEDNO BLEDU Z 2026-09-10, policzone wprost.
+
+    Cykl idzie po ~55 artykulach. Przed poprawka kazdy z nich wysylal wlasne
+    wywolanie do dostawcy z zerowym saldem — 52-62 odmowy na cykl, cykl co piec
+    minut, okolo 15 tysiecy wywolan na dobe. Po poprawce pierwsza odmowa odcina
+    dostawce, a reszta cyklu nie dotyka juz sieci.
+    """
+    d, klient = anthropic_odmawiajacy(blad_sdk(400, ODMOWA_KREDYTOWA))
+    with pytest.raises(Wyczerpany):
+        _pytaj_anthropic(d)
+    for _ in range(20):
+        with pytest.raises(BrakDostawcy):
+            _pytaj_anthropic(d)
+    assert klient.wywolan == 1, (
+        f"dostawca z zerowym saldem dostal {klient.wywolan} wywolan zamiast "
+        f"jednego — bezpiecznik nie dziala")
+
+
+def test_odciecie_po_awarii_TRWALEJ_jest_CZASOWE_a_nie_dozywotnie():
+    """Konto bywa doladowane. Trwale odciecie zamienialoby brak kredytu
+    w trwale wylaczenie analizy — i wymagaloby restartu poda, zeby wrocic."""
+    d, klient = anthropic_odmawiajacy(blad_sdk(400, ODMOWA_KREDYTOWA))
+    with pytest.raises(Wyczerpany):
+        _pytaj_anthropic(d)
+    d._niedostepny_do = 0.0                   # symulacja uplywu ZWARCIE_TRWALE_S
+    with pytest.raises(Wyczerpany):
+        _pytaj_anthropic(d)
+    assert klient.wywolan == 2, "po odczekaniu dostawca ma dostac kolejna szanse"
+
+
+def test_awaria_TRWALA_zwiera_DLUZEJ_niz_limit_dobowy_i_tempa():
+    """Trzy dlugosci, bo to trzy rozne sytuacje. Limit tempa mija w sekundy,
+    dobowy o polnocy, a brak kredytu nie mija sam w ogole — konczy go czlowiek."""
+    from services.ingest.llm import DostawcaMieszany
+
+    assert (Dostawca.ZWARCIE_TRWALE_S > DostawcaMieszany.ZWARCIE_DOBOWE_S
+            > DostawcaMieszany.ZWARCIE_S)
+
+
+# =================== bezpiecznik obejmuje OBU dostawcow ====================
+
+class _Martwy(Dostawca):
+    """Dostawca z zerowym saldem: kazde zapytanie to awaria TRWALA."""
+
+    def __init__(self, nazwa, triaz, analiza):
+        self.nazwa, self.model_triazu, self.model_analizy = nazwa, triaz, analiza
+        self.wywolan = 0
+
+    async def zapytaj(self, **kw):
+        self.wywolan += 1
+        raise Wyczerpany(f"{self.nazwa}: brak srodkow na koncie (HTTP 400)")
+
+    def koszt(self, model, usage):
+        return 0.0
+
+
+def _obaj_martwi():
+    from services.ingest.llm import DostawcaMieszany
+
+    tani = _Martwy("tani", "flash-lite", "flash")
+    drogi = _Martwy("drogi", "haiku", "opus")
+    return DostawcaMieszany(triaz=tani, analiza=drogi), tani, drogi
+
+
+def test_awaria_TRWALA_u_OBU_daje_jawny_sygnal_ze_NIE_MA_CZYM_PYTAC():
+    """Bezpiecznik chronil dotad wylacznie dostawce TRIAZU. Gdy padli obaj,
+    nie bylo nic: kazdy artykul dostawal ten sam wyjatek, raz na artykul,
+    przez caly cykl i przez kazdy nastepny cykl.
+
+    Wolajacy musi miec z czego zrobic JEDEN warunek — stad `czy_ma_czym_pytac`
+    i `BrakDostawcy` podnoszony BEZ wywolania API.
+    """
+    ai, tani, drogi = _obaj_martwi()
+    assert ai.czy_ma_czym_pytac(), "zanim ktorykolwiek odmowil, pytac wolno"
+
+    # Pierwszy artykul: triaz odmawia, zapasowy tez.
+    with pytest.raises(Wyczerpany):
+        _pytaj(ai, ai.model_triazu)
+
+    assert not ai.czy_ma_czym_pytac(), (
+        "obaj dostawcy odcieci, a mieszanka nadal melduje, ze ma czym pytac")
+    assert ai.powod_niedostepnosci(), "powod ma trafic do logu, a nie zginac"
+
+    # Reszta cyklu: ani jednego wywolania wiecej.
+    for _ in range(20):
+        with pytest.raises(BrakDostawcy):
+            _pytaj(ai, ai.model_triazu)
+        with pytest.raises(BrakDostawcy):
+            _pytaj(ai, ai.model_analizy)
+    assert (tani.wywolan, drogi.wywolan) == (1, 1), (
+        f"po odcieciu obu dostawcy dostali {tani.wywolan} i {drogi.wywolan} "
+        f"wywolan zamiast po jednym")
+
+
+def test_dostawca_ANALIZY_tez_ma_bezpiecznik():
+    """Analiza nie ma zejscia awaryjnego i wlasnie dlatego potrzebuje zwarcia:
+    bez niego kazdy artykul, ktory przeszedl triaz, kupuje wlasna odmowe
+    u dostawcy, o ktorym juz wiadomo, ze odmowi."""
+    from services.ingest.llm import DostawcaMieszany
+
+    class Zajety(_Dzialajacy):
+        async def zapytaj(self, **kw):
+            self.wywolan += 1
+            raise Przeciazony("HTTP 429")
+
+    triaz, analiza = _Dzialajacy(), Zajety()
+    analiza.nazwa, analiza.model_triazu, analiza.model_analizy = "drogi", "haiku", "opus"
+    ai = DostawcaMieszany(triaz=triaz, analiza=analiza)
+
+    for _ in range(5):
+        with pytest.raises((Przeciazony, BrakDostawcy)):
+            _pytaj(ai, ai.model_analizy)
+    assert analiza.wywolan == ai.PROG_ZWARCIA, (
+        f"po {ai.PROG_ZWARCIA} odmowach z rzedu dostawca analizy ma nie byc "
+        f"pytany, a dostal {analiza.wywolan} zapytan")
+    assert not ai.czy_ma_czym_pytac(), "bez dostawcy analizy cykl nie ma co robic"
+
+
+def test_ANALIZA_dalej_nie_ma_zejscia_na_dostawce_triazu():
+    """Bezpiecznik nie moze przy okazji poluzowac tej zasady. Analiza WYTWARZA
+    wartosc cechy `news_sent`; podmiana modelu wstawia w srodek szeregu uskok,
+    ktorego kalibracja wagi nie zaklada. Brakujaca analiza to tylko brakujacy
+    wiersz, ktory widac."""
+    from services.ingest.llm import DostawcaMieszany
+
+    triaz = _Dzialajacy()
+    triaz.nazwa, triaz.model_triazu, triaz.model_analizy = "tani", "flash-lite", "flash"
+    analiza = _Martwy("drogi", "haiku", "opus")
+    ai = DostawcaMieszany(triaz=triaz, analiza=analiza)
+
+    with pytest.raises(Wyczerpany):
+        _pytaj(ai, ai.model_analizy)
+    with pytest.raises(BrakDostawcy):
+        _pytaj(ai, ai.model_analizy)
+    assert triaz.wywolan == 0, (
+        "analiza zeszla na model triazu — cecha `news_sent` dostalaby uskok")
+
+
+# ============ stan bezpiecznika MUSI przezyc cykl ============
+#
+# Dowod z logu produkcyjnego 2026-09-10: komunikat
+#   „[llm] triaz: gemini — wyczerpany limit DOBOWY; przechodze na anthropic
+#    na 60 min"
+# pojawial sie co ~6 minut, a nie raz na godzine. Zwarcie na 60 minut nie
+# przezywalo cyklu, bo `wybierz_dostawce` buduje dostawce od nowa w KAZDYM
+# cyklu, a stan siedzi w instancji.
+
+def test_stan_bezpiecznika_DA_SIE_przeniesc_na_nastepny_cykl():
+    ai, tani, drogi = _obaj_martwi()
+    with pytest.raises(Wyczerpany):
+        _pytaj(ai, ai.model_triazu)
+    assert not ai.czy_ma_czym_pytac()
+
+    nowy_cykl, tani2, drogi2 = _obaj_martwi()
+    assert nowy_cykl.czy_ma_czym_pytac(), (
+        "swiezo zbudowana instancja ma czysty stan — na tym polega ten podblad")
+
+    nowy_cykl.przejmij_stan(ai)
+    assert not nowy_cykl.czy_ma_czym_pytac(), (
+        "bez przeniesienia stanu zwarcie na 60 min trwa tyle, co cykl")
+    with pytest.raises(BrakDostawcy):
+        _pytaj(nowy_cykl, nowy_cykl.model_triazu)
+    assert (tani2.wywolan, drogi2.wywolan) == (0, 0)
+
+
+def test_stanu_NIE_DA_SIE_przeniesc_miedzy_innymi_mieszankami():
+    """Przeniesienie stanu na inny sklad dostawcow odcieloby dostawce, ktory
+    nigdy nie odmowil — i to na szesc godzin, po cichu."""
+    from services.ingest.llm import DostawcaMieszany
+
+    ai, _, _ = _obaj_martwi()
+    inna = DostawcaMieszany(triaz=_Martwy("inny", "lite-2", "flash-2"),
+                            analiza=_Martwy("drogi", "haiku", "opus"))
+    with pytest.raises(ValueError):
+        inna.przejmij_stan(ai)
+
+
+# ============ WYJATEK MA MOWIC, KTO ODMOWIL ============
+#
+# Przy sukcesie model faktyczny wraca w `usage["model_uzyty"]`. Przy odmowie
+# `usage` czesto nie ma w ogole - a to wlasnie sciezka odmowy idzie do logu:
+#
+#   BŁĄD triaż gemini-3.5-flash-lite: BadRequestError: ... 'Your credit balance
+#   is too low to access the Anthropic API...'
+#
+# Nazwa mowila „gemini", odmowil Anthropic. Dlatego mieszanka podpisuje wyjatek
+# tym, kto go zwrocil.
+
+def _po_zejsciu(blad):
+    """Mieszanka po zejsciu na zapasowego: triaz odbija, odpowiada `drogi`."""
+    from services.ingest.llm import DostawcaMieszany
+
+    class Odbija(_Fałszywy):
+        async def zapytaj(self, **kw):
+            raise Przeciazony("429")
+
+    class Zapasowy(_Fałszywy):
+        async def zapytaj(self, *, model, **kw):
+            self.pytania.append(model)
+            raise blad()
+
+    tani = Odbija("tani", "flash-lite", "flash", (0.3, 2.5))
+    drogi = Zapasowy("drogi", "haiku", "opus", (5.0, 25.0))
+    return DostawcaMieszany(triaz=tani, analiza=drogi), tani, drogi
+
+
+def test_wyjatek_NIESIE_dostawce_ktory_go_zwrocil():
+    """Sedno poprawki: „kto odmowil" musi byc dostepne TAKZE w wyjatku.
+
+    `Przeciazony` i `Wyczerpany` nie niosa zadnego `usage` - odmowa zapadla,
+    zanim powstal pierwszy token. Bez podpisu na samym wyjatku log nie ma skad
+    wziac prawdy i podpisuje sie modelem zadanym.
+    """
+    from services.ingest.llm import kto_wykonal
+
+    ai, tani, drogi = _po_zejsciu(
+        lambda: Wyczerpany("drogi: brak srodkow na koncie (HTTP 400)"))
+    with pytest.raises(Wyczerpany) as e:
+        _pytaj(ai, ai.model_triazu)
+
+    assert drogi.pytania == ["haiku"], "test nie odtworzyl zejscia na zapasowego"
+    kto = kto_wykonal(e.value, ai, ai.model_triazu)
+    assert (kto.nazwa, kto.model) == ("drogi", "haiku")
+    assert str(kto) == "drogi/haiku", "podpis idzie wprost do logu"
+
+
+def test_bez_podpisu_zostaje_model_ZADANY_bo_przy_jednym_dostawcy_jest_prawdziwy():
+    """Druga granica. Domysl nie moze zmyslac: gdy dostawca jest jeden, zadany
+    model jest jedynym, ktory mogl odpowiedziec - i wtedy podpisu nie potrzeba."""
+    from services.ingest.llm import kto_wykonal
+
+    pojedynczy = _Fałszywy("tani", "flash-lite", "flash", (0.3, 2.5))
+    kto = kto_wykonal(RuntimeError("cokolwiek"), pojedynczy, "flash-lite")
+    assert (kto.nazwa, kto.model) == ("tani", "flash-lite")
+
+
+def test_ZUZYCIE_z_nieudanego_wywolania_tez_niesie_model_faktyczny():
+    """Bo `Odmowa` NIE JEST awaria i nie dochodzi do obslugi bledow.
+
+    `news_worker.triage` lapie ja i zwraca werdykt „rejected" razem z `usage` -
+    ta sciezka wyglada wiec jak sukces i idzie do `news.api_spend` normalnym
+    torem, przez `uzyty_model`. Gdyby zuzycie nie niosło modelu faktycznego,
+    dziennik nazwalby tanszy model i policzyl tansza stawke za prace zapasowego.
+    """
+    ai, tani, drogi = _po_zejsciu(
+        lambda: Odmowa({"input": 1000, "output": 200, "cache_read": 0}))
+    with pytest.raises(Odmowa) as e:
+        _pytaj(ai, ai.model_triazu)
+
+    assert e.value.usage["model_uzyty"] == "haiku"
+    assert ai.uzyty_model(ai.model_triazu, e.value.usage) == "haiku"
+    # Cennik bierze ten, kto wykonal prace: atrapa `drogi` liczy 42.0.
+    assert ai.koszt(ai.model_triazu, e.value.usage) == 42.0

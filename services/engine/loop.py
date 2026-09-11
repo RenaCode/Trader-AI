@@ -72,6 +72,81 @@ EXIT_THRESHOLD = 0.12
 #
 # Model egzekucji (rodzaj instrumentu + limit/rynek) przychodzi z wiersza
 # polecen, tak samo jak w trenerze, i jest ustawiany z jednego miejsca w charcie.
+#
+# HISTORII SPRZED POPRAWKI NIE PRZELICZAMY - I TO JEST DECYZJA, NIE ZANIEDBANIE
+#
+# Zmierzone na produkcji 2026-09-09. Momentu przelaczenia stawki nie trzeba
+# zgadywac, widac go w danych co do cyfry:
+#
+#     34 nogi po 0,055% (obrot 27 435,79)  ->  15,089687
+#      2 nogi po 0,100% (obrot  2 345,62)  ->   2,345620   (wyjscia poz. 17 i 18)
+#                                              17,435307  = sum(fees_paid)
+#     gdyby 0,100% na calym obrocie:           29,781414
+#     NIEDOBOR:                                12,346107
+#
+# Kapital jest wiec zawyzony o 12,35 USDC, a zysk +63,09 to naprawde +50,75
+# - zawyzenie o 19,6%. TO JEST PRAWDZIWE i nie znika przez to, ze zapisu nie
+# ruszamy.
+#
+# DLACZEGO MIMO TO NIE PRZEPISUJEMY WSTECZ
+#
+# 1. Bezpiecznik NIE dziala na zawyzonej liczbie - i to jest pomiar, nie
+#    domysl. Wszystkie 34 tanie nogi byly zaksiegowane PRZED szczytem jednostki
+#    (szczyt 2026-09-07 11:49; poz. 17 i 18 otwarte 2026-09-06, wiec ich
+#    prowizje wejscia juz w nim siedzialy). Niedobor jest wiec STALYM
+#    PRZESUNIECIEM POZIOMU, ktore skraca sie w liczniku `(szczyt - teraz)`
+#    i zostaje tylko w mianowniku:
+#
+#        obsuniecie zapisane  0,0100884789%
+#        obsuniecie prawdziwe 0,0100897236%
+#        roznica              1,2e-06 punktu procentowego, przy progu 10 pp
+#
+#    Jest to wlasnosc TEJ historii, a nie prawo: gdyby tanie nogi wypadly PO
+#    szczycie, licznik by sie przesunal. Dlatego jest tu liczba, a nie zasada.
+#
+# 2. Sama poprawka pozycji zostawilaby krzywa gorsza, niz jest teraz.
+#    `exec.equity_point` to 3719 zapisanych migawek, a szczyt bierze sie
+#    z `max(nav)` po nich (risk.py). Obnizenie `fees_paid` zmienia wylacznie
+#    punkt BIEZACY, wiec w krzywej powstalby uskok 12,35 w dol w chwili
+#    poprawki - i bezpiecznik przeczytalby go jako prawdziwe obsuniecie
+#    z niczego. Zeby tego uniknac, trzeba by przepisac takze wszystkie 3719
+#    punktow razem ze szczytem, czyli pamiec bezpiecznika o najgorszym stanie.
+#
+# 3. I tego przeliczenia NIE DA SIE ZROBIC UCZCIWIE. Migracja 0042 postawila
+#    tu granice i ona wlasnie tedy przebiega: wolno odtworzyc wielkosc, ktora
+#    jest DOKLADNIE WYLICZALNA z danych, ktore mamy (`nav = equity / units`,
+#    `units` stale i znane) - a nie zgadnac. Prowizja tego warunku nie spelnia.
+#    Znam stawke, ktora nalezalo policzyc; nie wiem, co zrobilby rachunek,
+#    gdyby ja placil. Wyzsza prowizja to nizszy kapital, a `max_position_notional`
+#    jest ulamkiem KAPITALU - wiec kazda nastepna pozycja bylaby innej
+#    wielkosci i kazdy nastepny wynik inny. Przepisanie samych prowizji daje
+#    krzywa, w ktorej pozycje sa wymierzone od jednego kapitalu, a zaksiegowane
+#    przy drugim: nie rekonstrukcje, tylko sklejke dwoch roznych przebiegow,
+#    ktora WYGLADA na kompletna. Dokladnie ten powod, dla ktorego 0042 zostawia
+#    NULL tam, gdzie nie umie policzyc.
+#
+# 4. Zapis jest prawdziwy jako zapis. `fees_paid` mowi, ile ta petla NALICZYLA,
+#    i mowi to zgodnie z prawda. Blad byl w stawce, nie w ksiegowaniu, jest
+#    nazwany tutaj i w charts/trader/values.yaml. Nadpisanie zamienia usterke
+#    udokumentowana i policzalna w niewidoczna.
+#
+# CO WOBEC TEGO TRZEBA WIEDZIEC, CZYTAJAC TE LICZBY
+#
+# Niedobor 12,35 USDC jest STALY - nie rosnie, bo od 2026-09-06 obie nogi
+# ida po stawce z koszty.py. Dotyka dwoch wielkosci i tylko dwoch:
+#
+#   * ZYSKU. +63,09 znaczy +50,75. Zadna regula ryzyka tego nie czyta, czyta
+#     to czlowiek - i to jest jedyna liczba, ktora naprawde klamie.
+#   * PROGU `min_equity` (95 000, kill-switch). Prog jest kwota, wiec tu
+#     przesuniecie sie NIE SKRACA: bufor zapisany 5063,09, prawdziwy 5050,75
+#     - zawyzenie o 0,244%, zawsze w strone "za pozno". Dla porownania jedna
+#     pozycja to 5% kapitalu, czyli okolo 5000: blad jest o trzy rzedy
+#     wielkosci mniejszy niz ziarno, ktorym ten prog operuje.
+#
+# Gdyby demo mialo trwac przy tej historii dluzej albo gdyby prog byl ciasny,
+# wlasciwa droga NIE jest edycja starych wierszy, tylko odciecie: nowy rachunek
+# od czystej krzywej. Sklejone przebiegi nie robia sie prawdziwe przez to,
+# ze sa dokladniejsze.
 
 START_EQUITY = Decimal(str(START_EQUITY_WSPOLNY))
 
@@ -160,13 +235,56 @@ def horizon_feature_ids(cur, h: Horizon, symbole: list[str] | None = None) -> li
 
 
 def latest_features(cur, instrument_id: int, as_of: datetime, h: Horizon,
-                    feature_ids: list[int]) -> dict:
-    """Odczyt point-in-time. Jedyna dozwolona sciezka - patrz komentarz modulu."""
+                    feature_ids: list[int],
+                    bar_start: datetime) -> tuple[dict, dict]:
+    """Cechy JEDNEJ swiecy - tej, dla ktorej zapada decyzja. Point-in-time.
+
+    Zwraca `(cechy tej swiecy, cechy ze swiec WCZESNIEJSZYCH)`. Druga wartosc
+    nie idzie do zadnego wyniku; sluzy wylacznie do nazwania awarii.
+
+    DWA BLEDY NARAZ, OBA CICHE - i oba bral na siebie sam prog `max_staleness`.
+
+    PIERWSZY: DECYZJA DLA SWIECY T NA CECHACH SWIECY T-1. Prog dla swiecy 4 h
+    wynosi 600 minut, czyli dwie i pol swiecy. Petla budzi sie o 12:00 i pyta
+    o decyzje dla swiecy 08:00-12:00, ale cecha tej swiecy powstaje dopiero,
+    gdy `history_worker` dociagnie swiece 1 h z 11:00 (co 1200 s), a `features`
+    ja policzy (co 900 s, swiadomie pomijajac swiece otwarta). Realna dostepnosc
+    to 12:20-12:35, czyli 20-35 minut PO cyklu z 12:00. Przy progu 600 minut
+    `feat.as_of` oddawalo wtedy komplet cech swiecy 04:00-08:00 i decyzja
+    zapadala na wektorze o jedna swiece za starym.
+
+    DRUGI: MIESZANKA SWIEC W JEDNYM WEKTORZE. `feat.as_of` robi
+    `DISTINCT ON (feature_def_id) ... ORDER BY event_time DESC` (migracja 0004),
+    wiec KAZDA cecha bierze swoja najswiezsza wartosc NIEZALEZNIE. Cecha
+    policzona wczesniej pochodzila ze swiecy T-1, wolniejsza ze swiecy T-2 -
+    i szly do `evaluate()` jako jeden wektor. Trener sklei pary sztywno
+    (`train.load_panel`: `FROM f JOIN p ON p.t = f.event_time`), wiec ani jedna
+    obserwacja treningowa nie ma tego ksztaltu.
+
+    ZADEN LICZNIK TEGO NIE WIDZIAL. `MIN_CECH` bylo spelnione (cechy T-1
+    istnieja i jest ich komplet), prog 600 minut nie migal, a `decided_for_bar`
+    zamykalo swiece po pierwszej takiej decyzji, wiec spoznione cechy nie mialy
+    juz jak niczego poprawic.
+
+    DLACZEGO OKNO ZAPYTANIA ZOSTAJE SZEROKIE, A FILTR JEST TUTAJ. Wezsze okno
+    (jedna swieca) daje ten sam wynik decyzyjny, ale zwraca wtedy PUSTKE
+    i pominiecie zapisuje sie jako "zadnej cechy" - nieodroznialnie od workera,
+    ktory stoi. Szerokie okno pozwala powiedziec, ze cechy SA, tyle ze dla
+    swiecy wczesniejszej: "potok spozniony" i "potok martwy" to dwie rozne
+    awarie i dwie rozne reakcje.
+    """
     cur.execute(
-        "SELECT feature_name, value FROM feat.as_of(%s, %s, %s, %s::interval)",
+        "SELECT feature_name, value, event_time FROM feat.as_of(%s, %s, %s, %s::interval)",
         (instrument_id, as_of, feature_ids or None, f"{h.max_staleness_min} minutes"))
     # feature_name ma postac 'rola__swieca@wersja'; do sygnalow idzie sama rola.
-    return {Horizon.role_of(r["feature_name"]): r["value"] for r in cur.fetchall()}
+    cechy, obce = {}, {}
+    for r in cur.fetchall():
+        rola = Horizon.role_of(r["feature_name"])
+        if r["event_time"] == bar_start:
+            cechy[rola] = r["value"]
+        else:
+            obce[rola] = r["event_time"]
+    return cechy, obce
 
 
 def current_bar(as_of: datetime, h: Horizon) -> datetime:
@@ -381,6 +499,18 @@ class Wycena:
     """
     unrealized: Decimal = Decimal(0)
     exposure: Decimal = Decimal(0)
+    # EKSPOZYCJA ZE ZNAKIEM: dluga na plus, krotka na MINUS. Osobna od `exposure`,
+    # bo obie odpowiadaja na inne pytanie i zlanie ich w jedna liczbe psuje
+    # jedna z odpowiedzi.
+    #
+    # `exposure` (brutto) mierzy, ILE RYNKU DOTYKAMY - i temu sluzy w limitach
+    # `max_total_exposure` oraz `max_position_notional`. Dla ryzyka krotka
+    # pozycja jest tak samo grozna jak dluga, wiec sumuje sie ja na plus.
+    #
+    # `exposure_netto` mierzy, ILE GOTOWKI POSZLO NA RYNEK - i tylko tym da sie
+    # odtworzyc saldo gotowkowe. Kupno gotowke ZABIERA, sprzedaz krotka ja
+    # DODAJE, wiec ta druga musi wejsc z przeciwnym znakiem. Patrz `update_equity`.
+    exposure_netto: Decimal = Decimal(0)
     # Ta sama ekspozycja w rozbiciu na instrument. Potrzebuje jej risk kernel do
     # limitu `max_position_notional`, ktory jest limitem NA INSTRUMENT - a bez
     # tego pola musialby wyliczac ekspozycje po raz drugi, wlasnym zapytaniem
@@ -451,6 +581,7 @@ def wycen(pozycje: list[dict]) -> Wycena:
         diff = (px - entry) if pos["side"] == "long" else (entry - px)
         w.unrealized += diff * qty
         w.exposure += qty * px
+        w.exposure_netto += (qty * px) if pos["side"] == "long" else -(qty * px)
         iid = pos.get("instrument_id")
         if iid is not None:
             w.per_instrument[iid] = w.per_instrument.get(iid, Decimal(0)) + qty * px
@@ -540,13 +671,38 @@ def update_equity(cur, engine: str, mode: str, as_of: datetime,
     # rusza; wynik handlu rusza nav i nie rusza liczby jednostek. Dzieki temu
     # obsuniecie mierzy strategie, a nie przelewy.
     nav = (equity / units) if units > 0 else Decimal(1)
+    # GOTOWKA LICZY SIE Z EKSPOZYCJI NETTO, NIE Z BRUTTO.
+    #
+    # Bylo tu `equity - exposure`. Dla pozycji dlugiej to tozsamosc: kupno
+    # zamienilo gotowke na aktywo, wiec gotowka to kapital minus wartosc
+    # rynkowa tego, co trzymamy.
+    #
+    # DLA KROTKIEJ TO ZDANIE JEST FALSZYWE, i to o dwie ekspozycje. Sprzedaz
+    # krotka gotowke na rachunek WPLACA, a aktywo staje sie zobowiazaniem:
+    #
+    #     gotowka = wplaty + realized + notional_wejscia
+    #     equity  = gotowka - ekspozycja       =>   gotowka = equity + ekspozycja
+    #
+    # Stary wzor odejmowal wiec dokladnie to, co sprzedaz dodala. Zmierzone na
+    # produkcji 2026-09-01 12:06 (same pozycje krotkie): equity 99 843,03,
+    # ekspozycja 1009,67, zapisana `cash` 98 833,37 przy rzeczywistej gotowce
+    # 100 852,70 - zanizenie o 2019,33, czyli o 2 x ekspozycje.
+    #
+    # `exposure_netto` ma dluga na plus, krotka na minus, wiec jedno odejmowanie
+    # obsluguje oba kierunki i portfel mieszany takze.
+    #
+    # DO ZADNEJ REGULY RYZYKA TA LICZBA NIE WCHODZI - czyta ja kafelek
+    # w services/api/routers/overview.py. Blad nie otwieral wiec dziury
+    # w bezpieczniku, tylko klamal wlascicielowi, i dlatego nie wolno go bylo
+    # zostawic jako "nieszkodliwy": kafelek "gotowka" jest jedynym miejscem,
+    # w ktorym czlowiek sprawdza, czy rachunek zgadza sie z giełdą.
     cur.execute(
         "INSERT INTO exec.equity_point (engine, mode, event_time, equity, cash, unrealized,"
         " realized_cum, exposure, nav, units, wplaty_netto)"
         " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)"
         " ON CONFLICT (engine, mode, event_time) DO NOTHING",
         (engine, mode, as_of.replace(second=0, microsecond=0),
-         equity, equity - exposure, unrealized, realized, exposure,
+         equity, equity - w.exposure_netto, unrealized, realized, exposure,
          nav, units, wplaty))
     return w
 
@@ -726,7 +882,14 @@ def zapisz_wejscie(cur, engine: str, mode: str, instrument_id: int, decision_id:
 
 def zapisz_wyjscie(cur, position: dict, cena: Decimal, prowizja: Decimal,
                    as_of: datetime, decision_id: int,
-                   ilosc: Decimal | None = None) -> Decimal:
+                   ilosc: Decimal | None = None, *,
+                   meta: dict | None = None,
+                   order_id: int | None = None,
+                   planned_order_id: int | None = None,
+                   venue_order_id: str | None = None,
+                   client_order_id: str | None = None,
+                   venue_fill_id: str | None = None,
+                   prowizja_ccy: str | None = None) -> Decimal:
     """Zamkniecie pozycji, w calosci albo w czesci. Wspolne dla obu zrodel.
 
     WYJSCIE CZESCIOWE JEST NAJGORSZYM MOMENTEM NA UPROSZCZENIE. Zlecenie
@@ -738,12 +901,100 @@ def zapisz_wyjscie(cur, position: dict, cena: Decimal, prowizja: Decimal,
 
     Czesc pozostala ZACHOWUJE `avg_price`. Cena wejscia nie zmienia sie od tego,
     ze sprzedalismy polowe - zmienia sie tylko ilosc.
+
+    WYJSCIE ZOSTAWIA WIERSZ W `exec.order` I `exec.fill`, TAK SAMO JAK WEJSCIE
+
+    Do 2026-09-09 ta funkcja dotykala wylacznie `exec.position`. Skutek zmierzony
+    na produkcji: 18 pozycji zamknietych, 18 wierszy `exec.order` i 18 `exec.fill`
+    - SAME WEJSCIA. Prowizji wyjsc bylo 9,3335 z 17,4353 USDC, czyli 53,5%
+    calego kosztu, i nie istnialy w zadnym wierszu wypelnienia.
+
+    To nie jest brak wygodnego widoku, tylko dziura w rejestrze faktow. Wszystko,
+    co mierzy egzekucje, stoi na `exec.fill`, bo tylko tam jest zapisane, PO ILE
+    naprawde poszlo - `exec.position` trzyma cene wejscia i wynik, nie cene
+    wyjscia. Trzy rzeczy widzialy wiec polowe transakcji i nie mialy jak sie
+    o tym dowiedziec:
+
+      * pomiar poslizgu (services/engine/poslizg.py) - liczyl poslizg wejsc
+        i nazywal go kosztem, choc runda ma dwie nogi;
+      * uzgodnienie z gielda - odtwarza pozycje z wypelnien, wiec kazde wyjscie
+        bylo dla niego rozjazdem sald bez przyczyny w naszej ksiedze;
+      * czujka zdrowia egzekucji - liczyla polowe zdarzen.
+
+    Cena wyjscia nie da sie odtworzyc wstecz z niczego innego: `realized_pnl`
+    jest po prowizji i po zaokragleniu, a przy wyjsciu czesciowym sumuje sie
+    z kilku wypelnien.
+
+    SKAD `engine`, `mode` I `instrument_id`: DOCZYTUJEMY JE Z WIERSZA POZYCJI,
+    a nie bierzemy z parametru. Wolajacy podaje `position` w roznym ksztalcie
+    (sciezka gieldowa i papierowa czytaja inne kolumny), wiec przepisanie tych
+    trzech pol do sygnatury oznaczaloby, ze zapis zlecenia zalezy od tego, kto
+    go wola. Tabela pozycji jest jedynym zrodlem prawdy o tym, czyja jest pozycja,
+    i pozostanie nim takze wtedy, gdy ktos doda trzecia sciezke wyjscia.
+
+    Osobny SELECT, a nie `INSERT ... SELECT` w jednej instrukcji, i to jest
+    wybor, nie niedopatrzenie. Atrapa bazy (tests/atrapa_bazy.py) sprawdza
+    NOT NULL i `UNIQUE (mode, client_order_id)` wiazac parametry pozycyjne
+    z kolumnami z migracji - a wartosci schowanych w SELECT-cie nie widzi
+    zadna. Zapis w formie, ktorej atrapa nie potrafi zweryfikowac, wypadlby
+    spod tej ochrony po cichu: testy nadal by przechodzily, a wiersz odrzucalaby
+    dopiero produkcja. To jest dokladnie ta klasa bledu, dla ktorej ta atrapa
+    powstala.
+
+    `order_id` PODAJEMY, GDY ZLECENIE JUZ ISTNIEJE - dokladnie jak w
+    `zapisz_wejscie`. Na gieldzie wiersz zlecenia powstaje przy ZLOZENIU, wiec
+    bez tego parametru jedno wyjscie zostawialoby DWA wiersze w `exec.order`.
+    Rachunek papierowy zadnego zlecenia wczesniej nie sklada, wiec tam wiersz
+    powstaje tutaj.
     """
     calosc = Decimal(position["qty"])
     ile = calosc if ilosc is None else min(ilosc, calosc)
     entry = Decimal(position["avg_price"])
     diff = (cena - entry) if position["side"] == "long" else (entry - cena)
     pnl = diff * ile
+
+    # ZAPIS WYPELNIENIA IDZIE PRZED ZMIANA POZYCJI, zeby `INSERT ... SELECT`
+    # czytal wiersz pozycji w stanie sprzed zamkniecia. Po `closed_at` pozycja
+    # nadal istnieje, ale kolejnosc "najpierw fakt, potem jego skutek" jest
+    # tutaj takze porzadkiem czytania.
+    #
+    # ZEROWEJ ILOSCI NIE KSIEGUJEMY. Wypelnienie na 0 nie jest zdarzeniem, a
+    # wiersz w `exec.fill` z qty=0 zanizalby kazda srednia liczona po tej tabeli
+    # i podbijal licznik wypelnien czujki zdrowia egzekucji.
+    if ile > 0:
+        meta = dict(meta or {})
+        cur.execute(
+            "SELECT p.engine, p.mode, p.instrument_id, p.side, i.quote_ccy"
+            " FROM exec.position p JOIN ref.instrument i ON i.id = p.instrument_id"
+            " WHERE p.id=%s", (position["id"],))
+        p = cur.fetchone()
+        oid = order_id
+        if oid is None:
+            cur.execute(
+                "INSERT INTO exec.order (decision_id, planned_order_id, engine, mode,"
+                " instrument_id, venue_order_id, client_order_id, side, order_type, qty,"
+                " limit_price, status, submitted_at, raw)"
+                " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'filled',%s,%s) RETURNING id",
+                (decision_id, planned_order_id, p["engine"], p["mode"],
+                 p["instrument_id"], venue_order_id,
+                 client_order_id or f"tai-wyjscie-{decision_id}",
+                 # STRONA ZLECENIA JEST ODWROTNA DO STRONY POZYCJI. Wyjscie
+                 # z pozycji dlugiej to sprzedaz, z krotkiej - odkup. Wpisanie
+                 # tu strony pozycji zrobiloby z kazdego wyjscia drugie wejscie:
+                 # uzgodnienie odtwarza salda z wypelnien, wiec liczyloby nam
+                 # ekspozycje podwojna zamiast zerowej.
+                 "sell" if p["side"] == "long" else "buy",
+                 meta.get("order", "market"), ile, cena, as_of, json.dumps(meta)))
+            oid = cur.fetchone()["id"]
+        cur.execute(
+            "INSERT INTO exec.fill (order_id, venue_fill_id, qty, price, fee, fee_ccy,"
+            " event_time) VALUES (%s,%s,%s,%s,%s,%s,%s)",
+            # WALUTA PROWIZJI: z gieldy, gdy ja podala, inaczej waluta kwotowana
+            # instrumentu. Zaden z wolajacych wyjscie jej nie zna, a NULL w tym
+            # miejscu zmienialby prowizje w liczbe bez jednostki - czyli w cos,
+            # czego nie da sie zsumowac z pozostalymi kosztami.
+            (oid, venue_fill_id or f"paper-{oid}", ile, cena, prowizja,
+             prowizja_ccy or p["quote_ccy"], as_of))
 
     if ile >= calosc:
         cur.execute(
@@ -786,13 +1037,30 @@ def execute_paper(cur, engine: str, mode: str, instrument_id: int, decision_id: 
 
 
 def close_paper(cur, position: dict, price: Decimal, as_of: datetime,
-                decision_id: int, kind: str, limit: bool) -> Decimal:
+                decision_id: int, kind: str, limit: bool,
+                planned_order_id: int | None = None) -> Decimal:
+    """Symulacja wyjscia. Lustro `execute_paper` - z ta sama `meta`.
+
+    `meta` NIE JEST OZDOBA. Pomiar poslizgu odrzuca wiersze rachunku papierowego
+    po `raw->>'execution'`, bo cena wypelnienia jest tam z zalozenia rowna
+    `cena * (1 +- POSLIZG)` - policzenie z nich poslizgu oddaloby stala, ktora
+    sami wpisalismy, i wygladalo na jej potwierdzenie. Wyjscie bez tego znacznika
+    weszloby do pomiaru jako obserwacja gieldowa i unieważniłoby go.
+    """
     fee_rate, slip = stawki(kind, limit)
     qty = Decimal(position["qty"])
     exit_px = price * (Decimal(1) - slip) if position["side"] == "long" \
         else price * (Decimal(1) + slip)
     fee = qty * exit_px * fee_rate
-    return zapisz_wyjscie(cur, position, exit_px, fee, as_of, decision_id)
+    return zapisz_wyjscie(
+        cur, position, exit_px, fee, as_of, decision_id,
+        planned_order_id=planned_order_id,
+        meta={"execution": "internal_paper", "kind": kind,
+              "order": "limit" if limit else "market",
+              "fee_rate": str(fee_rate), "slippage": str(slip),
+              "wypelnienie": ("sprawdzone na swiecy T+1 (plan "
+                              f"{planned_order_id})" if planned_order_id
+                              else "natychmiastowe")})
 
 
 def zapisz_wyjscie_bez_pozycji(cur, engine: str, mode: str, plan: dict,
@@ -952,7 +1220,8 @@ def rozstrzygnij_plany(cur, engine: str, mode: str, h: Horizon, now: datetime,
                             (plan["trigger"]["position_id"],))
                 poz = cur.fetchone()
             if poz:
-                close_paper(cur, poz, cena, wypelniono, plan["decision_id"], kind, True)
+                close_paper(cur, poz, cena, wypelniono, plan["decision_id"], kind, True,
+                            planned_order_id=plan["id"])
             else:
                 # WYJSCIE, KTORE NIE MA CZEGO ZAMKNAC. Pozycji nie ma, bo
                 # zamknal ja w miedzyczasie ktos inny (dozor, kill-switch)
@@ -1039,8 +1308,16 @@ async def sprawdz(conn, engine: str = "crypto", h: Horizon | None = None) -> int
         iid, sym = inst["id"], inst["symbol"]
         probuj(f"{sym}: decyzja w tej świecy?",
                lambda i=iid: decided_for_bar(cur, engine, "demo", i, bar_start, h))
-        f = probuj(f"{sym}: odczyt cech point-in-time",
-                   lambda i=iid: latest_features(cur, i, now, h, ids or []))
+        # KONTROLA PYTA O TO SAMO, CO PRODUKCJA: o cechy TEJ swiecy, nie
+        # o najswiezsze jakiekolwiek. Kontrola czytajaca szerszym oknem
+        # meldowalaby [ok] dokladnie w tym stanie, ktory wstrzymuje decyzje.
+        para = probuj(f"{sym}: odczyt cech point-in-time",
+                      lambda i=iid: latest_features(cur, i, now, h, ids or [],
+                                                    bar_start))
+        f, obce = para if para else (None, {})
+        if not f and obce:
+            print(f"         UWAGA: brak cech świecy {bar_start:%m-%d %H:%M}, "
+                  f"ale {len(obce)} czeka z wcześniejszych — potok spóźniony")
         # KONTROLA MOWI O WIEKU, nie tylko o tym, ze zapytanie sie wykonalo.
         # `mark_price` przy przeterminowanej cenie zwraca None bez wyjatku, wiec
         # sam `probuj` wypisalby [ok] dla instrumentu z martwym feedem - czyli
@@ -1312,6 +1589,15 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
              # journal.pominiecie (0041), bo heartbeat ma `engine` w kluczu
              # glownym i kazdy przebieg kasuje poprzedni.
              "pominiete_bez_cech": 0, "pominiete_bez_ceny": 0,
+             # POTOK SPOZNIONY, A NIE MARTWY - podzbior `pominiete_bez_cech`.
+             #
+             # Rozroznienie jest tu cala trescią licznika. "Brak cech" znaczy
+             # "worker stoi" i konczy sie alarmem zywotnosci. "Cechy sa, ale
+             # dla swiecy wczesniejszej" znaczy "worker zyje, tylko nie zdazyl"
+             # - zywotnosc milczy, wszystko bije, a silnik nie handluje.
+             # Bez osobnej liczby obie awarie wygladaja w heartbeacie
+             # identycznie, a reakcja na nie jest inna.
+             "cechy_z_poprzedniej_swiecy": 0,
              # Rozmiar uniwersum decyzyjnego. Bez tej liczby przebieg na PUSTEJ
              # liscie instrumentow - `tradeable` zdjete pomylkowo, migracja
              # w polowie - wyglada w heartbeacie identycznie jak przebieg,
@@ -1354,18 +1640,44 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
         if decided_for_bar(cur, engine, mode, iid, bar_start, h):
             stats["poza_swieca"] += 1
             continue
-        features = latest_features(cur, iid, now, h, feature_ids)
+        features, obce = latest_features(cur, iid, now, h, feature_ids, bar_start)
         if len(features) < MIN_CECH:
             # SLAD ZANIM `continue`. Bez tego wiersza instrument znikal
             # z przebiegu bezglosnie i z bazy nie dalo sie odroznic "pominiety
             # z braku cech" od "silnik w ogole nie chodzil".
+            #
+            # DECYZJA ODLOZONA, NIE ODWOLANA - i to jest cala roznica.
+            # `current_bar` oddaje te sama swiece przez cale jej nastepne
+            # okno, a `decided_for_bar` blokuje dopiero po ZAPADNIECIU decyzji.
+            # Petla budzi sie co 300 s, wiec przy potoku spoznionym o 20-35
+            # minut decyzja dla swiecy 08:00-12:00 zapada w cyklu 12:20-12:35,
+            # nadal w oknie [12:00, 16:00) i nadal po cenie zamkniecia tej
+            # swiecy (`zakres_swiecy(..., bar_start)`). Kosztem jest opoznienie
+            # zlozenia zlecenia, nie utrata transakcji.
+            #
+            # KOSZT JEST REALNY DOPIERO, GDY POTOK SPOZNIA SIE O WIECEJ NIZ
+            # SWIECE - wtedy zaden cykl w oknie nie zobaczy kompletu i silnik
+            # przestaje handlowac CALKOWICIE. Z zewnatrz wyglada to jak rynek
+            # bez sygnalow, wiec ta galaz musi zostawiac liczbe: wiersz
+            # w journal.pominiecie na kazda (swieca, instrument) ORAZ licznik
+            # w heartbeacie ponizej.
             stats["pominiete_bez_cech"] += 1
-            zapisz_pominiecie(
-                cur, engine, mode, iid, bar_start, "za_malo_cech",
-                f"{len(features)} z wymaganych {MIN_CECH}: "
-                + (", ".join(sorted(features)) if features else "żadnej"))
+            if obce:
+                stats["cechy_z_poprzedniej_swiecy"] += 1
+                najswiezsza = max(obce.values())
+                szczegol = (
+                    f"{len(features)} z wymaganych {MIN_CECH} dla świecy "
+                    f"{bar_start:%Y-%m-%d %H:%M}; potok SPÓŹNIONY — "
+                    f"{len(obce)} cech czeka z wcześniejszych świec, "
+                    f"najświeższa {najswiezsza:%Y-%m-%d %H:%M}")
+            else:
+                szczegol = (f"{len(features)} z wymaganych {MIN_CECH} dla świecy "
+                            f"{bar_start:%Y-%m-%d %H:%M}: "
+                            + (", ".join(sorted(features)) if features else "żadnej"))
+            zapisz_pominiecie(cur, engine, mode, iid, bar_start,
+                              "za_malo_cech", szczegol)
             if verbose:
-                print(f"  {symbol:10s} pominięty — za mało cech ({len(features)})")
+                print(f"  {symbol:10s} pominięty — {szczegol}")
             continue
         # CENA DECYZYJNA TO ZAMKNIECIE SWIECY, nie ostatnia cena minutowa.
         #
@@ -1440,6 +1752,21 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
     # pominiecie JUZ zaszlo, niezaleznie od tego, co stanie sie dalej.
     if stats["pominiete_bez_cech"] or stats["pominiete_bez_ceny"]:
         conn.commit()
+
+    # CISZA CALEGO UNIWERSUM MA BYC GLOSNA.
+    #
+    # Pojedynczy instrument bez cech to zdarzenie; CALE uniwersum bez cech tej
+    # swiecy to potok, ktory sie zatrzymal - a silnik, ktory nie handluje, bo
+    # nie ma na czym, wyglada dokladnie tak samo jak silnik, ktory nie handluje,
+    # bo rynek jest spokojny. Komunikat idzie BEZ `verbose`, bo jest to jedyne
+    # miejsce, w ktorym ta roznica pada wprost do logu zadania.
+    do_oceny = stats["instrumenty"] - stats["poza_swieca"]
+    if do_oceny > 0 and stats["cechy_z_poprzedniej_swiecy"] == do_oceny:
+        print(f"  UWAGA: ŻADEN z {do_oceny} instrumentów nie ma kompletu cech "
+              f"świecy {bar_start:%Y-%m-%d %H:%M} — potok cech spóźniony. "
+              f"Decyzje odłożone do następnego cyklu; jeśli opóźnienie "
+              f"przekracza {h.bar_minutes} min, silnik NIE HANDLUJE. "
+              f"Sprawdź: kubectl logs deploy/trader-features --tail=30")
 
     # PRZEBIEG DRUGI: najpierw wyjscia (nie konkuruja o kapital i zwalniaja go),
     # potem wejscia w kolejnosci malejacej sily sygnalu.

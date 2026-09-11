@@ -106,6 +106,18 @@ class RiskState:
                 and self.nav_day_ago is not None and self.nav_od_poczatku)
 
     @property
+    def wynik_w_jednostkach(self) -> bool:
+        """Publiczna odpowiedz na "ktora miara wygrala".
+
+        Istnieje po to, zeby drugi czytelnik krzywej (`wznowienie.py` przez
+        `stan_kapitalu.zloz_stan`) mogl NAZWAC jednostke w dzienniku zwolnienia,
+        nie siegajac po pole prywatne i nie odtwarzajac tego warunku u siebie.
+        Odtworzony warunek jest dokladnie tym, co rozjechalo bezpiecznik
+        z dozorca po migracji 0031.
+        """
+        return self._nav_wiarygodne
+
+    @property
     def wynik(self) -> Decimal:
         return self.nav if self._nav_wiarygodne else self.equity
 

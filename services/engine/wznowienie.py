@@ -43,6 +43,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from services.engine import stan_kapitalu  # noqa: E402
+
 # Minimalny czas od zadzialania. Nie jest to warunek wznowienia - jest to
 # warunek ROZWAZANIA wznowienia. Sam uplyw czasu niczego nie dowodzi.
 KARENCJA_MIN = int(os.environ.get("WZNOWIENIE_KARENCJA_MIN", "60"))
@@ -53,48 +55,23 @@ HISTEREZA = float(os.environ.get("WZNOWIENIE_HISTEREZA", "0.5"))
 
 
 async def stan_konta(fetch_one, engine: str, mode: str) -> dict | None:
-    """Kapital biezacy, szczyt i sprzed doby - te same trzy liczby co risk kernel."""
-    biez = await fetch_one(
-        "SELECT equity FROM exec.equity_point WHERE engine=%s AND mode=%s"
-        " ORDER BY event_time DESC LIMIT 1", (engine, mode))
-    if not biez:
-        return None
-    szczyt = await fetch_one(
-        "SELECT max(equity) AS peak FROM exec.equity_point WHERE engine=%s AND mode=%s",
-        (engine, mode))
-    doba = await fetch_one(
-        "SELECT equity FROM exec.equity_point WHERE engine=%s AND mode=%s"
-        " AND event_time <= now() - interval '24 hours'"
-        " ORDER BY event_time DESC LIMIT 1", (engine, mode))
-    if not doba:
-        # TEN SAM FALLBACK CO W RiskKernel._equity() I Z TEGO SAMEGO POWODU.
-        #
-        # Brak punktu sprzed 24 h znaczy, ze CALA krzywa jest mlodsza niz doba
-        # (gdyby istnial starszy punkt, zapytanie wyzej by go zwrocilo).
-        # Odniesieniem jest wiec POCZATEK historii - dla rachunku istniejacego
-        # od trzech godzin "od poczatku" i "od doby" to to samo pytanie.
-        #
-        # Spadek na punkt biezacy dawal `day_ago == equity`, czyli strate
-        # dzienna 0,00% zawsze - a tutaj kierunek tego bledu jest GORSZY niz
-        # w kernelu. Tam limit nie zadzialal; tu `warunek_ustal` meldowalo
-        # "strata dzienna 0,00% < 1,00%" i ZWALNIALO kill-switcha na podstawie
-        # pomiaru, ktorego nie bylo. Bezpiecznik zdejmowal sam siebie.
-        #
-        # ROZJAZD Z KERNELEM JEST TU GROZNIEJSZY NIZ SAMA LICZBA: gdyby kernel
-        # mierzyl od poczatku historii, a ta funkcja od punktu biezacego, kazdy
-        # swiezy rachunek wpadalby w petle - kernel zatrzymuje przy 4%,
-        # wznowienie widzi 0,00% i zwalnia, kernel zatrzymuje ponownie. Oba
-        # ogniwa "poprawne" z osobna, a z zewnatrz widac tylko silnik, ktory
-        # dziwnie sie zachowuje. Dlatego ta poprawka nie moze isc bez tamtej.
-        doba = await fetch_one(
-            "SELECT equity FROM exec.equity_point WHERE engine=%s AND mode=%s"
-            " ORDER BY event_time ASC LIMIT 1", (engine, mode))
-    equity = float(biez["equity"])
-    return {
-        "equity": equity,
-        "peak": float((szczyt or {}).get("peak") or equity),
-        "day_ago": float(doba["equity"]) if doba else equity,
-    }
+    """Wynik, szczyt i wynik sprzed doby - TE SAME TRZY LICZBY CO RISK KERNEL.
+
+    "Te same" znaczy tu: z tych samych zapytan i po tej samej regule wyboru
+    miary, a nie "policzone tak, zeby wychodzilo podobnie". Poprzednia wersja
+    czytala wylacznie `exec.equity_point.equity`, podczas gdy `evaluate_account`
+    od migracji 0031 liczy strate dzienna i obsuniecie z `nav`. Uzasadnienie
+    i scenariusz w liczbach - w naglowku `stan_kapitalu`.
+
+    KLUCZE NAZYWAJA WIELKOSC, NIE KOLUMNE. Poprzednie `equity`/`peak`/`day_ago`
+    obiecywaly pieniadze; po wejsciu `nav` te same klucze niosly wartosc
+    jednostki krazaca wokol 1,0. Nazwa, ktora klamie o jednostce, jest tym
+    samym rodzajem bledu co druga kopia zapytania.
+    """
+    wiersze = {}
+    for klucz, sql in stan_kapitalu.PLAN:
+        wiersze[klucz] = await fetch_one(sql, (engine, mode))
+    return stan_kapitalu.zloz_stan(wiersze)
 
 
 def warunek_ustal(limit_name: str, wartosc_limitu: float, stan: dict) -> tuple[bool, str]:
@@ -105,16 +82,20 @@ def warunek_ustal(limit_name: str, wartosc_limitu: float, stan: dict) -> tuple[b
     "wznowiono automatycznie".
     """
     prog = wartosc_limitu * HISTEREZA
+    # Jednostka idzie do opisu, bo dwa procenty policzone z dwoch roznych
+    # krzywych czytaja sie w dzienniku identycznie - a to wlasnie ta
+    # nieodroznialnosc pozwalala zdejmowac hamulec dzien za wczesnie.
+    skad = "jednostka" if stan.get("jednostka") else "kapitał"
     if limit_name == "max_daily_loss":
-        if stan["day_ago"] <= 0:
+        if stan["doba"] <= 0:
             return False, "brak odniesienia sprzed doby"
-        strata = (stan["day_ago"] - stan["equity"]) / stan["day_ago"] * 100
-        return strata < prog, f"strata dzienna {strata:.2f}% < {prog:.2f}%"
+        strata = (stan["doba"] - stan["wynik"]) / stan["doba"] * 100
+        return strata < prog, f"strata dzienna {strata:.2f}% < {prog:.2f}% ({skad})"
     if limit_name == "max_drawdown":
-        if stan["peak"] <= 0:
+        if stan["szczyt"] <= 0:
             return False, "brak szczytu"
-        dd = (stan["peak"] - stan["equity"]) / stan["peak"] * 100
-        return dd < prog, f"obsunięcie {dd:.2f}% < {prog:.2f}%"
+        dd = (stan["szczyt"] - stan["wynik"]) / stan["szczyt"] * 100
+        return dd < prog, f"obsunięcie {dd:.2f}% < {prog:.2f}% ({skad})"
     # Limit nieznany tej regule NIE jest wznawiany. Domysl jest tu celowo
     # zachowawczy: nowy limit krytyczny, o ktorym ta funkcja nie wie, zatrzyma
     # system do czasu, az ktos swiadomie dopisze jego regule.

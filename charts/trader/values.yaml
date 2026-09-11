@@ -386,3 +386,21 @@ trainerCron:
   resources:
     limits:   { cpu: 2000m, memory: 1Gi }
     requests: { cpu: 200m,  memory: 384Mi }
+
+# Kurs waluty odniesienia wlasciciela (market.fx_rate, migracja 0036).
+#
+# BEZ TEJ SEKCJI CALY CHART SIE NIE RENDERUJE. `kurs-cron.yaml` otwiera sie
+# warunkiem `{{- if .Values.kursCron.enabled }}`, a brak klucza `kursCron` daje
+# "nil pointer evaluating interface {}.enabled" - blad NIE tego jednego zadania,
+# tylko calego release'u. ArgoCD nie zsynchronizuje wtedy NICZEGO i objawem jest
+# "wdrozenie nie zmienia nic", a nie awaria. Sprawdzone 2026-09-10:
+# `helm template t charts/trader` konczylo sie tym bledem.
+#
+# `enabled: true`, bo wylaczenie zadania jest gorsza z dwoch cichych awarii:
+# `market.fx_rate` zostaje wtedy pusta, a druga krzywa kapitalu sklada sie
+# z samych luk "nie przeliczono" - czyli mechanizm zbudowany i niewpiety,
+# dokladnie to, przed czym ostrzega naglowek kurs-cron.yaml.
+kursCron:
+  enabled: true
+  schedule: "13 */6 * * *"   # co 6 h, w minucie nieuzywanej przez inne zadania
+  dni: 400                   # zapas ponad rok, zeby backfill mial z czego liczyc

@@ -28,7 +28,7 @@ import json
 import os
 import sys
 import time
-from typing import Any
+from typing import Any, NamedTuple
 
 import httpx
 
@@ -67,6 +67,42 @@ class Przeciazony(RuntimeError):
         self.dobowy = dobowy
 
 
+class Wyczerpany(Przeciazony):
+    """Awaria TRWALA: nie minie w tym cyklu i najpewniej nie minie dzis sama.
+
+    Wyczerpany kredyt, uniewazniony klucz, brak uprawnien do modelu. Rozroznienie
+    nie jest akademickie - to jest ROZNICA W TYM, CO WOLNO ZROBIC DALEJ. Przy
+    limicie tempa kolejny artykul ma sens (limit mija w sekundy), przy braku
+    kredytu KAZDY kolejny artykul to jedno wywolanie, ktore na pewno odmowi.
+    Zmierzone na produkcji 2026-09-10: 400 "Your credit balance is too low"
+    powtorzone 52-62 razy w kazdym cyklu, cykl co 5 minut - okolo 15 tysiecy
+    bezuzytecznych wywolan na dobe, bo zaden bezpiecznik nie mial czego zewrzec.
+
+    DLACZEGO PODKLASA `Przeciazony`, A NIE OSOBNA GALAZ
+    `Przeciazony` znaczy "dostawca odmawia z powodu limitu, nie z powodu bledu
+    w naszym zapytaniu" - i to jest jedyny wyjatek, po ktorym wolno siegnac po
+    drugiego dostawce w triazu. Martwy klucz spelnia ten warunek tak samo jak
+    limit tempa: zejscie na zapasowego jest wtedy tak samo uprawnione, a nawet
+    bardziej pilne. Osobna galaz wymagalaby dopisania drugiego `except` w kazdym
+    miejscu, ktore juz teraz obsluguje odmowe - i pierwsze zapomniane miejsce
+    przywrocilo by dokladnie ten blad, ktory ta klasa naprawia.
+
+    Rozni sie DLUGOSCIA zwarcia: `Przeciazony` na minuty, `Wyczerpany` na godziny.
+    """
+
+
+class BrakDostawcy(RuntimeError):
+    """Nie ma juz KOGO zapytac - kazdy dostawca w tej konfiguracji jest odciety.
+
+    Podnoszony BEZ wywolania API, wiec nie niesie zuzycia tokenow. To jest
+    sygnal "przestan probowac w tym cyklu", a nie kolejna awaria do policzenia
+    w statystykach - patrz kontrakt w `Dostawca`.
+
+    NIE jest podklasa `Przeciazony`: po `Przeciazony` wolno siegnac po drugiego
+    dostawce, a tu wlasnie drugiego dostawcy juz nie ma.
+    """
+
+
 class Odmowa(BladOdpowiedzi):
     """Model odmowil odpowiedzi. Nie jest to awaria - jest to odpowiedz."""
 
@@ -103,8 +139,102 @@ def _bez_additional_properties(schema: Any) -> Any:
     return schema
 
 
+class Wykonawca(NamedTuple):
+    """Dostawca i model, ktore NAPRAWDE obsluzyly wywolanie.
+
+    Nie ten, o ktory prosilismy - ten, ktory odpowiedzial (albo odmowil). Przy
+    jednym dostawcy to zawsze to samo; rozjezdza sie dokladnie wtedy, gdy
+    mieszanka zeszla na dostawce zapasowego.
+    """
+
+    nazwa: str
+    model: str
+
+    def __str__(self) -> str:
+        return f"{self.nazwa}/{self.model}"
+
+
+def oznacz_wykonawce(e: Exception, nazwa: str, model: str) -> None:
+    """Dopisuje do WYJATKU, kto go zwrocil. Pierwszy wpis wygrywa.
+
+    DLACZEGO NA WYJATKU, A NIE W `usage`
+
+    Przy sukcesie model faktyczny wraca w `usage["model_uzyty"]` i to wystarcza.
+    Przy awarii `usage` czesto nie ma w ogole: `Przeciazony` i `Wyczerpany` nie
+    niosa zadnego zuzycia, bo odmowa zapadla, zanim powstal jakikolwiek token.
+    A to wlasnie sciezka awarii idzie do logu - i tam brakowalo prawdy.
+
+    Zmierzone na produkcji 2026-09-10, ta sama linia 52-62 razy w kazdym cyklu:
+
+        BLAD triaz gemini-3.5-flash-lite: BadRequestError: ... 'Your credit
+        balance is too low to access the Anthropic API...'
+
+    Nazwa mowila "gemini", odmowil Anthropic (mieszanka zeszla na zapasowego po
+    wyczerpaniu limitu dobowego Gemini), a szukanie awarii poszlo za nazwa -
+    czyli w strone dostawcy, ktory z tym bledem nie mial nic wspolnego.
+
+    Pierwszy wpis wygrywa, bo stempluje ten, kto WYKONAL wywolanie; warstwy
+    wyzej tylko przepuszczaja wyjatek dalej i nadpisanie zamienialoby prawde
+    z powrotem na model zadany.
+    """
+    if getattr(e, "wykonawca", None) is not None:
+        return
+    try:
+        e.wykonawca = Wykonawca(nazwa, model)
+    except AttributeError:
+        # Wyjatek z `__slots__` nie przyjmie atrybutu. Log spadnie wtedy na
+        # model zadany - gorzej, ale nie kosztem awarii W OBSLUDZE AWARII.
+        pass
+
+
+def kto_wykonal(e: Exception, ai: "Dostawca", model_zadany: str) -> Wykonawca:
+    """Wykonawca odczytany z wyjatku; gdy go nie ma - ten, o ktory prosilismy.
+
+    Domysl jest PRAWDZIWY tam, gdzie dostawca jest jeden: zadany model jest
+    wtedy jedynym, ktory mogl odpowiedziec. Rozjazd wprowadza dopiero mieszanka
+    i to ona stempluje wyjatki (`DostawcaMieszany._zapytaj_u`) - stempel siedzi
+    w warstwie, ktora KIERUJE zapytaniami, wiec obejmuje takze dostawcow
+    dopisanych pozniej, ktorzy o zadnym stemplowaniu nie wiedza.
+    """
+    w = getattr(e, "wykonawca", None)
+    return w if isinstance(w, Wykonawca) else Wykonawca(ai.nazwa, model_zadany)
+
+
 class Dostawca:
-    """Wspolny interfejs. Podklasa dostarcza transport i cennik."""
+    """Wspolny interfejs. Podklasa dostarcza transport i cennik.
+
+    KONTRAKT NA AWARIE — CZYTA GO `news_worker`, WIEC MUSI DAC SIE ZROZUMIEC TUTAJ
+
+    `zapytaj` konczy sie na jeden z pieciu sposobow i kazdy znaczy co innego dla
+    NASTEPNEGO artykulu:
+
+      * wynik `(dane, usage)`,
+      * `Odmowa` / `BladOdpowiedzi` — wywolanie doszlo do skutku i KOSZTOWALO,
+        ale wyniku nie ma. Ten artykul nie idzie dalej, nastepny probujemy
+        normalnie,
+      * `Przeciazony` — awaria PRZEJSCIOWA (limit tempa, 5xx, timeout). Mija
+        sama, nastepny artykul ma sens,
+      * `Wyczerpany` (podklasa `Przeciazony`) — awaria TRWALA (brak kredytu,
+        martwy klucz, brak uprawnien do modelu). Nie minie w tym cyklu,
+      * `BrakDostawcy` — nie ma juz kogo pytac; wywolanie NIE poszlo do API.
+
+    JEDEN WARUNEK, KTORY MA SPRAWDZAC WOLAJACY: `czy_ma_czym_pytac()`.
+
+    Zwraca False, gdy dalsze pytania w tym cyklu sa z gory stracone. Wtedy
+    news_worker ma PRZESTAC wolac `triage`/`analyze`, ale MA DALEJ ZAPISYWAC
+    artykuly (sciezka `analizuj=False`): kanal RSS nie odda jutro tego, czego
+    dzis nie pobierzemy, a zapisany artykul bez analizy odzyska `nadrob_zaleglosci`
+    w oknie 24 h, gdy tylko dostawca wroci. Przerwanie CALEGO cyklu byloby
+    lekarstwem gorszym od choroby — traciloby material bezpowrotnie.
+
+    Warunek trzeba sprawdzac TAKZE wewnatrz petli po artykulach, bo stan zmienia
+    sie w jej trakcie: pierwszy artykul dostaje `Wyczerpany`, a dopiero przez
+    niego dostawca zostaje odciety. `zapytaj` samo pilnuje tej samej zasady
+    i podnosi `BrakDostawcy` zamiast wolac martwe API — warunek u wolajacego
+    oszczedza petle, a nie chroni budzet.
+
+    `powod_niedostepnosci()` daje tekst do logu; pusty, gdy dostawca jest zdrowy.
+    """
 
     nazwa: str = ""
     model_analizy: str = ""
@@ -113,9 +243,62 @@ class Dostawca:
     CENNIK: dict[str, tuple[float, float]] = {}
     CENNIK_DOMYSLNY: tuple[float, float] = (5.0, 25.0)
 
+    # ILE TRWA ODCIECIE PO AWARII TRWALEJ.
+    #
+    # Szesc godzin, a nie dziesiec minut i nie "do konca doby". Brak kredytu nie
+    # mija z uplywem czasu - konczy go CZLOWIEK, ktory doladuje konto albo wymieni
+    # klucz. Proba co dziesiec minut to 144 bezuzyteczne wywolania na dobe zamiast
+    # 15 tysiecy - lepiej, ale wciaz bez sensu, bo zadne z nich niczego nie zmieni.
+    # Szesc godzin daje cztery proby na dobe i nic przy tym nie tracimy: artykuly
+    # zapisane bez analizy odzyskuje `nadrob_zaleglosci` w oknie 24 h.
+    #
+    # Wymiana klucza NIE czeka na ten czas - nowy klucz to nowy obiekt dostawcy,
+    # a stanu bezpiecznika nie wolno wtedy przenosic (patrz `DostawcaMieszany`).
+    ZWARCIE_TRWALE_S = 6 * 3600.0
+
+    # Stan bezpiecznika. Atrybuty KLASY, zeby podklasy nie musialy wolac
+    # `super().__init__` - przypisanie w `odetnij` tworzy atrybut instancji.
+    _niedostepny_do: float = 0.0
+    _powod_niedostepnosci: str = ""
+    # Odmowy POD RZAD. Trzyma je dostawca, ktory odmawia, a nie ten, kto pyta:
+    # inaczej mieszanka musialaby prowadzic osobny licznik dla kazdej roli
+    # i pierwsza zapomniana rola zostalaby bez bezpiecznika (tak wlasnie
+    # analiza zostala bez niego do 2026-09-10).
+    _odmowy_pod_rzad: int = 0
+
     async def zapytaj(self, *, model: str, system: str, user: str,
                       schema: dict, max_tokens: int) -> tuple[dict, dict]:
         raise NotImplementedError
+
+    def czy_ma_czym_pytac(self) -> bool:
+        """Czy pytanie tego dostawcy ma jeszcze jakikolwiek sens w tym cyklu."""
+        return time.monotonic() >= self._niedostepny_do
+
+    def powod_niedostepnosci(self) -> str:
+        return "" if self.czy_ma_czym_pytac() else self._powod_niedostepnosci
+
+    def odetnij(self, ile_s: float, powod: str) -> None:
+        """Przestan pytac tego dostawce przez `ile_s` sekund.
+
+        Nie skraca juz trwajacego odciecia: awaria trwala, po ktorej przyjdzie
+        zwykly limit tempa, nie moze zamienic szesciu godzin w dziesiec minut.
+        """
+        do = time.monotonic() + ile_s
+        if do > self._niedostepny_do:
+            self._niedostepny_do = do
+            self._powod_niedostepnosci = powod
+
+    def _sprawdz_dostepnosc(self) -> None:
+        """Podnosi `BrakDostawcy` zamiast wolac API, o ktorym wiadomo, ze odmowi.
+
+        Wolane na wejsciu `zapytaj`, bo bezpiecznik ma dzialac takze wtedy, gdy
+        dostawca jest jeden - wyczerpany kredyt pali wtedy dokladnie tyle samo
+        wywolan, co w mieszance, tylko nikt nie ma go od czego odbic.
+        """
+        if not self.czy_ma_czym_pytac():
+            raise BrakDostawcy(
+                f"{self.nazwa}: {self._powod_niedostepnosci} — odciety na "
+                f"{(self._niedostepny_do - time.monotonic()) / 60:.0f} min")
 
     def uzyty_model(self, model: str, usage: dict) -> str:
         """Model, ktory NAPRAWDE obsluzyl zapytanie.
@@ -165,8 +348,86 @@ class DostawcaAnthropic(Dostawca):
         self.model_analizy = os.environ.get("ANALYSIS_MODEL", "claude-opus-5")
         self.model_triazu = os.environ.get("TRIAGE_MODEL", "claude-haiku-4-5")
 
+    async def zamknij(self) -> None:
+        # SDK TEZ TRZYMA PULE POLACZEN - nie tylko klient Gemini obok.
+        # Dostawca Gemini domykal swoja od poczatku, ten nie domykal niczej,
+        # wiec kazda wymiana klucza i kazde zakonczenie procesu zostawialy
+        # otwarte gniazda. Widac to bylo dopiero przy dostawcy budowanym co
+        # cykl: 338 cykli w jednym procesie to bylo 338 porzuconych pul.
+        await self._c.close()
+
+    # SLOWA, PO KTORYCH POZNAJEMY ODMOWE ROZLICZENIOWA.
+    #
+    # Rozroznienie idzie po TRESCI, nie po kodzie HTTP - dokladnie tak jak
+    # `DostawcaGemini.limit_dobowy` czyta `quotaId`, bo Google tez daje jeden kod
+    # na dwie rozne sytuacje. Tutaj jest tak samo, tylko gorzej: 400 to u
+    # Anthropica ZAROWNO nasz blad w schemacie (do naprawienia w kodzie, ma byc
+    # glosny), JAK I wyczerpany kredyt (nic w kodzie nie pomoze). Zmierzone na
+    # produkcji 2026-09-10:
+    #   400 {'type': 'invalid_request_error', 'message': 'Your credit balance is
+    #   too low to access the Anthropic API. Please go to Plans & Billing...'}
+    ODMOWA_ROZLICZENIOWA = ("credit balance", "purchase credits", "billing",
+                            "insufficient funds", "credit card")
+
+    @staticmethod
+    def _tresc_odmowy(e: Exception) -> str:
+        """Komunikat razem z cialem odpowiedzi, malymi literami.
+
+        Cialo, bo `str(wyjatku)` bywa u SDK skrocone, a rozstrzyga wlasnie tresc.
+        """
+        czesci = [str(e), str(getattr(e, "message", "") or "")]
+        cialo = getattr(e, "body", None)
+        if cialo is not None:
+            czesci.append(json.dumps(cialo, ensure_ascii=False, default=str))
+        return " ".join(czesci).lower()
+
+    def _przeloz_odmowe(self, e: Exception, model: str) -> None:
+        """Zamienia odmowe SDK na wyjatek, ktory niesie DECYZJE, a nie kod HTTP.
+
+        Nie podnosi niczego, gdy nie umie zaklasyfikowac - wtedy oryginalny blad
+        leci dalej nietkniety. Cisza jest tu wazniejsza od domyslu: blad w naszym
+        schemacie ma zostac glosny, a nie zamienic sie w "dostawca chwilowo
+        niedostepny", po ktorym potok w nieskonczonosc czeka na cud.
+
+        Rozpoznajemy po atrybutach (`status_code`, `body`), a nie przez
+        `isinstance` — pakiet `anthropic` jest importowany leniwie, zeby obraz
+        z samym kluczem Gemini nie musial go miec w ogole.
+        """
+        kod = getattr(e, "status_code", None)
+        tresc = self._tresc_odmowy(e)
+        rozliczeniowa = any(s in tresc for s in self.ODMOWA_ROZLICZENIOWA)
+
+        if kod is None:
+            # Timeout i zerwane polaczenie nie maja kodu HTTP. Sa przejsciowe:
+            # SDK probowal juz raz (max_retries=1), nastepny artykul ma sens.
+            if type(e).__name__ in ("APITimeoutError", "APIConnectionError"):
+                raise Przeciazony(f"{self.nazwa}: brak odpowiedzi na zapytanie "
+                                  f"o model {model} ({type(e).__name__})") from e
+            return
+
+        if kod == 429 and not rozliczeniowa:
+            raise Przeciazony(f"{self.nazwa}: limit tempa na modelu {model} "
+                              f"(HTTP 429)") from e
+        if kod in (401, 403) or rozliczeniowa:
+            # 401 martwy/odwolany klucz, 403 brak uprawnien do modelu,
+            # tresc rozliczeniowa przy dowolnym kodzie - wszystkie trzy trwaja,
+            # dopoki nie zrobi czegos czlowiek.
+            powod = ("brak srodkow na koncie" if rozliczeniowa
+                     else "klucz odrzucony albo bez uprawnien do modelu")
+            self.odetnij(self.ZWARCIE_TRWALE_S, f"{powod} (HTTP {kod})")
+            raise Wyczerpany(
+                f"{self.nazwa}: {powod} (HTTP {kod}, model {model}). Ponawianie "
+                f"nie pomoze - to sie nie odnowi samo, wymaga doladowania konta "
+                f"albo wymiany klucza.") from e
+        if kod >= 500:
+            raise Przeciazony(f"{self.nazwa}: awaria po stronie dostawcy "
+                              f"(HTTP {kod}, model {model})") from e
+        # 400 bez tresci rozliczeniowej to NASZ blad - zly schemat, zle pole.
+        # Leci dalej w oryginalnej postaci, glosno.
+
     async def zapytaj(self, *, model: str, system: str, user: str,
                       schema: dict, max_tokens: int) -> tuple[dict, dict]:
+        self._sprawdz_dostepnosc()
         kw: dict[str, Any] = {
             "model": model,
             "max_tokens": max_tokens,
@@ -180,7 +441,13 @@ class DostawcaAnthropic(Dostawca):
         if model == self.model_analizy:
             kw["thinking"] = {"type": "adaptive"}
             kw["output_config"]["effort"] = "medium"
-        r = await self._c.messages.create(**kw)
+        try:
+            r = await self._c.messages.create(**kw)
+        except Exception as e:                                   # noqa: BLE001
+            # Klasyfikacja albo podniesie wlasny wyjatek, albo przepusci
+            # oryginalny - patrz `_przeloz_odmowe`.
+            self._przeloz_odmowe(e, model)
+            raise
         usage = {
             "input": r.usage.input_tokens,
             "output": r.usage.output_tokens,
@@ -292,6 +559,37 @@ class DostawcaGemini(Dostawca):
                     return True
         return "PerDay" in (tresc.get("error", {}).get("message") or "")
 
+    # Tresci, po ktorych 400 od Google jest odmowa TRWALA, a nie naszym bledem.
+    # 400 dostajemy takze za zly schemat (`additionalProperties`) i ten MUSI
+    # zostac glosny - dlatego rozstrzyga tresc, tak samo jak przy `limit_dobowy`.
+    ODMOWA_TRWALA = ("api key not valid", "api_key_invalid", "invalid api key",
+                     "billing", "billing_disabled", "credit")
+
+    def _odmowa_trwala(self, r: httpx.Response, model: str) -> None:
+        """Podnosi `Wyczerpany`, gdy odmowa nie minie sama. Inaczej nic nie robi.
+
+        Bez tego uniewazniony klucz Gemini wracal jako goly `HTTPStatusError`:
+        nie `Przeciazony`, wiec mieszanka nie schodzila na zapasowego, wiec
+        KAZDY artykul dostawal wlasne wywolanie do dostawcy, ktory na pewno
+        odmowi. Ten sam mechanizm, ktory 2026-09-10 spalil 15 tysiecy wywolan
+        na wyczerpanym koncie Anthropica.
+        """
+        if r.status_code not in (400, 401, 403):
+            return
+        try:
+            tresc = json.dumps(r.json(), ensure_ascii=False, default=str).lower()
+        except ValueError:
+            tresc = r.text.lower()
+        if r.status_code == 400 and not any(s in tresc for s in self.ODMOWA_TRWALA):
+            return
+        powod = ("klucz odrzucony albo rozliczenie wylaczone"
+                 if r.status_code != 403 else "brak uprawnien do modelu")
+        self.odetnij(self.ZWARCIE_TRWALE_S, f"{powod} (HTTP {r.status_code})")
+        raise Wyczerpany(
+            f"{self.nazwa}: {powod} (HTTP {r.status_code}, model {model}). "
+            f"Ponawianie nie pomoze - wymaga wymiany klucza albo wlaczenia "
+            f"rozliczenia w konsoli Google.")
+
     async def _poslij(self, model: str, body: dict) -> httpx.Response:
         for proba in range(1, self.PROBY + 1):
             await self._przepustnica()
@@ -299,6 +597,7 @@ class DostawcaGemini(Dostawca):
                                       json=body,
                                       headers={"x-goog-api-key": self._klucz})
             if r.status_code not in self.PONAWIALNE:
+                self._odmowa_trwala(r, model)
                 r.raise_for_status()
                 return r
             if r.status_code == 429 and self.limit_dobowy(r):
@@ -322,6 +621,7 @@ class DostawcaGemini(Dostawca):
 
     async def zapytaj(self, *, model: str, system: str, user: str,
                       schema: dict, max_tokens: int) -> tuple[dict, dict]:
+        self._sprawdz_dostepnosc()
         body = {
             "systemInstruction": {"parts": [{"text": system}]},
             "contents": [{"role": "user", "parts": [{"text": user}]}],
@@ -406,6 +706,30 @@ class DostawcaMieszany(Dostawca):
     Model analizy MUSI być inny niż model triażu — inaczej nie da się
     rozstrzygnąć, do którego dostawcy skierować zapytanie, a milczący wybór
     „pierwszy z brzegu" trafiałby raz tu, raz tam.
+
+    WYMAGANIE: TA INSTANCJA MUSI PRZEŻYĆ WIELE CYKLI
+
+    To nie jest uwaga na marginesie, tylko warunek działania bezpiecznika.
+    Bezpiecznik jest STANEM — licznikiem odmów i chwilą, do której dostawcy nie
+    pytamy. Instancja tworzona od nowa w każdym cyklu zaczyna ten stan od zera,
+    więc zwarcie „na 60 minut" trwa dokładnie tyle, ile cykl.
+
+    Widać to wprost w logu produkcyjnym: komunikat „[llm] triaz: gemini —
+    wyczerpany limit DOBOWY; przechodze na anthropic na 60 min" pojawiał się co
+    ~6 minut zamiast raz na godzinę. Zwarcie nie przeżywało cyklu, bo
+    `wybierz_dostawce` woła `zbuduj_dostawce` przy KAŻDYM cyklu (klucz może
+    pojawić się w interfejsie między cyklami i to jest słuszne).
+
+    Wolno to pogodzić na dwa sposoby i oba są poprawne:
+
+      * trzymać jedną instancję poza pętlą cykli i budować nową DOPIERO wtedy,
+        gdy zmienią się klucze, albo
+      * budować co cykl i przenosić stan przez `przejmij_stan(poprzednia)`.
+
+    W obu wypadkach obowiązuje ta sama granica: stanu NIE WOLNO przenosić, gdy
+    zmienił się klucz. Nowy klucz to dokładnie ta sytuacja, w której odcięcie ma
+    zniknąć natychmiast — inaczej właściciel doładowuje konto, wpisuje nowy klucz
+    i przez sześć godzin nic się nie dzieje.
     """
 
     nazwa = "mieszany"
@@ -429,16 +753,26 @@ class DostawcaMieszany(Dostawca):
     ZWARCIE_DOBOWE_S = 3600.0
 
     def __init__(self, triaz: Dostawca, analiza: Dostawca):
+        for d in (triaz, analiza):
+            if not isinstance(d, Dostawca):
+                # Bezpiecznik trzyma stan W DOSTAWCY, ktory odmawia. Obiekt
+                # spoza tej rodziny nie ma gdzie go trzymac, wiec mieszanka
+                # pytalaby go bez konca - czyli dokladnie to, co naprawiamy.
+                # Lepiej upasc przy budowie niz po cichu zgubic bezpiecznik.
+                raise TypeError(
+                    f"{type(d).__name__} nie jest Dostawca - bezpiecznik "
+                    f"trzyma stan w dostawcy i nie mialby go gdzie zapisac")
         if triaz.model_triazu == analiza.model_analizy:
             raise ValueError(
                 "model triazu i model analizy sa identyczne - nie da sie "
                 "rozstrzygnac, do ktorego dostawcy skierowac zapytanie")
         self._triaz = triaz
         self._analiza = analiza
-        # Licznik odmow triazu POD RZAD i chwila, do ktorej nie pytamy
-        # wyczerpanego dostawcy. Patrz `zapytaj`.
-        self._odmowy_triazu = 0
-        self._zwarcie_do = 0.0
+        # Licznik odmow POD RZAD i chwila odciecia siedza w DOSTAWCY, ktory
+        # odmawia (`Dostawca._odmowy_pod_rzad`, `Dostawca._niedostepny_do`),
+        # a nie tutaj. Wczesniej byly tu i dotyczyly wylacznie triazu - dlatego
+        # analiza nie miala zadnego bezpiecznika i wyczerpany kredyt Anthropica
+        # palil po jednym wywolaniu na artykul.
         self.model_triazu = triaz.model_triazu
         self.model_analizy = analiza.model_analizy
         self.nazwa = f"{triaz.nazwa}+{analiza.nazwa}"
@@ -459,7 +793,7 @@ class DostawcaMieszany(Dostawca):
 
     async def zapytaj(self, *, model: str, system: str, user: str,
                       schema: dict, max_tokens: int) -> tuple[dict, dict]:
-        # BEZPIECZNIK NA WYCZERPANY KLUCZ TRIAZU.
+        # BEZPIECZNIK NA WYCZERPANEGO DOSTAWCE - OBU, NIE TYLKO TRIAZU.
         #
         # Zejscie awaryjne nizej dziala poprawnie, ale wlacza sie DOPIERO po
         # wyczerpaniu piatki ponowien - okolo 80 sekund na artykul. Gdy klucz
@@ -473,17 +807,31 @@ class DostawcaMieszany(Dostawca):
         # dostawce i idziemy wprost do zapasowego. Po ZWARCIE_S sprobujemy
         # znowu - limity sa okresowe, wiec trwale odciecie zmienialoby chwilowy
         # limit w trwala zmiane modelu triazu.
-        if model == self.model_triazu and self._zwarcie_otwarte():
+        #
+        # TO SAMO DOTYCZY DOSTAWCY ANALIZY, i tego wlasnie brakowalo do
+        # 2026-09-10. Analiza nie ma zejscia awaryjnego, wiec o bezpieczniku dla
+        # niej nikt nie pomyslal - i wyczerpany kredyt Anthropica wracal raz na
+        # artykul, 52-62 razy w cyklu, bez konca. Analiza nie schodzi na innego
+        # dostawce (patrz nizej), ale MA prawo przestac pytac martwego.
+        dostawca = self._dla(model)
+        if model == self.model_triazu and not dostawca.czy_ma_czym_pytac():
             return await self._triaz_zapasowy(system, user, schema, max_tokens)
+        if not dostawca.czy_ma_czym_pytac():
+            # ANALIZA NIE MA ZEJSCIA AWARYJNEGO (patrz nizej), wiec odciety
+            # dostawca analizy znaczy: w tym cyklu analizy nie bedzie. Mowimy to
+            # WPROST i bez wywolania API, zamiast oddawac ten sam wyjatek raz na
+            # artykul - wolajacy ma z czego zrobic jeden warunek.
+            raise BrakDostawcy(
+                f"analiza niemozliwa: {dostawca.nazwa} — "
+                f"{dostawca.powod_niedostepnosci()}")
         try:
-            data, usage = await self._dla(model).zapytaj(
-                model=model, system=system, user=user, schema=schema,
+            data, usage = await self._zapytaj_u(
+                dostawca, model, system=system, user=user, schema=schema,
                 max_tokens=max_tokens)
-            usage["model_uzyty"] = model
-            if model == self.model_triazu:
-                self._odmowy_triazu = 0
+            dostawca._odmowy_pod_rzad = 0
             return data, usage
-        except Przeciazony:
+        except Przeciazony as e:
+            self._zanotuj_odmowe(dostawca, e)
             if model != self.model_triazu:
                 # ANALIZA NIE MA ZEJSCIA AWARYJNEGO, i to jest decyzja.
                 #
@@ -496,24 +844,124 @@ class DostawcaMieszany(Dostawca):
             # Zmiana modelu zmienia probke, nie wartosc cechy - a triaz, ktory
             # padl, zatrzymuje CALA analize, co widac wlasnie na produkcji:
             # darmowy klucz Gemini odbil 94% wywolan i potok stanal.
-            self._odmowy_triazu += 1
-            # Limit DOBOWY zwiera od razu, bez czekania na druga odmowe: on nie
-            # minie sam za chwile, a kazde kolejne pytanie to strata czasu.
-            dobowy = getattr(sys.exc_info()[1], "dobowy", False)
-            prog = 1 if dobowy else self.PROG_ZWARCIA
-            if self._odmowy_triazu >= prog and not self._zwarcie_otwarte():
-                self._zwarcie_do = time.monotonic() + (
-                    self.ZWARCIE_DOBOWE_S if dobowy else self.ZWARCIE_S)
-                # GLOSNO, raz na zwarcie. Cicha zmiana modelu triazu znaczy, ze
-                # probka artykulow zmienia sie bez sladu - a to widac dopiero
-                # w wynikach, tygodnie pozniej.
-                ile = (self.ZWARCIE_DOBOWE_S if dobowy else self.ZWARCIE_S) / 60
-                powod = ("wyczerpany limit DOBOWY" if dobowy
-                         else f"odmowy {self._odmowy_triazu} razy pod rzad")
-                print(f"[llm] triaz: {self._triaz.nazwa} — {powod}; "
-                      f"przechodze na {self._analiza.nazwa} na {ile:.0f} min",
-                      file=sys.stderr, flush=True)
             return await self._triaz_zapasowy(system, user, schema, max_tokens)
+
+    async def _zapytaj_u(self, dostawca: Dostawca, model: str,
+                         **kw: Any) -> tuple[dict, dict]:
+        """Wywolanie u KONKRETNEGO dostawcy, podpisane jego nazwa i modelem.
+
+        JEDYNE miejsce, w ktorym mieszanka dotyka dostawcy - i dlatego jedyne,
+        w ktorym trzeba pamietac o podpisie. Wczesniej `usage["model_uzyty"]`
+        ustawialy dwie sciezki osobno (zwykla i zapasowa), a wyjatek nie niosl
+        tej informacji w ogole; tedy przeciekal do logu model ZADANY zamiast
+        tego, ktory naprawde odmowil.
+        """
+        try:
+            data, usage = await dostawca.zapytaj(model=model, **kw)
+        except Exception as e:                               # noqa: BLE001
+            oznacz_wykonawce(e, dostawca.nazwa, model)
+            # `Odmowa` i `BladOdpowiedzi` NIOSA zuzycie tokenow, ktore trafi do
+            # `news.api_spend` (patrz `news_worker.zapisz_nieudane`). Wpis ma
+            # nazywac model, ktory te tokeny spalil, bo wedlug jego stawki
+            # liczony jest koszt - a na tym dzienniku stoi limit dobowy.
+            zuzycie = getattr(e, "usage", None)
+            if isinstance(zuzycie, dict):
+                zuzycie.setdefault("model_uzyty", model)
+            raise
+        usage["model_uzyty"] = model
+        return data, usage
+
+    def _zanotuj_odmowe(self, dostawca: Dostawca, e: Przeciazony) -> None:
+        """Licznik odmow i decyzja o odcieciu - DLA OBU DOSTAWCOW TAK SAMO.
+
+        Do 2026-09-10 ten licznik dotyczyl wylacznie triazu, bo tylko triaz mial
+        zejscie awaryjne i tylko o nim myslano przy pisaniu bezpiecznika. Skutek
+        byl taki, ze gdy padl dostawca ANALIZY, nie zwieralo sie nic - a przy
+        wyczerpanym kredycie kazdy artykul kupowal sobie wlasna odmowe.
+
+        Trzy dlugosci odciecia, bo to sa trzy rozne sytuacje:
+          * zwykly limit tempa    -> ZWARCIE_S, po dwoch odmowach pod rzad,
+          * limit DOBOWY          -> ZWARCIE_DOBOWE_S, po pierwszej,
+          * awaria TRWALA         -> ZWARCIE_TRWALE_S, po pierwszej.
+        Awaria trwala i dobowa nie czekaja na druga odmowe, bo nie ma na co
+        czekac: obie sa juz rozpoznane po tresci odpowiedzi, nie zgadniete
+        z powtorzen.
+        """
+        dostawca._odmowy_pod_rzad += 1
+        trwala = isinstance(e, Wyczerpany)
+        prog = 1 if (trwala or e.dobowy) else self.PROG_ZWARCIA
+        if dostawca._odmowy_pod_rzad < prog:
+            return
+        ile_s = (self.ZWARCIE_TRWALE_S if trwala
+                 else self.ZWARCIE_DOBOWE_S if e.dobowy else self.ZWARCIE_S)
+        powod = ("awaria TRWALA" if trwala
+                 else "wyczerpany limit DOBOWY" if e.dobowy
+                 else f"odmowy {dostawca._odmowy_pod_rzad} razy pod rzad")
+        dostawca.odetnij(ile_s, f"{powod}: {e}")
+        # GLOSNO, raz na zwarcie - tu jestesmy tylko wtedy, gdy dostawca byl
+        # przed chwila jeszcze pytany. Cicha zmiana modelu triazu znaczy, ze
+        # probka artykulow zmienia sie bez sladu, a to widac dopiero w wynikach,
+        # tygodnie pozniej. Cicha przerwa w analizie znaczy dziure w cesze.
+        if dostawca is self._triaz:
+            print(f"[llm] triaz: {dostawca.nazwa} — {powod}; przechodze na "
+                  f"{self._analiza.nazwa} na {ile_s / 60:.0f} min",
+                  file=sys.stderr, flush=True)
+        else:
+            print(f"[llm] analiza: {dostawca.nazwa} — {powod}; analiza "
+                  f"WSTRZYMANA na {ile_s / 60:.0f} min (zejscia awaryjnego nie "
+                  f"ma - podmiana modelu wstawilaby uskok w cechę news_sent)",
+                  file=sys.stderr, flush=True)
+
+    def czy_ma_czym_pytac(self) -> bool:
+        """Mieszanka ma czym pytac, dopoki zyje dostawca ANALIZY.
+
+        Nie "dopoki zyje ktorykolwiek". Analiza nie ma zejscia awaryjnego, wiec
+        odciety dostawca analizy znaczy, ze w tym cyklu nie powstanie ANI JEDNA
+        wartosc cechy `news_sent`. Sam triaz niczego nie zapisuje - artykul,
+        ktory go nie przejdzie, nie zostawia wiersza - wiec triaz bez analizy to
+        wydatek bez sladu. Odciecie OBU dostawcow jest szczegolnym przypadkiem
+        tego samego warunku, a nie osobna regula.
+
+        Uwaga dla wolajacego: False znaczy "nie analizuj w tym cyklu", a NIE
+        "przerwij cykl". Artykuly nadal trzeba zapisywac - patrz kontrakt
+        w `Dostawca`.
+        """
+        return self._analiza.czy_ma_czym_pytac()
+
+    def powod_niedostepnosci(self) -> str:
+        powody = [f"{d.nazwa}: {d.powod_niedostepnosci()}"
+                  for d in (self._triaz, self._analiza)
+                  if not d.czy_ma_czym_pytac()]
+        return "; ".join(powody)
+
+    def przejmij_stan(self, poprzednia: "DostawcaMieszany") -> None:
+        """Przenosi stan bezpiecznika z instancji z poprzedniego cyklu.
+
+        POWOD ISTNIENIA TEJ METODY. `wybierz_dostawce` buduje dostawce od nowa
+        w kazdym cyklu, zeby klucz wpisany w interfejsie zadzialal bez restartu
+        poda. Bez przeniesienia stanu odciecie „na 60 minut" trwa jeden cykl,
+        czyli piec minut - dokladnie to widac w logu produkcyjnym z 2026-09-10.
+
+        KIEDY NIE WOLNO TEGO WOLAC: gdy zmienil sie ktorykolwiek klucz. Nowy
+        klucz to jedyna rzecz, ktora naprawia awarie trwala, wiec przeniesienie
+        na niego starego odciecia kazaloby wlascicielowi czekac szesc godzin
+        po doladowaniu konta. Kluczy nie widac z tego poziomu - porownanie
+        nalezy do wolajacego, ktory je czyta.
+
+        Odrzuca instancje o innym skladzie: przeniesienie stanu miedzy roznymi
+        dostawcami odcieloby dostawce, ktory nigdy nie odmowil.
+        """
+        if (poprzednia.nazwa != self.nazwa
+                or poprzednia.model_triazu != self.model_triazu
+                or poprzednia.model_analizy != self.model_analizy):
+            raise ValueError(
+                f"stan bezpiecznika z innej mieszanki ({poprzednia.nazwa}) nie "
+                f"pasuje do {self.nazwa} - odcielby dostawce, ktory nie odmowil")
+        for nowy, stary in ((self._triaz, poprzednia._triaz),
+                            (self._analiza, poprzednia._analiza)):
+            nowy._niedostepny_do = stary._niedostepny_do
+            nowy._powod_niedostepnosci = stary._powod_niedostepnosci
+            nowy._odmowy_pod_rzad = stary._odmowy_pod_rzad
 
     def koszt(self, model: str, usage: dict) -> float:
         # CENNIK BIERZE TEN DOSTAWCA, KTORY WYKONAL WYWOLANIE. Wspolna tablica
@@ -524,7 +972,8 @@ class DostawcaMieszany(Dostawca):
         return self._dla(faktyczny).koszt(faktyczny, usage)
 
     def _zwarcie_otwarte(self) -> bool:
-        return time.monotonic() < self._zwarcie_do
+        """Czy dostawca TRIAZU jest odciety. Stan trzyma on sam."""
+        return not self._triaz.czy_ma_czym_pytac()
 
     async def _triaz_zapasowy(self, system: str, user: str, schema: dict,
                               max_tokens: int) -> tuple[dict, dict]:
@@ -533,11 +982,24 @@ class DostawcaMieszany(Dostawca):
         Zmiana modelu zmienia probke, nie wartosc cechy. Analiza takiego zejscia
         NIE MA i to jest osobna decyzja, opisana wyzej.
         """
+        if not self._analiza.czy_ma_czym_pytac():
+            # OBAJ ODCIECI. Do 2026-09-10 ta sciezka konczyla sie wywolaniem do
+            # martwego dostawcy - raz na artykul, w kolko. Teraz mowi wprost, ze
+            # w tym cyklu nie ma czym pytac.
+            raise BrakDostawcy(f"obaj dostawcy odcieci — {self.powod_niedostepnosci()}")
         zapasowy = self._analiza.model_triazu
-        data, usage = await self._analiza.zapytaj(
-            model=zapasowy, system=system, user=user, schema=schema,
-            max_tokens=max_tokens)
-        usage["model_uzyty"] = zapasowy
+        try:
+            data, usage = await self._zapytaj_u(
+                self._analiza, zapasowy, system=system, user=user,
+                schema=schema, max_tokens=max_tokens)
+        except Przeciazony as e:
+            # ODMOWA ZAPASOWEGO TEZ SIE LICZY. Bez tego dostawca, ktory odmawia
+            # WYLACZNIE na tej sciezce, nie zbieral zadnych odmow i jego
+            # bezpiecznik nie zwieral sie nigdy - a wlasnie tedy ida wszystkie
+            # zapytania po odcieciu triazu.
+            self._zanotuj_odmowe(self._analiza, e)
+            raise
+        self._analiza._odmowy_pod_rzad = 0
         return data, usage
 
     def _dla_triazu_zapasowy(self) -> str:
@@ -557,6 +1019,14 @@ def zbuduj_dostawce(klucze: dict[str, str | None]) -> Dostawca | None:
     gorsze pod kazdym wzgledem naraz — patrz `DostawcaMieszany`.
 
     Jeden klucz znaczy jednego dostawce, bez zmiany zachowania.
+
+    UWAGA NA CYKL ZYCIA. Zwrocony obiekt TRZYMA STAN BEZPIECZNIKA (kiedy przestac
+    pytac wyczerpanego dostawce). Wolanie tej funkcji w kazdym cyklu i wyrzucanie
+    poprzedniego obiektu KASUJE ten stan - zwarcie „na 60 minut" trwa wtedy tyle,
+    co cykl, czyli piec minut. Albo trzymaj jedna instancje miedzy cyklami i buduj
+    nowa dopiero po zmianie klucza, albo przenies stan przez
+    `DostawcaMieszany.przejmij_stan`. Szczegoly i granica („po zmianie klucza NIE
+    przenosic") sa w docstringu `DostawcaMieszany`.
     """
     a = klucze.get("anthropic")
     g = klucze.get("gemini")

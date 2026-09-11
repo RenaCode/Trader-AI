@@ -15,6 +15,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
+from services.engine import stan_kapitalu
 from services.engine.risk_rules import (
     RiskState, RiskVerdict, evaluate_account, evaluate_limits,
 )
@@ -194,9 +195,7 @@ class RiskKernel:
         istniec i byc sprzed trzech dni, a to jest inny brak niz brak punktu.
         """
         cur = self.conn.cursor()
-        cur.execute(
-            "SELECT equity FROM exec.equity_point WHERE engine=%s AND mode=%s"
-            " ORDER BY event_time DESC LIMIT 1", (self.engine, self.mode))
+        cur.execute(stan_kapitalu.SQL_EQUITY_BIEZ, (self.engine, self.mode))
         row = cur.fetchone()
         if not row or row.get("equity") is None:
             return None
@@ -217,24 +216,17 @@ class RiskKernel:
         # liczby, a limit wolno oceniac konserwatywnie.
         current = self.kapital() or Decimal(0)
 
-        cur.execute(
-            "SELECT max(equity) AS peak FROM exec.equity_point WHERE engine=%s AND mode=%s",
-            (self.engine, self.mode))
+        cur.execute(stan_kapitalu.SQL_EQUITY_SZCZYT, (self.engine, self.mode))
         peak = Decimal((cur.fetchone() or {}).get("peak") or current)
 
-        cur.execute(
-            "SELECT equity FROM exec.equity_point WHERE engine=%s AND mode=%s"
-            " AND event_time <= now() - interval '24 hours' ORDER BY event_time DESC LIMIT 1",
-            (self.engine, self.mode))
+        cur.execute(stan_kapitalu.SQL_EQUITY_DOBA, (self.engine, self.mode))
         row = cur.fetchone()
         if not row:
             # RACHUNEK MLODSZY NIZ DOBA - patrz komentarz przy `_wynik()`.
             # Odniesieniem jest POCZATEK historii, a nie punkt biezacy: dla
             # rachunku, ktory istnieje od trzech godzin, "od poczatku" i "od
             # doby" to ta sama rzecz. Spadek na punkt biezacy dawal zawsze 0%.
-            cur.execute(
-                "SELECT equity FROM exec.equity_point WHERE engine=%s AND mode=%s"
-                " ORDER BY event_time ASC LIMIT 1", (self.engine, self.mode))
+            cur.execute(stan_kapitalu.SQL_EQUITY_PIERWSZY, (self.engine, self.mode))
             row = cur.fetchone()
         day_ago = Decimal(row["equity"]) if row else current
         return current, peak, day_ago
@@ -261,28 +253,19 @@ class RiskKernel:
         "szczyt jest szczytem", cokolwiek innego cofa pomiar na kapital.
         """
         cur = self.conn.cursor()
-        cur.execute(
-            "SELECT nav, wplaty_netto FROM exec.equity_point WHERE engine=%s AND mode=%s"
-            "   AND nav IS NOT NULL ORDER BY event_time DESC LIMIT 1",
-            (self.engine, self.mode))
+        cur.execute(stan_kapitalu.SQL_NAV_BIEZ, (self.engine, self.mode))
         biez = cur.fetchone()
         if not biez:
             return None, None, None, None, False
 
-        cur.execute("SELECT max(nav) AS szczyt,"
-                    "       count(*) FILTER (WHERE nav IS NULL) AS bez_nav"
-                    "  FROM exec.equity_point WHERE engine=%s AND mode=%s",
-                    (self.engine, self.mode))
+        cur.execute(stan_kapitalu.SQL_NAV_AGREGAT, (self.engine, self.mode))
         agr = cur.fetchone() or {}
         szczyt = agr.get("szczyt")
         # None traktujemy jak luke: brak odpowiedzi na pytanie o pelnosc nie
         # jest odpowiedzia "pelna".
         od_poczatku = agr.get("bez_nav") == 0
 
-        cur.execute(
-            "SELECT nav FROM exec.equity_point WHERE engine=%s AND mode=%s"
-            "   AND nav IS NOT NULL AND event_time <= now() - interval '24 hours'"
-            " ORDER BY event_time DESC LIMIT 1", (self.engine, self.mode))
+        cur.execute(stan_kapitalu.SQL_NAV_DOBA, (self.engine, self.mode))
         doba = cur.fetchone()
         if not doba:
             # PIERWSZA DOBA RACHUNKU NIE MOZE BYC DOBA BEZ LIMITU STRATY DZIENNEJ.
@@ -308,10 +291,7 @@ class RiskKernel:
             # migracja 0031 zaczela liczyc nav 2026-09-07, wiec przez pierwsza
             # dobe po niej produkcja tez nie miala limitu straty dziennej
             # (przed migracja dzialal, bo `_equity()` mialo historie od 27.08).
-            cur.execute(
-                "SELECT nav FROM exec.equity_point WHERE engine=%s AND mode=%s"
-                "   AND nav IS NOT NULL ORDER BY event_time ASC LIMIT 1",
-                (self.engine, self.mode))
+            cur.execute(stan_kapitalu.SQL_NAV_PIERWSZY, (self.engine, self.mode))
             doba = cur.fetchone()
 
         nav = Decimal(biez["nav"])

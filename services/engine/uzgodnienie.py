@@ -24,6 +24,27 @@ według `exec.position` trzymamy, z saldem, które raportuje giełda — per akt
 TOLERANCJA JEST KONIECZNA, nie wygodna. Giełda zaokrągla ilości do kroku
 instrumentu, a prowizja bywa pobierana w kupionym aktywie. Porównanie na
 dokładną równość zgłaszałoby rozjazd przy każdej transakcji.
+
+DWA PROGI, BO SĄ DWA RÓŻNE ŹRÓDŁA SZUMU — i jeden z nich nie ma odniesienia
+
+Sama różnica WZGLĘDNA nie wystarcza i psuje się dokładnie tam, gdzie boli.
+Gdy po jednej stronie jest zero, mianownikiem porównania jest sama resztka,
+więc KAŻDA niezerowa ilość daje względną 1,0 — tysiąc razy ponad tolerancję.
+Resztka warta siedem centów wygląda wtedy identycznie jak zniknięcie całej
+pozycji, a `killswitch.triggered` chodzi bez wyciszenia co dziesięć minut.
+Skutek nie jest kosmetyczny: CallMeBot ma własny limit tempa, więc prawdziwy
+kill-switch i `engine.down` giną za ścianą alarmów o pyle.
+
+Dlatego różnica musi przekroczyć OBA progi, żeby zostać rozjazdem:
+
+  * bezwzględny — ile aktywa trzeba mieć, żeby to w ogóle była pozycja.
+    Bierze się z reguł instrumentu (`ref.instrument.lot_size`, `min_notional`),
+    czyli z tego samego źródła, którym giełda mierzy zlecenia,
+  * względny — ile aktywa może zjeść księgowanie prowizji. Bierze się
+    z CENNIKA (`koszty.py`), bo stawki zmienia regulamin i progi VIP.
+
+Żaden z nich nie jest stałą wpisaną w ten plik. Stała byłaby trzecim miejscem,
+w którym trzyma się reguły giełdy — i pierwszym, które by się rozjechało.
 """
 from __future__ import annotations
 
@@ -36,11 +57,45 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from services.engine.koszty import CENNIK, koszty  # noqa: E402
 from services.exchanges.base import ExchangeError  # noqa: E402
 
-# Względna różnica, poniżej której nie zgłaszamy nic. Zaokrąglenia kroku
-# instrumentu i prowizja pobierana w aktywie mieszczą się grubo poniżej.
-TOLERANCJA = Decimal(os.environ.get("UZGODNIENIE_TOLERANCJA", "0.001"))
+# Rodzaj instrumentu, którym chodzi silnik — decyduje o wierszu CENNIKA.
+# Ten sam argument co przy `mozliwosci.py --stawki --kind spot_eu`: podmiot
+# unijny ma takera 0,250%, czyli DWA I PÓŁ RAZA drożej niż globalny, a próg
+# policzony z cudzego wiersza cennika nie opisuje rachunku, który uzgadniamy.
+KIND_DOMYSLNY = "spot_eu"
+
+
+def tolerancja_wzgledna(kind: str = KIND_DOMYSLNY) -> Decimal:
+    """Ile PROCENT różnicy jeszcze nie jest rozjazdem. Z CENNIKA, nie ze stałej.
+
+    CO TA TOLERANCJA MA POCHŁONĄĆ, a czego nie
+
+    Po naprawieniu `rozlicz_prowizje` obie strony porównania liczą NETTO, więc
+    w kodzie poprawnym asymetrii nie ma wcale. Tolerancja zabezpiecza przypadek,
+    w którym jedna strona przestaje odejmować prowizję pobraną w kupionym
+    aktywie — a to jest realne, bo `/v5/order/*` potrafi nie oddać `feeCurrency`,
+    które `/v5/execution/list` oddaje. Wtedy różnica wynosi DOKŁADNIE jedną
+    stawkę prowizji.
+
+    DLACZEGO TAKER, A NIE MAKER. Nie wiemy, która stawka zaksięgowała się po
+    której stronie, więc próg musi pokryć droższą. Poprzednia stała 0,001 leżała
+    dokładnie na stawce makera i była 2,5x MNIEJSZA od takera zmierzonego
+    u giełdy (0,250% na podmiocie unijnym) — czyli alarmowała przy każdym
+    kupnie zleceniem rynkowym. Komentarz w `egzekucja.rozlicz_prowizje` sam
+    przyznawał, że próg leży „DOKŁADNIE na granicy".
+
+    DLACZEGO RAZY DWA. Granica jest złym miejscem na próg: giełda zaokrągla
+    prowizję do precyzji aktywa, więc faktyczna różnica bywa odrobinę WIĘKSZA
+    niż stawka nominalna, a jeden wiersz pozycji potrafi przejść więcej niż
+    jedno księgowanie (wejście plus wyjście częściowe). Mnożnik 2 daje margines
+    na jedno dodatkowe zdarzenie i odsuwa próg od równości, na której stał.
+
+    Szum od zaokrąglania ilości do kroku instrumentu NIE jest już tu liczony —
+    od tego jest próg bezwzględny, który mierzy go dokładnie, a nie w procentach.
+    """
+    return Decimal(str(koszty(kind).taker)) * 2
 
 
 class Nieuzgadnialne(RuntimeError):
@@ -48,7 +103,8 @@ class Nieuzgadnialne(RuntimeError):
 
 
 def rozjazdy(nasze: dict[str, Decimal], gieldy: dict[str, Decimal],
-             tolerancja: Decimal = TOLERANCJA) -> list[dict]:
+             tolerancja: Decimal | None = None,
+             progi: dict[str, Decimal] | None = None) -> list[dict]:
     """Porównanie dwóch obrazów stanu. CZYSTA FUNKCJA — bez bazy i bez sieci.
 
     Zwraca listę różnic; pusta lista znaczy zgodność. Rozdzielenie porównania
@@ -57,13 +113,53 @@ def rozjazdy(nasze: dict[str, Decimal], gieldy: dict[str, Decimal],
 
     Aktywa nieznane jednej ze stron TEŻ są rozjazdem. Saldo, o którym nie wiemy,
     jest tak samo groźne jak pozycja, której nie ma — tyle że w drugą stronę.
+
+    `progi` to próg BEZWZGLĘDNY per aktywo: ilość, poniżej której różnica nie
+    jest pozycją, bo żadne zlecenie nie mogłoby jej ani stworzyć, ani usunąć.
+    Buduje go `progi_bezwzgledne()` z reguł instrumentu. Brak wpisu znaczy
+    próg zerowy — czyli zachowanie sprzed tej poprawki, i dlatego wołający
+    z bazą MUSI go podać.
+
+    ILOŚĆ UJEMNA NIE JEST ROZJAZDEM ILOŚCIOWYM, TYLKO BŁĘDEM POMIARU. Na spocie
+    nie da się mieć -0,5 BTC. Ujemna wartość po którejkolwiek stronie znaczy,
+    że sam pomiar jest nieprawdziwy — najczęściej dlatego, że okno rejestru
+    giełdy obcięło kupno i zostawiło samą sprzedaż (patrz `pozycje_z_wypelnien`).
+    Nazwanie tego „pozycją-widmo" wysyłałoby człowieka w złą stronę: kazałoby
+    szukać aktywa, którego giełda nie ma, podczas gdy naprawdę brakuje POŁOWY
+    REJESTRU. Dostaje więc własny rodzaj i przechodzi PRZED oboma progami —
+    progi mierzą wielkość różnicy, a tu zła jest sama liczba.
     """
+    if tolerancja is None:
+        tolerancja = tolerancja_wzgledna()
+    progi = progi or {}
     wynik = []
     for aktywo in sorted(set(nasze) | set(gieldy)):
         u_nas = nasze.get(aktywo, Decimal(0))
         u_nich = gieldy.get(aktywo, Decimal(0))
         roznica = u_nich - u_nas
         odniesienie = max(abs(u_nas), abs(u_nich))
+
+        if u_nas < 0 or u_nich < 0:
+            wynik.append({
+                "aktywo": aktywo,
+                "u_nas": u_nas,
+                "u_gieldy": u_nich,
+                "roznica": roznica,
+                "wzgledna": (abs(roznica) / odniesienie if odniesienie
+                             else Decimal(0)),
+                "rodzaj": "ilosc-ujemna",
+            })
+            continue
+
+        # PRÓG BEZWZGLĘDNY PRZED WZGLĘDNYM, bo tylko on ma sens przy zerze.
+        #
+        # Przy `u_nas = 0` mianownikiem względnej jest sama resztka, więc każda
+        # niezerowa ilość daje 1,0 — i jedna nieusuwalna drobina na rachunku
+        # zamienia uzgodnienie w nadajnik alarmów krytycznych bez końca.
+        prog = progi.get(aktywo, Decimal(0))
+        if abs(roznica) <= prog:
+            continue
+
         if odniesienie == 0:
             continue
         wzgledna = abs(roznica) / odniesienie
@@ -79,6 +175,66 @@ def rozjazdy(nasze: dict[str, Decimal], gieldy: dict[str, Decimal],
             "rodzaj": ("pozycja-widmo" if u_nas > u_nich else "saldo-nieznane"),
         })
     return wynik
+
+
+# --------------------------------------------------------- prog bezwzgledny
+
+async def progi_bezwzgledne(fetch_all, engine: str) -> dict[str, Decimal]:
+    """Ile aktywa musi się różnić, żeby to była POZYCJA. Z reguł instrumentu.
+
+    DLACZEGO Z BAZY, A NIE ZE STAŁEJ
+
+    Próg wpisany w ten plik byłby zgadywaniem cudzych reguł. `ref.instrument`
+    trzyma je tak, jak podała je giełda (`services/ingest/instrumenty.py`),
+    więc zmiana kroku czy minimum wartości przesuwa próg sama — a to są liczby,
+    które giełda zmienia bez uprzedzenia i per instrument.
+
+    RESZTKA JEST NIEUSUWALNA Z DWÓCH NIEZALEŻNYCH POWODÓW i próg musi pokryć
+    oba, dlatego bierzemy z nich WIĘKSZY:
+
+      * `lot_size` — zlecenie na ilość mniejszą niż krok nie istnieje.
+        `zlecenia.do_kroku_w_dol` zaokrągla sprzedaż W DÓŁ (i słusznie: w górę
+        łamałoby limit risk kernela po cichu), więc po każdym wyjściu zostaje
+        reszta z dzielenia przez krok. Z definicji reszty jest ona ZAWSZE
+        mniejsza od kroku — czyli ten próg pokrywa ją co do jednego przypadku,
+        a nie „zwykle".
+      * `min_notional` — zlecenie warte mniej niż minimum giełdy jest
+        odrzucane. Resztka powyżej kroku, ale warta pięciu centów, jest równie
+        trwała: nie da się jej sprzedać ani dziś, ani nigdy.
+
+    Drugi warunek jest w walucie kwotowanej, więc wymaga ceny. Bierzemy ostatnią
+    świecę minutową i tylko wtedy, gdy jest ŚWIEŻA. Cena sprzed trzech dni
+    przeliczona na ilość daje próg oderwany od rynku, a błąd w stronę progu za
+    dużego jest tu najgorszy z możliwych: wycisza rozjazd, który był prawdziwy.
+    Brak świeżej ceny zostawia sam `lot_size` — mniej, ale nadal poprawnie.
+
+    KIERUNEK ZAOKRĄGLEŃ MIĘDZY INSTRUMENTAMI TEGO SAMEGO AKTYWA. Jedno aktywo
+    bazowe może mieć kilka par. Bierzemy NAJMNIEJSZY krok i NAJWYŻSZĄ cenę,
+    czyli w obu członach wariant dający próg MNIEJSZY: resztka jest naprawdę
+    nie do sprzedania dopiero wtedy, gdy nie da się jej sprzedać na ŻADNEJ
+    z par, na których stoi.
+    """
+    rows = await fetch_all(
+        "SELECT i.base_ccy AS aktywo, min(i.lot_size) AS lot,"
+        "       max(i.min_notional) AS min_wartosc, max(c.close) AS cena"
+        "  FROM ref.instrument i"
+        "  LEFT JOIN LATERAL ("
+        "        SELECT k.close FROM market.candle k"
+        "         WHERE k.instrument_id = i.id AND k.timeframe = '1m'"
+        "           AND k.event_time > now() - interval '1 day'"
+        "         ORDER BY k.event_time DESC LIMIT 1) c ON true"
+        " WHERE i.active AND i.engine::text = %s AND i.base_ccy IS NOT NULL"
+        " GROUP BY i.base_ccy", (engine,))
+
+    progi: dict[str, Decimal] = {}
+    for r in rows:
+        kandydaci = [Decimal(str(r["lot"]))] if r["lot"] else []
+        if r["min_wartosc"] and r["cena"] and Decimal(str(r["cena"])) > 0:
+            kandydaci.append(Decimal(str(r["min_wartosc"]))
+                             / Decimal(str(r["cena"])))
+        if kandydaci:
+            progi[r["aktywo"].upper()] = max(kandydaci)
+    return progi
 
 
 
@@ -103,6 +259,15 @@ def pozycje_z_wypelnien(wypelnienia, baza_symbolu: dict[str, str]) -> dict[str, 
     PROWIZJA POBRANA W KUPIONYM AKTYWIE JEST ODEJMOWANA. Na spocie Bybit
     potrafi pobrac ja wlasnie tak; pominiecie tego zanizyloby odtworzona
     pozycje dokladnie o wartosc prowizji przy kazdym kupnie.
+
+    WARTOSC UJEMNA ZOSTAJE W WYNIKU I JEST W TYM CELOWA. Na spocie nie da sie
+    miec ujemnej ilosci, wiec ujemny wynik odtworzenia znaczy jedno: okno
+    rejestru urwalo kupno i zostawilo sprzedaz. Odfiltrowanie takiej wartosci
+    (`v > 0` zamiast `v != 0`) zamienialoby BLAD POMIARU w cichy brak wpisu,
+    czyli w „aktywa nie mamy" — a to jest zdanie prawdziwie brzmiace i falszywe.
+    `pokrycie_wypelnien` lapie ten przypadek tylko wtedy, gdy mamy otwarta
+    pozycje; przy pustym dzienniku strazy nie ma zadnej. Ujemna wartosc musi
+    wiec dojsc do `rozjazdy`, ktore nazywa ja `ilosc-ujemna`.
     """
     stan: dict[str, Decimal] = {}
     for w in wypelnienia:
@@ -191,11 +356,15 @@ async def kontekst_wypelnien(fetch_all, engine: str, mode: str):
 
 
 async def uzgodnij(fetch_all, notify, adapter, engine: str = "crypto",
-                   mode: str = "demo", sucho: bool = False) -> int:
+                   mode: str = "demo", sucho: bool = False,
+                   kind: str = KIND_DOMYSLNY) -> int:
     """Porównuje nasz obraz z giełdą i zgłasza różnice.
 
     Zwraca liczbę rozjazdów. Zero znaczy zgodność, a nie brak sprawdzenia —
     różnicę widać w komunikacie.
+
+    `kind` wskazuje wiersz CENNIKA, z którego wychodzi tolerancja względna;
+    musi być ten sam, którym chodzi silnik (`loop.py --kind spot_eu`).
     """
     nasze = await nasze_pozycje(fetch_all, engine, mode)
     try:
@@ -239,7 +408,11 @@ async def uzgodnij(fetch_all, notify, adapter, engine: str = "crypto",
     interesujace = (await aktywa_uniwersum(fetch_all, engine)) | set(nasze)
     salda = {k: v for k, v in salda.items() if k in interesujace}
 
-    r = rozjazdy(nasze, salda)
+    # PROGI Z BAZY, NIE ZE STALEJ — patrz `progi_bezwzgledne` i
+    # `tolerancja_wzgledna`. Oba pytania zadajemy TUTAJ, zeby samo porownanie
+    # zostalo czysta funkcja dwoch slownikow.
+    progi = await progi_bezwzgledne(fetch_all, engine)
+    r = rozjazdy(nasze, salda, tolerancja_wzgledna(kind), progi)
     if not r and not nasze and not salda:
         # PUSTO PO OBU STRONACH TO NIE JEST UZGODNIENIE. Zgadzaja sie dwa puste
         # zbiory, czyli nie porownano niczego. Komunikat "zgodne" powiedzialby
@@ -270,13 +443,29 @@ async def uzgodnij(fetch_all, notify, adapter, engine: str = "crypto",
         tresc = "\n".join(
             f"{x['aktywo']}: u nas {x['u_nas']}, u giełdy {x['u_gieldy']} "
             f"({x['rodzaj']})" for x in r)
+        # KAZDY RODZAJ MA WLASNE ZDANIE, bo kazdy wysyla czlowieka gdzie indziej.
+        # Wspolny akapit o pozycji-widmie kazalby przy `ilosc-ujemna` szukac
+        # aktywa na gieldzie, podczas gdy szukac trzeba brakujacej polowy
+        # rejestru — czyli w zupelnie innym miejscu i z innym wnioskiem.
+        wyjasnienia = {
+            "pozycja-widmo": ("pozycja-widmo blokuje wejścia, których nic nie "
+                              "blokuje"),
+            "saldo-nieznane": "saldo nieznane to ekspozycja poza limitami",
+            "ilosc-ujemna": ("ilość ujemna jest NIEMOŻLIWA na spocie — to nie "
+                             "jest stan rachunku, tylko BŁĄD POMIARU: rejestr "
+                             "giełdy oddał sprzedaż bez odpowiadającego jej "
+                             "kupna, więc odtworzenie liczy z urwanego okna "
+                             "i żadnej z pozostałych liczb nie wolno ufać"),
+        }
+        obecne = [wyjasnienia[k] for k in
+                  ("pozycja-widmo", "saldo-nieznane", "ilosc-ujemna")
+                  if any(x["rodzaj"] == k for x in r)]
         for u in await fetch_all('SELECT id FROM app."user" WHERE is_active'):
             await notify(
                 u["id"], "killswitch.triggered",
                 f"Nasz stan nie zgadza się z giełdą ({engine})",
-                f"{tresc}\n\nPozycja-widmo blokuje wejścia, których nic nie blokuje; "
-                f"saldo nieznane to ekspozycja poza limitami. Obie wymagają "
-                f"wyjaśnienia PRZED kolejnym zleceniem.",
+                f"{tresc}\n\n" + "; ".join(obecne) +
+                ". Wymaga wyjaśnienia PRZED kolejnym zleceniem.",
                 engine=engine, severity="critical",
                 data={"rozjazdy": [{k: str(v) for k, v in x.items()} for x in r]})
     return len(r)
@@ -287,6 +476,13 @@ async def main() -> int:
     ap.add_argument("--engine", default="crypto")
     ap.add_argument("--mode", default="demo")
     ap.add_argument("--sucho", action="store_true")
+    # `--kind` MUSI byc ten sam, ktorym chodzi silnik (values.yaml,
+    # workers.crypto: `--kind spot_eu`). Ten sam argument, ktory uzasadnia te
+    # linie przy `mozliwosci.py --stawki`: prog policzony z wiersza CENNIKA,
+    # ktorego nikt nie uzywa, opisuje inny rachunek niz uzgadniany.
+    ap.add_argument("--kind", default=KIND_DOMYSLNY,
+                    choices=tuple(sorted(CENNIK)),
+                    help="rodzaj instrumentu — wiersz CENNIKA dla tolerancji")
     args = ap.parse_args()
 
     if not os.environ.get("DATABASE_URL"):
@@ -338,7 +534,8 @@ async def main() -> int:
                                else cred["live_host"])
         try:
             return await uzgodnij(fetch_all, notify, adapter,
-                                  engine=args.engine, mode=args.mode, sucho=args.sucho)
+                                  engine=args.engine, mode=args.mode,
+                                  sucho=args.sucho, kind=args.kind)
         except Nieuzgadnialne as e:
             print(f"uzgodnienie {args.engine}/{args.mode}: NIEWYKONALNE — {e}")
             return 2

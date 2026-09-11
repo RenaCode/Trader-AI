@@ -15,6 +15,24 @@
 # jedzie w tym samym obrazie co silnik, wiec sprawdza dokladnie ten kod, ktory
 # handluje.
 #
+# TRZY WYNIKI, NIE DWA (kody wyjscia). Zadanie swieci na czerwono TYLKO wtedy,
+# gdy jest o czym budzic czlowieka:
+#
+#   0  zaliczona            lancuch zadzialal od limitu po powiadomienie
+#   0  NIEROZSTRZYGNIETA    kill-switch juz stal, wiec proby nie dalo sie
+#                           przeprowadzic - nie ma czego wywolac ze stanu
+#                           spoczynku. To NIE jest awaria zabezpieczenia i nie
+#                           ma prawa konczyc poda bledem; log mowi wprost, ze
+#                           w tym cyklu nikt bezpiecznika nie sprawdzil
+#   1  NIEZALICZONA         proba SIE WYKONALA i ogniwo padlo - napraw lancuch
+#   2  NIESPRAWDZONE        nierozstrzygnieta dluzej niz tydzien - zwolnij
+#                           kill-switch albo zdecyduj swiadomie, ze handel stoi
+#
+# Do 2026-09-10 trzeci przypadek byl zgloszony jako pierwszy: pod konczyl sie
+# bledem, aplikacja wisiala jako Degraded i szedl mail o awarii - za kazdym
+# razem, odkad kill-switch byl aktywny. Prawdziwa awaria lancucha wygladalaby
+# identycznie i utonelaby w tych powtorkach.
+#
 # CZESTOTLIWOSC: codziennie. Proba wstrzymuje wejscia na kilkanascie minut, co
 # przy swiecy 4h jest ulamkiem jednego okna decyzyjnego - a przy sredniej
 # ekspozycji 1,3% kosztem, ktorego nie widac w wyniku. Bezpiecznik sprawdzany raz

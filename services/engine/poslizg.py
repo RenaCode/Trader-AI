@@ -54,12 +54,18 @@ Dlatego mierzymy wyłącznie wiersze z `raw->>'execution' = 'gielda'`, a filtr
 stoi w DWÓCH miejscach: w zapytaniu i w czystej funkcji. Zapytanie da się
 przypadkiem poprawić, funkcja jest testowana.
 
-CZEGO TEN MODUŁ NIE MIERZY
+CZEGO TEN MODUŁ NIE MIERZYŁ DO 2026-09-09 — I DLACZEGO TO WAŻNE PRZY CZYTANIU
+STARYCH WYNIKÓW
 
-Wyjść. `zapisz_wyjscie` nie zakłada wiersza w `exec.fill` (aktualizuje wyłącznie
-`exec.position`), więc w rejestrze wypełnień są SAME WEJŚCIA. Poślizg wyjścia
-jest dziś niemierzalny — to luka w zapisie, nie wynik pomiaru, i tak jest tutaj
-nazwana, żeby nikt nie wziął tej liczby za koszt rundy.
+Wyjść. `zapisz_wyjscie` nie zakładało wiersza w `exec.fill` (aktualizowało
+wyłącznie `exec.position`), więc w rejestrze wypełnień były SAME WEJŚCIA:
+18 pozycji zamkniętych, 18 wierszy `exec.fill`. Poślizg wyjścia był wtedy
+niemierzalny — była to luka w zapisie, nie wynik pomiaru.
+
+Zapis jest naprawiony i wyjścia trafiają tu na równi z wejściami. Ale wszystko,
+co zmierzono PRZED tą datą, opisuje wyłącznie nogę wejściową, więc nie wolno
+porównywać takiej liczby z nowszą jako „poprawy" ani „pogorszenia": zmieniła się
+próba, nie egzekucja. Runda ma dwie nogi i dopiero od teraz obie są w próbie.
 """
 from __future__ import annotations
 

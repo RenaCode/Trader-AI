@@ -280,8 +280,24 @@ async def rozstrzygnij_plan(cur, adapter, plan: dict, f: Filtry, *, engine: str,
                     (plan["trigger"].get("position_id"),))
         poz = cur.fetchone()
         if poz:
+            # WIERSZ ZLECENIA JUZ ISTNIEJE - powstal przy zlozeniu wyjscia na
+            # gielde, dokladnie tak jak przy wejsciu. Podajemy go, zeby jedno
+            # wyjscie nie zostawilo w `exec.order` dwoch zlecen; wypelnienie
+            # dopisuje sie do niego.
+            #
+            # PROWIZJA IDZIE SUROWA, razem z waluta z gieldy. Wejscie przelicza
+            # ja przez `rozlicz_prowizje`, bo kupno na spocie placi prowizje
+            # w KUPIONYM aktywie i musi ona zejsc z ilosci, ktora naprawde mamy.
+            # Sprzedaz takiego problemu nie ma - wychodzi z niej waluta kwotowana
+            # - wiec przeliczanie byloby tu zgadywaniem kursu bez potrzeby.
             zapisz_wyjscie(cur, poz, cena, prowizja, teraz, plan["decision_id"],
-                           ilosc=r.ilosc)
+                           ilosc=r.ilosc, meta=meta,
+                           order_id=id_zlecenia_w_bazie,
+                           planned_order_id=plan["id"],
+                           venue_order_id=stan.id_gieldy,
+                           client_order_id=id_w,
+                           venue_fill_id=f"{stan.id_gieldy}",
+                           prowizja_ccy=prowizja_ccy)
         else:
             # SPRZEDAZ SIE WYKONALA, A NIE MA CZEGO ZAMKNAC.
             #

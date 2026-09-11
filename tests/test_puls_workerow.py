@@ -302,7 +302,38 @@ def test_czujka_MILCZY_o_awarii_juz_zgloszonej():
     kod, poszly = _czujka([wiersz("market", 60, wiek_s=7200)],
                           wyslane_po={"market"})
     assert poszly == []
-    assert kod == 1, "kod wyjścia ma nadal mówić, że stan jest zły"
+    assert kod == 0, (
+        "awaria już zgłoszona, a zadanie znowu pada — worker martwy przez "
+        "tydzień dałby 1008 padniętych Jobów o jednym zgłoszeniu; stan opisuje "
+        "linia „MILCZY ...' w logu, wypisywana przy każdym przebiegu")
+
+
+def test_awaria_juz_zgloszona_NIE_ZNIKA_z_logu(capsys):
+    """Cisza w kodzie wyjścia nie ma prawa zabrać ze sobą logu.
+
+    Zadanie zielone I log bez śladu to stan nieodróżnialny od spokoju w obu
+    kanałach naraz — czyli dokładnie ta cisza, którą ten plik ma likwidować,
+    tyle że wpuszczona drugimi drzwiami.
+    """
+    _czujka([wiersz("market", 60, wiek_s=7200)], wyslane_po={"market"})
+    log = capsys.readouterr().out
+    assert "MILCZY" in log and "market" in log, \
+        "zadanie kończy się zerem i nie zostawia śladu o martwym workerze"
+    assert "worker bez pulsu" in log, \
+        "log nie mówi, DLACZEGO kod wyjścia jest zerem mimo znaleziska"
+
+
+def test_NAWROT_po_powrocie_workera_znowu_maluje_zadanie_na_czerwono():
+    """Worker, który wstał i zamilkł ponownie, to zdarzenie NOWE.
+
+    Rozróżnienie jest tu za darmo i bez drugiego mechanizmu: tłumienie pyta
+    o powiadomienie młodsze niż OSTATNI UDANY CYKL, a ten się przesunął — stare
+    zgłoszenie przestaje więc dotyczyć tej awarii. Gdyby tłumienie pytało tylko
+    „czy kiedykolwiek zgłoszono", druga awaria przepadłaby teraz w obu kanałach
+    naraz, bo od 2026-09-10 kod wyjścia idzie za tym samym warunkiem.
+    """
+    kod, poszly = _czujka([wiersz("market", 60, wiek_s=7200)], wyslane_po=set())
+    assert kod == 1 and len(poszly) == 1
 
 
 def test_czujka_bez_wierszy_nie_udaje_ze_sprawdzila():

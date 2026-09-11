@@ -40,6 +40,28 @@ spec:
               # sprawdzenia. To zadanie ma pilnowac takze SAMEGO DOZORCY -
               # nadzorca, ktorego nikt nie nadzoruje, jest tylko przesunieciem
               # problemu o jeden poziom.
+              #
+              # CO ZNACZY PADNIETY JOB TEGO ZADANIA - i czego NIE znaczy.
+              #
+              # `RC` nizej zbiera kody wyjscia podsprawdzen, a te od 2026-09-10
+              # odpowiadaja na pytanie "czy TEN przebieg zglosil cos NOWEGO",
+              # a nie "czy system jest w zlym stanie". Padniety Job znaczy wiec:
+              # albo czujka sie wywrocila, albo wlasnie poszlo powiadomienie.
+              #
+              # Poprzednia wersja niosla tu STAN: kod niezerowy przez caly czas
+              # trwania problemu. Zmierzone na produkcji tego samego dnia -
+              # kill-switch aktywny od poltorej doby, zadanie chodzi co 10 minut,
+              # wiec 144 padniete Joby na dobe, 144 pody w stanie Error, mail
+              # z kazdego i ta aplikacja ArgoCD trwale w stanie Degraded. Sygnal
+              # powtarzany 144 razy o rzeczy, ktora sie nie zmienia, uczy
+              # przewijac cala kategorie - takze ten jeden Job, w ktorym czujka
+              # naprawde padla.
+              #
+              # STANU SZUKA SIE W LOGU, nie w kodzie wyjscia. Kazda czujka
+              # wypisuje znalezisko przy KAZDYM przebiegu, takze w oknach ciszy
+              # powiadomien, wiec `kubectl logs job/trader-zywotnosc-...` mowi,
+              # w jakim stanie jest system, za kazdym razem, gdy ktos spojrzy.
+              # Uzasadnienie i historia obu rund: docstring services/engine/dozor.py.
               command:
                 - sh
                 - -c
@@ -101,7 +123,12 @@ spec:
                   # nikt nie odswiezal statusu i nikt tego nie widzial.
                   # Zostaje sama OCENA, ktora jest odczytem.
                   python services/engine/dozor.py --co instrumenty || RC=$?
-                  python services/engine/uzgodnienie.py          || RC=$?
+                  # `--kind` TAK SAMO JAK NIZEJ przy `--stawki`. Tolerancja
+                  # wzgledna uzgodnienia wychodzi z CENNIKA, a nie ze stalej:
+                  # taker podmiotu unijnego to 0,250%, czyli 2,5x wiecej niz
+                  # dawna stala 0,001. Prog policzony z cudzego wiersza cennika
+                  # alarmowalby przy kazdym kupnie zleceniem rynkowym.
+                  python services/engine/uzgodnienie.py --kind spot_eu || RC=$?
                   # CENNIK GIELDY KONTRA CENNIK W KODZIE. Sprawdzenie istnialo
                   # od poczatku jako narzedzie CLI i nikt go nigdy nie uruchomil.
                   # Runda kosztuje 0,200%, a mediana zwrotu na transakcje jest

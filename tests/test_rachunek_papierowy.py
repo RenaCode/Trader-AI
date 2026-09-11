@@ -33,6 +33,12 @@ TERAZ = BAR + timedelta(hours=1)
 
 SWIECA = {"high": D("110"), "low": D("90"), "close": D("100"), "n": 5}
 POZYCJA = {"id": 77, "side": "long", "qty": D("10"), "avg_price": D("95")}
+# Odpowiedzi na dwa odczyty, które `zapisz_wyjscie` wykonuje przy księgowaniu
+# wypełnienia: skąd jest pozycja (`engine`, `mode`, `instrument_id`, waluta
+# kwotowana) i jaki identyfikator dostało założone zlecenie wyjścia.
+SKAD_POZYCJA = {"engine": "crypto", "mode": "demo", "instrument_id": 3,
+                "side": "long", "quote_ccy": "USDC"}
+ID_ZLECENIA = {"id": 91}
 
 
 def plan(**nadpisz):
@@ -154,12 +160,20 @@ def test_plan_wyjscia_BEZ_position_id_tez_jest_anomalia():
 
 def test_wyjscie_Z_POZYCJA_nadal_ksieguje_zamkniecie():
     """Kontrola dodatnia. Bez niej „nic nie księgujemy" przechodziłoby także
-    wtedy, gdyby poprawka zabiła normalne wyjście."""
-    cur, st = rozstrzygnij([plan()], SWIECA, POZYCJA)
+    wtedy, gdyby poprawka zabiła normalne wyjście.
+
+    Sprawdza też ślad w rejestrze wypełnień, bo to jest ta sama trasa co przy
+    wejściu i musi zostawiać ten sam rodzaj wiersza. Do 2026-09-09 zostawiała
+    wyłącznie zmianę w `exec.position`, więc rachunek papierowy miał w
+    `exec.fill` same wejścia — a to na tej tabeli stoi pomiar egzekucji.
+    """
+    cur, st = rozstrzygnij([plan()], SWIECA, POZYCJA, SKAD_POZYCJA, ID_ZLECENIA)
 
     assert st["wypelnione"] == 1
     assert st["wyjscie_bez_pozycji"] == 0
     assert cur.zawiera("UPDATE exec.position SET closed_at=")
+    assert wstawienia(cur, "exec.order"), "wyjście musi mieć własne zlecenie"
+    assert wstawienia(cur, "exec.fill"), "wyjście musi mieć własne wypełnienie"
 
 
 def test_wejscie_nadal_otwiera_pozycje():

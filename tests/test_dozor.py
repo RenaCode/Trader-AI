@@ -217,14 +217,27 @@ def test_czujka_tlumi_powtorne_zgloszenie_tej_samej_awarii():
         "brak tłumienia opartego o czas ostatniego uderzenia serca"
 
 
-def test_czujka_konczy_sie_kodem_niezerowym_przy_awarii():
-    """Drugi, niezależny sygnał: nieudane zadanie widać w `kubectl get jobs`
-    nawet wtedy, gdy kanał powiadomień zawiódł."""
-    from pathlib import Path
+def test_czujka_liczy_kod_wyjscia_JEDNA_regula_dla_calego_pliku():
+    """Kod wyjścia ma iść za tłumieniem powiadomień, a nie obok niego.
 
+    Drugi, niezależny od kanału powiadomień ślad jest wart tyle samo co
+    wcześniej — ale wart jest go ZGŁOSZENIE, a nie każdy z 144 przebiegów doby.
+    Zadanie chodzi co dziesięć minut, więc `return 1` na końcu czujki znaczyło
+    „144 padnięte Joby na dobę, dopóki ktoś tego nie naprawi" — a sygnał, który
+    przychodzi zawsze, przestaje cokolwiek znaczyć dokładnie tak samo w
+    `kubectl get jobs`, jak w powiadomieniach.
+
+    Asercja jest o WSPÓLNEJ funkcji, a nie o kształcie tej jednej czujki:
+    reguła policzona osobno w każdej z nich rozjedzie się przy pierwszej, która
+    zapomni wypisać powód zera.
+    """
     ogon = _cialo("sprawdz_zywotnosc")
-    assert ogon.rstrip().endswith("return 1"), \
-        "czujka kończy się zerem mimo wykrytej awarii"
+    assert ogon.rstrip().endswith('return kod_wyjscia(zgloszone, trwale, '
+                                  '"silnik bez pulsu")'), \
+        "czujka liczy kod wyjścia po swojemu, obok wspólnej reguły"
+    assert "trwale += 1" in ogon, \
+        "awaria już zgłoszona nie jest nigdzie policzona, więc zero z tej " \
+        "czujki wyjdzie nieme"
 
 
 # --- czujka kill-switcha ----------------------------------------------------
@@ -240,22 +253,37 @@ def test_czujka_ryzyka_tlumi_powtorne_zgloszenie():
     assert "created_at > %s" in cialo
 
 
-def test_czujka_ryzyka_konczy_sie_kodem_niezerowym_PRZEZ_CALY_CZAS_BLOKADY():
-    """Kod wyjścia opisuje STAN, a nie zdarzenie.
+def test_czujka_ryzyka_opisuje_stan_LOGIEM_a_nie_kodem_wyjscia():
+    """Stan trwały ma być widoczny przy każdym przebiegu — ale w logu.
 
-    Poprzednia wersja (`return 1 if nowe else 0`) zwracała zero, gdy tłumienie
-    powiadomień akurat milczało — więc zatrzymany handel meldował `Complete`.
-    Argument „stan znany nie może malować `kubectl get jobs` na czerwono" jest
-    słuszny przy dryfie, gdzie HANDEL IDZIE DALEJ; przy kill-switchu czerwień
-    jest jedynym prawdziwym opisem systemu i gaśnie sama w chwili zwolnienia.
+    Ta czujka przeszła dwie rundy poprawek w przeciwnych kierunkach i obie
+    padły na tym samym: na próbie wciśnięcia opisu STANU w kanał o jednym bicie,
+    który z natury niesie „czy ten przebieg się udał". Runda 1 (`return 1 if
+    nowe else 0`) gubiła stan, bo bit był wolny. Runda 2 (`return 1` bezwarunkowo)
+    zatkała bit stanem tak trwałym, że przestał cokolwiek znaczyć: kill-switch
+    aktywny od 2190 minut dał 144 padnięte Joby na dobę i ArgoCD trwale
+    Degraded.
+
+    Dziś kod wyjścia idzie za tłumieniem powiadomień, a opis stanu ma własny,
+    nieograniczony kanał: linię „KILL-SWITCH ..." wypisywaną BEZWARUNKOWO,
+    przed jakimkolwiek pytaniem o rytm. Zero z tej czujki nigdy nie jest nieme —
+    i to jest jedyny powód, dla którego wolno mu być zerem.
 
     Reszta tej czujki — rytm przypominania i cała ścieżka wysyłki — siedzi
     w `test_kill_switch_widocznosc.py`.
     """
     ogon = _cialo("sprawdz_ryzyko")
     assert "return 1 if nowe else 0" not in ogon
-    assert ogon.rstrip().endswith("return 1"), \
-        "czujka kończy się zerem mimo aktywnego kill-switcha"
+    assert ogon.rstrip().endswith('return kod_wyjscia(zgloszone, trwale, '
+                                  '"kill-switch aktywny")'), \
+        "czujka liczy kod wyjścia po swojemu, obok wspólnej reguły"
+
+    # Linia stanu MUSI stać przed pytaniem o tłumienie, inaczej cisza w kanale
+    # powiadomień zabiera ze sobą także log — i wtedy zero jest nieme.
+    stan = ogon.index('print(f"  KILL-SWITCH')
+    tlumienie = ogon.index("werdykt = ocen_kill_switch")
+    assert stan < tlumienie, \
+        "stan wypisywany dopiero po decyzji o tłumieniu — czyli nie zawsze"
 
 
 # --- czujka kopii zapasowych ------------------------------------------------

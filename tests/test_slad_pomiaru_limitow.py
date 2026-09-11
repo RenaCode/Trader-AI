@@ -384,12 +384,64 @@ def test_przy_aktywnym_kill_switchu_cisza_pomiaru_NIE_ALARMUJE_drugi_raz():
         f"drugi alarm o zatrzymanym systemie: {kody}")
 
 
-def test_rytm_ciszy_pomiaru_nie_wysyla_ale_ZOSTAWIA_kod_wyjscia():
-    """Cisza w kanale powiadomień nie jest zgodą na stan — dokładnie jak przy
-    kill-switchu."""
+def test_rytm_ciszy_pomiaru_nie_wysyla_i_NIE_PODNOSI_kodu_wyjscia(capsys):
+    """Kod wyjścia idzie za tłumieniem powiadomień — dokładnie jak przy
+    kill-switchu i z tego samego powodu (zmierzonego na produkcji 2026-09-10:
+    144 padnięte Joby na dobę o jednym znanym zdarzeniu).
+
+    Cisza dotyczy jednak WYŁĄCZNIE kodu wyjścia. Znalezisko zostaje wypisane
+    wielkimi literami przy każdym przebiegu, razem z powodem, dla którego
+    zadanie mimo to kończy się zerem — zielone zadanie BEZ śladu w logu byłoby
+    stanem nieodróżnialnym od spokoju w obu kanałach naraz.
+    """
     kod, wyslane = przebieg(
         AtrapaCzujki(wiek_s=3 * 24 * 3600, od_zgloszenia_pomiar_min=30))
-    assert (kod, wyslane) == (1, [])
+    assert (kod, wyslane) == (0, [])
+    log = capsys.readouterr().out
+    assert "BEZPIECZNIK NIE RAPORTUJE crypto/demo" in log
+    assert "bezpiecznik nie raportuje" in log.split("BEZPIECZNIK NIE RAPORTUJE")[-1], \
+        "log nie mówi, DLACZEGO kod wyjścia jest zerem mimo znaleziska"
+
+
+def test_NAWROT_ciszy_pomiaru_NIE_wpada_w_rytm_poprzedniego_zgloszenia():
+    """Pomiar zamilkł, poszedł alarm, ktoś to naprawił — i po godzinie zamilkł
+    ZNOWU. To druga, osobna awaria bezpiecznika.
+
+    Sam rytm przypominania widzi tu „zgłoszone 90 minut temu, cisza" i tłumi ją.
+    Dopóki kod wyjścia był niezależny od tłumienia, wada była zamaskowana:
+    zadanie i tak świeciło się na czerwono. Po związaniu obu kanałów jednym
+    warunkiem nawrót przepadłby w obu naraz — czyli cisza NIEODRÓŻNIALNA od
+    spokoju o bezpieczniku, który przestał mierzyć.
+
+    Rozpoznanie nie wymaga nowej kolumny ani stanu: cisza zaczęła się `wiek_s`
+    temu, więc zgłoszenie STARSZE od niej opisywało ciszę POPRZEDNIĄ. Ten sam
+    chwyt, którym `engine.down` porównuje się z `last_beat_at`, a kill-switch
+    z `triggered_at`.
+    """
+    w = ocen_cisze_pomiaru(wiek_s=20 * 60, nigdy=None, od_zgloszenia_min=90)
+    assert w is not None and w["nawrot"] is True
+    assert w["zglos"] is True, "druga awaria bezpiecznika uciszona przez alarm o pierwszej"
+
+
+def test_ta_SAMA_cisza_nie_jest_nawrotem_bo_wtedy_nawrot_znaczylby_zawsze():
+    """Druga strona tego samego warunku. Zgłoszenie MŁODSZE niż początek ciszy
+    dotyczy tej ciszy, więc obowiązuje rytm — inaczej czujka alarmowałaby przy
+    każdym z 144 przebiegów doby i nauczyłaby się ją przewijać."""
+    w = ocen_cisze_pomiaru(wiek_s=3 * 24 * 3600, nigdy=None, od_zgloszenia_min=90)
+    assert w["nawrot"] is False and w["zglos"] is False
+
+
+def test_limit_bez_ANI_JEDNEGO_pomiaru_nie_jest_nawrotem_przy_kazdym_przebiegu():
+    """KANAREK NA NAJPROSTSZY SPOSÓB ZEPSUCIA TEGO WARUNKU.
+
+    Pomiar świeży (2 minuty), ale jeden limit konieczny nie ma pomiaru w całej
+    historii. Gdyby nawrót liczył się z `wiek_s` także tutaj, wychodziłoby
+    „zgłoszenie starsze niż dwie minuty", czyli alarm co dziesięć minut bez
+    końca o stanie, który trwa od zawsze i nie ma czego nawracać.
+    """
+    w = ocen_cisze_pomiaru(wiek_s=120, nigdy=["min_equity"], od_zgloszenia_min=90)
+    assert w["nawrot"] is False, "stan trwający od zawsze zgłoszony jako nawrót"
+    assert w["zglos"] is False, "alarm o tym samym braku przy każdym przebiegu"
 
 
 def test_tryb_suchy_wylacza_WYSYLKE_a_nie_stan():

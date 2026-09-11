@@ -1,0 +1,124 @@
+{{- if .Values.kursCron.enabled }}
+# Zbieranie kursu waluty odniesienia wlasciciela (market.fx_rate, migracja 0036).
+#
+# DLACZEGO TO ZADANIE W OGOLE POWSTAJE
+#
+# `services/engine/waluta.py` istnial i NIE BYL WOLANY PRZEZ NIC: ani przez
+# CronJob, ani przez workera, ani przez router. Tabela `market.fx_rate` na
+# produkcji mial 0 wierszy, wiec druga krzywa kapitalu skladala sie wylacznie
+# z luk "nie przeliczono". Mechanizm zbudowany i niewpiety wyglada w repozytorium
+# dokladnie tak samo jak mechanizm dzialajacy - to jest ta sama rodzina bledow,
+# co status instrumentow zamrozony przez `|| true` (patrz instrumenty-cron.yaml).
+#
+# PO CO KURS
+#
+# Bezpiecznik mierzy w USDC i `min_equity` jest progiem w USDC, a wlasciciel
+# wplaca przez rail fiatowy podmiotu unijnego, czyli w EUR. Stan "kill-switch
+# zielony, wszystkie limity w normie" jest W PELNI ZGODNY ze stanem "wlasciciel
+# ma o kilka procent mniej, niz wplacil" - bezpiecznik jest Z KONSTRUKCJI slepy
+# na te strate. Zmierzone na USDCEUR: zakres roczny okolo 5,9% przy wyniku
+# strategii okolo 2,9% rocznie, wiec to nie jest szum.
+#
+# To zadanie NIE ZMIENIA ZACHOWANIA BEZPIECZNIKA. Dodaje DRUGA LICZBE obok
+# pierwszej. Czy prog ma stac w USDC, czy w walucie wlasciciela, jest decyzja
+# wlasciciela i tu nie zapada.
+#
+# DLACZEGO `--co historia`, A NIE `--co kurs` ANI PELNY PRZEBIEG
+#
+# Narzedzie ma trzy podzakresy i tylko jeden nadaje sie na czujke:
+#
+#   --co historia  pobiera ZAMKNIETE swiece dzienne z publicznego endpointu
+#                  podmiotu i dopisuje je do market.fx_rate. Nie wymaga klucza
+#                  gieldy ani SECRETS_KEY. Konczy sie kodem 1 WYLACZNIE wtedy,
+#                  gdy zrodlo nie oddalo ani jednej swiecy - czyli przy
+#                  prawdziwej awarii zrodla.
+#   --co kurs      dopisuje jedna biezaca cene z tickera. Wymaga SECRETS_KEY
+#                  i odszyfrowania poswiadczen, a jego kod 1 zapala sie takze
+#                  przy chwilowym braku odczytu tickera. Wiecej zaleznosci
+#                  i wiecej powodow do falszywej czerwieni, a przy swiecy
+#                  dziennej i progu wieku 36 h nie wnosi nic, czego nie ma
+#                  historia.
+#   --co krzywa    to RAPORT, nie zbieranie: nie zapisuje ani jednego wiersza
+#                  i zwraca 0 nawet wtedy, gdy nie przeliczyl niczego. Zadanie
+#                  cykliczne z takim podzakresem byloby zielone zawsze,
+#                  niezaleznie od tego, czy kurs w ogole jest.
+#
+# Kody wyjscia sprawdzone NA PRODUKCJI 2026-09-09, w podzie `trader-api`:
+#   --co historia --dni 400 --sucho  ->  0  (400 zamknietych swiec USDCEUR)
+#   --co kurs --sucho                ->  0
+# Zadne z nich nie konczy sie kodem 1 na zdrowej produkcji demo - w odroznieniu
+# od `instrumenty.py`, ktore na podmiocie unijnym ZAWSZE oddaje 3.
+#
+# DLACZEGO `--dni` SIEGA PONAD ROK
+#
+# Interfejs pokazuje pierwsza krzywa do 365 dni wstecz, wiec druga musi umiec
+# siegnac tak samo daleko - inaczej porownanie konczy sie tam, gdzie zaczyna
+# sie luka, a wlasciciel zobaczy "nie przeliczono" na wiekszosci wykresu.
+# Uzupelnienie historii jest tu KROKIEM TEGO SAMEGO ZADANIA, a nie osobnym
+# zadaniem jednorazowym: zadanie uruchamiane raz jest zadaniem, ktore po
+# odtworzeniu bazy nikt nie uruchomi ponownie, i wracamy do tabeli z 0 wierszy.
+# Koszt powtarzania jest zerowy - `zapisz_kursy` idzie przez
+# `ON CONFLICT DO NOTHING`, wiec kolejne przebiegi wstawiaja wylacznie nowa
+# swiece, a reszta jest odrzucana przez klucz glowny.
+#
+# CO SZESC GODZIN, a nie raz na dobe. Prog wieku kursu w module (`MAX_WIEK`)
+# wynosi 36 h; przy przebiegu dobowym DRUGA nieudana proba juz robi luke na
+# calej krzywej. Co szesc godzin daje pieć podejsc zapasu, a koszt to jedno
+# zapytanie HTTP do publicznego endpointu.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: trader-kurs
+  labels: {{- include "trader.labels" . | nindent 4 }}
+spec:
+  schedule: {{ .Values.kursCron.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  startingDeadlineSeconds: 300
+  jobTemplate:
+    spec:
+      # Zawieszone polaczenie z gielda nie moze blokowac `Forbid` w
+      # nieskonczonosc - kolejne przebiegi po cichu by przepadaly.
+      activeDeadlineSeconds: 600
+      # Jedno ponowienie: 429 albo chwilowy blad sieci mija sam, a dopisanie
+      # swiec jest bezpieczne do powtorzenia (ON CONFLICT DO NOTHING).
+      backoffLimit: 1
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: kurs
+              image: "{{ .Values.api.image.repository }}:{{ .Values.api.image.tag }}"
+              imagePullPolicy: {{ .Values.api.image.pullPolicy }}
+              # Bez `|| true` i bez maskowania kodu wyjscia. Kod 1 z tego
+              # podzakresu znaczy "zrodlo nie oddalo ani jednej swiecy" - czyli
+              # dokladnie ten stan, o ktorym czlowiek ma sie dowiedziec.
+              command:
+                - python
+                - services/engine/waluta.py
+                - --co
+                - historia
+                - --dni
+                - {{ .Values.kursCron.dni | quote }}
+              env:
+                # ROLA Z PRAWEM ZAPISU. Sprawdzone na produkcji, a nie zalozone:
+                #   has_table_privilege('trader_silnik','market.fx_rate','INSERT') = t
+                #   has_table_privilege('trader_czujka','market.fx_rate','INSERT') = f
+                # Nadanie idzie z petli w migracji 0034 (schemat `market`
+                # + ALTER DEFAULT PRIVILEGES), wiec 0036 swiadomie nie ma
+                # wlasnego GRANT-a i nie jest potrzebna zadna nowa migracja.
+                #
+                # `czujka` byloby tu ta sama awaria co przy instrumentach:
+                # `permission denied for table fx_rate` i tabela pusta dalej.
+                {{- include "trader.rolaDbEnv" (dict "ctx" $ "rola" "silnik") | nindent 16 }}
+                # SECRETS_KEY swiadomie NIE MA. `--co historia` czyta publiczny
+                # endpoint swiec i nie odszyfrowuje zadnego poswiadczenia;
+                # klucz w podzie, ktory go nie potrzebuje, to tylko szersza
+                # powierzchnia ataku.
+                - name: PYTHONUNBUFFERED
+                  value: "1"
+              resources:
+                limits:   { cpu: 300m, memory: 256Mi }
+                requests: { cpu: 20m,  memory: 64Mi }
+{{- end }}

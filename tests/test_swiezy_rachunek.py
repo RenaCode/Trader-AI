@@ -264,8 +264,8 @@ def test_wznowienie_NIE_zwalnia_swiezego_rachunku_na_niezmierzonej_zerowce():
               {"wiek_h": 0, "equity": Decimal("96000"), "nav": None, "wplaty": None}]
     stan = asyncio.run(stan_konta(fetch_one_z_krzywej(punkty), "crypto", "live"))
 
-    assert stan["day_ago"] == 100_000, (
-        f"odniesienie sprzed doby to {stan['day_ago']}, a nie początek krzywej")
+    assert stan["doba"] == 100_000, (
+        f"odniesienie sprzed doby to {stan['doba']}, a nie początek krzywej")
     ustal, dowod = warunek_ustal("max_daily_loss", 2.0, stan)
     assert ustal is False, f"kill-switch zwolniony przy stracie 4%: {dowod}"
     assert "4.00%" in dowod, f"strata dzienna zmierzona jako: {dowod}"
@@ -302,9 +302,115 @@ def test_kernel_i_wznowienie_MIERZA_TO_SAMO_na_swiezym_rachunku():
     z_kernela = {u["name"]: u["used"] for u in k.check_account().usage}["max_daily_loss"]
 
     stan = asyncio.run(stan_konta(fetch_one_z_krzywej(punkty), "crypto", "live"))
-    z_wznowienia = (stan["day_ago"] - stan["equity"]) / stan["day_ago"] * 100
+    z_wznowienia = (stan["doba"] - stan["wynik"]) / stan["doba"] * 100
 
     assert z_kernela == pytest.approx(z_wznowienia, abs=0.01), (
         f"kernel mierzy {z_kernela:.2f}%, wznowienie {z_wznowienia:.2f}% "
         f"— ta sama strata, dwie odpowiedzi")
     assert z_kernela == pytest.approx(4.0, abs=0.01)
+
+
+# ------------------ druga kopia pomiaru: wznowienie na `equity`, kernel na `nav`
+
+def krzywa_z_doplata() -> list[dict]:
+    """Rachunek traci 2,5% na jednostce, a właściciel dopłaca 5% kapitału.
+
+    Dwie liczby rozjeżdżają się w PRZECIWNE strony i to jest cała treść tego
+    scenariusza: `nav` spada (bo dopłata nie jest zyskiem), `equity` rośnie
+    ponad punkt sprzed doby (bo dopłata to pieniądze).
+
+        nav      1,000 → 0,975            strata dzienna 2,50%  ≥ limit 2%
+        equity 100 000 → 102 375          strata dzienna −2,38% < histereza
+    """
+    return [{"wiek_h": 30, "nav": Decimal("1.000"), "wplaty": Decimal("100000"),
+             "equity": Decimal("100000")},
+            {"wiek_h": 0, "nav": Decimal("0.975"), "wplaty": Decimal("105000"),
+             "equity": Decimal("102375")}]
+
+
+def test_wznowienie_NIE_zdejmuje_hamulca_po_doplacie():
+    """KANAREK dla rozjazdu equity↔nav z migracji 0031.
+
+    Kill-switch zadziałał, bo `evaluate_account` zmierzyło stratę dzienną
+    z `nav`: 2,5% przy limicie 2%. `stan_konta` czytało wyłącznie
+    `exec.equity_point.equity`, a tę dopłata podniosła — strata dzienna
+    wychodziła ujemna, poniżej histerezy 1%, więc dozorca zwalniał bezpiecznik
+    W DNIU, w którym rachunek naprawdę tracił 2,5%.
+
+    Kierunek błędu jest jednostronny: dopłata może stratę na `equity` tylko
+    zamaskować, nigdy powiększyć. Nic się przy tym nie wywracało — w dzienniku
+    zostawało zdanie prawdziwe o innej krzywej niż ta, którą mierzy limit.
+    """
+    import asyncio
+
+    from services.engine.wznowienie import stan_konta, warunek_ustal
+
+    stan = asyncio.run(stan_konta(fetch_one_z_krzywej(krzywa_z_doplata()), "crypto", "live"))
+    assert stan["jednostka"] is True, (
+        f"wznowienie zeszło na kapitał, choć krzywa `nav` jest pełna — stan: {stan}")
+
+    ustal, dowod = warunek_ustal("max_daily_loss", 2.0, stan)
+    assert ustal is False, f"hamulec zdjęty przy stracie 2,5% na jednostce: {dowod}"
+    assert "2.50%" in dowod, f"strata dzienna zmierzona jako: {dowod}"
+
+
+def test_kernel_i_wznowienie_ZGADZAJA_SIE_takze_po_doplacie():
+    """Sedno poprawki: jedna liczba, dwóch czytelników — również wtedy, gdy
+    wpłaty rozjeżdżają kapitał z wynikiem.
+
+    Test poprzedni pilnuje samego kierunku (nie zwalniaj); ten pilnuje, że obie
+    strony podają DOKŁADNIE tę samą wartość. Gdyby kernel zmienił regułę wyboru
+    miary, a wznowienie zostało przy swojej, poprzedni test nadal by przechodził
+    — bo 2,5% przekracza histerezę przy każdej z nich.
+    """
+    import asyncio
+
+    from services.engine.wznowienie import stan_konta
+
+    punkty = krzywa_z_doplata()
+    k, _ = kernel(punkty, {"max_daily_loss": LIMITY["max_daily_loss"]})
+    z_kernela = {u["name"]: u["used"] for u in k.check_account().usage}["max_daily_loss"]
+
+    stan = asyncio.run(stan_konta(fetch_one_z_krzywej(punkty), "crypto", "live"))
+    z_wznowienia = (stan["doba"] - stan["wynik"]) / stan["doba"] * 100
+
+    assert z_kernela == pytest.approx(z_wznowienia, abs=0.001), (
+        f"kernel mierzy {z_kernela:.3f}%, wznowienie {z_wznowienia:.3f}% "
+        f"— ta sama strata, dwie odpowiedzi")
+    assert z_kernela == pytest.approx(2.5, abs=0.001)
+
+
+def test_obsuniecie_we_wznowieniu_tez_idzie_z_jednostki():
+    """Ta sama para, drugi limit. Obsunięcie liczone z `equity` widzi szczyt
+    podniesiony wpłatą — czyli mierzy przelew, a nie stratę."""
+    import asyncio
+
+    from services.engine.wznowienie import stan_konta, warunek_ustal
+
+    # Szczyt jednostki 1,00; teraz 0,94 → obsunięcie 6% przy limicie 10%,
+    # histereza wznowienia 5%. Na kapitale: szczyt 100 000, teraz 98 700
+    # (po dopłacie 5%) → 1,3%, czyli „ustało" — a nie ustało.
+    punkty = [{"wiek_h": 30, "nav": Decimal("1.00"), "wplaty": Decimal("100000"),
+               "equity": Decimal("100000")},
+              {"wiek_h": 0, "nav": Decimal("0.94"), "wplaty": Decimal("105000"),
+               "equity": Decimal("98700")}]
+    stan = asyncio.run(stan_konta(fetch_one_z_krzywej(punkty), "crypto", "live"))
+    ustal, dowod = warunek_ustal("max_drawdown", 10.0, stan)
+    assert ustal is False, f"obsunięcie 6% zameldowane jako ustałe: {dowod}"
+    assert "6.00%" in dowod, f"obsunięcie zmierzone jako: {dowod}"
+
+
+def test_bez_kolumny_nav_wznowienie_wraca_na_kapital():
+    """Kanarek odwrotny: baza bez przeliczonej krzywej `nav` nie może zatrzymać
+    wznowienia na zawsze. Wtedy — i tylko wtedy — obie strony liczą z kapitału,
+    dokładnie jak przed migracją 0031."""
+    import asyncio
+
+    from services.engine.wznowienie import stan_konta, warunek_ustal
+
+    punkty = [{"wiek_h": 30, "equity": Decimal("100000"), "nav": None, "wplaty": None},
+              {"wiek_h": 0, "equity": Decimal("99800"), "nav": None, "wplaty": None}]
+    stan = asyncio.run(stan_konta(fetch_one_z_krzywej(punkty), "crypto", "live"))
+    assert stan["jednostka"] is False
+    ustal, dowod = warunek_ustal("max_daily_loss", 2.0, stan)
+    assert ustal is True, f"rachunek bez krzywej nav nie wraca do handlu: {dowod}"

@@ -33,6 +33,26 @@ czyli spowodowałby dokładnie tę awarię, przed którą kill-switch ma chroni�
 Próba używa progu kapitału, bo to jedyny z trzech limitów krytycznych z regułą
 `reczne` — usługa wznowienia go nie ruszy i nie zwolni zdarzenia w połowie
 pomiaru.
+
+TRZY WYNIKI, NIE DWA
+
+    ZALICZONA (0)          łańcuch zadziałał od limitu po powiadomienie
+    NIEZALICZONA (1)       próba się WYKONAŁA i któreś ogniwo padło —
+                           to jest awaria zabezpieczenia i ma krzyczeć
+    NIEROZSTRZYGNIĘTA (0)  próby NIE DA SIĘ przeprowadzić, bo kill-switch już
+                           stoi: nie ma czego wywołać ze stanu spoczynku
+    NIESPRAWDZONE (2)      nierozstrzygnięta zbyt długo — patrz niżej
+
+Do 2026-09-10 istniały dwa pierwsze i trzeci wpadał do drugiego, czyli aktywny
+kill-switch był zgłaszany jako awaria samego kill-switcha. To błąd rozpoznania:
+„nie dało się zmierzyć" to nie to samo co „zmierzono i wyszło źle". Skutek był
+gorszy niż fałszywy alarm — zaufanie do próby spadało dokładnie wtedy, gdy
+człowiek i tak wiedział o kill-switchu, a prawdziwa awaria łańcucha wyglądałaby
+identycznie i utonęłaby w tych powtórkach.
+
+NIEROZSTRZYGNIĘTA NIE JEST JEDNAK ZALICZONA. Kod zerowy znaczy tu tylko tyle, że
+nie ma o czym budzić człowieka w nocy; komunikat mówi wprost, że w tym cyklu
+NIKT nie sprawdził, czy bezpiecznik działa.
 """
 from __future__ import annotations
 
@@ -50,9 +70,46 @@ CZEKAJ_SILNIK_S = int(os.environ.get("PROBA_CZEKAJ_SILNIK_S", "420"))
 CZEKAJ_DOZOR_S = int(os.environ.get("PROBA_CZEKAJ_DOZOR_S", "660"))
 KROK_S = 15
 
+# ILE DÓB BEZ POTWIERDZENIA, ZANIM SAMA CISZA JEST AWARIĄ.
+#
+# Bezpiecznik niesprawdzony przez wiele dni to osobne ryzyko od bezpiecznika
+# zepsutego — i jedyne, które rośnie samo. Trzeci wynik bez tego progu byłby
+# workiem bez dna: „nie dało się zmierzyć" powtarzane w nieskończoność
+# z zerowym kodem wyjścia niczym się nie różni od wyłączenia próby.
+#
+# Siedem, bo próg musi mieścić się między dwiema granicami:
+#
+#   OD DOŁU — zwykłą ludzką obsługę prawdziwego zatrzymania. Kill-switch, który
+#   zadziałał w piątek wieczorem i został zwolniony w poniedziałek po analizie,
+#   daje trzy doby nierozstrzygniętych prób. Próg 3 albo 5 zamieniałby normalny
+#   tryb pracy w drugi alarm — o alarmie. Wyłączony byłby w tydzień.
+#
+#   OD GÓRY — opóźnienie wykrycia, które ten projekt już raz uznał za zbyt duże.
+#   Próba jest dobowa właśnie dlatego, że przy tygodniowej o awarii bezpiecznika
+#   dowiadujemy się średnio po trzech i pół dnia (patrz komentarz w
+#   charts/trader/templates/proba-cron.yaml). Tydzień ciszy jest więc dokładnie
+#   tą granicą, powyżej której „chwilowo nie sprawdzamy" staje się stanem.
+#
+# Świadomie BEZ odczytu ze środowiska: próg, który da się podnieść zmienną,
+# zostanie podniesiony przy pierwszym niewygodnym przebiegu i nikt tego nie
+# zauważy — tak samo jak nie widać wyłączonego limitu.
+MAX_DNI_BEZ_POTWIERDZENIA = 7
+
 
 class Niezaliczona(RuntimeError):
     """Ogniwo łańcucha nie zadziałało. To awaria zabezpieczenia, nie próby."""
+
+
+class Nierozstrzygnieta(RuntimeError):
+    """Próby NIE DAŁO SIĘ przeprowadzić. To nie jest wynik pomiaru.
+
+    Niesie `dni` — ile dób minęło od ostatniego POTWIERDZENIA, że łańcuch
+    działa. Bez tej liczby trzeci wynik byłby nieodróżnialny od sukcesu.
+    """
+
+    def __init__(self, powod: str, dni: float):
+        super().__init__(powod)
+        self.dni = dni
 
 
 async def _czekaj_na(warunek, limit_s: int, opis: str):
@@ -64,6 +121,39 @@ async def _czekaj_na(warunek, limit_s: int, opis: str):
             return wynik
         await asyncio.sleep(KROK_S)
         minelo += KROK_S
+    return None
+
+
+async def _dni_od_potwierdzenia(fetch_one, engine: str, mode: str) -> float | None:
+    """Ile dób od ostatniej ZALICZONEJ próby. None, gdy takiej nigdy nie było.
+
+    ŚLAD JUŻ JEST W BAZIE — osobna tabela byłaby drugą kopią tej samej rzeczy.
+    Każda zaliczona próba zwalnia zdarzenie, które sama wywołała, i zostawia
+    parę kolumn, która nie powstaje inaczej:
+
+        released_auto = true                       -> usługa wznowienia
+        released_auto = false, released_by = ID    -> człowiek przez API
+        released_auto = false, released_by = NULL  -> PRÓBA POŻAROWA
+
+    Ta trójka jest już opisana niżej, przy samym zwolnieniu, i pilnuje jej test
+    `test_proba_pozarowa_NIE_udaje_wznowienia_automatycznego`. Szukanie śladu po
+    treści `release_note` działałoby do pierwszej zmiany sformułowania — ten sam
+    błąd, przed którym ostrzega migracja 0029 przy `limit_name`.
+
+    Liczymy od `released_at`, nie od `triggered_at`: potwierdzeniem jest moment,
+    w którym łańcuch przeszedł do końca, a nie ten, w którym się zaczął.
+
+    Doby liczy BAZA. Odejmowanie dat po stronie Pythona wymagałoby zgadywania
+    strefy — a strefa pomylona o dwie godziny przy progu liczonym w dobach jest
+    niewidoczna dokładnie do dnia, w którym ma zadziałać.
+    """
+    r = await fetch_one(
+        "SELECT extract(epoch FROM now() - max(released_at)) / 86400.0 AS dni"
+        " FROM risk.killswitch_event"
+        " WHERE engine::text=%s AND mode::text=%s AND released_at IS NOT NULL"
+        "   AND released_auto = false AND released_by IS NULL", (engine, mode))
+    if r and r["dni"] is not None:
+        return float(r["dni"])
     return None
 
 
@@ -83,13 +173,28 @@ async def przeprowadz(fetch_all, fetch_one, execute, engine: str = "crypto",
         raise Niezaliczona(f"limit {LIMIT_PROBY} nie istnieje")
 
     aktywne = await fetch_one(
-        "SELECT count(*) AS n FROM risk.killswitch_event"
+        "SELECT count(*) AS n,"
+        "       extract(epoch FROM now() - min(triggered_at)) / 86400.0"
+        "           AS dni_blokady"
+        " FROM risk.killswitch_event"
         " WHERE engine::text=%s AND mode::text=%s AND released_at IS NULL",
         (engine, mode))
     if aktywne["n"]:
-        # Nie odróżniłaby swojego zdarzenia od zastanego i zwolniłaby cudze.
-        raise Niezaliczona(
-            f"kill-switch jest już aktywny ({aktywne['n']}) — zwolnij go najpierw")
+        # NIE JEST TO NIEPOWODZENIE ŁAŃCUCHA, tylko brak możliwości pomiaru:
+        # próba wywołuje kill-switch ze stanu spoczynku, a tego stanu nie ma.
+        # (Nie odróżniłaby też swojego zdarzenia od zastanego i zwolniłaby
+        # cudze — dlatego nie próbuje mimo wszystko.)
+        dni = await _dni_od_potwierdzenia(fetch_one, engine, mode)
+        if dni is None:
+            # Ani jednej zaliczonej próby w dzienniku: świeże wdrożenie albo
+            # taki system, w którym próba nigdy nie doszła do końca. Dolną
+            # granicą ciszy jest wtedy wiek najstarszego czynnego zdarzenia —
+            # przez ten czas próba na pewno nie mogła się wykonać. Zero
+            # zerowałoby licznik na zawsze i próg byłby martwy.
+            dni = float(aktywne["dni_blokady"] or 0.0)
+        raise Nierozstrzygnieta(
+            f"kill-switch jest już aktywny ({aktywne['n']}) — zwolnij go najpierw",
+            dni)
 
     kapital = float(stan["equity"])
     prog_przed = float(lim["value"])
@@ -198,6 +303,49 @@ async def przeprowadz(fetch_all, fetch_one, execute, engine: str = "crypto",
         print(f"    próg po przywróceniu: {float(po['value']):.2f}")
 
 
+async def uruchom(fetch_all, fetch_one, execute, **kw) -> int:
+    """Przeprowadza próbę i zamienia jej wynik na KOD WYJŚCIA.
+
+    Rozdział wyników od kodów siedzi tutaj, a nie w `main`, bo `main` zajmuje
+    się pulą połączeń i argumentami — a to jest jedyne miejsce, w którym zapada
+    decyzja „czy CronJob ma zaświecić na czerwono". Osobna funkcja znaczy też,
+    że tę decyzję da się sprawdzić testem bez bazy.
+
+        0  zaliczona albo nierozstrzygnięta w granicach ciszy
+        1  NIEZALICZONA — łańcuch padł, zabezpieczenie nie działa
+        2  NIESPRAWDZONE zbyt długo — cisza sama stała się awarią
+
+    Dwójka zamiast jedynki nie jest ozdobnikiem: oba kody kończą pod na
+    czerwono, ale mówią o dwóch różnych rzeczach i wymagają dwóch różnych
+    reakcji (napraw łańcuch / zwolnij kill-switch albo zdecyduj świadomie, że
+    handel stoi dalej). W logu zadania widać je bez czytania treści.
+    """
+    try:
+        return await przeprowadz(fetch_all, fetch_one, execute, **kw)
+    except Niezaliczona as e:
+        print(f"\nNIEZALICZONA: {e}", file=sys.stderr)
+        print("  To jest awaria samego zabezpieczenia, nie próby.", file=sys.stderr)
+        return 1
+    except Nierozstrzygnieta as e:
+        print(f"\nNIEROZSTRZYGNIĘTA: {e}", file=sys.stderr)
+        print("  ZABEZPIECZENIE NIE ZOSTAŁO W TYM CYKLU SPRAWDZONE — to nie "
+              "jest potwierdzenie,", file=sys.stderr)
+        print("  że kill-switch zadziała, tylko brak możliwości sprawdzenia.",
+              file=sys.stderr)
+        print(f"  Od ostatniego potwierdzenia: {e.dni:.1f} doby "
+              f"(próg: {MAX_DNI_BEZ_POTWIERDZENIA}).", file=sys.stderr)
+        if e.dni > MAX_DNI_BEZ_POTWIERDZENIA:
+            print(f"\nNIESPRAWDZONE od {e.dni:.1f} doby — sama ta cisza jest "
+                  f"już awarią.", file=sys.stderr)
+            print("  Handel stoi, więc nic nie ryzykuje TERAZ. Ryzyko powstaje "
+                  "w chwili zwolnienia", file=sys.stderr)
+            print("  kill-switcha: system wróci do handlu z bezpiecznikiem, "
+                  "którego od tygodnia", file=sys.stderr)
+            print("  nikt nie sprawdził.", file=sys.stderr)
+            return 2
+        return 0
+
+
 async def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--engine", default="crypto")
@@ -217,13 +365,9 @@ async def main() -> int:
 
     await open_pool()
     try:
-        return await przeprowadz(fetch_all, fetch_one, execute,
-                                 engine=args.engine, mode=args.mode,
-                                 sucho=args.sucho)
-    except Niezaliczona as e:
-        print(f"\nNIEZALICZONA: {e}", file=sys.stderr)
-        print("  To jest awaria samego zabezpieczenia, nie próby.", file=sys.stderr)
-        return 1
+        return await uruchom(fetch_all, fetch_one, execute,
+                             engine=args.engine, mode=args.mode,
+                             sucho=args.sucho)
     finally:
         await close_pool()
 
