@@ -645,3 +645,86 @@ def test_dostawca_NIE_TRZYMA_polaczenia_z_ktoregos_cyklu():
             asyncio.run(ai.zamknij())
     finally:
         mp.undo()
+
+
+# ============ nieudana przebudowa nie ma prawa zostawić ZAMKNIĘTEGO dostawcy ============
+
+def test_nieudana_przebudowa_NIE_ZOSTAWIA_zamknietego_dostawcy(monkeypatch):
+    """Kolejność „zamknij stary, potem zbuduj nowy" ma jeden stan, z którego
+    nie ma wyjścia.
+
+    Budowa potrafi paść: `DostawcaAnthropic` importuje pakiet `anthropic`
+    leniwie, więc dopisanie klucza Anthropica w obrazie złożonym pod samo Gemini
+    kończy się tutaj wyjątkiem. Przy starej kolejności stary dostawca był wtedy
+    już ZAMKNIĘTY, a wyjątek przerywał przypisanie u wołającego: `ai` zostawało
+    przy zamkniętym obiekcie, `klucze_ai` przy STARYM zestawie kluczy.
+
+    I to jest cała pułapka: gdy właściciel cofnie nieudany klucz, zestaw znów
+    zgadza się z zapamiętanym, warunek „bez zmian" oddaje tego zamkniętego
+    dostawcę i każde wywołanie do końca życia procesu pada na zamkniętym
+    kliencie. Cicho — w logu dalej stoi „Tryb: pobieranie i ANALIZA".
+    """
+    sekrety = {"gemini_api_key": "g-1"}
+    monkeypatch.setattr(news_worker, "_klucz",
+                        lambda conn, sekret, env: sekrety.get(sekret))
+
+    def zbuduj(klucze):
+        if klucze.get("anthropic"):
+            # Obraz złożony pod samo Gemini nie ma z czego zbudować analizy.
+            raise ImportError("No module named 'anthropic'")
+        return _DostawcaAtrapa(klucze)
+
+    monkeypatch.setattr(news_worker, "zbuduj_dostawce", zbuduj)
+
+    stary = _DostawcaAtrapa({"anthropic": None, "gemini": "g-1"})
+    klucze_ai = {"anthropic": None, "gemini": "g-1"}
+
+    # Właściciel dopisuje klucz Anthropica — budowa pada.
+    sekrety["anthropic_api_key"] = "a-1"
+    with pytest.raises(ImportError):
+        asyncio.run(news_worker.dostawca_na_cykle(None, stary, klucze_ai,
+                                                  wymagany=True))
+
+    assert stary.zamkniety == 0, (
+        "nieudana przebudowa zamknęła dostawcę, którego wołający nadal trzyma — "
+        "od tej chwili pracuje on na zamkniętym kliencie")
+
+    # Właściciel cofa nieudany klucz. Zestaw znów zgadza się z zapamiętanym,
+    # więc wraca TEN SAM obiekt - i musi być zdatny do użytku.
+    sekrety.pop("anthropic_api_key")
+    ai, klucze_po = asyncio.run(
+        news_worker.dostawca_na_cykle(None, stary, klucze_ai, wymagany=True))
+
+    assert ai is stary and klucze_po == klucze_ai
+    assert stary.zamkniety == 0, (
+        "dostawca wrócił do użytku zamknięty — worker milczy, a w logu dalej "
+        "stoi, że analizuje")
+
+
+def test_UDANA_przebudowa_dalej_zamyka_poprzedniego(monkeypatch):
+    """Druga strona tej samej zmiany kolejności — i to ona łatwo ginie.
+
+    Budowa przed zamknięciem nie może się zamienić w „budowa ZAMIAST
+    zamknięcia": wymiana klucza bez domknięcia starej puli to po prostu ten sam
+    wyciek, tylko rzadszy. Dwie pule naraz też nie istnieją — zamknięcie idzie
+    zaraz po udanej budowie, w tej samej funkcji.
+    """
+    sekrety = {"gemini_api_key": "g-1"}
+    monkeypatch.setattr(news_worker, "_klucz",
+                        lambda conn, sekret, env: sekrety.get(sekret))
+    monkeypatch.setattr(news_worker, "zbuduj_dostawce",
+                        lambda klucze: _DostawcaAtrapa(klucze))
+
+    stary = _DostawcaAtrapa({"anthropic": None, "gemini": "g-1"})
+    klucze_ai = {"anthropic": None, "gemini": "g-1"}
+
+    sekrety["gemini_api_key"] = "g-2"
+    nowy, klucze_po = asyncio.run(
+        news_worker.dostawca_na_cykle(None, stary, klucze_ai, wymagany=True))
+
+    assert nowy is not stary, "zmiana klucza ma dać NOWY obiekt, ze świeżym bezpiecznikiem"
+    assert nowy.klucze["gemini"] == "g-2"
+    assert klucze_po == {"anthropic": None, "gemini": "g-2"}
+    assert stary.zamkniety == 1, (
+        "poprzedni dostawca nie został zamknięty — wymiana klucza byłaby "
+        "kolejnym wyciekiem puli")

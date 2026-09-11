@@ -106,13 +106,33 @@ async def tryb_analizy(user: dict = Depends(current_user)):
     if d is None:
         return {"aktywny": False,
                 "opis": "Brak klucza — skaner pobiera artykuły, ale ich nie analizuje."}
-    return {
-        "aktywny": True,
-        "dostawca": d.nazwa,
-        "model_triazu": d.model_triazu,
-        "model_analizy": d.model_analizy,
-        "mieszanka": "+" in d.nazwa,
-    }
+    # DOSTAWCA ZBUDOWANY TU MUSI TU ZGINAC. `zbuduj_dostawce` nie jest odczytem
+    # konfiguracji - kazdy zwrocony obiekt otwiera pule polaczen (httpx u Gemini,
+    # klient SDK u Anthropica). Worker domyka je od 2026-09-10, ten ekran nie
+    # domykal ich wcale, a jest gorszym miejscem na taki wyciek: proces API zyje
+    # tygodniami, a `analiza-tryb` jest wolane przy kazdym wejsciu w ustawienia
+    # I po kazdym zapisie sekretu (`Settings.jsx`), wiec pule przybywaja bez
+    # zadnego ograniczenia.
+    #
+    # Do narysowania ekranu potrzebne sa same nazwy, wiec przepisujemy je, zanim
+    # obiekt pojdzie do zamkniecia - odpowiedz nie ma go prawa przezyc.
+    try:
+        return {
+            "aktywny": True,
+            "dostawca": d.nazwa,
+            "model_triazu": d.model_triazu,
+            "model_analizy": d.model_analizy,
+            "mieszanka": "+" in d.nazwa,
+        }
+    finally:
+        # Cisza przy bledzie, tak samo jak w `news_worker.zamknij_dostawce`:
+        # nieudane domkniecie gniazda nie ma prawa zamienic odczytu ekranu
+        # ustawien w blad 500.
+        try:
+            await d.zamknij()
+        except Exception as e:                               # noqa: BLE001
+            print(f"[uwaga] nie udało się zamknąć dostawcy {d.nazwa}: "
+                  f"{type(e).__name__}: {e}")
 
 
 @router.put("/secrets/{name}", dependencies=[Depends(require_csrf)])

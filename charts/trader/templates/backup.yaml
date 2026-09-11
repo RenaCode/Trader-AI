@@ -8,6 +8,20 @@
 #
 # Zrzut leci na dysk hosta, poza wolumen bazy — kopia na tym samym wolumenie,
 # który ma chronić, nie chroni przed niczym poza pomyłką w SQL.
+#
+# JEDEN PRZEBIEG ZOSTAWIA CZTERY PLIKI o wspólnym znaczniku czasu i one
+# stanowią kopię dopiero RAZEM:
+#
+#   trader-<znacznik>.dump              zrzut bazy (pg_dump, format custom)
+#   trader-<znacznik>.role.sql          role klastra (pg_dumpall --globals-only)
+#   trader-<znacznik>.wersje            wersje, w których zrzut powstał
+#   trader-<znacznik>.odtwarzanie.txt   kolejność odtwarzania
+#
+# Sam `.dump` nie wystarcza i to nie jest szczegół: `pg_dump` zrzuca JEDNĄ BAZĘ,
+# a role są obiektem klastra — do archiwum trafiają więc wszystkie GRANT-y dla
+# ról procesów i ani jedno CREATE ROLE. Na czystym klastrze taki zrzut wywala
+# się na każdym nadaniu, a procesy nie mają czym się zalogować — mimo że
+# `pg_restore --list` przeszedł. Kopiując kopię gdzie indziej, przenoś komplet.
 apiVersion: batch/v1
 kind: CronJob
 metadata:
@@ -51,7 +65,57 @@ spec:
                 - -c
                 - |
                   set -eu
-                  PLIK="/backup/trader-$(date -u +%Y%m%dT%H%M%SZ).dump"
+                  ZNACZNIK="$(date -u +%Y%m%dT%H%M%SZ)"
+                  PLIK="/backup/trader-$ZNACZNIK.dump"
+                  PLIK_ROL="/backup/trader-$ZNACZNIK.role.sql"
+                  PLIK_WERSJI="/backup/trader-$ZNACZNIK.wersje"
+                  PLIK_ODTWARZANIA="/backup/trader-$ZNACZNIK.odtwarzanie.txt"
+
+                  # WERSJE, W KTORYCH TEN ZRZUT POWSTAL.
+                  #
+                  # pg_dump pisze "CREATE EXTENSION timescaledb" BEZ klauzuli
+                  # VERSION, a zrzucona zawartosc _timescaledb_catalog pasuje
+                  # tylko do tej wersji rozszerzenia, z ktorej pochodzi. Obraz
+                  # bazy jest przypiety do RUCHOMEGO tagu, wiec "ten sam tag"
+                  # za pol roku znaczy inna wersje - i odtwarzajacy nie ma skad
+                  # wziac tej, ktorej potrzebuje, poza tym plikiem.
+                  WERSJA_TS="$(psql -h {{ include "trader.fullname" . }}-db \
+                                    -U {{ .Values.db.username }} -d {{ .Values.db.database }} \
+                                    -tAc "SELECT extversion FROM pg_extension WHERE extname = 'timescaledb'")"
+                  [ -n "$WERSJA_TS" ] || { echo "!! baza nie ma rozszerzenia timescaledb"; exit 1; }
+                  WERSJA_PG="$(psql -h {{ include "trader.fullname" . }}-db \
+                                    -U {{ .Values.db.username }} -d {{ .Values.db.database }} \
+                                    -tAc "SHOW server_version")"
+                  printf 'timescaledb=%s\npostgresql=%s\nobraz=%s\n' \
+                         "$WERSJA_TS" "$WERSJA_PG" \
+                         "{{ .Values.db.image.repository }}:{{ .Values.db.image.tag }}" > "$PLIK_WERSJI"
+                  echo "==> wersje: timescaledb $WERSJA_TS, postgresql $WERSJA_PG"
+
+                  # OBIEKTY GLOBALNE KLASTRA - czyli ROLE, ktorych zrzut bazy
+                  # nie zawiera, a bez ktorych sie nie wgra. Ten krok idzie
+                  # PRZED zrzutem danych, bo w tej samej kolejnosci sie odtwarza.
+                  #
+                  # BEZ HASEL swiadomie (--no-role-passwords): kopia lezy na
+                  # dysku hosta, a hasla rol i tak ustawia migrator z sekretu
+                  # (db/migrate.py, ustaw_hasla_rol) i robi to idempotentnie.
+                  # Kopia niosaca poswiadczenia to wyciek czekajacy na okazje;
+                  # kopia bez nich wymaga jednego dodatkowego kroku, ktory
+                  # i tak jest w instrukcji odtwarzania.
+                  echo "==> obiekty globalne klastra do $PLIK_ROL"
+                  pg_dumpall -h {{ include "trader.fullname" . }}-db \
+                             -U {{ .Values.db.username }} -l {{ .Values.db.database }} \
+                             --globals-only --no-role-passwords --file="$PLIK_ROL"
+
+                  # Zrzut globalny, w ktorym brakuje roli, jest tak samo
+                  # bezuzyteczny jak jego brak - tyle ze wyglada jak kopia.
+                  # Lista rol pochodzi z values.yaml, wiec dodanie roli procesu
+                  # bez uwzglednienia jej w kopii zatrzyma to zadanie.
+                  for ROLA in {{ .Values.db.username }} {{ .Values.db.appUsername }}{{ range $nazwa, $r := .Values.db.role }} {{ $r.user }}{{ end }}; do
+                    grep -qE "^(CREATE|ALTER) ROLE \"?$ROLA\"?[ ;]" "$PLIK_ROL" \
+                      || { echo "!! w zrzucie globalnym nie ma roli $ROLA"; exit 1; }
+                  done
+                  echo "==> role w kopii sprawdzone"
+
                   echo "==> zrzut do $PLIK"
                   pg_dump -h {{ include "trader.fullname" . }}-db \
                           -U {{ .Values.db.username }} -d {{ .Values.db.database }} \
@@ -62,6 +126,62 @@ spec:
                   # czyta spis treści archiwum i zawodzi na pliku obciętym.
                   pg_restore --list "$PLIK" > /dev/null
                   echo "==> weryfikacja archiwum ok, rozmiar: $(du -h "$PLIK" | cut -f1)"
+
+                  # KOLEJNOSC ODTWARZANIA, ZAPISANA OBOK ZRZUTU. Kopia bez
+                  # instrukcji odtworzenia to nadal nie jest kopia: czlowiek,
+                  # ktory ja bedzie wgrywal, moze nie miec dostepu do tego
+                  # repozytorium ani czasu na czytanie szablonow Helma.
+                  cat > "$PLIK_ODTWARZANIA" <<KONIEC
+                  ODTWARZANIE BAZY {{ .Values.db.database }} Z KOPII $ZNACZNIK
+                  Kolejnosc jest OBOWIAZKOWA - kazdy krok zaklada poprzedni.
+
+                  Komplet plikow tej kopii (przenos je RAZEM):
+                    trader-$ZNACZNIK.dump             dane bazy {{ .Values.db.database }}
+                    trader-$ZNACZNIK.role.sql         role i uprawnienia klastra
+                    trader-$ZNACZNIK.wersje           wersje zrodlowe
+                    trader-$ZNACZNIK.odtwarzanie.txt  ten plik
+
+                  0. KLASTER W ZGODNEJ WERSJI. Podnies pusty klaster na obrazie
+                     z TimescaleDB $WERSJA_TS i PostgreSQL $WERSJA_PG. Tag obrazu
+                     jest ruchomy, wiec "ten sam tag" NIE znaczy "ta sama
+                     wersja" - sprawdz wersje w podniesionym klastrze.
+
+                  1. ROLE PRZED DANYMI:
+                       psql -U {{ .Values.db.username }} -d postgres -f trader-$ZNACZNIK.role.sql
+                     Zrzut danych jest pelen GRANT-ow dla rol, ktorych sam nie
+                     tworzy. Odwrotna kolejnosc konczy sie bledem na kazdym z nich.
+
+                  2. BAZA I ROZSZERZENIE W ZAPISANEJ WERSJI:
+                       createdb -U {{ .Values.db.username }} -O {{ .Values.db.username }} {{ .Values.db.database }}
+                       psql -U {{ .Values.db.username }} -d {{ .Values.db.database }} \\
+                            -c "CREATE EXTENSION timescaledb VERSION '$WERSJA_TS';"
+                     Klauzula VERSION jest konieczna: pg_dump jej nie zapisal,
+                     a zrzucony katalog rozszerzenia pasuje tylko do $WERSJA_TS.
+
+                  3. DANE, procedura TimescaleDB (inaczej rozjedzie sie katalog):
+                       psql -d {{ .Values.db.database }} -c "SELECT timescaledb_pre_restore();"
+                       pg_restore -d {{ .Values.db.database }} --no-owner trader-$ZNACZNIK.dump
+                       psql -d {{ .Values.db.database }} -c "SELECT timescaledb_post_restore();"
+                     Ostrzezenie pg_dump o cyklicznym kluczu obcym na
+                     'continuous_agg' dotyczy katalogu TimescaleDB, nie naszych
+                     danych, i jest oczekiwane.
+
+                  4. HASLA ROL. Zrzut globalny idzie bez hasel, wiec po kroku 1
+                     zadna rola procesu nie ma czym sie zalogowac. Hasla ustawia
+                     migrator: kontener startowy "migrate" poda {{ include "trader.fullname" . }}-api,
+                     wiec wystarczy helm upgrade z kompletnym sekretem
+                     {{ .Values.secretName }}. Migracje sa juz w zrzucie, wiec
+                     migrator nie zrobi nic poza ustawieniem hasel - i o to
+                     w tym kroku chodzi.
+
+                  5. SPRAWDZ, ze wstalo, ZANIM wpuscisz silnik:
+                       psql -d {{ .Values.db.database }} -c "SELECT count(*) FROM journal.decision;"
+                       psql -d {{ .Values.db.database }} -c "SELECT rolname FROM pg_roles WHERE rolname LIKE 'trader%';"
+                       psql -d {{ .Values.db.database }} -c "SELECT extversion FROM pg_extension WHERE extname='timescaledb';"
+                     Pusty journal.decision po odtworzeniu znaczy, ze wgrales
+                     schemat bez danych - to nie jest odtworzona baza.
+                  KONIEC
+                  echo "==> instrukcja odtwarzania w $PLIK_ODTWARZANIA"
 
                   # Slad w bazie, ZAPISYWANY PO WERYFIKACJI - jego obecnosc znaczy
                   # "istnieje czytelny zrzut", a nie "zadanie sie uruchomilo".
@@ -74,18 +194,10 @@ spec:
                        -U {{ .Values.db.username }} -d {{ .Values.db.database }} \
                        -c "INSERT INTO app.backup_run (plik, bajtow) VALUES ('$PLIK', $(stat -c %s "$PLIK"))"
 
-                  # UWAGA DO ODTWARZANIA: pg_restore --list dowodzi, ze archiwum jest
-                  # czytelne - nie dowodzi, ze wgra sie do dzialajacej bazy. Baza z
-                  # TimescaleDB wymaga procedury z dokumentacji, inaczej odtworzenie
-                  # rozjedzie katalogi rozszerzenia:
-                  #
-                  #   psql -c "SELECT timescaledb_pre_restore();"
-                  #   pg_restore -d trader --no-owner <plik>
-                  #   psql -c "SELECT timescaledb_post_restore();"
-                  #
-                  # Ostrzezenie pg_dump o cyklicznym kluczu obcym na 'continuous_agg'
-                  # dotyczy katalogu TimescaleDB, nie naszych danych, i jest oczekiwane.
-                  find /backup -name 'trader-*.dump' -mtime "+${RETENCJA_DNI}" -delete
+                  # Retencja obejmuje CALY komplet, nie sam zrzut - inaczej pliki
+                  # rol, wersji i instrukcji zostawalyby na dysku bez konca,
+                  # a przy okazji przezywalyby zrzut, ktorego dotycza.
+                  find /backup -type f -name 'trader-*' -mtime "+${RETENCJA_DNI}" -delete
                   echo "==> kopie na dysku: $(ls -1 /backup/trader-*.dump | wc -l)"
               volumeMounts:
                 - name: backup

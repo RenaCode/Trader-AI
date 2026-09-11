@@ -1117,3 +1117,160 @@ def test_ZUZYCIE_z_nieudanego_wywolania_tez_niesie_model_faktyczny():
     assert ai.uzyty_model(ai.model_triazu, e.value.usage) == "haiku"
     # Cennik bierze ten, kto wykonal prace: atrapa `drogi` liczy 42.0.
     assert ai.koszt(ai.model_triazu, e.value.usage) == 42.0
+
+
+# ============ każdy zbudowany dostawca ma swoje zamknięcie ============
+#
+# `zbuduj_dostawce` nie jest odczytem konfiguracji: KAŻDY zwrócony obiekt otwiera
+# pulę połączeń (httpx u Gemini, klient SDK u Anthropica). Worker domyka je od
+# 2026-09-10, ale poprawka objęła wyłącznie jego pętlę — a obiekt potrafi powstać
+# i zginąć w dwóch miejscach, do których nikt wtedy nie zajrzał.
+
+def test_nieudana_budowa_MIESZANKI_nie_zostawia_OTWARTEJ_puli(monkeypatch):
+    """Obiekt, który nie wyjdzie z fabryki, nie ma komu zostać zamknięty.
+
+    `DostawcaAnthropic` importuje pakiet `anthropic` LENIWIE — i to jest decyzja,
+    dzięki której obraz złożony pod samo Gemini nie musi go mieć. Skutek uboczny:
+    dopisanie drugiego klucza w takim obrazie kończy budowę mieszanki wyjątkiem.
+    Gdy `DostawcaGemini` powstał wcześniej, jego pula httpx zostaje otwarta i nie
+    ma już żadnej drogi do `zamknij()`: wołający dostał wyjątek, a nie obiekt.
+
+    Dlatego ten, który może nie wstać, powstaje ZANIM powstanie jakakolwiek pula.
+    """
+    from services.ingest import llm
+
+    otwarte = []
+    prawdziwy = llm.DostawcaGemini
+
+    class _Sledzony(prawdziwy):
+        def __init__(self, klucz, http=None):
+            super().__init__(klucz, http)
+            otwarte.append(self)
+
+    class _NieWstaje(llm.Dostawca):
+        nazwa = "anthropic"
+
+        def __init__(self, klucz):
+            raise ImportError("No module named 'anthropic'")
+
+    monkeypatch.setattr(llm, "DostawcaGemini", _Sledzony)
+    monkeypatch.setattr(llm, "DostawcaAnthropic", _NieWstaje)
+
+    with pytest.raises(ImportError):
+        llm.zbuduj_dostawce({"anthropic": "a-1", "gemini": "g-1"})
+
+    try:
+        assert not otwarte, (
+            f"budowa padła po otwarciu {len(otwarte)} puli połączeń — obiekt nie "
+            f"wyszedł z `zbuduj_dostawce`, więc nikt jej już nie zamknie")
+    finally:
+        for d in otwarte:
+            asyncio.run(d.zamknij())
+
+
+def test_ekran_USTAWIEN_zamyka_dostawce_ktorego_zbudowal(monkeypatch):
+    """Drugie miejsce, w którym dostawca powstaje — i jedyne bez sprzątania.
+
+    `/api/settings/analiza-tryb` celowo liczy tryb TĄ SAMĄ funkcją, której używa
+    worker, żeby ekran nie był drugą kopią reguły. Razem z regułą dostał jednak
+    pulę połączeń, której nie zamykał. To gorsze miejsce na wyciek niż pętla
+    workera: proces API żyje tygodniami, a `Settings.jsx` woła ten adres przy
+    każdym wejściu w ustawienia I po każdym zapisie sekretu — pule przybywają
+    bez żadnego ograniczenia.
+
+    Ekranowi potrzebne są same nazwy, więc obiekt nie ma prawa przeżyć odpowiedzi.
+    """
+    from services.api.routers import settings as ekran
+    from services.ingest import llm
+
+    class _Atrapa(llm.Dostawca):
+        nazwa = "gemini+anthropic"
+        model_triazu = "tani"
+        model_analizy = "drogi"
+
+        def __init__(self):
+            self.zamkniety = 0
+
+        async def zamknij(self):
+            self.zamkniety += 1
+
+    zbudowane = []
+
+    def zbuduj(klucze):
+        d = _Atrapa()
+        zbudowane.append(d)
+        return d
+
+    async def sekrety(sql, *a, **kw):
+        return [{"name": "anthropic_api_key"}, {"name": "gemini_api_key"}]
+
+    monkeypatch.setattr(llm, "zbuduj_dostawce", zbuduj)
+    monkeypatch.setattr(ekran, "fetch_all", sekrety)
+
+    odpowiedz = asyncio.run(ekran.tryb_analizy())
+
+    # Ekran ma dalej mówić prawdę — sprzątanie nie może zjeść treści.
+    assert odpowiedz["aktywny"] is True
+    assert odpowiedz["dostawca"] == "gemini+anthropic"
+    assert odpowiedz["mieszanka"] is True
+    assert len(zbudowane) == 1
+    assert zbudowane[0].zamkniety == 1, (
+        "ekran ustawień zbudował dostawcę i go nie zamknął — pula połączeń na "
+        "każde wejście w ustawienia, w procesie, który żyje tygodniami")
+
+
+def test_ekran_USTAWIEN_nie_pada_gdy_zamkniecie_sie_nie_uda(monkeypatch):
+    """Nieudane domknięcie gniazda to nie powód, żeby ekran przestał się rysować.
+
+    Ta sama zasada, co w `news_worker.zamknij_dostawce`: powód sprzątania jest
+    ważniejszy niż jego niepowodzenie. Tu dochodzi jeszcze to, że wyjątek
+    z `finally` przesłoniłby gotową już odpowiedź i zamienił odczyt ekranu
+    w błąd 500.
+    """
+    from services.api.routers import settings as ekran
+    from services.ingest import llm
+
+    class _NieDaSieZamknac(llm.Dostawca):
+        nazwa = "gemini"
+        model_triazu = "tani"
+        model_analizy = "drogi"
+
+        def __init__(self):
+            self.probowano = 0
+
+        async def zamknij(self):
+            self.probowano += 1
+            raise RuntimeError("gniazdo już zerwane")
+
+    d = _NieDaSieZamknac()
+
+    async def sekrety(sql, *a, **kw):
+        return [{"name": "gemini_api_key"}]
+
+    monkeypatch.setattr(llm, "zbuduj_dostawce", lambda klucze: d)
+    monkeypatch.setattr(ekran, "fetch_all", sekrety)
+
+    odpowiedz = asyncio.run(ekran.tryb_analizy())
+
+    assert odpowiedz["dostawca"] == "gemini"
+    assert d.probowano == 1, "próba zamknięcia miała się odbyć"
+
+
+def test_BRAK_klucza_nie_buduje_niczego_do_zamkniecia(monkeypatch):
+    """Ścieżka bez klucza nie ma obiektu — i nie wolno jej tego zmienić.
+
+    Kanarek na poprawkę wyżej: `finally` dopisany w złym miejscu wywróciłby się
+    tu na `None`, czyli dokładnie w tym stanie, w którym właściciel pierwszy raz
+    ogląda ten ekran.
+    """
+    from services.api.routers import settings as ekran
+    from services.ingest import llm
+
+    async def bez_sekretow(sql, *a, **kw):
+        return []
+
+    monkeypatch.setattr(llm, "zbuduj_dostawce", lambda klucze: None)
+    monkeypatch.setattr(ekran, "fetch_all", bez_sekretow)
+
+    odpowiedz = asyncio.run(ekran.tryb_analizy())
+    assert odpowiedz["aktywny"] is False

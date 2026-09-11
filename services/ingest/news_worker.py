@@ -239,8 +239,24 @@ async def dostawca_na_cykle(conn, poprzedni: Dostawca | None,
     ZMIANA KLUCZA NIE PRZENOSI STANU - I TAK MA BYC. Nowy klucz to jedyna rzecz,
     ktora naprawia awarie trwala; przeniesienie na niego starego odciecia
     kazaloby wlascicielowi czekac szesc godzin po doladowaniu konta. Stary obiekt
-    idzie do `zamknij_dostawce`, ZANIM stanie nowy: inaczej wymiana klucza bylaby
-    kolejnym wyciekiem puli.
+    idzie do `zamknij_dostawce`, bo wymiana klucza bez zamkniecia bylaby po
+    prostu kolejnym wyciekiem puli, tylko rzadszym.
+
+    NAJPIERW BUDUJEMY, DOPIERO POTEM ZAMYKAMY STAREGO - i to jest warunek, a nie
+    kosmetyka. Budowa moze sie nie udac: `DostawcaAnthropic` importuje pakiet
+    `anthropic` leniwie, wiec dopisanie klucza Anthropica w obrazie zlozonym pod
+    samo Gemini konczy sie tu wyjatkiem. Przy odwrotnej kolejnosci stary dostawca
+    byl juz wtedy ZAMKNIETY, a wyjatek przerywal przypisanie - `ai` zostawalo
+    przy zamknietym obiekcie, `klucze_ai` przy STARYM zestawie kluczy. Gdy
+    wlasciciel cofnal nieudany klucz, zestaw znowu zgadzal sie z zapamietanym,
+    warunek „bez zmian" zwracal tego zamknietego dostawce i kazde wywolanie do
+    konca zycia procesu padalo na „client has been closed" - cicho, bo w logu
+    dalej stalo „Tryb: pobieranie i ANALIZA".
+
+    Przy tej kolejnosci nieudana budowa nie rusza NICZEGO: stary dostawca zyje
+    dalej ze swoja pula i swoim bezpiecznikiem, a zapamietane klucze wciaz go
+    opisuja. Dwie pule naraz nie istnieja - zamkniecie idzie zaraz po udanej
+    budowie, w tej samej funkcji.
 
     POLACZENIE ZOSTAJE PRZY CYKLU. `conn` jest tu wylacznie po to, zeby odczytac
     klucze; do dostawcy trafia sam slownik `str | None` (patrz `odczytaj_klucze`
@@ -252,8 +268,9 @@ async def dostawca_na_cykle(conn, poprzedni: Dostawca | None,
     klucze = odczytaj_klucze(conn)
     if poprzednie_klucze is not None and klucze == poprzednie_klucze:
         return poprzedni, poprzednie_klucze
+    nowy = _zbuduj_albo_skoncz(klucze, wymagany)
     await zamknij_dostawce(poprzedni)
-    return _zbuduj_albo_skoncz(klucze, wymagany), klucze
+    return nowy, klucze
 
 
 def content_hash(title: str, summary: str) -> bytes:

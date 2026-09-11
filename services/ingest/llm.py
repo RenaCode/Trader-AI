@@ -1031,7 +1031,16 @@ def zbuduj_dostawce(klucze: dict[str, str | None]) -> Dostawca | None:
     a = klucze.get("anthropic")
     g = klucze.get("gemini")
     if a and g:
-        return DostawcaMieszany(triaz=DostawcaGemini(g), analiza=DostawcaAnthropic(a))
+        # KOLEJNOSC BUDOWY NIE JEST OBOJETNA. `DostawcaAnthropic` importuje
+        # pakiet `anthropic` leniwie, wiec to on moze tu nie wstac - w obrazie
+        # zlozonym pod samo Gemini dopisanie drugiego klucza konczy sie
+        # ImportError. Zbudowany wczesniej `DostawcaGemini` mial juz wtedy
+        # otwarta pule httpx, ktorej nikt nie zamknie: obiekt nie wyjdzie z tej
+        # funkcji, wiec `zamknij_dostawce` u wolajacego nie ma czego zamknac.
+        # Ten, ktory moze nie wstac, powstaje wiec ZANIM powstanie jakakolwiek
+        # pula polaczen.
+        analiza = DostawcaAnthropic(a)
+        return DostawcaMieszany(triaz=DostawcaGemini(g), analiza=analiza)
     if a:
         return DostawcaAnthropic(a)
     if g:

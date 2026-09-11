@@ -273,6 +273,41 @@ def test_zabezpieczenie_ktore_NIE_zadzialalo_daje_kod_niezerowy(monkeypatch, cap
     assert "NIEZALICZONA" in capsys.readouterr().err
 
 
+def test_proba_ZWALNIA_wlasne_zdarzenie_gdy_padnie_w_polowie(monkeypatch):
+    """Próba, która padła na ogniwie 4, nie ma prawa zostawić handlu wstrzymanego.
+
+    Kill-switch wywołany przez próbę nie opisuje żadnego stanu rachunku: powstał
+    dlatego, że `min_equity` stało przez chwilę powyżej kapitału. Próg wraca
+    w `finally`, więc przyczyna znika — a zdarzenie z `released_at IS NULL`
+    ZATRZYMUJE HANDEL (`evaluate_account`, punkt 1). Silnik stoi przez artefakt
+    własnej próby, a nie przez decyzję ryzyka.
+
+    Od rozdziału na trzy wyniki kosztuje to podwójnie: następne dobowe przebiegi
+    widzą aktywny kill-switch i kończą się jako NIEROZSTRZYGNIĘTE z kodem ZERO
+    przez `MAX_DNI_BEZ_POTWIERDZENIA` dób. CronJob świeci na zielono przy
+    silniku, który nie handluje — a kanał, który miał o tym powiedzieć (dozór),
+    jest dokładnie tym ogniwem, którego awaria to spowodowała.
+    """
+    from services.engine import proba_killswitcha as pk
+
+    monkeypatch.setattr(pk, "CZEKAJ_DOZOR_S", 0)      # ogniwo 4 pada od razu
+    fetch_one, fetch_all, execute, wykonane = _baza_proby(
+        aktywnych=0,
+        zdarzenie={"id": 77, "reason": "kapital ponizej progu",
+                   "limit_name": "min_equity"},
+        powiadomien=0)                                 # dozor milczy
+
+    assert asyncio.run(pk.uruchom(fetch_all, fetch_one, execute)) == 1, (
+        "brak powiadomienia to NIEZALICZONA")
+
+    zwolnienia = [(s, p) for s, p in wykonane
+                  if "UPDATE risk.killswitch_event SET released_at" in s]
+    assert zwolnienia, (
+        "proba wywolala kill-switcha, padla na ogniwie 4 i NIE ZWOLNILA go — "
+        "handel stoi przez zdarzenie, ktorego przyczyna juz nie istnieje")
+    assert zwolnienia[-1][1][-1] == 77, "zwolnic wolno WYLACZNIE wlasne zdarzenie"
+
+
 def test_wiele_dob_bez_potwierdzenia_SAMO_staje_sie_awaria(capsys):
     """Trzeci wynik nie może być workiem bez dna. Bezpiecznik niesprawdzony od
     tygodnia to osobne ryzyko — po przekroczeniu progu sama cisza jest awarią

@@ -207,6 +207,11 @@ async def przeprowadz(fetch_all, fetch_one, execute, engine: str = "crypto",
               f"na cykl silnika. Nic nie zmieniam.")
         return 0
 
+    # IDENTYFIKATOR ZDARZENIA, KTORE PROBA SAMA WYWOLA. Poza blokiem `try`,
+    # bo czyta go `finally` - a tam nie wolno polegac na tym, ze przypisanie
+    # w srodku zdazylo sie wykonac.
+    moje_zdarzenie: int | None = None
+
     try:
         print(f"\n--- podnoszę {LIMIT_PROBY} na {prog_proby} (powyżej kapitału) ---")
         await execute(
@@ -226,6 +231,7 @@ async def przeprowadz(fetch_all, fetch_one, execute, engine: str = "crypto",
         if not z:
             raise Niezaliczona(
                 "silnik nie uruchomił kill-switcha mimo kapitału poniżej progu")
+        moje_zdarzenie = z["id"]
         print(f"  zadziałał: id={z['id']} limit={z['limit_name']} — {z['reason']}")
         if z["limit_name"] != LIMIT_PROBY:
             raise Niezaliczona(
@@ -301,6 +307,36 @@ async def przeprowadz(fetch_all, fetch_one, execute, engine: str = "crypto",
             "SELECT value FROM risk.limit_def WHERE engine::text=%s AND mode::text=%s"
             "   AND name=%s", (engine, mode, LIMIT_PROBY))
         print(f"    próg po przywróceniu: {float(po['value']):.2f}")
+
+        # ZDARZENIE PROBY TEZ WRACA, I Z TEGO SAMEGO POWODU CO PROG.
+        #
+        # Kill-switch wywolany przez probe nie opisuje zadnego stanu rachunku -
+        # powstal dlatego, ze `min_equity` stalo przez chwile powyzej kapitalu.
+        # Przywrocenie progu kasuje przyczyne, ale nie zdarzenie, a zdarzenie
+        # z `released_at IS NULL` ZATRZYMUJE HANDEL (`evaluate_account`, pkt 1).
+        # Proba padajaca na ogniwie 3-4 zostawiala wiec silnik wstrzymany na
+        # czas nieokreslony - wlasnym artefaktem, nie decyzja ryzyka.
+        #
+        # Od 2026-09-10 kosztuje to podwojnie: nastepne przebiegi widza aktywny
+        # kill-switch i koncza sie ZEREM jako NIEROZSTRZYGNIETE przez
+        # MAX_DNI_BEZ_POTWIERDZENIA dob. CronJob swieci na zielono przy silniku,
+        # ktory nie handluje - a kanal, ktory mial o tym powiedziec (dozor),
+        # jest dokladnie tym ogniwem, ktorego awaria to spowodowala.
+        #
+        # `AND released_at IS NULL` sprawia, ze na sciezce ZALICZONEJ jest to
+        # zapis pusty: zwolnienie poszlo juz wyzej, razem z wlasciwa notatka.
+        # Zwalniamy WYLACZNIE wlasne zdarzenie - cudzego proba nie dotyka,
+        # i to jest ten sam powod, dla ktorego w ogole nie startuje przy
+        # aktywnym kill-switchu.
+        if moje_zdarzenie is not None:
+            await execute(
+                "UPDATE risk.killswitch_event SET released_at = now(),"
+                " released_auto = false, release_note = %s"
+                " WHERE id = %s AND released_at IS NULL",
+                ("PRÓBA POŻAROWA PRZERWANA — zdarzenie wywołane celowo przez "
+                 "services/engine/proba_killswitcha.py, przyczyna (podniesiony "
+                 "próg) już nie istnieje. Łańcuch NIE został potwierdzony.",
+                 moje_zdarzenie))
 
 
 async def uruchom(fetch_all, fetch_one, execute, **kw) -> int:
