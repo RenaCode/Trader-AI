@@ -39,6 +39,7 @@ import argparse
 import asyncio
 import os
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -52,6 +53,101 @@ KARENCJA_MIN = int(os.environ.get("WZNOWIENIE_KARENCJA_MIN", "60"))
 # Ulamek limitu, ponizej ktorego miara musi wrocic, zeby wznowic. 0.5 znaczy:
 # limit obsuniecia 10% -> wznowienie ponizej 5%.
 HISTEREZA = float(os.environ.get("WZNOWIENIE_HISTEREZA", "0.5"))
+
+# Co ile powtarzac w logu opis stanu, ktory sie NIE ZMIENIL.
+#
+# DLACZEGO TO W OGOLE ISTNIEJE - stan produkcji 2026-09-12
+#
+# `wznow()` wola dozorca co 60 s (`dozorca.INTERWAL_S`), a kazda galaz `continue`
+# nizej wypisywala swoja linie bezwarunkowo. Kill-switch z reguly recznej trwa,
+# dopoki nie dotknie go czlowiek - na produkcji 75 godzin - wiec `kubectl logs
+# deploy/trader-dozorca` oddawalo 615 linii, z czego 615 identycznych:
+#
+#     id=2 Kapital 100063.09 spadl do progu 100563.00: min_equity ma regule
+#     reczna - czeka na czlowieka
+#
+# To jest ta sama wada, ktora ten projekt tropi w kanale powiadomien i w kodzie
+# wyjscia czujek: SYGNAL, KTORY PRZYCHODZI ZAWSZE, PRZESTAJE COKOLWIEK ZNACZYC.
+# Log zalany jedna linia nie jest logiem bogatszym, tylko logiem, w ktorym nie
+# widac niczego innego - w tym wyjatku z cyklu dozorcy albo chwili, w ktorej
+# stan sie zmienil. Kosztuje tez retencje: 1440 linii na dobe wypycha z bufora
+# poda wszystko starsze.
+#
+# CZEGO TA STALA NIE ROBI: nie ucisza stanu. Zmiana stanu idzie do logu
+# NATYCHMIAST, a trwanie jest przypominane w tym rytmie razem z liczba
+# pominietych przebiegow - patrz `Dziennik.stan`. Cisza calkowita byla by tu
+# bledem gorszym niz zalew, bo stan trwale zly jest nieodrozialny od spokoju.
+#
+# Godzina, a nie doba: to jest log, a nie powiadomienie. Czytany bywa wtedy,
+# gdy ktos juz patrzy, wiec ma odpowiadac na pytanie "co sie dzieje TERAZ"
+# bez czekania. Sesja diagnostyczna rzadko trwa dluzej niz godzine.
+PRZYPOMNIENIE_LOGU_S = int(os.environ.get("WZNOWIENIE_PRZYPOMNIENIE_S", "3600"))
+
+
+class Dziennik:
+    """Log stanu bez zalewania: ZMIANA mowi od razu, TRWANIE przypomina w rytmie.
+
+    Pamiec jest w PROCESIE, nie w bazie, i to jest wybor, nie skrot. Pytanie
+    brzmi "czy ten log juz to powiedzial", a log jest wlasnoscia procesu:
+    po restarcie poda bufor zaczyna sie od nowa i pierwszy opis stanu MUSI
+    sie w nim znalezc, bo inaczej `kubectl logs` po restarcie nie odpowiada na
+    pytanie o stan wcale. Skutkiem ubocznym jest to, ze uruchomienie z linii
+    polecen (`python wznowienie.py`) wypisuje komplet - czyli dokladnie to,
+    czego sie po nim oczekuje.
+
+    `znacznik` jest TOZSAMOSCIA stanu, a `tresc` jego opisem. Rozdzielone, bo
+    opis niesie liczby, ktore drgaja co cykl (wiek zdarzenia, kapital), i
+    porownywanie po samym tekscie kazaloby wypisac wszystko od nowa przy kazdej
+    zmianie ostatniej cyfry - czyli nie tlumiloby niczego.
+    """
+
+    def __init__(self, przypomnienie_s: int | None = None,
+                 zegar=time.monotonic) -> None:
+        self._odstep = (PRZYPOMNIENIE_LOGU_S if przypomnienie_s is None
+                        else przypomnienie_s)
+        self._zegar = zegar
+        self._stan: dict[str, dict] = {}
+
+    def stan(self, klucz: str, znacznik: str, tresc: str) -> bool:
+        """Wypisz opis stanu, jesli sie zmienil albo minal rytm. Zwraca czy poszlo."""
+        teraz = self._zegar()
+        poprzedni = self._stan.get(klucz)
+
+        if poprzedni is None or poprzedni["znacznik"] != znacznik:
+            self._stan[klucz] = {"znacznik": znacznik, "od": teraz,
+                                 "ostatni": teraz, "pominiete": 0}
+            print(tresc)
+            return True
+
+        if teraz - poprzedni["ostatni"] < self._odstep:
+            poprzedni["pominiete"] += 1
+            return False
+
+        # PRZYPOMNIENIE MA SIE PRZEDSTAWIC i powiedziec, czego nie widac
+        # w logu. Bez tych dwoch liczb linia sprzed godziny jest nieodrozialna
+        # od linii sprzed sekundy, a to wlasnie ta roznica jest tu tresci a.
+        pominiete = poprzedni["pominiete"]
+        trwa_min = (teraz - poprzedni["od"]) / 60
+        poprzedni.update(ostatni=teraz, pominiete=0)
+        print(f"{tresc}\n    (stan TRWA — nieprzerwanie od {trwa_min:.0f} min "
+              f"w tym procesie, {pominiete} identycznych przebiegów pominięto "
+              f"w logu; przypomnienie co {self._odstep // 60} min)")
+        return True
+
+    def zdarzenie(self, klucz: str, tresc: str) -> None:
+        """Wypisz BEZWARUNKOWO i skasuj pamiec stanu pod tym kluczem.
+
+        Wznowienie i wstrzymanie automatu to ZDARZENIA - zachodza raz i nie maja
+        czego tlumic. Skasowanie pamieci jest tu istotne: stan, ktory wrocil po
+        zdarzeniu, ma sie wypisac od nowa, a nie wpasc w rytm sprzed zdarzenia.
+        """
+        self._stan.pop(klucz, None)
+        print(tresc)
+
+
+# Jeden dziennik na proces. Dozorca wola `wznow()` w petli i ma dzielic pamiec
+# miedzy przebiegami; testy i kazdy inny wolajacy moga podac wlasny.
+DZIENNIK = Dziennik()
 
 
 async def stan_konta(fetch_one, engine: str, mode: str) -> dict | None:
@@ -103,7 +199,16 @@ def warunek_ustal(limit_name: str, wartosc_limitu: float, stan: dict) -> tuple[b
 
 
 async def wznow(fetch_all, fetch_one, execute, notify, engine: str = "crypto",
-                mode: str = "demo", sucho: bool = False) -> int:
+                mode: str = "demo", sucho: bool = False,
+                dziennik: Dziennik | None = None) -> int:
+    """Przejrzyj aktywne zatrzymania i zwolnij te, ktorych warunek ustal.
+
+    WYPISYWANIE IDZIE PRZEZ `Dziennik`, A NIE PRZEZ GOLE `print`. Ta funkcja
+    chodzi w petli co 60 s i opisuje STANY, ktore z natury trwaja godzinami -
+    uzasadnienie i zmierzony koszt przy `PRZYPOMNIENIE_LOGU_S`. Zdarzenia
+    (wznowienie, wstrzymanie automatu) ida bezwarunkowo przez `zdarzenie`.
+    """
+    dz = DZIENNIK if dziennik is None else dziennik
     zdarzenia = await fetch_all(
         "SELECT k.id, k.reason, k.limit_name, k.triggered_at,"
         "       round(extract(epoch from (now() - k.triggered_at))/60) AS wiek_min"
@@ -111,20 +216,28 @@ async def wznow(fetch_all, fetch_one, execute, notify, engine: str = "crypto",
         " WHERE k.engine::text = %s AND k.mode::text = %s AND k.released_at IS NULL"
         " ORDER BY k.triggered_at", (engine, mode))
     if not zdarzenia:
-        print("wznowienie: brak aktywnych kill-switchy")
+        dz.stan("wznowienie", "brak", "wznowienie: brak aktywnych kill-switchy")
         return 0
 
     stan = await stan_konta(fetch_one, engine, mode)
     if stan is None:
-        print("wznowienie: brak danych o kapitale — nie ma na czym oprzeć decyzji")
+        dz.stan("wznowienie", "bez-kapitalu",
+                "wznowienie: brak danych o kapitale — nie ma na czym oprzeć decyzji")
         return 0
+    dz.stan("wznowienie", "aktywne",
+            f"wznowienie: {len(zdarzenia)} aktywnych zatrzymań do przejrzenia")
 
     zwolnione = 0
     for z in zdarzenia:
-        opis = f"id={z['id']} {z['reason']}"
+        # WIEK ZDARZENIA W KAZDEJ LINII. Stan opisany bez niego czyta sie tak
+        # samo po minucie i po trzech dobach, a to jest jedyna liczba, ktora
+        # odroznia "wlasnie sie stalo" od "stoi i nikt tego nie tknal".
+        opis = f"id={z['id']} ({z['wiek_min']:.0f} min) {z['reason']}"
+        klucz = f"zdarzenie:{z['id']}"
         nazwa = z["limit_name"]
         if not nazwa:
-            print(f"  {opis}: bez nazwy limitu (sprzed 0029) — zostaje ręczne")
+            dz.stan(klucz, "bez-nazwy",
+                    f"  {opis}: bez nazwy limitu (sprzed 0029) — zostaje ręczne")
             continue
 
         lim = await fetch_one(
@@ -132,13 +245,16 @@ async def wznow(fetch_all, fetch_one, execute, notify, engine: str = "crypto",
             " WHERE engine::text=%s AND mode::text=%s AND name=%s AND enabled",
             (engine, mode, nazwa))
         if not lim:
-            print(f"  {opis}: limit {nazwa} już nie istnieje — zostaje ręczne")
+            dz.stan(klucz, f"brak-limitu:{nazwa}",
+                    f"  {opis}: limit {nazwa} już nie istnieje — zostaje ręczne")
             continue
         if lim["wznowienie"] == "reczne":
-            print(f"  {opis}: {nazwa} ma regułę ręczną — czeka na człowieka")
+            dz.stan(klucz, f"reczne:{nazwa}",
+                    f"  {opis}: {nazwa} ma regułę ręczną — czeka na człowieka")
             continue
         if z["wiek_min"] < KARENCJA_MIN:
-            print(f"  {opis}: karencja ({z['wiek_min']:.0f}/{KARENCJA_MIN} min)")
+            dz.stan(klucz, "karencja",
+                    f"  {opis}: karencja ({z['wiek_min']:.0f}/{KARENCJA_MIN} min)")
             continue
 
         # LICZNIK PRZED WARUNKIEM. Gdyby szedl po nim, system przy trwajacym
@@ -150,8 +266,12 @@ async def wznow(fetch_all, fetch_one, execute, notify, engine: str = "crypto",
             "   AND released_auto AND released_at > now() - interval '24 hours'",
             (engine, mode, nazwa))
         if (ile or {}).get("n", 0) >= lim["max_wznowien"]:
-            print(f"  {opis}: {ile['n']} automatycznych wznowień w dobie przy "
-                  f"limicie {lim['max_wznowien']} — dalej wyłącznie ręcznie")
+            # STAN, nie zdarzenie: licznik dobowy opada sam i dopoki nie opadnie,
+            # ta linia powtarzalaby sie co cykl. Powiadomienie nizej ma wlasne
+            # tlumienie po stronie `notify()` i nie zalezy od tego rytmu.
+            dz.stan(klucz, f"licznik:{ile['n']}",
+                    f"  {opis}: {ile['n']} automatycznych wznowień w dobie przy "
+                    f"limicie {lim['max_wznowien']} — dalej wyłącznie ręcznie")
             if not sucho:
                 for u in await fetch_all('SELECT id FROM app."user" WHERE is_active'):
                     await notify(
@@ -167,10 +287,14 @@ async def wznow(fetch_all, fetch_one, execute, notify, engine: str = "crypto",
 
         ustal, dowod = warunek_ustal(nazwa, float(lim["value"]), stan)
         if not ustal:
-            print(f"  {opis}: warunek trwa ({dowod})")
+            # ZNACZNIK BEZ LICZB Z `dowod`. Miara drga przy kazdym odczycie
+            # krzywej, wiec znacznik z niej zbudowany zmienialby sie co cykl
+            # i nie stlumilby ani jednej linii. Stanem jest "warunek trwa",
+            # a nie "warunek trwa przy 4,31%"; liczba idzie do tresci.
+            dz.stan(klucz, f"trwa:{nazwa}", f"  {opis}: warunek trwa ({dowod})")
             continue
 
-        print(f"  {opis}: WZNAWIAM — {dowod}")
+        dz.zdarzenie(klucz, f"  {opis}: WZNAWIAM — {dowod}")
         zwolnione += 1
         if sucho:
             continue
