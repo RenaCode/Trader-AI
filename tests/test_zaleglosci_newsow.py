@@ -44,8 +44,11 @@ def test_zaleglosci_biora_tylko_artykuly_bez_analizy():
 def test_zaleglosci_respektuja_limit_dobowy():
     zaleglosci = ZRODLO[ZRODLO.index("async def nadrob_zaleglosci"):
                         ZRODLO.index("async def run_cycle")]
-    assert "if wydano >= DAILY_LIMIT_USD:" in zaleglosci, \
-        "nadrabianie zaległości pomija limit wydatków"
+    assert "budzet.wyczerpany()" in zaleglosci, \
+        "nadrabianie zaległości pomija bramkę budżetu"
+    assert "ai.czy_ma_czym_pytac()" in zaleglosci, \
+        ("nadrabianie zaległości nie sprawdza, czy dostawca żyje — kontrakt "
+         "`llm.Dostawca` wymaga tego OD WOŁAJĄCEGO")
 
 
 def test_zapis_analizy_ma_jedna_implementacje():

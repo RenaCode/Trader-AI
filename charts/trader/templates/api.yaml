@@ -68,6 +68,13 @@ spec:
             - name: GEMINI_API_KEY
               valueFrom:
                 secretKeyRef: { name: {{ .Values.secretName }}, key: GEMINI_API_KEY, optional: true }
+            {{/*
+            TE SAME modele i limity co u workerow. `/api/api-spend` wola
+            `limit_dobowy_usd()` we WLASNYM procesie, wiec bez tego bloku
+            interfejs pokazywalby limit 5.0 z domyslu kodu, podczas gdy
+            wydatki zatrzymywalaby zupelnie inna liczba u workera.
+            */}}
+            {{- include "trader.llmEnv" . | nindent 12 }}
             - name: CORS_ORIGINS
               value: "https://{{ .Values.ingress.host }}"
           ports:

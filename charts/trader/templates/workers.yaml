@@ -106,6 +106,15 @@ spec:
             - name: GEMINI_API_KEY
               valueFrom:
                 secretKeyRef: { name: {{ $.Values.secretName }}, key: GEMINI_API_KEY, optional: true }
+            {{/*
+            Modele i limity dostawcy analizy. Wspolna definicja z API - patrz
+            `trader.llmEnv` w _helpers.tpl, tam jest powod.
+
+            Widza je takze workery, ktore modelu nie dotykaja, i tak ma byc:
+            rozdzielanie per worker znaczyloby druga liste do utrzymania
+            i pierwsze miejsce, w ktorym da sie o jednej zapomniec.
+            */}}
+            {{- include "trader.llmEnv" $ | nindent 12 }}
             - name: PYTHONUNBUFFERED
               value: "1"
           resources: {{- toYaml $w.resources | nindent 12 }}

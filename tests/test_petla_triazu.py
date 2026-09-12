@@ -32,6 +32,7 @@ from pathlib import Path
 import pytest
 
 from services.ingest import news_worker
+from services.ingest.llm import Dostawca
 
 KORZEN = Path(__file__).resolve().parents[1]
 MIGRACJA = (KORZEN / "db/migrations/0044_werdykt_triazu.sql").read_text(encoding="utf-8")
@@ -88,8 +89,14 @@ class Wpis:
         self.published_parsed = time.gmtime()
 
 
-class AtrapaDostawcy:
+class AtrapaDostawcy(Dostawca):
     """Tyle dostawcy, ile dotyka `run_cycle` poza samym wywołaniem modelu.
+
+    DZIEDZICZY PO `Dostawca`, a nie udaje go z trzech atrybutów. Bezpiecznik
+    (`czy_ma_czym_pytac`, `powod_niedostepnosci`, `odetnij`) jest CZĘŚCIĄ
+    kontraktu, który `run_cycle` ma sprawdzać — atrapa bez tych metod pozwoliłaby
+    napisać w workerze wywołanie, którego produkcja by nie wykonała, albo
+    przeciwnie: ukryłaby, że worker kontraktu nie sprawdza wcale.
 
     Koszt zerowy celowo: limit dobowy ma w tych testach nigdy nie być wiążący,
     bo mierzymy LICZBĘ OCEN, a nie budżet.
@@ -194,7 +201,14 @@ class AtrapaNewsow:
             self._po_id(params[0])["ma_analize"] = True
             return None
         if sql.startswith("SELECT a.id, a.title"):
-            return self._zalegle()
+            return self._zalegle(sql)
+        if sql.startswith("SELECT count(*) AS n FROM news.api_spend"):
+            return {"n": 0}
+        if sql.startswith("SELECT count(*) FILTER"):
+            return self._diagnoza()
+        if sql.startswith("SELECT EXTRACT(EPOCH"):
+            gotowe = [a for a in self.artykuly if a["ma_analize"]]
+            return {"h": 0.0 if gotowe else None}
         return None
 
     def _wstaw(self, params):
@@ -205,7 +219,7 @@ class AtrapaNewsow:
                                           id=len(self.artykuly) + 1))
         return {"id": self.artykuly[-1]["id"]}
 
-    def _zalegle(self):
+    def _zalegle(self, sql: str):
         """Wszystko bez analizy, ale TYLKO z okna OKNO_ZALEGLOSCI_H.
 
         Okno jest jedynym warunkiem `WHERE`, który atrapa odtwarza, bo jest
@@ -213,11 +227,41 @@ class AtrapaNewsow:
         już żadnej świecy (patrz tests/test_zaleglosci_newsow.py) i produkcja
         nigdy go tu nie zobaczy. Filtr po werdykcie zostaje świadomie
         nieodtworzony — o nim ma decydować kod, nie atrapa.
+
+        ODDAJE WYŁĄCZNIE KOLUMNY WYMIENIONE W `SELECT`-cie, i to jest cała
+        różnica między tą atrapą a tym, co tu stało do 12.09.2026. Poprzednia
+        wersja oddawała cały wiersz niezależnie od zapytania, więc kod mógł
+        czytać pole, którego produkcja mu nie daje. Tak przeżyły trzynaście
+        zielonych testów dwa błędy naraz: `nadrob_zaleglosci` nie pobierało
+        `a.triage_at`, `wolno_ponowic` dostawało `None` zamiast znacznika
+        i odstęp PRZERWA_PO_AWARII_S nie obowiązywał ani razu. Na produkcji
+        kosztowało to 106 artykułów, które wyczerpały po trzy próby w 301
+        sekundach i zostały porzucone na zawsze.
+
+        Pominięcie `WHERE` jest DECYZJĄ (mocniejszy test), oddawanie kolumn
+        spoza `SELECT`-a było PRZEOCZENIEM (słabszy). To nie jest ta sama rzecz.
         """
         granica = przed_chwila_minus(news_worker.OKNO_ZALEGLOSCI_H * 3600)
-        return [dict(a, feed="Kanał testowy") for a in self.artykuly
+        kolumny = set(re.findall(r"\ba\.([a-z_]+)", sql)) | {"feed"}
+        return [{k: v for k, v in dict(a, feed="Kanał testowy").items()
+                 if k in kolumny}
+                for a in self.artykuly
                 if not a["ma_analize"]
                 and (a["event_time"] is None or a["event_time"] > granica)]
+
+    def _diagnoza(self):
+        """`czekaja` / `porzucone` liczone POLITYKĄ WORKERA, nie kopią jej w SQL-u.
+
+        Zapytanie produkcyjne odtwarza w SQL-u to, co `etap_do_wykonania` wie
+        w Pythonie. Gdyby atrapa miała własną trzecią wersję tej reguły,
+        pilnowałaby zgodności z samą sobą.
+        """
+        w_oknie = [a for a in self.artykuly if not a["ma_analize"]]
+        czekaja = [a for a in w_oknie if news_worker.etap_do_wykonania(a)]
+        porzucone = [a for a in w_oknie
+                     if a.get("triage_verdict") == "failed"
+                     and (a.get("triage_attempts") or 0) >= news_worker.PROBY_PO_AWARII_MAX]
+        return {"czekaja": len(czekaja), "porzucone": len(porzucone)}
 
 
 def nowy_artykul(title: str, **nadpisz) -> dict:
@@ -278,9 +322,17 @@ def przed_chwila_minus(sekund: float) -> datetime:
 
 
 def puste_stats() -> dict:
-    """Liczniki cyklu w kształcie, jakiego oczekuje `nadrob_zaleglosci`."""
-    return {"koszt": 0.0, "bledy": 0, "opisy_bledow": [], "zaleglosci": 0,
-            "odsiane": 0}
+    """Liczniki cyklu w kształcie, jakiego oczekuje `nadrob_zaleglosci`.
+
+    Bierzemy je Z WORKERA, a nie przepisujemy tutaj: własna kopia rozjechałaby
+    się przy pierwszym nowym liczniku i test pilnowałby nieistniejącego kształtu.
+    """
+    return news_worker.puste_stats()
+
+
+def swiezy_budzet() -> news_worker.Budzet:
+    """Budżet, który w tych testach nigdy nie jest wiążący."""
+    return news_worker.Budzet(0.0, 0)
 
 
 def cykl(baza, ai=None):
@@ -327,7 +379,8 @@ def test_ZALEGLOSCI_nie_triazuja_ponownie_artykulu_z_werdyktem(monkeypatch):
     _licznik_analizy(monkeypatch)
 
     asyncio.run(news_worker.nadrob_zaleglosci(
-        baza, baza, AtrapaDostawcy(), {}, [], 0.0, puste_stats(), verbose=False))
+        baza, baza, AtrapaDostawcy(), {}, [], swiezy_budzet(), puste_stats(),
+        verbose=False))
 
     assert ocenione == [], "artykuł z zapisanym werdyktem poszedł na triaż drugi raz"
 
@@ -423,7 +476,8 @@ def test_zalegly_artykul_po_triazu_idzie_PROSTO_do_analizy(monkeypatch):
     analizowane = _licznik_analizy(monkeypatch)
 
     asyncio.run(news_worker.nadrob_zaleglosci(
-        baza, baza, AtrapaDostawcy(), {}, [], 0.0, puste_stats(), verbose=False))
+        baza, baza, AtrapaDostawcy(), {}, [], swiezy_budzet(), puste_stats(),
+        verbose=False))
 
     assert ocenione == []
     assert analizowane == ["Bank centralny tnie stopy"]
