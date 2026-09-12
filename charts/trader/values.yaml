@@ -123,6 +123,49 @@ ingress:
     enabled: false
     secretName: trader-basicauth
 
+# MODELE I LIMITY ANALIZY WIADOMOSCI.
+#
+# DLACZEGO TE WARTOSCI STOJA TUTAJ, A NIE W DOMYSLACH KODU
+#
+# Do 12.09.2026 nie stalo tu nic. `services/ingest/llm.py` mial wpisane
+# `os.environ.get("ANALYSIS_MODEL", "claude-opus-5")`, zmiennej nie ustawial ani
+# chart, ani zaden ConfigMap, wiec kazda analiza szla na najdrozszym modelu -
+# i nie bylo w repozytorium miejsca, z ktorego dalo sie to odczytac. Zeby
+# dowiedziec sie, jakim modelem pracuje produkcja, trzeba bylo przeczytac kod
+# biblioteki i sprawdzic klaster. Kosztowalo to $0,0082 za artykul wobec
+# $0,0002 za triaz, przy 126 analizach.
+#
+# Wartosc domyslna w kodzie jest ZABEZPIECZENIEM na wypadek braku zmiennej.
+# Nie jest deklaracja tego, czym system ma pracowac - ta nalezy tutaj i ma sie
+# dac zmienic bez przebudowy obrazu.
+llm:
+  # Model ANALIZY - wytwarza wartosc cechy `news_sent`.
+  #
+  # UWAGA PRZY ZMIANIE: podmiana modelu w srodku doby wstawia w szereg cechy
+  # USKOK, ktorego kalibracja wagi nie zaklada (patrz `DostawcaMieszany` -
+  # analiza celowo NIE MA zejscia awaryjnego wlasnie z tego powodu). Zmieniac
+  # razem z decyzja, co zrobic z historia cechy, a nie mimochodem.
+  analysisModel: "claude-opus-5"
+  # Model TRIAZU - wybiera artykuly, nie ocenia ich. Zmiana zmienia probke,
+  # nie wartosc cechy, wiec jest znacznie mniej rygorystyczna.
+  triageModel: "claude-haiku-4-5"
+  # Odpowiedniki u Gemini, gdy ustawiony jest jego klucz. Mieszanka kieruje
+  # triaz do Gemini (5,5x taniej przy 94% wywolan), analize do Anthropica.
+  analysisModelGemini: "gemini-3.5-flash"
+  triageModelGemini: "gemini-3.5-flash-lite"
+  # TWARDY LIMIT KWOTOWY na dobe.
+  dailyUsd: "5.0"
+  # TWARDY LIMIT LICZBY WYWOLAN na dobe - druga bramka, nie zamiennik.
+  #
+  # Kwotowa nie zadzialala ANI RAZU: 11.09.2026 potok stanal calkowicie przy
+  # $0,114 z $5, bo zatrzymal go DARMOWY prog Gemini liczony w zapytaniach,
+  # ktorego dziennik wydatkow nie widzi. Bramka mierzaca inna wielkosc niz
+  # dostawca nie zatrzyma niczego przed nim.
+  #
+  # 1500 lezy miedzy zdrowa doba (503-516 wywolan, 07-11.09) a doba z petla
+  # deduplikacji (4404, 09.09). Lapie ucieczke, nie dotyka pracy.
+  dailyCalls: "1500"
+
 # Procesy tla. Kazdy dziala niezaleznie - patrz templates/workers.yaml.
 workers:
   # Dociaga swiece 1m i snapshoty orderbooka z gieldy. Nie wymaga zadnych kluczy,

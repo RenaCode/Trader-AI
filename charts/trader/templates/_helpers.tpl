@@ -80,3 +80,36 @@ dozorcą.
     secretKeyRef: { name: {{ $.Values.secretName }}, key: {{ $r.secretKey }} }
 {{- end }}
 {{- end -}}
+
+{{/*
+Modele i limity dostawcy analizy — JEDNA DEFINICJA DLA WSZYSTKICH PODÓW.
+
+DLACZEGO WSPÓLNY HELPER, A NIE DWIE LISTY
+
+`/api/api-spend` pokazuje limit dobowy, wołając `limit_dobowy_usd()` w procesie
+API — czyli czyta WŁASNE środowisko, nie środowisko workera, który ten limit
+faktycznie egzekwuje. Dwie listy zmiennych znaczyłyby więc interfejs mówiący
+jedną liczbę i bramkę zatrzymującą wydatki na drugiej, bez żadnego sygnału, że
+się rozjechały. Ten sam kształt rozjazdu (workers.features kontra
+trainerCron.horyzonty) kosztował już 21 godzin martwych cech 2026-09-04.
+
+`required` zamiast `default`: wartość pusta ma wywrócić `helm template`, a nie
+po cichu zejść na domyśl wpisany w `services/ingest/llm.py`. Domyśl w kodzie
+jest zabezpieczeniem na wypadek braku zmiennej, a nie deklaracją tego, czym
+system pracuje — przez cały czas życia projektu ANALYSIS_MODEL nie istniał
+nigdzie indziej i dlatego każda analiza szła najdroższym modelem.
+*/}}
+{{- define "trader.llmEnv" -}}
+- name: ANALYSIS_MODEL
+  value: {{ required "llm.analysisModel musi byc ustawiony wprost" .Values.llm.analysisModel | quote }}
+- name: TRIAGE_MODEL
+  value: {{ required "llm.triageModel musi byc ustawiony wprost" .Values.llm.triageModel | quote }}
+- name: ANALYSIS_MODEL_GEMINI
+  value: {{ required "llm.analysisModelGemini musi byc ustawiony wprost" .Values.llm.analysisModelGemini | quote }}
+- name: TRIAGE_MODEL_GEMINI
+  value: {{ required "llm.triageModelGemini musi byc ustawiony wprost" .Values.llm.triageModelGemini | quote }}
+- name: LLM_DAILY_USD
+  value: {{ required "llm.dailyUsd musi byc ustawiony wprost" .Values.llm.dailyUsd | quote }}
+- name: LLM_DAILY_CALLS
+  value: {{ required "llm.dailyCalls musi byc ustawiony wprost" .Values.llm.dailyCalls | quote }}
+{{- end -}}
