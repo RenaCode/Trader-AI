@@ -17,6 +17,7 @@ from datetime import datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import httpx
+import psycopg
 
 from .db import execute, fetch_all, fetch_one
 from .security import SecretBox
@@ -103,6 +104,77 @@ async def powiadom_o_bezpieczenstwie(user_id: int, event_code: str, title: str,
               f"{type(e).__name__}: {e}", flush=True)
 
 
+async def _zapisz_zdarzenie(user_id: int, event_code: str, sev: str, title: str,
+                            body: str, dane: dict,
+                            engine: str | None) -> tuple[dict, str, dict, str | None]:
+    """Zapis zdarzenia do tabeli. NIEZNANY KOMPONENT DEGRADUJE KOLUMNE, NIE ALERT.
+
+    Zwraca (wiersz, tresc, dane, zapisany_engine). Trzy ostatnie moga sie roznic
+    od tego, co przyszlo - wolajacy ma uzywac ICH, zeby kanaly wysylaly to samo,
+    co stoi w bazie.
+
+    PO CO TO ISTNIEJE
+
+    `notify.notification.engine` ma typ `ref.engine`, czyli enum SILNIKOW
+    HANDLOWYCH ('crypto','equity'). Nie ma w nim - i swiadomie miec nie bedzie,
+    patrz migracje 0029, 0034 i 0035 - dozorcy ryzyka, workerow danych ani
+    zadnego przyszlego procesu, ktory nie handluje. Kazdy z nich moze umrzec
+    i o smierci kazdego z nich trzeba powiadomic.
+
+    Do 2026-09-12 wlozenie takiej nazwy do `engine` konczylo caly `notify()`
+    wyjatkiem `InvalidTextRepresentation` - czyli POWIADOMIENIE O AWARII GINELO
+    Z POWODU LITEROWKI W SWOIM WLASNYM METADANYCH. Zmierzone: dozorca ryzyka
+    lezal 887 minut, czujka poprawnie go wykryla, i nikt sie o tym nie dowiedzial.
+    Detekcja dzialala, dostawa nie.
+
+    DLACZEGO DEGRADACJA, A NIE TWARDY BLAD
+
+    Bo to sa dwie rozne rzeczy: "kolumna nie zna tej nazwy" i "nie ma alarmu".
+    Pierwsza jest usterka metadanych i da sie ja naprawic jutro; druga jest
+    cisza w jedynym kanale, ktory mial sie odezwac. Alarm, ktory nie doszedl,
+    jest gorszy niz brak czujki, bo tworzy zludzenie nadzoru - wiec z tych dwoch
+    poswiecamy kolumne.
+
+    TO NIE JEST POLKNIETY BLAD. Usterka zostaje GLOSNA w trzech miejscach naraz:
+      * linia w logu procesu, z nazwa komponentu i typem zdarzenia;
+      * `data->>'komponent'` w samym powiadomieniu, wiec widac ja w dzwonku
+        i w ladunku webhooka;
+      * dopisek w tresci, wiec dociera takze tam, gdzie czlowiek naprawde
+        czyta - w WhatsAppie.
+    Znika wylacznie jedna rzecz: wyjatek, ktory kasowal alarm.
+
+    Wolamy bez sprawdzania z wyprzedzeniem (`pg_enum`), bo kazdy taki podglad
+    jest DRUGA KOPIA definicji typu - rozjedzie sie przy pierwszym rozszerzeniu
+    enuma i zrobi dokladnie te cisze, ktorej tu zapobiegamy. Baza jest jedynym
+    zrodlem prawdy o tym, co ten typ przyjmuje, wiec pytamy ja wprost.
+
+    Ponowienie jest bezpieczne, bo pula chodzi z `autocommit=True` (patrz
+    `db.open_pool`): odrzucona instrukcja nie zostawia transakcji do posprzatania.
+    Gdy poprawka tez padnie, wyjatek leci dalej - winowajca jest wtedy inny
+    (np. `severity` spoza `notify.severity`) i zgadywanie go byloby udawaniem.
+    """
+    sql = ("INSERT INTO notify.notification"
+           " (user_id, event_code, severity, title, body, data, engine)"
+           " VALUES (%s,%s,%s,%s,%s,%s,%s) RETURNING id")
+    try:
+        row = await fetch_one(sql, (user_id, event_code, sev, title, body,
+                                    json.dumps(dane), engine))
+        return row, body, dane, engine
+    except psycopg.errors.InvalidTextRepresentation:
+        if engine is None:
+            # Kolumna `engine` nie moze byc tu winna - nie zgadujemy, co jest.
+            raise
+        print(f"[powiadomienie] {event_code}: „{engine}” nie jest wartoscia "
+              f"enuma ref.engine (silniki handlowe). Alert IDZIE, nazwa "
+              f"komponentu laduje w data->>'komponent' i w tresci; kolumna "
+              f"`engine` zostaje pusta. Popraw wolajacego.", flush=True)
+        dane = {**dane, "komponent": engine}
+        body = f"{body}\n\nKomponent: {engine}" if body else f"Komponent: {engine}"
+        row = await fetch_one(sql, (user_id, event_code, sev, title, body,
+                                    json.dumps(dane), None))
+        return row, body, dane, None
+
+
 async def notify(user_id: int, event_code: str, title: str, body: str = "",
                  *, data: dict | None = None, engine: str | None = None,
                  severity: str | None = None) -> int | None:
@@ -137,10 +209,11 @@ async def notify(user_id: int, event_code: str, title: str, body: str = "",
             # nie zapisujemy jej jako zdarzenia, zeby nie zasmiecac dzwonka.
             return None
 
-    row = await fetch_one(
-        "INSERT INTO notify.notification (user_id, event_code, severity, title, body, data, engine)"
-        " VALUES (%s,%s,%s,%s,%s,%s,%s) RETURNING id",
-        (user_id, event_code, sev, title, body, json.dumps(data or {}), engine))
+    # `body` i `data` moga wrocic wzbogacone o nazwe komponentu spoza enuma -
+    # patrz `_zapisz_zdarzenie`. Od tej linii uzywamy ICH, zeby kanaly wysylaly
+    # to samo, co stoi w dzwonku.
+    row, body, dane, engine = await _zapisz_zdarzenie(
+        user_id, event_code, sev, title, body, data or {}, engine)
     nid = row["id"]
 
     # --- godziny ciszy -------------------------------------------------------
@@ -187,7 +260,7 @@ async def notify(user_id: int, event_code: str, title: str, body: str = "",
             else:
                 await _send_webhook(config, {
                     "event": event_code, "severity": sev, "title": title,
-                    "body": body, "engine": engine, "data": data or {},
+                    "body": body, "engine": engine, "data": dane,
                     "at": datetime.now(timezone.utc).isoformat(),
                 })
             await execute(
