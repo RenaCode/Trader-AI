@@ -25,12 +25,6 @@ metadata:
   labels: {{- include "trader.labels" . | nindent 4 }}
 spec:
   schedule: {{ .Values.instrumentyCron.schedule | quote }}
-  # STREFA CZASU JAWNIE, a nie z procesu kontrolera - patrz `timeZone`
-  # w values.yaml. Bez tego pola harmonogram liczy sie w strefie
-  # kube-controller-managera; na tym klastrze jest to Europe/Warsaw,
-  # wiec ta linia NICZEGO nie przesuwa - przestaje tylko zalezec od
-  # ustawienia hosta, ktorego ten chart nie kontroluje.
-  timeZone: {{ .Values.timeZone | quote }}
   concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 1
   failedJobsHistoryLimit: 3
