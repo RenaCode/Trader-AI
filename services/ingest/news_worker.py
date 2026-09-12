@@ -37,7 +37,8 @@ from psycopg.rows import dict_row
 from services.api.security import SecretBox
 from services.ingest import puls
 from services.ingest.llm import (
-    Dostawca, Odmowa, kto_wykonal, limit_dobowy_usd, zbuduj_dostawce,
+    BrakDostawcy, Dostawca, Odmowa, kto_wykonal, limit_dobowy_usd,
+    limit_wywolan_dobowy, zbuduj_dostawce,
 )
 
 # Nazwy modeli nalezą do DOSTAWCY, nie do tego pliku: te same prompty ida do
@@ -362,8 +363,63 @@ async def analyze(ai: Dostawca, title: str, summary: str,
 # (np. gdy kanal zmieni identyfikatory wpisow i deduplikacja przestanie dzialac).
 DAILY_LIMIT_USD = limit_dobowy_usd()
 
+# DRUGA BRAMKA: LICZBA WYWOLAN, NIE KWOTA.
+#
+# Bramka kwotowa nie zadzialala ANI RAZU. 11.09.2026 potok stanal calkowicie
+# przy $0,114 z $5 - zatrzymal go DARMOWY prog Gemini, liczony w zapytaniach,
+# ktorego dziennik wydatkow nie widzi w ogole. Licznik pilnowal wielkosci, ktora
+# nie byla wiazaca, i pokazywal przy tym "wykorzystanie 2%".
+#
+# Kwota i liczba wywolan mierza dwie rozne rzeczy i zadna nie zastepuje drugiej:
+# petla na tanim modelu (4404 wywolania 09.09, $4,85) rozbija sie o kwote dopiero
+# po godzinach, a te same 4404 wywolania przekraczaja dobowy prog dostawcy
+# w kilkanascie minut. Bramka po liczbie lapie wlasnie ten ksztalt.
+#
+# 1500 to trzykrotnosc zdrowej doby (503-516 wywolan dziennie od 07 do 11.09)
+# i jedna trzecia doby z petla (4404). Lapie ucieczke, nie dotyka pracy.
+DZIENNY_LIMIT_WYWOLAN = limit_wywolan_dobowy()
 
-def zapisz_nieudane(cur, conn, ai, model: str, purpose: str, blad: Exception) -> float:
+
+class Budzet:
+    """Ile DZIS wydano i ile wywolan wykonano - jedno i drugie z dziennika.
+
+    DWIE LICZBY W JEDNYM OBIEKCIE, bo musza byc czytane i podbijane razem.
+    Dopoki przez potok szla sama kwota, dolozenie drugiego ogranicznika
+    znaczyloby drugi parametr w kazdej sygnaturze i drugie miejsce, w ktorym
+    mozna go zapomniec - a zapomniany ogranicznik wyglada dokladnie tak samo
+    jak dzialajacy.
+
+    Stan poczatkowy czytamy z `news.api_spend`, a nie z licznika w pamieci:
+    proces restartuje sie w srodku doby i licznik od zera znaczylby limit
+    liczony od zera.
+    """
+
+    def __init__(self, usd: float, wywolania: int):
+        self.usd = usd
+        self.wywolania = wywolania
+
+    def dolicz(self, usd: float) -> None:
+        """Jedno wywolanie u dostawcy. Wolane RAZEM z `record_spend`.
+
+        Koszt bywa zerowy (darmowy prog dostawcy), wywolanie nie jest wtedy
+        mniej prawdziwe - i wlasnie takie wywolania wypalily limit 11.09.
+        """
+        self.usd += usd
+        self.wywolania += 1
+
+    def wyczerpany(self) -> str:
+        """Pusty napis znaczy 'wolno pytac dalej'. Inaczej - powod do logu."""
+        if self.usd >= DAILY_LIMIT_USD:
+            return (f"limit dobowy ${DAILY_LIMIT_USD:.2f} osiągnięty "
+                    f"(wydano ${self.usd:.4f})")
+        if self.wywolania >= DZIENNY_LIMIT_WYWOLAN:
+            return (f"limit dobowy {DZIENNY_LIMIT_WYWOLAN} wywołań osiągnięty "
+                    f"({self.wywolania})")
+        return ""
+
+
+def zapisz_nieudane(cur, conn, ai, model: str, purpose: str, blad: Exception,
+                    *, budzet: "Budzet | None" = None) -> float:
     """Koszt wywolania, ktore nic nie dalo. Zwraca wydana kwote (0, gdy nieznana).
 
     Wywolanie, ktore poszlo do dostawcy i wrocilo bezuzyteczne - odmowa, odpowiedz
@@ -385,6 +441,11 @@ def zapisz_nieudane(cur, conn, ai, model: str, purpose: str, blad: Exception) ->
         return 0.0
     koszt = ai.koszt(model, u)
     record_spend(cur, model, purpose, u, koszt, ok=False)
+    # Wywolanie nieudane TEZ JEST WYWOLANIEM u dostawcy i tez zjada jego prog
+    # dobowy. `budzet` jest opcjonalny wylacznie dlatego, ze nazwany - wolajacy
+    # w potoku podaje go zawsze.
+    if budzet is not None:
+        budzet.dolicz(koszt)
     conn.commit()
     return koszt
 
@@ -402,6 +463,125 @@ def spent_today(cur) -> float:
     cur.execute("SELECT COALESCE(sum(cost_usd), 0) AS s FROM news.api_spend"
                 " WHERE event_time >= date_trunc('day', now())")
     return float(cur.fetchone()["s"])
+
+
+def wywolania_dzis(cur) -> int:
+    """Ile zapytan poszlo dzis do dostawcow - z tego samego dziennika co kwota.
+
+    Doba liczona tak samo jak w `spent_today` (`date_trunc('day', now())`, strefa
+    bazy to UTC), zeby obie bramki odnawialy sie w tej samej chwili. Dwie rozne
+    granice doby znaczylyby okno, w ktorym jedna juz zwolnila, a druga jeszcze
+    nie - i nikt by nie wiedzial, ktora wlasnie zatrzymala potok.
+    """
+    cur.execute("SELECT count(*) AS n FROM news.api_spend"
+                " WHERE event_time >= date_trunc('day', now())")
+    return int(cur.fetchone()["n"])
+
+
+def puste_stats(limit: bool = False) -> dict:
+    """Komplet licznikow cyklu - JEDNO miejsce, w ktorym ten slownik powstaje.
+
+    Byly dwa: pelny na koncu `run_cycle` i skrocony na sciezce osiagnietego
+    limitu. Skrocony zamienial zadzialanie bezpiecznika w `KeyError`, czyli
+    w "cykl przerwany" - awarie tam, gdzie zadzialala ochrona. Dopisanie klucza
+    w jednym miejscu i zapomnienie o drugim jest bledem, ktorego nie widac
+    do dnia, w ktorym limit sie osiagnie.
+    """
+    return {"kanaly": 0, "pobrane": 0, "nowe": 0, "przeszly_filtr": 0,
+            "przeanalizowane": 0, "zapisane": 0, "odsiane": 0, "zaleglosci": 0,
+            "koszt": 0.0, "bledy": 0, "opisy_bledow": [],
+            # Stan POTOKU, nie przebieg cyklu - uzupelnia `diagnoza_potoku`.
+            "odciety": "", "limit_powod": "", "cisza": "",
+            # Artykuly ZAPISANE, ale nieocenione: budzet albo odciety dostawca.
+            # Wroca w `nadrob_zaleglosci` z nietknietym licznikiem prob.
+            "pominiete": 0,
+            "czekaja": 0, "porzucone": 0, "od_ostatniej_analizy_h": None,
+            "limit": limit}
+
+
+def diagnoza_potoku(cur) -> dict:
+    """Ile pracy CZEKA, ile juz PORZUCONO i jak dawno powstala ostatnia analiza.
+
+    To sa liczby o STANIE POTOKU, a nie o przebiegu tego cyklu, i wlasnie
+    dlatego sa potrzebne. Cykl, ktory nie mial nic do zrobienia, i cykl, ktory
+    nie byl w stanie zrobic niczego, wygladaja w licznikach przebiegu
+    identycznie: zero, zero, zero. Rozroznia je dopiero pytanie, czy cokolwiek
+    czekalo i kiedy ostatnio cokolwiek powstalo.
+
+    `porzucone` to artykuly, ktore wyczerpaly limit prob i nie wroca juz nigdy.
+    Na produkcji bylo ich 106 i nie mowila o nich ANI JEDNA linia logu.
+
+    Limit prob jest PARAMETREM zapytania, a nie stala wpisana w SQL: stala
+    w dwoch miejscach rozjezdza sie przy pierwszej zmianie, a tutaj rozjazd
+    objawilby sie liczba w logu, ktorej nikt nie ma jak zweryfikowac.
+    """
+    cur.execute(
+        "SELECT"
+        " count(*) FILTER (WHERE a.triage_verdict IS NULL"
+        "                    OR (a.triage_verdict = 'failed'"
+        "                        AND a.triage_attempts < %(proby)s)"
+        "                    OR (a.triage_verdict = 'accepted'"
+        "                        AND (a.analysis_verdict IS NULL"
+        "                             OR (a.analysis_verdict = 'failed'"
+        "                                 AND a.analysis_attempts < %(proby)s)))"
+        "                 ) AS czekaja,"
+        " count(*) FILTER (WHERE (a.triage_verdict = 'failed'"
+        "                         AND a.triage_attempts >= %(proby)s)"
+        "                    OR (a.analysis_verdict = 'failed'"
+        "                        AND a.analysis_attempts >= %(proby)s)"
+        "                 ) AS porzucone"
+        " FROM news.article a"
+        " LEFT JOIN news.article_analysis an ON an.article_id = a.id"
+        " WHERE an.id IS NULL"
+        "   AND a.event_time > now() - make_interval(hours => %(okno)s)",
+        {"proby": PROBY_PO_AWARII_MAX, "okno": OKNO_ZALEGLOSCI_H})
+    r = cur.fetchone() or {}
+    # Wiek ostatniej analizy liczymy z `ingested_at`, czyli z chwili, w ktorej
+    # MY poznalismy wynik - nie z daty publikacji artykulu. Pytanie brzmi
+    # "kiedy ten potok ostatnio cos wyprodukowal", a nie "jak swiezy byl news".
+    cur.execute("SELECT EXTRACT(EPOCH FROM (now() - max(ingested_at))) / 3600"
+                " AS h FROM news.article_analysis")
+    w = cur.fetchone() or {}
+    h = w.get("h")
+    return {"czekaja": int(r.get("czekaja") or 0),
+            "porzucone": int(r.get("porzucone") or 0),
+            "od_ostatniej_analizy_h": float(h) if h is not None else None}
+
+
+def opis_ciszy(s: dict, analizuj: bool) -> str:
+    """DLACZEGO w tym cyklu nie powstala ani jedna analiza. Pusty, gdy powstala.
+
+    NIEPUSTY ZAWSZE, gdy `analizuj` i `przeanalizowane == 0`. To jest warunek
+    twardy, nie uprzejmosc wobec czytajacego.
+
+    Linia z produkcji, powtarzana co piec minut przez dwie i pol doby:
+
+        [04:55:05] kanałów 4, wpisów 100, nowych 0, zapisanych 0, przez filtr 0,
+        odsianych 0, przeanalizowanych 0, koszt $0.0000, błędów 0, 1 s
+
+    Wszystko w niej bylo prawda. `news.article_analysis` nie dostalo w tym
+    czasie ANI JEDNEGO wiersza, cecha `news_sent` byla martwa, 106 artykulow
+    lezalo trwale porzuconych - i nic z tego nie dalo sie z tej linii odczytac,
+    bo cisza potoku wyglada w licznikach przebiegu tak samo jak spokojna doba
+    bez newsow. Cisza ma byc odroznialna od pracy Z SAMEJ LINII LOGU.
+    """
+    if not analizuj or s.get("przeanalizowane"):
+        return ""
+    powody = []
+    if s.get("odciety"):
+        powody.append(f"dostawca odcięty — {s['odciety']}")
+    if s.get("limit_powod"):
+        powody.append(s["limit_powod"])
+    if s.get("porzucone"):
+        powody.append(f"porzuconych po wyczerpaniu prób: {s['porzucone']}")
+    if not powody:
+        powody.append(f"czeka {s['czekaja']}, żaden nie doszedł do analizy"
+                      if s.get("czekaja") else "brak artykułów do analizy")
+    if s.get("pominiete"):
+        powody.append(f"zapisanych bez oceny: {s['pominiete']}")
+    wiek = s.get("od_ostatniej_analizy_h")
+    kiedy = "NIGDY" if wiek is None else f"{wiek:.0f} h temu"
+    return f"  ⚠ BEZ ANALIZ ({'; '.join(powody)}); ostatnia {kiedy}"
 
 
 # Ile razy artykul moze wrocic na ocene PO AWARII DOSTAWCY.
@@ -557,8 +737,8 @@ OKNO_ZALEGLOSCI_H = 24
 
 
 async def nadrob_zaleglosci(conn, cur, ai: Dostawca, instruments: dict[str, int],
-                            symbols: list[str], wydano: float, stats: dict,
-                            verbose: bool) -> float:
+                            symbols: list[str], budzet: Budzet, stats: dict,
+                            verbose: bool) -> None:
     """Analiza artykulow zapisanych wczesniej, ktore analizy nie dostaly.
 
     DLACZEGO TO ISTNIEJE
@@ -587,11 +767,31 @@ async def nadrob_zaleglosci(conn, cur, ai: Dostawca, instruments: dict[str, int]
     tylnymi drzwiami, tylko wolniejsza i trwalsza, bo baza nie zapomina tak jak
     RSS.
     """
+    # ODCIETY DOSTAWCA - WYCHODZIMY PRZED CZYTANIEM BAZY.
+    #
+    # Kontrakt `llm.Dostawca` mowi wprost: gdy `czy_ma_czym_pytac()` zwraca
+    # False, wolajacy ma PRZESTAC wolac `triage`/`analyze`. Do 12.09.2026 nikt
+    # tego warunku nie sprawdzal (`grep -c czy_ma_czym_pytac` w tym pliku dawal
+    # zero), wiec zamiast wyjsc, potok szedl przez cala liste zaleglosci
+    # i kazdemu artykulowi zapisywal 'failed'.
+    if not ai.czy_ma_czym_pytac():
+        stats["odciety"] = ai.powod_niedostepnosci()
+        return
+
     # Werdykt 'rejected' odpada JUZ W BAZIE, bo to 95% tabeli. Reszta warunkow
     # (limit ponowien) jest w `etap_do_wykonania` - patrz komentarz tam.
+    #
+    # `triage_at` I `analysis_at` MUSZA TU BYC. Stoi na nich `wolno_ponowic`,
+    # a kolumna niepobrana to w slowniku brak klucza, czyli `None`, czyli
+    # "dawno" - i odstep PRZERWA_PO_AWARII_S przestaje obowiazywac, po cichu.
+    # Tak wlasnie 11.09.2026 kazdy z 106 artykulow wyczerpal trzy proby w 301
+    # sekundach zamiast w 1800, po czym zostal porzucony na zawsze. Dopisujac
+    # tu kolumne, dopisz ja takze do atrapy w tescie - atrapa oddajaca wiersz
+    # spoza SELECT-a pilnuje zachowania, ktorego produkcja nie wykonuje.
     cur.execute(
         "SELECT a.id, a.title, a.summary, a.event_time, a.triage_verdict,"
-        " a.triage_attempts, a.analysis_verdict, a.analysis_attempts,"
+        " a.triage_at, a.triage_attempts, a.analysis_verdict,"
+        " a.analysis_at, a.analysis_attempts,"
         " f.name AS feed"
         " FROM news.article a"
         " JOIN news.feed f ON f.id = a.feed_id"
@@ -603,15 +803,23 @@ async def nadrob_zaleglosci(conn, cur, ai: Dostawca, instruments: dict[str, int]
         " ORDER BY a.event_time DESC", (OKNO_ZALEGLOSCI_H,))
     zalegle = cur.fetchall()
     if not zalegle:
-        return wydano
+        return
     if verbose:
         print(f"  zaległości do przeanalizowania: {len(zalegle)}")
 
     for a in zalegle:
-        if wydano >= DAILY_LIMIT_USD:
+        powod = budzet.wyczerpany()
+        if powod:
+            stats["limit_powod"] = powod
             if verbose:
-                print(f"    [stop] limit dobowy ${DAILY_LIMIT_USD:.2f} osiągnięty, "
-                      f"zostało {len(zalegle) - stats['zaleglosci']} zaległych")
+                print(f"    [stop] {powod}, zostało "
+                      f"{len(zalegle) - stats['zaleglosci']} zaległych")
+            break
+        # STAN DOSTAWCY ZMIENIA SIE W TRAKCIE PETLI - pierwszy artykul dostaje
+        # `Wyczerpany` i dopiero przez niego bezpiecznik odcina dostawce.
+        # Warunek sprzed petli tego nie zlapie.
+        if not ai.czy_ma_czym_pytac():
+            stats["odciety"] = ai.powod_niedostepnosci()
             break
         etap = etap_do_wykonania(a)
         if etap is None:
@@ -622,6 +830,21 @@ async def nadrob_zaleglosci(conn, cur, ai: Dostawca, instruments: dict[str, int]
         if etap == "triaz":
             try:
                 worth, why, tri_usage = await triage(ai, a["title"], a["summary"] or "")
+            except BrakDostawcy as e:
+                # `BrakDostawcy` TO NIE PROBA I NIE WERDYKT.
+                #
+                # Kontrakt `llm.Dostawca`: "wywolanie NIE poszlo do API". Nikogo
+                # nie zapytano, wiec nie ma kosztu do zapisania, nie ma awarii
+                # dostawcy do policzenia i - przede wszystkim - nie ma czego
+                # dopisac do `triage_attempts`. Ten licznik mierzy PROBY
+                # U DOSTAWCY; podbicie go tutaj kaze bazie twierdzic, ze artykul
+                # byl oceniany trzy razy, gdy nie byl ani razu.
+                #
+                # Tak zginelo 106 artykulow 11.09.2026 miedzy 14:13 a 22:10:
+                # `triage_attempts = 3`, powod "BrakDostawcy: obaj dostawcy
+                # odcieci", zaden nigdy nieoceniony, wszystkie trwale porzucone.
+                stats["odciety"] = ai.powod_niedostepnosci() or str(e)
+                break
             except Exception as e:                            # noqa: BLE001
                 # KTO ODMOWIL, a nie kogo pytalismy - patrz `kto_wykonal`.
                 # Mieszanka schodzi na dostawce zapasowego, wiec te dwie rzeczy
@@ -630,9 +853,9 @@ async def nadrob_zaleglosci(conn, cur, ai: Dostawca, instruments: dict[str, int]
                 kto = kto_wykonal(e, ai, ai.model_triazu)
                 stats["bledy"] += 1
                 stats["opisy_bledow"].append(f"triaż {kto}: {type(e).__name__}: {e}")
-                stracone = zapisz_nieudane(cur, conn, ai, kto.model, "triage", e)
+                stracone = zapisz_nieudane(cur, conn, ai, kto.model, "triage", e,
+                                           budzet=budzet)
                 stats["koszt"] += stracone
-                wydano += stracone
                 zapisz_werdykt_triazu(cur, a["id"], "failed",
                                       f"{type(e).__name__}: {e}", kto.model)
                 conn.commit()
@@ -646,11 +869,11 @@ async def nadrob_zaleglosci(conn, cur, ai: Dostawca, instruments: dict[str, int]
             model_tri = ai.uzyty_model(ai.model_triazu, tri_usage)
             tri_cost = ai.koszt(model_tri, tri_usage)
             record_spend(cur, model_tri, "triage", tri_usage, tri_cost)
+            budzet.dolicz(tri_cost)
             zapisz_werdykt_triazu(cur, a["id"],
                                   "accepted" if worth else "rejected", why, model_tri)
             conn.commit()
             stats["koszt"] += tri_cost
-            wydano += tri_cost
             if not worth:
                 stats["odsiane"] += 1
                 continue
@@ -658,13 +881,17 @@ async def nadrob_zaleglosci(conn, cur, ai: Dostawca, instruments: dict[str, int]
         try:
             data, usage = await analyze(ai, a["title"], a["summary"] or "", a["feed"],
                                         a["event_time"], symbols)
+        except BrakDostawcy as e:
+            # Jak wyzej, o jeden etap dalej: bez wywolania nie ma proby.
+            stats["odciety"] = ai.powod_niedostepnosci() or str(e)
+            break
         except Exception as e:                                # noqa: BLE001
             kto = kto_wykonal(e, ai, ai.model_analizy)
             stats["bledy"] += 1
             stats["opisy_bledow"].append(f"analiza {kto}: {type(e).__name__}: {e}")
-            stracone = zapisz_nieudane(cur, conn, ai, kto.model, "analysis", e)
+            stracone = zapisz_nieudane(cur, conn, ai, kto.model, "analysis", e,
+                                       budzet=budzet)
             stats["koszt"] += stracone
-            wydano += stracone
             zapisz_werdykt_analizy(cur, a["id"], "failed")
             conn.commit()
             if verbose:
@@ -682,8 +909,8 @@ async def nadrob_zaleglosci(conn, cur, ai: Dostawca, instruments: dict[str, int]
         model_ana = ai.uzyty_model(ai.model_analizy, usage)
         price = ai.koszt(model_ana, usage)
         record_spend(cur, model_ana, "analysis", usage, price)
+        budzet.dolicz(price)
         stats["koszt"] += price
-        wydano += price
         zapisz_werdykt_analizy(cur, a["id"], "relevant")
         zapisz_analize(cur, a["id"], model_ana, data, usage, price,
                        a["event_time"], instruments)
@@ -691,7 +918,6 @@ async def nadrob_zaleglosci(conn, cur, ai: Dostawca, instruments: dict[str, int]
         stats["zaleglosci"] += 1
         if verbose:
             print(f"    [zaległy] {data['direction']:>7s} {a['title'][:60]}")
-    return wydano
 
 
 async def run_cycle(conn, ai: Dostawca | None, http: httpx.AsyncClient,
@@ -728,18 +954,24 @@ async def run_cycle(conn, ai: Dostawca | None, http: httpx.AsyncClient,
     """
     cur = conn.cursor(row_factory=dict_row)
 
-    wydano = spent_today(cur)
-    if analizuj and wydano >= DAILY_LIMIT_USD:
-        print(f"Limit dobowy osiągnięty: ${wydano:.2f} z ${DAILY_LIMIT_USD:.2f}. "
-              f"Cykl pominięty — wznowienie po północy UTC.")
-        # Komplet kluczy, nie tylko te uzyte nizej: podsumowanie cyklu i puls
-        # siegaja po `zapisane` i `zaleglosci`, wiec skrocony slownik zamienial
-        # osiagniety limit w KeyError, czyli w "cykl przerwany" - awarie tam,
-        # gdzie zadzialal bezpiecznik.
-        return {"kanaly": 0, "pobrane": 0, "nowe": 0, "przeszly_filtr": 0,
-                "przeanalizowane": 0, "zapisane": 0, "odsiane": 0,
-                "zaleglosci": 0, "bledy": 0, "opisy_bledow": [],
-                "koszt": 0.0, "limit": True}
+    budzet = Budzet(spent_today(cur), wywolania_dzis(cur))
+    powod_limitu = budzet.wyczerpany() if analizuj else ""
+    if powod_limitu:
+        # WYCZERPANY BUDZET SCHODZI DO TRYBU BEZ ANALIZY, A NIE POMIJA CYKLU.
+        #
+        # Do 12.09.2026 bylo tu `return`: osiagniecie limitu o 14:00 znaczylo,
+        # ze WSZYSTKO, co kanaly opublikuja do polnocy UTC, przepada
+        # bezpowrotnie - bo RSS oddaje tylko swieze wpisy, a my nie zapisywalismy
+        # nic. Kontrakt `llm.Dostawca` mowi o tej samej sytuacji wprost:
+        # "PRZERWANIE CALEGO CYKLU byloby lekarstwem gorszym od choroby".
+        #
+        # Limit ma zatrzymac WYDAWANIE PIENIEDZY. Pobieranie i zapis sa darmowe
+        # i dzialaja dalej; analize dolozy `nadrob_zaleglosci` po polnocy, o ile
+        # artykul zmiesci sie jeszcze w oknie OKNO_ZALEGLOSCI_H. Czesc i tak
+        # przepadnie - ale czesc, a nie wszystko, i widac ktora.
+        print(f"{powod_limitu}. Schodzę na sam zapis — wznowienie analizy "
+              f"po północy UTC.")
+        analizuj = False
 
     cur.execute("SELECT id, symbol FROM ref.instrument WHERE active")
     instruments = {r["symbol"]: r["id"] for r in cur.fetchall()}
@@ -767,9 +999,9 @@ async def run_cycle(conn, ai: Dostawca | None, http: httpx.AsyncClient,
     """, (silniki, silniki))
     feeds = cur.fetchall()
 
-    stats = {"kanaly": len(feeds), "pobrane": 0, "nowe": 0, "przeszly_filtr": 0,
-             "przeanalizowane": 0, "zapisane": 0, "odsiane": 0, "zaleglosci": 0,
-             "koszt": 0.0, "bledy": 0, "opisy_bledow": []}
+    stats = puste_stats(limit=bool(powod_limitu))
+    stats["limit_powod"] = powod_limitu
+    stats["kanaly"] = len(feeds)
 
     for feed in feeds:
         entries, status = await fetch_feed(http, feed["url"])
@@ -834,21 +1066,51 @@ async def run_cycle(conn, ai: Dostawca | None, http: httpx.AsyncClient,
             if published < datetime.now(timezone.utc) - timedelta(days=1):
                 continue
 
-            if wydano >= DAILY_LIMIT_USD:
-                if verbose:
-                    print(f"    [stop] limit dobowy ${DAILY_LIMIT_USD:.2f} osiągnięty")
-                break
+            # `continue`, NIE `break` - I TO JEST CALA ROZNICA.
+            #
+            # Zapis artykulu stoi WYZEJ w tej petli, analiza nizej. `break`
+            # ucinal wiec razem z analiza takze ZAPIS pozostalych wpisow tego
+            # kanalu - a kanal RSS nie odda jutro tego, czego dzis nie
+            # pobralismy. Wyczerpany budzet ma zatrzymac WYDAWANIE PIENIEDZY,
+            # nie zbieranie darmowego materialu; te dwie rzeczy `break`
+            # sklejal w jedna.
+            powod = budzet.wyczerpany()
+            if powod:
+                stats["limit_powod"] = powod
+                if verbose and not stats["pominiete"]:
+                    print(f"    [stop] {powod}")
+                stats["pominiete"] += 1
+                continue
+
+            # DOSTAWCA ODCIETY - ZAPISUJEMY DALEJ, PYTAC PRZESTAJEMY.
+            #
+            # Dokladnie to mowi kontrakt `llm.Dostawca` ("MA DALEJ ZAPISYWAC
+            # artykuly") i dokladnie tego nikt nie sprawdzal do 12.09.2026.
+            # Artykul jest juz w bazie, wiec `nadrob_zaleglosci` wroci po niego
+            # w oknie 24 h, gdy dostawca wroci - I NIE ZASTANIE GO Z WYPALONYM
+            # LICZNIKIEM PROB.
+            if not ai.czy_ma_czym_pytac():
+                stats["odciety"] = ai.powod_niedostepnosci()
+                stats["pominiete"] += 1
+                continue
 
             try:
                 worth, why, tri_usage = await triage(ai, title, summary)
+            except BrakDostawcy as e:
+                # Bezpiecznik zwarl sie w trakcie tej petli - patrz ten sam
+                # warunek w `nadrob_zaleglosci`. Bez wywolania nie ma proby,
+                # a pozostale wpisy tego kanalu nadal maja zostac ZAPISANE.
+                stats["odciety"] = ai.powod_niedostepnosci() or str(e)
+                stats["pominiete"] += 1
+                continue
             except Exception as e:                            # noqa: BLE001
                 # KTO ODMOWIL, a nie kogo pytalismy - patrz `kto_wykonal`.
                 kto = kto_wykonal(e, ai, ai.model_triazu)
                 stats["bledy"] += 1
                 stats["opisy_bledow"].append(f"triaż {kto}: {type(e).__name__}: {e}")
-                stracone = zapisz_nieudane(cur, conn, ai, kto.model, "triage", e)
+                stracone = zapisz_nieudane(cur, conn, ai, kto.model, "triage", e,
+                                           budzet=budzet)
                 stats["koszt"] += stracone
-                wydano += stracone
                 # Awaria dostawcy NIE JEST werdyktem - artykul wroci w
                 # zaleglosciach, ale policzona liczba prob (PROBY_PO_AWARII_MAX)
                 # nie pozwoli mu wracac w nieskonczonosc.
@@ -866,11 +1128,11 @@ async def run_cycle(conn, ai: Dostawca | None, http: httpx.AsyncClient,
             model_tri = ai.uzyty_model(ai.model_triazu, tri_usage)
             tri_cost = ai.koszt(model_tri, tri_usage)
             record_spend(cur, model_tri, "triage", tri_usage, tri_cost)
+            budzet.dolicz(tri_cost)
             zapisz_werdykt_triazu(cur, article_id,
                                   "accepted" if worth else "rejected", why, model_tri)
             conn.commit()
             stats["koszt"] += tri_cost
-            wydano += tri_cost
 
             if not worth:
                 stats["odsiane"] += 1
@@ -882,13 +1144,17 @@ async def run_cycle(conn, ai: Dostawca | None, http: httpx.AsyncClient,
 
             try:
                 data, usage = await analyze(ai, title, summary, feed["name"], published, symbols)
+            except BrakDostawcy as e:
+                stats["odciety"] = ai.powod_niedostepnosci() or str(e)
+                stats["pominiete"] += 1
+                continue
             except Exception as e:                            # noqa: BLE001
                 kto = kto_wykonal(e, ai, ai.model_analizy)
                 stats["bledy"] += 1
                 stats["opisy_bledow"].append(f"analiza {kto}: {type(e).__name__}: {e}")
-                stracone = zapisz_nieudane(cur, conn, ai, kto.model, "analysis", e)
+                stracone = zapisz_nieudane(cur, conn, ai, kto.model, "analysis", e,
+                                           budzet=budzet)
                 stats["koszt"] += stracone
-                wydano += stracone
                 zapisz_werdykt_analizy(cur, article_id, "failed")
                 conn.commit()
                 if verbose:
@@ -909,8 +1175,8 @@ async def run_cycle(conn, ai: Dostawca | None, http: httpx.AsyncClient,
             model_ana = ai.uzyty_model(ai.model_analizy, usage)
             price = ai.koszt(model_ana, usage)
             record_spend(cur, model_ana, "analysis", usage, price)
+            budzet.dolicz(price)
             stats["koszt"] += price
-            wydano += price
             stats["przeanalizowane"] += 1
 
             zapisz_werdykt_analizy(cur, article_id, "relevant")
@@ -936,9 +1202,12 @@ async def run_cycle(conn, ai: Dostawca | None, http: httpx.AsyncClient,
     # swojego okna waznosci, wiec zdazy zasilic wiecej swiec. Przy wyczerpaniu
     # budzetu dobowego tracimy wiec to, co i tak stracilibysmy najszybciej.
     if analizuj and ai is not None:
-        wydano = await nadrob_zaleglosci(conn, cur, ai, instruments, symbols,
-                                         wydano, stats, verbose)
+        await nadrob_zaleglosci(conn, cur, ai, instruments, symbols,
+                                budzet, stats, verbose)
 
+    # DIAGNOZA POTOKU NA KONIEC KAZDEGO CYKLU - patrz `opis_ciszy`.
+    stats.update(diagnoza_potoku(cur))
+    stats["cisza"] = opis_ciszy(stats, analizuj)
     return stats
 
 
@@ -1094,9 +1363,12 @@ async def main() -> int:
                                + (f", zaległych {s['zaleglosci']}" if s['zaleglosci'] else "")
                                + f", koszt ${s['koszt']:.4f}"
                                if analizuj else "bez analizy (brak klucza)")
+                    # `cisza` DOPISUJE SIE DO TEJ SAMEJ LINII, a nie obok.
+                    # Osobna linia ginie w `--quiet` i w przewijaniu; ta ma byc
+                    # nie do przeoczenia tam, gdzie czyta sie log.
                     print(f"[{started:%H:%M:%S}] kanałów {s['kanaly']}, wpisów {s['pobrane']}, "
                           f"nowych {s['nowe']}, zapisanych {s['zapisane']}, {analiza}, "
-                          f"błędów {s['bledy']}, {took:.0f} s")
+                          f"błędów {s['bledy']}, {took:.0f} s" + s.get("cisza", ""))
                     # BLEDY WYPISUJEMY ZAWSZE, TAKZE PRZY --quiet.
                     #
                     # `--quiet` istnieje po to, zeby wyciszyc rutynowy postep, a nie

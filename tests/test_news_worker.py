@@ -189,17 +189,22 @@ def _zalegly():
     """Wiersz `news.article` czekający na triaż — bez żadnej oceny."""
     from datetime import datetime, timezone
 
+    # Komplet kolumn, jakie pobiera SELECT w `nadrob_zaleglosci` — ze
+    # znacznikami czasu włącznie. Wiersz uboższy niż zapytanie pozwoliłby
+    # napisać kod czytający pole, którego produkcja nie oddaje; wiersz bogatszy
+    # pozwoliłby przeoczyć kolumnę, której zapytanie nie pobiera. Oba błędy
+    # zdarzyły się tu naprawdę.
     return {"id": 1, "title": "Fed podniósł stopy o 25 pb", "summary": "zajawka",
             "event_time": datetime.now(timezone.utc), "feed": "Kanał testowy",
-            "triage_verdict": None, "triage_attempts": 0,
-            "analysis_verdict": None, "analysis_attempts": 0}
+            "triage_verdict": None, "triage_at": None, "triage_attempts": 0,
+            "analysis_verdict": None, "analysis_at": None,
+            "analysis_attempts": 0}
 
 
 def _nadrob(ai, baza):
-    stats = {"koszt": 0.0, "bledy": 0, "opisy_bledow": [], "zaleglosci": 0,
-             "odsiane": 0}
-    asyncio.run(news_worker.nadrob_zaleglosci(baza, baza, ai, {}, [], 0.0,
-                                              stats, verbose=False))
+    stats = news_worker.puste_stats()
+    asyncio.run(news_worker.nadrob_zaleglosci(
+        baza, baza, ai, {}, [], news_worker.Budzet(0.0, 0), stats, verbose=False))
     return stats
 
 

@@ -113,14 +113,40 @@ class Odmowa(BladOdpowiedzi):
 def limit_dobowy_usd() -> float:
     """Twardy limit wydatkow na dobe.
 
-    `ANTHROPIC_DAILY_USD` zostaje jako nazwa zapasowa, bo tak nazywa sie zmienna
-    juz ustawiona na klastrze; nowa nazwa jest neutralna wobec dostawcy.
+    `ANTHROPIC_DAILY_USD` zostaje jako nazwa zapasowa, bo pod taka nazwa zmienna
+    wystepuje w starszych opisach wdrozenia; nowa nazwa jest neutralna wobec
+    dostawcy.
+
+    UWAGA NA TRESC TEGO KOMENTARZA. Do 12.09.2026 stalo tu, ze `ANTHROPIC_DAILY_USD`
+    "juz jest ustawiona na klastrze". NIE BYLA - ani na `trader-news`, ani na
+    `trader-api`; oba procesy schodzily na 5.0 ponizej. Komentarz opisywal stan
+    zamierzony jako stan faktyczny, wiec kazdy, kto go czytal, szukal wartosci
+    limitu nie tam, gdzie ona naprawde byla. Wartosc obowiazujaca sprawdza sie
+    jedna komenda, nie lektura:
+        kubectl get deploy trader-news -o jsonpath='{.spec.template.spec.containers[0].env[*].name}'
     """
     for nazwa in ("LLM_DAILY_USD", "ANTHROPIC_DAILY_USD"):
         v = os.environ.get(nazwa)
         if v:
             return float(v)
     return 5.0
+
+
+def limit_wywolan_dobowy() -> int:
+    """Twardy limit LICZBY wywolan na dobe - druga bramka obok kwotowej.
+
+    Istnieje, bo kwotowa nie zadzialala ani razu. Darmowe progi dostawcow sa
+    liczone w ZAPYTANIACH, nie w dolarach: 11.09.2026 Gemini odcial potok po
+    512 wywolaniach za lacznie $0,114, czyli przy 2% wykorzystania limitu
+    kwotowego. Bramka, ktora mierzy nie te wielkosc co dostawca, nie zatrzyma
+    niczego przed nim - zatrzyma dopiero po fakcie.
+
+    Domysl 1500 wynika z pomiaru, nie z okraglosci: zdrowa doba to 503-516
+    wywolan (07-11.09), doba z petla deduplikacji to 4404 (09.09). 1500 lezy
+    miedzy nimi z zapasem w obie strony.
+    """
+    v = os.environ.get("LLM_DAILY_CALLS")
+    return int(v) if v else 1500
 
 
 def _bez_additional_properties(schema: Any) -> Any:
