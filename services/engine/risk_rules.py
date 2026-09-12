@@ -47,8 +47,21 @@ class RiskState:
     equity: Decimal
     peak: Decimal
     day_ago: Decimal
-    exposure: Decimal
-    per_instrument: dict[int, Decimal]
+    # EKSPOZYCJA: `None` ZNACZY „NIE ZMIERZONA", A NIE „ZERO".
+    #
+    # Czyta ja wylacznie `evaluate_limits`, czyli sciezka POJEDYNCZEGO ZLECENIA.
+    # `evaluate_account` - ta, ktora wola dozorca ryzyka co 60 s - nie dotyka
+    # ani `exposure`, ani `per_instrument` w zadnej ze swoich czterech regul.
+    # Wolajacy, ktory tej wielkosci nie mierzy, ma prawo jej nie podac.
+    #
+    # DLACZEGO NIE `Decimal(0)` JAKO DOMYSL. Zero jest poprawna zmierzona
+    # wartoscia (rachunek bez pozycji i bez zlecen), wiec nie da sie go odroznic
+    # od braku pomiaru. Limit `max_total_exposure` przy niezmierzonej ekspozycji
+    # podanej jako zero przepuszczalby KAZDE zlecenie i wygladalby przy tym
+    # dokladnie tak, jak limit dzialajacy. `None` w tym miejscu zamienia ten
+    # cichy blad w `ValueError` w pierwszej sekundzie - patrz `evaluate_limits`.
+    exposure: Decimal | None
+    per_instrument: dict[int, Decimal] | None
     orders_last_hour: int
     killswitch: dict | None = None
     # Wartosc jednostki: biezaca, szczytowa i sprzed doby. Domysl None znaczy
@@ -308,6 +321,19 @@ def evaluate_limits(state: RiskState, limits: dict[str, dict],
             return RiskVerdict(
                 "block", f"Wykonano {n} zleceń w ostatniej godzinie przy limicie {lim['value']}",
                 violations=violations, usage=usage)
+
+    # EKSPOZYCJA MUSI BYC ZMIERZONA, ZANIM ZACZNIEMY JA OCENIAC.
+    #
+    # Od tego miejsca w dol dwie reguly czytaja `exposure` i `per_instrument`.
+    # Stan zlozony przez wolajacego, ktory tych wielkosci nie liczy (dozorca
+    # ryzyka, `stan_kapitalu.stan_ryzyka`), nie nadaje sie do oceny ZLECENIA -
+    # i ma sie o tym dowiedziec glosno, a nie przez limit, ktory przepuszcza
+    # wszystko. Ten warunek nie moze zapalic sie na produkcji: `RiskKernel.check`
+    # i symulacja portfelowa mierza obie wielkosci przed wolaniem.
+    if state.exposure is None or state.per_instrument is None:
+        raise ValueError(
+            "evaluate_limits dostalo stan bez zmierzonej ekspozycji - ocena "
+            "zlecenia na takim stanie przepuscilaby kazde wejscie")
 
     # 5. Laczna ekspozycja.
     lim = limits.get("max_total_exposure")

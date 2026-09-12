@@ -30,6 +30,11 @@ Robi trzy rzeczy w pętli co `INTERWAL_S`:
        czasu (patrz wznowienie.py)
     3. bije własny heartbeat, żeby czujka żywotności miała czego pilnować
 
+A od 2026-09-12 robi też czwartą: KOŃCZY SIĘ, gdy `POD_RZAD_MAX` cykli z rzędu
+zakończy się błędem. Pojedynczy wyjątek nadal nie zabija ostatniej linii obrony;
+seria wyjątków nie jest jednak błędem, tylko stanem — i bezpiecznik w takim
+stanie ma przestać wyglądać na działający. Powód opisany przy stałej niżej.
+
 NIE zamyka pozycji. Zatrzymuje wejścia; wyjścia zostają w gestii silnika.
 Awaryjne domknięcie z tego procesu wymagałoby kluczy giełdy w kolejnym
 kontenerze, co poszerza powierzchnię ataku — to osobna decyzja, nie oczywista
@@ -99,6 +104,38 @@ from services.engine.wznowienie import wznow
 INTERWAL_S = int(os.environ.get("DOZORCA_INTERWAL_S", "60"))
 NAZWA = "dozorca-ryzyka"
 
+# Ile cykli pod rząd zakończonych błędem kończy proces. TA SAMA STAŁA co
+# w market_worker, history_worker, features i news_worker — różna liczba
+# w każdym module znaczyłaby, że „pięć awarii" jest wynikiem przypadku, a nie
+# decyzji.
+#
+# DLACZEGO DOZORCA GO NIE MIAŁ, A MUSI
+#
+# Cztery workery danych dostały ten licznik, bo „proces, który pada, ma padać
+# widocznie". Dozorca został pominięty z rozumowania, które brzmiało dobrze
+# i było błędne: ostatnia linia obrony nie może zginąć od jednego błędu, więc
+# pętla łapie wyjątek i idzie dalej. Brakującego drugiego zdania dopisała
+# produkcja 2026-09-11: pod stał 15 godzin z 900 przerwanymi cyklami pod rząd
+# i ANI JEDNYM domkniętym, a `kubectl get pods` pokazywał `Running 1/1`,
+# `restartCount 0`, ArgoCD `Healthy`. Wyjątek wypisany do logu to nie jest
+# widoczność — logu poda nikt nie czyta, a po restarcie kontenera nie ma go
+# już wcale.
+#
+# Jeden błąd to nadal nie powód do śmierci: pięć cykli to pięć minut, w których
+# chwilowe zerwanie połączenia z bazą mija samo. Pięć pod rząd to nie chwila,
+# to stan — i wtedy proces, który UDAJE ŻYWEGO, jest gorszy niż proces, którego
+# nie ma. Nieżyjący dozorca w CrashLoopBackOff jest widoczny w `kubectl get
+# pods`, podnosi `restartCount` i psuje zdrowie aplikacji w ArgoCD. Żyjący
+# dozorca, który nic nie ocenia, nie robi żadnej z tych rzeczy.
+#
+# TO NIE JEST `livenessProbe` I NIE MA GO ZASTĘPOWAĆ. Argumentacja w
+# `charts/trader/templates/workers.yaml` (dlaczego probe'a tam nie ma i nie
+# dostanie) obowiązuje bez zmian: restart nikomu nic nie mówi. Licznik broni
+# przed procesem, który PADA; przed procesem, który STOI — zawieszonym na
+# zapytaniu — broni puls `risk.dozorca_heartbeat` i `dozor.py --co zywotnosc`.
+# To dwie różne awarie i żaden z tych mechanizmów nie zastępuje drugiego.
+POD_RZAD_MAX = int(os.environ.get("DOZORCA_POD_RZAD_MAX", "5"))
+
 
 async def bij_heartbeat(execute, engine: str, mode: str, detal: dict) -> None:
     """Własny puls dozorcy — w OSOBNEJ tabeli, nie w risk.engine_heartbeat.
@@ -147,10 +184,12 @@ async def petla(engine: str, mode: str, raz: bool = False) -> int:
     print("Ocenia limity konta niezależnie od silnika, wznawia na dowodzie, "
           "bije własny puls.")
     poprzedni: str | None = None
+    pod_rzad = 0
     try:
         with psycopg.connect(url, row_factory=dict_row) as conn:
             while True:
                 started = datetime.now(timezone.utc)
+                blad: str | None = None
                 try:
                     werdykt, powod, wiek = ocen_konto(conn, engine, mode)
                     # Zmiana stanu jest zdarzeniem; stan niezmieniony nie jest.
@@ -180,16 +219,47 @@ async def petla(engine: str, mode: str, raz: bool = False) -> int:
                                              round(wiek, 1) if wiek is not None
                                              else None)})
                 except Exception as e:                        # noqa: BLE001
-                    # Dozorca NIE MOŻE zginąć od pojedynczego błędu — to on jest
-                    # ostatnią linią. Błąd jest wypisany i pętla idzie dalej;
-                    # gdyby błąd był trwały, heartbeat przestanie się odświeżać
-                    # i czujka żywotności zgłosi to jako martwego dozorcę.
-                    print(f"[{started:%H:%M:%S}] cykl dozorcy przerwany: "
-                          f"{type(e).__name__}: {e}")
+                    # Dozorca NIE MOŻE zginąć od POJEDYNCZEGO błędu — to on jest
+                    # ostatnią linią, a chwilowe zerwanie połączenia z bazą mija
+                    # samo. Błąd jest wypisany i pętla idzie dalej.
+                    #
+                    # ALE SERIA BŁĘDÓW TO JUŻ NIE BŁĄD, TYLKO STAN. Do 2026-09-12
+                    # stało tu wyłącznie „pętla idzie dalej", z uzasadnieniem, że
+                    # trwała awaria przestanie odświeżać heartbeat i zgłosi ją
+                    # czujka żywotności. To rozumowanie ma dwie dziury i obie
+                    # otworzyły się tego samego dnia: alarm czujki może nie
+                    # wyjść (wywracał się na enumie `ref.engine` przy `notify()`),
+                    # a alarm i tak NIE JEST ZATRZYMANIEM — sam proces wygląda
+                    # dalej na zdrowy w każdym narzędziu, które na niego patrzy.
+                    # Licznik niżej nie zastępuje czujki; jest drugim, niezależnym
+                    # od bazy i od poczty sygnałem tego samego faktu.
+                    blad = f"{type(e).__name__}: {e}"
+                    print(f"[{started:%H:%M:%S}] cykl dozorcy przerwany: {blad}")
                     conn.rollback()
 
+                if blad:
+                    pod_rzad += 1
+                    print(f"[{started:%H:%M:%S}] cykl dozorcy nieudany "
+                          f"({pod_rzad}/{POD_RZAD_MAX})")
+                    if pod_rzad >= POD_RZAD_MAX:
+                        # KOD NIEZEROWY, nie `sys.exit(0)` i nie cicha pętla:
+                        # kontener ma wstać, `restartCount` ma urosnąć, a przy
+                        # trwałej przyczynie pod ma wpaść w CrashLoopBackOff.
+                        # Bezpiecznik, którego nie ma, musi być widoczny jako
+                        # bezpiecznik, którego nie ma.
+                        print(f"{POD_RZAD_MAX} cykli dozorcy pod rząd "
+                              f"zakończonych błędem — kończę proces, żeby "
+                              f"martwy bezpiecznik przestał wyglądać na żywy")
+                        return 1
+                else:
+                    pod_rzad = 0
+
                 if raz:
-                    return 0
+                    # KOD WYJŚCIA MÓWI, CZY CYKL SIĘ UDAŁ. Do 2026-09-12 `--raz`
+                    # zwracało 0 zawsze, także po wyjątku — czyli jedyne
+                    # narzędzie do ręcznego sprawdzenia dozorcy meldowało sukces
+                    # dokładnie wtedy, gdy dozorca nie działał.
+                    return 1 if blad else 0
                 await asyncio.sleep(INTERWAL_S)
     finally:
         await close_pool()

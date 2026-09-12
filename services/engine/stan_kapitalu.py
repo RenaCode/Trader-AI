@@ -79,6 +79,11 @@ def stan_ryzyka(wiersze: dict[str, dict | None]) -> RiskState | None:
     Pozostale pola (ekspozycja, zlecenia, kill-switch) zostaja puste: ten stan
     sluzy do policzenia WYNIKU, a nie do wydania werdyktu o zleceniu.
 
+    Ekspozycja idzie jako `None`, nie `Decimal(0)` - patrz `RiskState`. Zero
+    bylo tu nieprawda, ktorej nie da sie odroznic od pomiaru: gdyby ktos
+    kiedykolwiek podal ten stan do `evaluate_limits`, `max_total_exposure`
+    przepuscilby kazde zlecenie, milczac. Teraz taki wolacz dostaje `ValueError`.
+
     FALLBACKI SA TU, a nie u wolajacego. Brak punktu sprzed doby znaczy, ze
     cala krzywa jest mlodsza niz doba - odniesieniem jest wtedy jej POCZATEK.
     Spadek na punkt biezacy dawal `doba == wynik`, czyli strate dzienna 0,00%
@@ -98,7 +103,7 @@ def stan_ryzyka(wiersze: dict[str, dict | None]) -> RiskState | None:
     if nav is None:
         # Bez `nav` reguly spadaja na kapital - zachowanie sprzed migracji 0031.
         return RiskState(equity=equity, peak=szczyt, day_ago=doba,
-                         exposure=Decimal(0), per_instrument={}, orders_last_hour=0)
+                         exposure=None, per_instrument=None, orders_last_hour=0)
 
     agr = wiersze.get("nav_agregat") or {}
     nav_szczyt = _dec(agr.get("szczyt")) or nav
@@ -110,7 +115,7 @@ def stan_ryzyka(wiersze: dict[str, dict | None]) -> RiskState | None:
 
     return RiskState(
         equity=equity, peak=szczyt, day_ago=doba,
-        exposure=Decimal(0), per_instrument={}, orders_last_hour=0,
+        exposure=None, per_instrument=None, orders_last_hour=0,
         nav=nav, nav_peak=nav_szczyt, nav_day_ago=nav_doba,
         wplaty_netto=_dec(nav_biez.get("wplaty_netto")),
         nav_od_poczatku=od_poczatku)

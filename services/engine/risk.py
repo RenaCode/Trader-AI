@@ -456,13 +456,50 @@ class RiskKernel:
         obsuniecie kapitalu podczas trzymania pozycji nie bylo przez nikogo
         oceniane i kill-switch nie mial szans zadzialac - patrz komentarz przy
         evaluate_account().
+
+        EKSPOZYCJA POZA TA SCIEZKA (naprawa 2026-09-12)
+
+        Do tego dnia stalo tu `self._open_exposure()`. Ta liczba NIE BYLA PRZEZ
+        NIKOGO CZYTANA: `evaluate_account` ma cztery reguly - kill-switch,
+        strate dzienna, prog kapitalu i obsuniecie - i zadna z nich nie siega
+        ani do `state.exposure`, ani do `state.per_instrument`. Oba pola czyta
+        wylacznie `evaluate_limits`, czyli ocena POJEDYNCZEGO ZLECENIA, ktorej
+        ta metoda nie wola. Do `record_usage` tez nic z tego nie szlo, bo
+        `evaluate_account` nie dopisuje pozycji `max_total_exposure` do `usage`.
+
+        Kosztowalo to CALY BEZPIECZNIK. `_open_exposure` czyta
+        `journal.planned_order` i `journal.decision`, a rola `trader_dozorca`
+        nie ma USAGE na schemat `journal` - i to jest granica celowa
+        (migracja 0034: nadzorca, ktory czyta uzasadnienia decyzji, zaczyna je
+        oceniac). Dozorca wywracal sie wiec na KAZDYM cyklu, 900 razy pod rzad,
+        zanim doszedl do `wznow()` i do wlasnego pulsu - a poniewaz petla lapie
+        wyjatek i spi 60 s, na zewnatrz wygladalo to na `Running` 1/1 i ArgoCD
+        `Healthy`. Zaobserwowane na produkcji 2026-09-11/12:
+        `permission denied for schema journal`, zero domknietych cykli.
+
+        DRUGIE PRZEJSCIE PRZEZ TE SAMA GRANICE, jeszcze nieujawnione: krok (1)
+        `_open_exposure` wycenia pozycje po `market.candle`, a dozorca nie ma
+        USAGE takze na `market`. Na produkcji nie bylo tego widac wylacznie
+        dlatego, ze przy zatrzymanym handlu nie ma ani jednej otwartej pozycji,
+        wiec `cena_odniesienia` nie jest w ogole wolana. Samo nadanie praw do
+        `journal` przesunelo by awarie na `market` przy pierwszej pozycji.
+
+        DLACZEGO NIE WASKI `GRANT`, TYLKO USUNIECIE ZAPYTANIA. Nadanie praw po
+        to, zeby policzyc liczbe, ktorej nikt nie czyta, jest rozszczelnieniem
+        granicy bez zadnej wartosci po drugiej stronie. Pytanie „czy pominiecie
+        `journal` zanizy ekspozycje" nie powstaje, bo ekspozycja w tej sciezce
+        nie jest do niczego uzywana. W `check()` - jedynej sciezce, ktora ja
+        czyta - zapytania zostaja bez zmian; tamta chodzi na roli
+        `trader_silnik`, ktora ma pelny dostep do `journal`.
         """
         equity, peak, day_ago = self._equity()
         nav, nav_szczyt, nav_doba, wplaty, nav_od_poczatku = self._wynik()
-        exposure, per_instrument = self._open_exposure()
         state = RiskState(
-            equity=equity, peak=peak, day_ago=day_ago, exposure=exposure,
-            per_instrument=per_instrument, orders_last_hour=0,
+            equity=equity, peak=peak, day_ago=day_ago,
+            # EKSPOZYCJI TU NIE MIERZYMY - patrz `EKSPOZYCJA POZA TA SCIEZKA`
+            # w docstringu wyzej. `None`, a nie `Decimal(0)`: stan bez pomiaru
+            # ma sie nie nadawac do oceny zlecenia.
+            exposure=None, per_instrument=None, orders_last_hour=0,
             killswitch=self.killswitch_active(),
             nav=nav, nav_peak=nav_szczyt, nav_day_ago=nav_doba,
             wplaty_netto=wplaty, nav_od_poczatku=nav_od_poczatku,
