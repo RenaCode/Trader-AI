@@ -66,3 +66,29 @@ def nazwa_przekrojowa(nazwa_bazowa: str, symbole: Iterable[str]) -> str:
     niezależnie od uniwersum i nie muszą o nim wiedzieć.
     """
     return f"{nazwa_bazowa}#{odcisk(symbole)}"
+
+
+# UNIWERSUM DECYZYJNE — JEDNO ZAPYTANIE DLA WSZYSTKICH, KTÓRZY JE CZYTAJĄ.
+#
+# Pętla decyzyjna (loop.py), trener (train.py) i potok cech (features.py) pytały
+# o ten zbiór trzema osobnymi, przepisanymi zapytaniami. Czwarte — w
+# `diagnose_signals.py` — zgubiło `tradeable`, i to nie objawiło się awarią:
+# odcisk policzony po „wszystkich aktywnych" nie pasował do żadnej definicji
+# w `feat.feature_def`, więc `load_panel` nie zwracał ANI JEDNEGO wiersza
+# `rel_strength`, `cross_section()` zwracał None, a tabela IC drukowała się bez
+# tego jednego wiersza. Brak wiersza wygląda dokładnie tak samo jak sygnał,
+# którego nikt nie policzył.
+#
+# `tradeable`, nie `active`: historię zbieramy szerzej, niż handlujemy (0020).
+# Od migracji 0023 ten sam aktyw jest w bazie DWA RAZY — jako *USDT i jako
+# *USDC — więc „wszystkie aktywne" to zbiór, w którym BTC liczy się podwójnie.
+SQL_UNIWERSUM_DECYZYJNE = (
+    "SELECT id, symbol FROM ref.instrument"
+    " WHERE engine = %s AND active AND tradeable AND kind <> 'perp'"
+    " ORDER BY symbol")
+
+
+def uniwersum_decyzyjne(cur, engine: str) -> list[dict]:
+    """Instrumenty, którymi silnik faktycznie obstawia. Wiersze z `ref.instrument`."""
+    cur.execute(SQL_UNIWERSUM_DECYZYJNE, (engine,))
+    return cur.fetchall()

@@ -42,7 +42,7 @@ from psycopg.rows import dict_row
 
 from services.engine.horizons import DEFAULT_BAR, HORIZONS, get as get_horizon
 from services.engine.statystyka import spearman
-from services.engine.uniwersum import odcisk
+from services.engine.uniwersum import SQL_UNIWERSUM_DECYZYJNE, odcisk
 from services.engine.portfolio import precompute_panels
 from services.engine.train import atr_threshold, load_panel
 
@@ -76,7 +76,8 @@ def main() -> int:
                          "Do porownania IC MIEDZY uniwersami: gdy dwie grupy maja "
                          "osobno przewage, a razem nie, przyczyna musi byc widoczna "
                          "w tym, ze ten sam sygnal ma w nich rozny znak. Puste = "
-                         "wszystkie aktywne")
+                         "uniwersum decyzyjne (active AND tradeable), czyli to, "
+                         "co obstawia produkcja")
     args = ap.parse_args()
 
     url = os.environ.get("DATABASE_URL")
@@ -89,14 +90,36 @@ def main() -> int:
     with psycopg.connect(url, row_factory=dict_row) as conn:
         cur = conn.cursor()
         tylko = [x.strip().upper() for x in args.instrumenty.split(",") if x.strip()]
-        cur.execute("SELECT id, symbol FROM ref.instrument WHERE engine=%s AND active"
-                    " AND kind <> 'perp'"
-                    " AND (%s::text[] IS NULL OR symbol = ANY(%s))"
-                    " ORDER BY symbol", (args.engine, tylko or None, tylko or None))
+        if tylko:
+            # ZBIOR PODANY WPROST - do porownania uniwersum kandydujacego
+            # z obowiazujacym. Odcisk liczy sie wtedy z DOKLADNIE tej listy,
+            # tak samo jak przy `features.py --instrumenty`.
+            cur.execute("SELECT id, symbol FROM ref.instrument WHERE engine=%s AND active"
+                        " AND kind <> 'perp' AND symbol = ANY(%s)"
+                        " ORDER BY symbol", (args.engine, tylko))
+        else:
+            # UNIWERSUM DECYZYJNE, NIE „WSZYSTKIE AKTYWNE".
+            #
+            # Do 2026-09-12 staly tu `active AND kind <> 'perp'` bez `tradeable`
+            # i wynikaly z tego dwie rzeczy naraz, obie ciche:
+            #
+            #   * odcisk policzony z tego zbioru nie pasowal do ZADNEJ definicji
+            #     w `feat.feature_def` (potok cech zapisuje je pod odciskiem
+            #     uniwersum decyzyjnego), wiec `load_panel` nie oddawal ani
+            #     jednego wiersza `rel_strength`. `cross_section()` zwracal None,
+            #     a tabela IC drukowala sie bez tego wiersza - czyli akurat bez
+            #     liczby, po ktora sie tu przychodzi;
+            #   * od migracji 0023 ten sam aktyw jest w bazie dwa razy (*USDT
+            #     i *USDC), wiec proba IC liczyla BTC podwojnie. `n` roslo
+            #     dwukrotnie bez jednej nowej obserwacji, a blad standardowy
+            #     wypisany nizej malal przez to o czynnik do sqrt(2).
+            cur.execute(SQL_UNIWERSUM_DECYZYJNE, (args.engine,))
         instrumenty = cur.fetchall()
         brak = sorted(set(tylko) - {i["symbol"] for i in instrumenty})
         if brak:
             sys.exit(f"nie ma w bazie albo nieaktywne: {', '.join(brak)}")
+        if not instrumenty:
+            sys.exit("uniwersum decyzyjne jest puste — nie ma czego mierzyć")
 
         # ODCISK UNIWERSUM dla cechy przekrojowej. Bez niego sila wzgledna byla by
         # martwa w calej diagnostyce, a jej IC - jedynego sygnalu patrzacego na

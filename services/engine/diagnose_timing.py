@@ -65,6 +65,7 @@ from services.engine.risk_rules import MIN_CONFIDENCE
 from services.engine.train import (
     DEFAULT_WEIGHTS, MIN_INSTRUMENTS, atr_threshold, load_panel, score_threshold,
 )
+from services.engine.uniwersum import SQL_UNIWERSUM_DECYZYJNE, odcisk
 
 # Ile losowych ukladow czasu na okno. 200 daje percentyl z dokladnoscia 0,5 pkt,
 # co w zupelnosci wystarcza do odpowiedzi "srodek rozkladu czy ogon".
@@ -116,14 +117,27 @@ def main() -> int:
 
     with psycopg.connect(url, row_factory=dict_row) as conn:
         cur = conn.cursor()
-        cur.execute("SELECT id, symbol FROM ref.instrument WHERE engine=%s AND active"
-                    " AND tradeable AND kind <> 'perp' ORDER BY symbol", (args.engine,))
+        cur.execute(SQL_UNIWERSUM_DECYZYJNE, (args.engine,))
         instrumenty = cur.fetchall()
         inst_ids = {i["symbol"]: i["id"] for i in instrumenty}
+        if not instrumenty:
+            print("PRZERWANO: uniwersum decyzyjne jest puste")
+            return 2
+
+        # ODCISK UNIWERSUM. Bez niego `load_panel` odsiewa cechy przekrojowe
+        # warunkiem `params->>'uniwersum' = NULL`, ktory jest falszem dla kazdego
+        # wiersza - `rel_strength` wypadalo wiec z panelu, `cross_section()`
+        # zwracalo None, a `combine()` renormalizowalo wynik po pozostalych
+        # SIEDMIU sygnalach. Test permutacyjny mierzyl przez to inna strategie
+        # niz ta, ktora prowadzi produkcja, i nie mial jak tego powiedziec:
+        # brakujacej cechy nie widac w wydruku niczym poza samym wynikiem.
+        fp = odcisk([i["symbol"] for i in instrumenty])
+        print(f"Uniwersum: {len(instrumenty)} instrumentów, odcisk {fp}")
 
         panels: dict[str, list[dict]] = {}
         for inst in instrumenty:
-            p = load_panel(cur, inst["id"], h, now - timedelta(days=args.days), now)
+            p = load_panel(cur, inst["id"], h, now - timedelta(days=args.days), now,
+                           fp=fp)
             if len(p) > 500:
                 panels[inst["symbol"]] = p
         if len(panels) < MIN_INSTRUMENTS:
