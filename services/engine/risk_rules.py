@@ -189,6 +189,103 @@ def wartosc_limitu(lim: dict, kapital: Decimal) -> Decimal:
     return Decimal(lim["value"])
 
 
+def prog_min_equity(lim: dict, state: RiskState) -> Decimal:
+    """Podloga kapitalu w walucie. JEDNO miejsce, bo czyta ja pomiar I regula.
+
+    NIGDY PROCENTOWO OD SZCZYTU. Prog wyrazony jako procent szczytu jest
+    DOKLADNIE limitem obsuniecia (`max_drawdown`) - czyli duplikatem, ktory
+    wyglada na dodatkowe zabezpieczenie i nim nie jest.
+
+    Dopuszczalne sa dwie postacie. Kwotowa jest prosta, ale przestaje dzialac po
+    wyplacie: rachunek spada zgodnie z wola wlasciciela, a prog zostaje w miejscu
+    i zatrzymuje silnik bez powodu. `pct_wplat` przesuwa sie razem z wplatami
+    netto i wyraza to, o co chodzi: "nie strac wiecej niz tyle z tego, co
+    wlozylem".
+    """
+    if lim.get("unit") == "pct_wplat" and state.wplaty_netto is not None:
+        return Decimal(lim["value"]) / Decimal(100) * state.wplaty_netto
+    return Decimal(lim["value"])
+
+
+def pomiar_konta(state: RiskState,
+                 limits: dict[str, dict]) -> tuple[list[dict], dict]:
+    """Zuzycie KAZDEGO limitu konta - policzone ZANIM zapadnie jakikolwiek werdykt.
+
+    DLACZEGO POMIAR JEST ODDZIELONY OD OCENY
+
+    Do 2026-09-12 obie rzeczy robila jedna petla warunkow w `evaluate_account`:
+    kazdy limit dopisywal swoj pomiar tuz przed wlasnym `return`. Wygladalo to
+    poprawnie i mialo skutek, ktorego nikt nie zaplanowal - POMIAR ZNIKAL
+    DOKLADNIE WTEDY, GDY BYL NAJPOTRZEBNIEJSZY:
+
+      * przy aktywnym kill-switchu funkcja wracala w punkcie 1, PRZED
+        pierwszym pomiarem. Zatrzymane konto nie produkowalo wiec ani jednego
+        wiersza w `risk.limit_usage` - a to jest stan, w ktorym pytanie "czy
+        bezpiecznik w ogole liczy" jest jedynym, jakie zostaje. Zmierzone na
+        produkcji 2026-09-12: kill-switch aktywny od 2026-09-09 03:20, ostatni
+        zapisany pomiar sprzed 9629 minut, `min_equity` BEZ ANI JEDNEGO pomiaru
+        w calej historii;
+      * przy naruszeniu wczesniejszego limitu ginely pomiary wszystkich
+        pozniejszych. Naruszona strata dzienna kasowala pomiar `min_equity`
+        i `max_drawdown`, czyli dokladnie w chwili klopotu dwa z trzech filarow
+        podlogi kapitalu przestawaly zostawiac slad.
+
+    Oba objawy to ta sama wada: NADZOR STAJE SIE NIEWIDOCZNY W CHWILI, W KTOREJ
+    JEST NAJBARDZIEJ POTRZEBNY. Ten sam ksztalt, co tlumienie powiadomien
+    spelnione raz na zawsze i co zawieszony worker meldujacy `Running 1/1`.
+
+    Pomiar jest wiec teraz bezwarunkowy, a krotkie spiecie ocen zostaje - to
+    dwie rozne rzeczy i nie moga dzielic jednego `return`.
+
+    CO NADAL MOZE ZOSTAC NIEZMIERZONE, I DLACZEGO TO NIE JEST TA SAMA WADA
+
+    Warunki `wynik_doba > 0` i `wynik_szczyt > 0` zostaja, bo mowia o BRAKU
+    DANYCH, a nie o werdykcie: bez odniesienia sprzed doby nie ma czego dzielic.
+    Rozroznia je czujka - limit bez ani jednego pomiaru w historii jest dla niej
+    alarmem tak samo jak pomiar przeterminowany (patrz `dozor.ocen_cisze_pomiaru`).
+
+    ZWRACA DWIE RZECZY, BO SLUZA DWOM ROZNYM ODBIORCOM
+
+    `usage` idzie DO BAZY: `float` i `used` obciete do zera, bo `utilization`
+    ujemne czytaloby sie jak blad zapisu, a nie jak rachunek z zyskiem.
+
+    `surowe` idzie DO REGULY i niesie liczbe, ktora regula naprawde porownuje:
+    nieobciety odsetek straty i obsuniecia (te moga byc ujemne) oraz podloge
+    kapitalu jako `Decimal`. Przekazanie regule liczby z `usage` byloby cicha
+    zmiana warunku bezpieczenstwa - obcinanie i konwersja na `float` nalezy do
+    zapisu, nie do oceny.
+    """
+    usage: list[dict] = []
+    surowe: dict = {}
+
+    lim = limits.get("max_daily_loss")
+    if lim and state.wynik_doba > 0:
+        # Z WYNIKU, nie z kapitalu: wyplata obniza kapital zgodnie z wola
+        # wlasciciela i nie jest strata dzienna.
+        loss_pct = float((state.wynik_doba - state.wynik) / state.wynik_doba * 100)
+        surowe["max_daily_loss"] = loss_pct
+        usage.append({"name": "max_daily_loss", "used": max(0.0, loss_pct),
+                      "threshold": float(lim["value"])})
+
+    lim = limits.get("min_equity")
+    if lim:
+        prog = prog_min_equity(lim, state)
+        surowe["min_equity"] = prog
+        usage.append({"name": "min_equity", "used": float(state.equity),
+                      "threshold": float(prog)})
+
+    lim = limits.get("max_drawdown")
+    if lim and state.wynik_szczyt > 0:
+        # Z WYNIKU, nie z kapitalu: wplata podnosi kapital i szczyt, a nie jest
+        # zyskiem - obsuniecie liczone od takiego szczytu mierzyloby przelew.
+        dd_pct = float((state.wynik_szczyt - state.wynik) / state.wynik_szczyt * 100)
+        surowe["max_drawdown"] = dd_pct
+        usage.append({"name": "max_drawdown", "used": max(0.0, dd_pct),
+                      "threshold": float(lim["value"])})
+
+    return usage, surowe
+
+
 def evaluate_account(state: RiskState, limits: dict[str, dict]) -> RiskVerdict:
     """Limity dotyczace CALEGO KONTA - kill-switch, strata dzienna, obsuniecie.
 
@@ -204,25 +301,30 @@ def evaluate_account(state: RiskState, limits: dict[str, dict]) -> RiskVerdict:
 
     Wykryte przez test symulacji portfelowej, ktory nie potrafil doprowadzic do
     uruchomienia kill-switcha mimo straty przekraczajacej prog.
+
+    KAZDE WYJSCIE Z TEJ FUNKCJI NIESIE PELNY POMIAR. Liczby pochodza z
+    `pomiar_konta` i sa tam policzone RAZ - uzasadnienie i historia wady
+    w docstringu tamtej funkcji. Werdykt nadal zwiera na pierwszym naruszeniu;
+    zwiera sie tylko OCENA, nie pomiar.
     """
     violations: list[dict] = []
-    usage: list[dict] = []
+    usage, surowe = pomiar_konta(state, limits)
 
-    # 1. Kill-switch. Nic dalej nie ma znaczenia.
+    # 1. Kill-switch. Nic dalej nie ma znaczenia DLA WERDYKTU - ale pomiar idzie
+    #    dalej razem z nim, bo zatrzymane konto jest jedynym, przy ktorym pytanie
+    #    "czy bezpiecznik nadal liczy" nie ma innej odpowiedzi niz ten wiersz.
     if state.killswitch:
         ts = state.killswitch.get("triggered_at")
         kiedy = f" od {ts:%Y-%m-%d %H:%M}" if ts else ""
-        return RiskVerdict("block",
-                           f"Kill-switch aktywny{kiedy}: {state.killswitch.get('reason')}")
+        return RiskVerdict(
+            "block",
+            f"Kill-switch aktywny{kiedy}: {state.killswitch.get('reason')}",
+            usage=usage)
 
     # 2. Strata dzienna.
     lim = limits.get("max_daily_loss")
-    if lim and state.wynik_doba > 0:
-        # Z WYNIKU, nie z kapitalu: wyplata obniza kapital zgodnie z wola
-        # wlasciciela i nie jest strata dzienna.
-        loss_pct = float((state.wynik_doba - state.wynik) / state.wynik_doba * 100)
-        usage.append({"name": "max_daily_loss", "used": max(0.0, loss_pct),
-                      "threshold": float(lim["value"])})
+    if lim and "max_daily_loss" in surowe:
+        loss_pct = surowe["max_daily_loss"]
         if loss_pct >= float(lim["value"]):
             violations.append({"limit": "max_daily_loss", "observed": loss_pct,
                                "threshold": float(lim["value"]), "action": lim["action"]})
@@ -253,21 +355,7 @@ def evaluate_account(state: RiskState, limits: dict[str, dict]) -> RiskVerdict:
     # Ogranicza to, ILE SYSTEM ZARYZYKUJE DALEJ, a nie to, ile juz stracil.
     lim = limits.get("min_equity")
     if lim:
-        # NIGDY PROCENTOWO OD SZCZYTU. Prog wyrazony jako procent szczytu jest
-        # DOKLADNIE limitem obsuniecia, ktory stoi punkt nizej - czyli
-        # duplikatem, ktory wyglada na dodatkowe zabezpieczenie i nim nie jest.
-        #
-        # Dopuszczalne sa dwie postacie. Kwotowa jest prosta, ale przestaje
-        # dzialac po wyplacie: rachunek spada zgodnie z wola wlasciciela,
-        # a prog zostaje w miejscu i zatrzymuje silnik bez powodu. `pct_wplat`
-        # przesuwa sie razem z wplatami netto i wyraza to, o co chodzi:
-        # "nie strac wiecej niz tyle z tego, co wlozylem".
-        if lim.get("unit") == "pct_wplat" and state.wplaty_netto is not None:
-            prog = Decimal(lim["value"]) / Decimal(100) * state.wplaty_netto
-        else:
-            prog = Decimal(lim["value"])
-        usage.append({"name": "min_equity", "used": float(state.equity),
-                      "threshold": float(prog)})
+        prog = surowe["min_equity"]
         if state.equity <= prog:
             violations.append({"limit": "min_equity", "observed": float(state.equity),
                                "threshold": float(prog), "action": lim["action"]})
@@ -280,12 +368,8 @@ def evaluate_account(state: RiskState, limits: dict[str, dict]) -> RiskVerdict:
 
     # 4. Obsuniecie od szczytu.
     lim = limits.get("max_drawdown")
-    if lim and state.wynik_szczyt > 0:
-        # Z WYNIKU, nie z kapitalu: wplata podnosi kapital i szczyt, a nie jest
-        # zyskiem - obsuniecie liczone od takiego szczytu mierzyloby przelew.
-        dd_pct = float((state.wynik_szczyt - state.wynik) / state.wynik_szczyt * 100)
-        usage.append({"name": "max_drawdown", "used": max(0.0, dd_pct),
-                      "threshold": float(lim["value"])})
+    if lim and "max_drawdown" in surowe:
+        dd_pct = surowe["max_drawdown"]
         if dd_pct >= float(lim["value"]):
             violations.append({"limit": "max_drawdown", "observed": dd_pct,
                                "threshold": float(lim["value"]), "action": lim["action"]})

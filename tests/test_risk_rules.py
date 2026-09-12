@@ -259,3 +259,72 @@ def test_wydruk_limitu_ekspozycji_nie_zalezy_od_jednostki():
     baza = Decimal(str(START_EQUITY))
     assert wartosc_limitu(kwotowo, baza) == wartosc_limitu(procentowo, baza)
     assert float(wartosc_limitu(procentowo, baza)) / START_EQUITY == pytest.approx(0.15)
+
+
+# ============================================================================
+# POMIAR NIE ZWIERA SIĘ RAZEM Z WERDYKTEM (naprawa 2026-09-12)
+#
+# `evaluate_account` liczyło zużycie każdego limitu tuż przed własnym `return`,
+# więc pierwszy werdykt kasował pomiar wszystkich limitów stojących niżej —
+# a aktywny kill-switch kasował je wszystkie, bo wracał w punkcie 1.
+#
+# Skutek zmierzony na produkcji 2026-09-12: kill-switch aktywny od 2026-09-09
+# 03:20, ostatni wiersz w `risk.limit_usage` sprzed 9629 minut, `min_equity` bez
+# ANI JEDNEGO pomiaru w całej historii. Przez sześć dób nie istniał żaden dowód,
+# że ochrona kapitału w ogóle liczy — dokładnie w stanie, w którym jest to
+# jedyne pytanie, jakie zostaje.
+#
+# Werdykt nadal zwiera na pierwszym naruszeniu. Zwiera się WYŁĄCZNIE ocena.
+# ============================================================================
+
+LIMITY_KONIECZNE_NAZWY = {"max_daily_loss", "max_drawdown", "min_equity"}
+
+
+def zmierzone(v) -> set[str]:
+    return {u["name"] for u in v.usage}
+
+
+def test_KANAREK_aktywny_kill_switch_NIE_kasuje_pomiaru():
+    """Sedno poprawki. Werdykt `block` z punktu 1 ma nieść komplet pomiarów."""
+    v = evaluate_account(
+        stan(killswitch={"reason": "prog kapitalu", "triggered_at": None}),
+        DEFAULT_LIMITS)
+    assert v.verdict == "block" and "Kill-switch" in (v.reason or "")
+    assert zmierzone(v) >= LIMITY_KONIECZNE_NAZWY, (
+        f"zatrzymane konto nie zostawia śladu pomiaru — bezpiecznik znów jest "
+        f"niewidoczny dokładnie wtedy, gdy jest najpotrzebniejszy; "
+        f"zmierzone: {sorted(zmierzone(v))}")
+
+
+def test_KANAREK_naruszony_limit_NIE_kasuje_pomiaru_limitow_ponizej():
+    """Strata dzienna przekroczona w punkcie 2 kasowała pomiar `min_equity`
+    (punkt 3) i `max_drawdown` (punkt 4) — czyli w chwili kłopotu dwa z trzech
+    filarów podłogi kapitału przestawały zostawiać ślad."""
+    v = evaluate_account(stan(equity=Decimal("97000"), peak=Decimal("100000")),
+                         DEFAULT_LIMITS)
+    assert v.verdict == "block" and "Strata dzienna" in (v.reason or "")
+    assert zmierzone(v) >= LIMITY_KONIECZNE_NAZWY, (
+        f"pomiar zwarł się razem z werdyktem: {sorted(zmierzone(v))}")
+
+
+def test_zdrowe_konto_mierzy_DOKLADNIE_TO_SAMO_co_przed_zmiana():
+    """Kanarek na kanarka. Gdyby komplet pojawiał się tylko przy `block`,
+    poprzednie dwa testy przechodziłyby, a normalny cykl mierzyłby mniej."""
+    v = evaluate_account(stan(), DEFAULT_LIMITS)
+    assert v.verdict == "allow"
+    assert zmierzone(v) >= LIMITY_KONIECZNE_NAZWY
+
+
+def test_pomiar_straty_dziennej_NIE_JEST_obciety_w_regule():
+    """`usage` obcina `used` do zera, bo ujemne wykorzystanie czytałoby się jak
+    błąd zapisu. Reguła musi dostać liczbę NIEOBCIĘTĄ — obcinanie należy do
+    zapisu, nie do oceny. Rachunek na plusie: zapis 0, reguła widzi minus."""
+    from services.engine.risk_rules import pomiar_konta
+
+    usage, surowe = pomiar_konta(
+        stan(equity=Decimal("101000"), peak=Decimal("101000")), DEFAULT_LIMITS)
+    wpis = next(u for u in usage if u["name"] == "max_daily_loss")
+    assert wpis["used"] == 0.0, "ujemne wykorzystanie poszłoby do risk.limit_usage"
+    assert surowe["max_daily_loss"] < 0, (
+        "reguła dostała liczbę obciętą do zera — to cicha zmiana warunku "
+        "bezpieczeństwa przy limicie o wartości niedodatniej")

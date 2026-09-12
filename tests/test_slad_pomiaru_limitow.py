@@ -209,6 +209,59 @@ def test_zdrowy_komplet_NIE_rzuca():
     assert kernel(kur).check_account().verdict == "allow"
 
 
+# ------------------------------------------ 1b. ZATRZYMANE KONTO TEŻ MIERZY
+
+class KursorZatrzymany(Kursor):
+    """To samo konto, ale z AKTYWNYM kill-switchem w `risk.killswitch_event`."""
+
+    def execute(self, sql, params=None):
+        s = " ".join(sql.split())
+        if s.startswith("SELECT id, reason, triggered_at FROM risk.killswitch_event"):
+            self._wynik = [{"id": 2, "reason": "Kapitał 100063.09 spadł do progu "
+                                               "100563.00", "triggered_at": None}]
+            return self
+        return super().execute(sql, params)
+
+
+def test_KANAREK_zatrzymane_konto_ZOSTAWIA_slad_pomiaru():
+    """STAN PRODUKCJI 2026-09-12 I SEDNO POPRAWKI Z TEGO DNIA.
+
+    Kill-switch aktywny od 2026-09-09 03:20 (75 h), `min_equity` z regułą ręczną,
+    więc zatrzymanie nie mija samo. `evaluate_account` wracało w punkcie 1 PRZED
+    pierwszym pomiarem, więc przez cały ten czas nie powstał ani jeden wiersz
+    w `risk.limit_usage` — ostatni pochodził sprzed 9629 minut, a `min_equity`
+    nie miał ANI JEDNEGO w całej historii.
+
+    To jest ta sama rodzina wad, co „tłumienie spełnione raz na zawsze"
+    i „zawieszony worker melduje Running 1/1": NADZÓR ZNIKA DOKŁADNIE WTEDY, GDY
+    JEST NAJPOTRZEBNIEJSZY. Przy zatrzymanym systemie pytanie „czy bezpiecznik
+    jeszcze liczy" jest jedynym, jakie zostaje, a odpowiedzi nie było przez
+    sześć dób — i wyglądało to na stan wyjaśniony, bo czujka wypisywała
+    „SPODZIEWANE przy aktywnym kill-switchu".
+    """
+    kur = KursorZatrzymany()
+    v = kernel(kur).check_account()
+
+    assert v.verdict == "block" and "Kill-switch" in (v.reason or "")
+    zmierzone = kur.zmierzone_limity()
+    assert zmierzone == {1, 2, 11}, (
+        f"zatrzymane konto nie zostawiło kompletu pomiarów: {sorted(zmierzone)} "
+        f"— nie ma czym udowodnić, że podłoga kapitału jest jeszcze liczona")
+
+
+def test_zatrzymane_konto_NIE_wyzwala_kolejnego_kill_switcha():
+    """Druga strona: pomiar przy aktywnym kill-switchu nie może zamienić się
+    w żądanie następnego zatrzymania. `risk.killswitch_event` ma dostać zero
+    nowych wierszy — inaczej każdy cykl dokładałby jedno zdarzenie do listy,
+    której człowiek ma potem ręcznie dotknąć."""
+    kur = KursorZatrzymany()
+    v = kernel(kur).check_account()
+
+    assert v.trigger_killswitch is None
+    assert not [s for s, _ in kur.zapisy if "risk.killswitch_event" in s], (
+        "ocena zatrzymanego konta dopisała kolejne zdarzenie kill-switcha")
+
+
 # ============================================================================
 # 3. CISZA POMIARU JEST WIDOCZNA BEZ CZYTANIA LOGU PODA
 #
@@ -370,18 +423,40 @@ def test_swiezy_pomiar_bez_kill_switcha_to_ZERO():
     assert przebieg(AtrapaCzujki()) == (0, [])
 
 
-def test_przy_aktywnym_kill_switchu_cisza_pomiaru_NIE_ALARMUJE_drugi_raz():
-    """`evaluate_account` przy aktywnym kill-switchu wraca w punkcie 1, PRZED
-    jakimkolwiek pomiarem — cisza jest wtedy spodziewana, a nie awarią.
+def test_KANAREK_przy_aktywnym_kill_switchu_cisza_pomiaru_TEZ_ALARMUJE():
+    """ODWROCENIE POPRZEDNIEJ REGUŁY — i to jest sedno poprawki z 2026-09-12.
 
-    Drugi alarm o systemie, który już alarmuje, uczy odklikiwać oba. Stan i tak
-    jest widoczny: kill-switch trzyma kod wyjścia niezerowy.
+    Do tego dnia stał tu test o odwrotnej treści: „przy aktywnym kill-switchu
+    cisza pomiaru NIE alarmuje drugi raz". Uzasadniał go fakt, a nie zamiar —
+    `evaluate_account` wracało w punkcie 1 przed pierwszym pomiarem, więc
+    zatrzymane konto z natury nie produkowało wierszy, a alarm o tym byłby
+    alarmem o własnej implementacji.
+
+    Ta przyczyna została usunięta u źródła (`risk_rules.pomiar_konta` mierzy
+    bezwarunkowo), więc wyjątek przestał opisywać cokolwiek poza ślepotą czujki.
+    Zmierzone na produkcji 2026-09-12: kill-switch aktywny od trzech dób,
+    ostatni zapisany pomiar sprzed 9629 minut, `min_equity` bez ani jednego
+    w całej historii — i czujka wypisywała to jako „SPODZIEWANE".
+
+    Zatrzymany system jest DOKŁADNIE tym stanem, w którym pytanie „czy
+    bezpiecznik jeszcze liczy" nie ma innego źródła odpowiedzi niż ta tabela.
     """
     kod, wyslane = przebieg(AtrapaCzujki([zdarzenie_ks()], wiek_s=3 * 24 * 3600))
-    assert kod == 1, "kill-switch aktywny, a zadanie zielone"
-    kody = {w["code"] for w in wyslane}
-    assert "risk.pomiar_zamilkl" not in kody, (
-        f"drugi alarm o zatrzymanym systemie: {kody}")
+    kody = [w["code"] for w in wyslane]
+    assert "risk.pomiar_zamilkl" in kody, (
+        f"bezpiecznik milczy od trzech dób i nikt się o tym nie dowiaduje, bo "
+        f"aktywny kill-switch uciszył czujkę: {kody}")
+    assert kod >= 2, (
+        f"dwa niezależne znaleziska (cisza pomiaru + kill-switch), kod {kod}")
+
+
+def test_przy_kill_switchu_swiezy_pomiar_NIE_dokłada_alarmu():
+    """Druga strona tego samego warunku: usunięcie wyjątku nie może zamienić się
+    w alarm przy każdym zatrzymaniu. Kill-switch aktywny, pomiar świeży —
+    zgłoszeniem jest wyłącznie kill-switch."""
+    kod, wyslane = przebieg(AtrapaCzujki([zdarzenie_ks()], wiek_s=120))
+    assert [w["code"] for w in wyslane] == ["killswitch.triggered"] * 2
+    assert kod == 1
 
 
 def test_rytm_ciszy_pomiaru_nie_wysyla_i_NIE_PODNOSI_kodu_wyjscia(capsys):

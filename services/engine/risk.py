@@ -513,10 +513,16 @@ class RiskKernel:
         # tego, czy sam zapis zatrzymania sie powiedzie. Odwrotna kolejnosc
         # zostawialaby zdarzenie bez liczby, ktora je uzasadnia.
         #
-        # `usage` bywa PUSTE i to jest poprawne: przy aktywnym kill-switchu
-        # evaluate_account wraca w punkcie 1, przed jakimkolwiek pomiarem. Cisza
-        # w tabeli jest wtedy spodziewana i czujka `dozor.py --co ryzyko` o tym
-        # wie - patrz `ocen_cisze_pomiaru`.
+        # `usage` JEST PELNE PRZY KAZDYM WERDYKCIE, takze przy aktywnym
+        # kill-switchu i przy naruszonym limicie (naprawa 2026-09-12). Do tego
+        # dnia bylo odwrotnie: `evaluate_account` wracalo w punkcie 1 przed
+        # pierwszym pomiarem, wiec zatrzymane konto nie zostawialo ANI JEDNEGO
+        # wiersza - i przez szesc dob nie istnial zaden dowod, ze bezpiecznik
+        # jeszcze liczy. Uzasadnienie i liczby z produkcji: `risk_rules.pomiar_konta`.
+        #
+        # Pusta lista znaczy wiec od teraz jedno: `risk.limit_def` nie ma ani
+        # jednego limitu konta dla tej pary engine/mode. To stan do zgloszenia,
+        # a nie spodziewana cisza - patrz `dozor.ocen_cisze_pomiaru`.
         self.record_usage(verdict.usage, co_najmniej_s=POMIAR_CO_S)
 
         if verdict.trigger_killswitch:

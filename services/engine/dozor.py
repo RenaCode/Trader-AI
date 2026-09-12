@@ -742,17 +742,32 @@ def ocen_cisze_pomiaru(wiek_s: float | None, nigdy: list[str] | None,
                       or od_zgloszenia_min >= odstep_h * 60)}
 
 
-async def sprawdz_cisze_pomiaru(fetch_all, notify, zatrzymane: set[tuple[str, str]],
-                                sucho: bool = False) -> int:
+async def sprawdz_cisze_pomiaru(fetch_all, notify, sucho: bool = False) -> int:
     """Czy pomiar limitow konta zostawia slad. Zwraca kod wyjscia (`kod_wyjscia`).
 
-    `zatrzymane` to zbior par (engine, mode) z AKTYWNYM kill-switchem. Dla nich
-    cisza jest SPODZIEWANA i nie jest alarmem: `evaluate_account` wraca
-    w punkcie 1, przed jakimkolwiek pomiarem, wiec zatrzymane konto z zalozenia
-    nie produkuje wierszy. Drugi alarm o systemie, ktory juz alarmuje, uczy
-    odbiorce odklikiwac oba - a stan i tak jest widoczny, bo o zatrzymaniu mowi
-    czujka kill-switcha, w logu przy kazdym przebiegu i w powiadomieniu
-    w swoim rytmie.
+    AKTYWNY KILL-SWITCH NIE JEST JUZ USPRAWIEDLIWIENIEM CISZY - i usuniecie tego
+    wyjatku (2026-09-12) jest wazniejsze niz cokolwiek innego w tej funkcji.
+
+    Do tego dnia stal tu parametr `zatrzymane`: pary (engine, mode) z aktywnym
+    kill-switchem, dla ktorych cisze wypisywano jako SPODZIEWANA i nie zglaszano.
+    Uzasadnienie brzmialo sensownie - `evaluate_account` wracalo w punkcie 1
+    przed pierwszym pomiarem, wiec wierszy faktycznie nie bylo, a drugi alarm
+    o systemie, ktory juz alarmuje, uczy odklikiwac oba.
+
+    Skutek byl dokladnie odwrotny do zamierzonego. Czujka przestawala widziec
+    bezpiecznik W JEDYNYM STANIE, W KTORYM ZOSTAJE JEDNO PYTANIE: czy on jeszcze
+    liczy. Przez szesc dob produkcji (zmierzone 2026-09-12: ostatni pomiar sprzed
+    9629 minut, `min_equity` bez ani jednego w historii) nie istnial zaden dowod,
+    ze ocena limitow w ogole sie wykonuje - a wygladalo to na stan wyjasniony.
+
+    Wyjatek byl obejsciem wady, ktora nalezalo naprawic u zrodla, i zostala
+    naprawiona: `risk_rules.pomiar_konta` mierzy bezwarunkowo, wiec zatrzymane
+    konto produkuje wiersze tak samo jak handlujace. Cisza w tej tabeli znaczy
+    od teraz jedno i to samo w kazdym stanie: NIKT NIE MIERZY.
+
+    Co zostaje z argumentu o drugim alarmie: zostaje rytm przypominania
+    (`ocen_cisze_pomiaru`) - ten sam, ktory tlumi powtorki przy kill-switchu.
+    Tlumi POWTORKE, a nie PIERWSZE zgloszenie, i to jest cala roznica.
     """
     wiersze = await fetch_all(
         "SELECT d.engine::text AS engine, d.mode::text AS mode,"
@@ -781,7 +796,6 @@ async def sprawdz_cisze_pomiaru(fetch_all, notify, zatrzymane: set[tuple[str, st
     zgloszone = trwale = 0
     odbiorcy = None
     for w in wiersze:
-        para = (w["engine"], w["mode"])
         wiek_s = None if w["wiek_s"] is None else float(w["wiek_s"])
 
         # CZY KTOKOLWIEK, KTO MIALBY MIERZYC, W OGOLE ZYJE.
@@ -824,14 +838,6 @@ async def sprawdz_cisze_pomiaru(fetch_all, notify, zatrzymane: set[tuple[str, st
         if werdykt is None:
             print(f"pomiar limitów {w['engine']}/{w['mode']}: świeży "
                   f"({wiek_s / 60:.0f} min temu)")
-            continue
-
-        if para in zatrzymane:
-            # Cisza wyjasniona, a nie przeoczona - i to musi byc w logu, bo
-            # inaczej nie da sie odroznic "wiemy dlaczego" od "nie zauwazylismy".
-            print(f"  pomiar limitów {w['engine']}/{w['mode']}: {werdykt['powod']} "
-                  f"— SPODZIEWANE przy aktywnym kill-switchu (ocena kończy się "
-                  f"przed pomiarem); opisuje to czujka kill-switcha, nie ta")
             continue
 
         print(f"  BEZPIECZNIK NIE RAPORTUJE {w['engine']}/{w['mode']}: "
@@ -933,9 +939,12 @@ async def sprawdz_ryzyko(fetch_all, notify, sucho: bool = False) -> int:
     # po pustej liscie zdarzen, bo to wlasnie wtedy jest jedynym pytaniem, jakie
     # zostaje: brak zatrzyman znaczy albo "nic zlego sie nie dzieje", albo
     # "nikt nie patrzy", a te dwa stany wygladaly do tej pory identycznie.
-    zatrzymane = {(z["engine"], z["mode"]) for z in zdarzenia}
-    zgloszone = await sprawdz_cisze_pomiaru(fetch_all, notify, zatrzymane,
-                                            sucho=sucho)
+    #
+    # LISTA ZATRZYMAN NIE JEST JUZ TEJ CZUJCE PODAWANA (2026-09-12). Sluzyla
+    # wylacznie do uciszania jej przy aktywnym kill-switchu, czyli w jedynym
+    # stanie, w ktorym pytanie "czy bezpiecznik liczy" nie ma innego zrodla
+    # odpowiedzi - uzasadnienie w docstringu `sprawdz_cisze_pomiaru`.
+    zgloszone = await sprawdz_cisze_pomiaru(fetch_all, notify, sucho=sucho)
     trwale = 0
 
     if not zdarzenia:
