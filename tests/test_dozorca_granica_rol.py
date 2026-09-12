@@ -354,3 +354,143 @@ def test_jeden_cykl_zglasza_porazke_KODEM_WYJSCIA(petla_bez_bazy, monkeypatch):
     monkeypatch.setattr(dozorca, "ocen_konto",
                         lambda conn, engine, mode: ("allow", None, 1.0))
     assert asyncio.run(dozorca.petla("crypto", "demo", raz=True)) == 0
+
+
+# ============================================================================
+# 3. POMIAR — liczba, na której stoi decyzja „usunąć zapytanie, nie nadawać praw"
+#
+# Wejścia WYŁĄCZNIE produkcyjne, odczytane z logów podów 2026-09-12 (read-only):
+#
+#   kapitał                100 063,09   trader-engine, komunikat kill-switcha
+#   instrumentów w cyklu   10           „już rozstrzygnięte w tej świecy 10"
+#   max_total_exposure     15 000 quote_ccy   db/migrations/0008_seed.sql
+#   max_position_notional   5 000 quote_ccy   db/migrations/0008_seed.sql
+#
+# Pytanie brzmiało: czy pominięcie `journal.planned_order` ZANIŻA ekspozycję,
+# a więc rozluźnia bezpiecznik? Odpowiedź jest RÓŻNA dla dwóch ścieżek i to
+# jest cała treść tej sekcji.
+# ============================================================================
+
+KAPITAL_PROD = Decimal("100063.09")
+N_INSTR = 10
+LIMITY_PROD = LIMITY | {
+    "max_position_notional": {"id": 3, "name": "max_position_notional",
+                              "value": Decimal("5000"), "unit": "quote_ccy",
+                              "action": "downsize"},
+    "max_total_exposure": {"id": 4, "name": "max_total_exposure",
+                           "value": Decimal("15000"), "unit": "quote_ccy",
+                           "action": "block"},
+    "max_orders_per_hour": {"id": 5, "name": "max_orders_per_hour",
+                            "value": Decimal("20"), "unit": "count",
+                            "action": "block"},
+}
+
+
+def test_POMIAR_werdykt_dozorcy_NIE_REAGUJE_na_ekspozycje():
+    """ŚCIEŻKA DOZORCY: zaniżenie wynosi ZERO, bo liczby nikt nie czyta.
+
+    To jest kanarek „czy miara reaguje na wejście", uruchomiony po to, żeby
+    dostać odpowiedź NIE. Przemiatamy ekspozycję przez pełen zakres — od zera
+    do dziesięciokrotności limitu — na czterech stanach konta (płaski, -0,5%
+    na dobę, -2,5% na dobę, -12% od szczytu). Jeśli choć jeden werdykt, powód,
+    ślad w `risk.limit_usage` albo żądanie kill-switcha drgnie, to znaczy, że
+    dozorca JEDNAK tej liczby używa — i wtedy jej usunięcie byłoby zaniżeniem,
+    a jedyną poprawną drogą wąski GRANT.
+
+    Zmierzone: 0 różnic na 40 przebiegach, 0 pozycji o ekspozycji w śladzie.
+    """
+    from services.engine.risk_rules import RiskState, evaluate_account
+
+    zakres = [Decimal(x) for x in
+              (0, 1, 100, 1_000, 7_500, 14_999, 15_000, 15_001, 30_000, 150_000)]
+    stany = [(Decimal("1.000"), Decimal("1.000"), Decimal("1.000")),
+             (Decimal("0.995"), Decimal("1.000"), Decimal("1.000")),
+             (Decimal("0.975"), Decimal("1.000"), Decimal("1.000")),
+             (Decimal("0.880"), Decimal("0.885"), Decimal("1.000"))]
+
+    roznych = przebiegow = sladow_o_ekspozycji = 0
+    for nav, nav_doba, nav_szczyt in stany:
+        odniesienie = None
+        for e in zakres:
+            st = RiskState(equity=KAPITAL_PROD, peak=KAPITAL_PROD,
+                           day_ago=KAPITAL_PROD, exposure=e,
+                           per_instrument={1: e}, orders_last_hour=0,
+                           nav=nav, nav_peak=nav_szczyt, nav_day_ago=nav_doba,
+                           wplaty_netto=Decimal("100000"))
+            v = evaluate_account(st, LIMITY_PROD)
+            odcisk = (v.verdict, v.reason, v.trigger_killswitch,
+                      tuple(sorted((u["name"], round(u["used"], 6),
+                                    round(u["threshold"], 6)) for u in v.usage)))
+            sladow_o_ekspozycji += sum(1 for u in v.usage
+                                       if "exposure" in u["name"]
+                                       or "notional" in u["name"])
+            przebiegow += 1
+            if odniesienie is None:
+                odniesienie = odcisk
+            elif odcisk != odniesienie:
+                roznych += 1
+
+    assert przebiegow == 40
+    assert roznych == 0, (
+        f"{roznych} werdyktów konta drgnęło od zmiany ekspozycji — dozorca "
+        "JEDNAK jej używa, więc usunięcie pomiaru ZANIŻA bezpiecznik i drogą "
+        "poprawną jest wąski GRANT, nie usunięcie zapytania")
+    assert sladow_o_ekspozycji == 0, (
+        "ocena konta zostawia w risk.limit_usage ślad o ekspozycji — ta liczba "
+        "jednak do czegoś służy")
+
+
+def test_POMIAR_sciezka_SILNIKA_bez_journal_zanizalaby_ekspozycje_o_13500():
+    """ŚCIEŻKA SILNIKA: tam zaniżenie jest ogromne — i dlatego jej NIE RUSZAMY.
+
+    `loop.py` woła `risk.check()` dla KAŻDEGO instrumentu (linia ~1847), a plany
+    wysyła dopiero po całej pętli (`zloz_oczekujace`, linia ~1950). W trakcie
+    cyklu plany leżą WYŁĄCZNIE w `journal.planned_order` — nie ma dla nich ani
+    jednego wiersza w `exec.order`. Zapytanie do `journal` jest więc JEDYNYM
+    źródłem kumulacji w obrębie cyklu.
+
+    Zmierzone na rachunku, który trzyma już 9 pozycji z poprzednich cykli:
+    ekspozycja końcowa 28 500 zamiast 15 000, czyli zaniżenie 13 500 USDC
+    = 90% limitu = 13,5% rachunku, limit przekroczony 1,90x.
+
+    Ten test pada, gdyby ktoś zastosował tę samą poprawkę do `check()`.
+    """
+    from services.engine.risk_rules import (
+        RiskState, evaluate_limits, position_budget,
+    )
+    budzet = position_budget(LIMITY_PROD, N_INSTR, KAPITAL_PROD)
+    cap = LIMITY_PROD["max_total_exposure"]["value"]
+    assert budzet == Decimal("1500")
+
+    def cykl(widzi_journal: bool, n_pozycji: int) -> Decimal:
+        baza = budzet * n_pozycji
+        plany: list[Decimal] = []
+        for i in range(100, 100 + N_INSTR):
+            w_cyklu = sum(plany, Decimal(0)) if widzi_journal else Decimal(0)
+            per = {j: budzet for j in range(n_pozycji)}
+            if widzi_journal:
+                per |= {j: p for j, p in enumerate(plany, start=100)}
+            st = RiskState(equity=KAPITAL_PROD, peak=KAPITAL_PROD,
+                           day_ago=KAPITAL_PROD, exposure=baza + w_cyklu,
+                           per_instrument=per, orders_last_hour=0,
+                           nav=Decimal("1.0"), nav_peak=Decimal("1.0"),
+                           nav_day_ago=Decimal("1.0"),
+                           wplaty_netto=Decimal("100000"))
+            v = evaluate_limits(st, LIMITY_PROD, instrument_id=i,
+                                notional=budzet, qty=Decimal("1"))
+            if v.verdict != "block":
+                plany.append(budzet if v.qty is None else budzet * v.qty)
+        return baza + sum(plany, Decimal(0))
+
+    # Rachunek pusty to przypadek ZDEGENEROWANY: budżet = limit / N, więc
+    # dziesięć wejść po 1500 wyczerpuje limit co do grosza i różnicy nie widać.
+    # Mierzenie wyłącznie na nim dałoby fałszywe „journal nic nie zmienia".
+    assert cykl(True, 0) == cykl(False, 0) == cap
+
+    z_journal, bez_journal = cykl(True, 9), cykl(False, 9)
+    assert z_journal == cap, "limit przestał wiązać na ścieżce zlecenia"
+    assert bez_journal == Decimal("28500")
+    assert bez_journal - z_journal == Decimal("13500"), (
+        "zmierzone zaniżenie przestało się zgadzać — jeśli to skutek zmiany "
+        "limitów, popraw liczbę; jeśli zmiany reguł, popraw reguły")
+    assert bez_journal / cap == Decimal("1.9")
