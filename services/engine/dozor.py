@@ -1067,9 +1067,15 @@ async def sprawdz_ryzyko(fetch_all, notify, sucho: bool = False) -> int:
 
 # Ile moze minac od ostatniej udanej kopii, zanim uznamy to za problem.
 #
-# Zadanie chodzi raz na dobe o 03:17 UTC, wiec 26 godzin daje dwie godziny
+# Zadanie chodzi raz na dobe o 03:17 CZASU LOKALNEGO (Europe/Warsaw - patrz
+# `timeZone` w charts/trader/values.yaml), wiec 26 godzin daje dwie godziny
 # zapasu na dlugi zrzut i na przesuniecie startu przez zajety wezel. Krotszy
 # prog zglaszalby falszywy alarm przy kazdym wolniejszym przebiegu.
+#
+# Do 2026-09-12 stalo tu "03:17 UTC" i bylo to nieprawda - `lastScheduleTime`
+# pokazywalo 01:17Z. Sam prog jest odporny, bo jest DLUGOSCIA, a nie chwila;
+# mylila godzina przy porownywaniu wpisu z chartem. Przesuniecie doby przy
+# zmianie czasu wynosi godzine i miesci sie w tym samym zapasie.
 KOPIA_STARA_PO_H = 26
 
 # O ile kopia moze byc mniejsza od poprzedniej, zanim uznamy to za utrate danych.

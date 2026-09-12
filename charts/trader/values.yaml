@@ -353,10 +353,39 @@ workers:
       limits:   { cpu: 1000m, memory: 512Mi }
       requests: { cpu: 50m,   memory: 128Mi }
 
+# STREFA CZASU WSZYSTKICH ZADAN CYKLICZNYCH. Jedna, bo rozjazd miedzy nimi
+# znaczylby, ze "po kopii" i "po treningu" zalezy od dnia roku.
+#
+# DLACZEGO TO POLE MUSI ISTNIEC, skoro nic nie przesuwa
+#
+# CronJob bez `timeZone` liczy harmonogram w strefie procesu
+# kube-controller-managera. Na tym klastrze k3s jest to strefa hosta
+# (Europe/Warsaw), wiec `17 3 * * *` odpalalo sie 03:17 CZASU LOKALNEGO -
+# zmierzone 2026-09-12: `lastScheduleTime` 2026-09-12T01:17:00Z, czyli 03:17
+# CEST. Godziny byly wiec od poczatku lokalne i to jest zamiar (okno nocne:
+# kopia 03:17, trener 04:40, proba kill-switcha 05:20).
+#
+# Komentarze przy tych trzech liniach mowily jednak "UTC" i to bylo nieprawda
+# przez caly czas. Blad nie objawia sie awaria - objawia sie tym, ze ktos
+# porownuje `lastScheduleTime` (UTC) z godzina z chartu i widzi dwie godziny
+# roznicy, ktorej nie umie wytlumaczyc. Raz juz kosztowalo to sledztwo.
+#
+# Jawna strefa wiaze zamiar z zachowaniem i odwiazuje jedno i drugie od
+# ustawienia hosta, ktorego ten chart nie kontroluje: przeniesienie wezla albo
+# `timedatectl set-timezone UTC` przesunelyby dzis cale okno nocne bez jednej
+# zmiany w repozytorium.
+#
+# ZMIANA CZASU: zadna z godzin nie lezy w oknie 02:00-02:59, czyli tam, gdzie
+# doba lokalna raz w roku nie ma tej godziny wcale, a raz ma ja dwa razy.
+# Wybor godzin poza tym oknem jest tu warunkiem, a nie przypadkiem.
+#
+# Wymaga Kubernetes >= 1.27 (pole stabilne). Klaster: v1.35.5+k3s1.
+timeZone: "Europe/Warsaw"
+
 # Kopia zapasowa bazy. Zrzut trafia na dysk hosta, poza wolumen bazy danych.
 backup:
   enabled: true
-  schedule: "17 3 * * *"        # codziennie 03:17 UTC, poza szczytem zapytań
+  schedule: "17 3 * * *"        # codziennie 03:17 czasu lokalnego (patrz timeZone)
   retentionDays: 14
   hostPath: /opt/trader-backups
 
@@ -389,13 +418,13 @@ instrumentyCron:
 # Godzina dobrana tak, zeby nie kolidowac z trenerem (04:40) ani z kopia (03:17).
 probaCron:
   enabled: true
-  schedule: "20 5 * * *"        # codziennie 05:20 UTC, po treningu i kopii
+  schedule: "20 5 * * *"        # codziennie 05:20 czasu lokalnego, po treningu i kopii
 
 # Trener walk-forward. Zadanie cykliczne, nie proces w Deploymencie - dlugie
 # obliczenia nie moga ginac przy wdrozeniach.
 trainerCron:
   enabled: true
-  schedule: "40 4 * * *"        # codziennie 04:40 UTC, po kopii zapasowej
+  schedule: "40 4 * * *"        # codziennie 04:40 czasu lokalnego, po kopii zapasowej
   bar: "4h"
   days: 1400
   trials: 60
