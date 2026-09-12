@@ -356,7 +356,19 @@ workers:
 # Kopia zapasowa bazy. Zrzut trafia na dysk hosta, poza wolumen bazy danych.
 backup:
   enabled: true
-  schedule: "17 3 * * *"        # codziennie 03:17 UTC, poza szczytem zapytań
+  # GODZINY SA LOKALNE (Europe/Warsaw), NIE UTC — zmierzone, nie zalozone.
+  #
+  # CronJob bez pola `timeZone` liczy harmonogram w strefie procesu
+  # kube-controller-managera, a na tym klastrze k3s jest to strefa hosta.
+  # `lastScheduleTime` dla tego zadania to 2026-09-12T01:17:00Z, czyli 03:17
+  # CEST. Tak samo trener (02:40Z = 04:40) i proba kill-switcha (03:20Z = 05:20).
+  #
+  # Do 2026-09-12 stalo w tych trzech liniach "UTC" i bylo to nieprawda.
+  # Zachowanie bylo poprawne od poczatku — okno nocne miało byc lokalne — wiec
+  # NIE MA TU NIC DO NAPRAWIENIA POZA TYM ZDANIEM. Blad nie objawial sie
+  # awaria: objawial sie tym, ze ktos porownywal `lastScheduleTime` z godzina
+  # z tego pliku i widzial dwie godziny roznicy, ktorej nie umial wytlumaczyc.
+  schedule: "17 3 * * *"        # codziennie 03:17 czasu lokalnego, poza szczytem zapytań
   retentionDays: 14
   hostPath: /opt/trader-backups
 
@@ -389,13 +401,13 @@ instrumentyCron:
 # Godzina dobrana tak, zeby nie kolidowac z trenerem (04:40) ani z kopia (03:17).
 probaCron:
   enabled: true
-  schedule: "20 5 * * *"        # codziennie 05:20 UTC, po treningu i kopii
+  schedule: "20 5 * * *"        # codziennie 05:20 czasu lokalnego, po treningu i kopii
 
 # Trener walk-forward. Zadanie cykliczne, nie proces w Deploymencie - dlugie
 # obliczenia nie moga ginac przy wdrozeniach.
 trainerCron:
   enabled: true
-  schedule: "40 4 * * *"        # codziennie 04:40 UTC, po kopii zapasowej
+  schedule: "40 4 * * *"        # codziennie 04:40 czasu lokalnego, po kopii zapasowej
   bar: "4h"
   days: 1400
   trials: 60
