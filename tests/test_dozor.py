@@ -240,6 +240,233 @@ def test_czujka_liczy_kod_wyjscia_JEDNA_regula_dla_calego_pliku():
         "czujki wyjdzie nieme"
 
 
+# --- czujka żywotności: puls NADZORU kontra enum SILNIKÓW -------------------
+#
+# Ta czujka pilnuje dwóch źródeł pulsu: `risk.engine_heartbeat` (silniki
+# handlowe) i `risk.dozorca_heartbeat` (nadzorca, który sam może umrzeć).
+# Klucz w tej drugiej tabeli to identyfikator PROCESU — `dozorca-ryzyka:crypto:demo`
+# — a `notify.notification.engine` ma typ `ref.engine`, czyli enum SILNIKÓW.
+#
+# Do 2026-09-12 czujka wkładała jedno w drugie i padała z
+# `InvalidTextRepresentation` DOKŁADNIE W CHWILI, W KTÓREJ MIAŁA KRZYKNĄĆ.
+# Zmierzone na produkcji: dozorca leżał 887 minut (pętla kończyła każdy cykl
+# `permission denied for schema journal`), nikt nie dostał ani jednego
+# powiadomienia, a `trader-zywotnosc` świecił na czerwono z powodem
+# niezwiązanym ze stanem silnika — czyli awaria nadzorcy chowała się za awarią
+# czujki, która miała ją zgłosić.
+#
+# ATRAPA ZNA TYP KOLUMNY, bo inaczej ten test nie miałby na czym paść: atrapa
+# przyjmująca każde `engine=` czyni tę klasę błędu niewykrywalną z definicji.
+# Wartości enuma czytamy Z MIGRACJI, a nie przepisujemy tutaj — druga kopia
+# rozjechałaby się z bazą przy pierwszym rozszerzeniu typu i cisza tego pliku
+# przestałaby cokolwiek znaczyć.
+
+class NieZnanySilnik(AssertionError):
+    """To, czym Postgres odpowiada na napis spoza `ref.engine`.
+
+    Dziedziczy z AssertionError celowo: to nie jest błąd atrapy, tylko
+    NIEZDANY TEST — kod wkłada do kolumny wartość, której typ nie zna.
+    """
+
+
+def _enum_silnikow() -> set[str]:
+    import re
+    from pathlib import Path
+
+    sql = Path("db/migrations/0001_extensions_and_reference.sql").read_text()
+    blok = re.search(r"CREATE TYPE ref\.engine\s+AS ENUM\s*\(([^)]*)\)", sql)
+    assert blok, "nie znaleziono definicji ref.engine w migracji 0001"
+    wartosci = set(re.findall(r"'([^']+)'", blok.group(1)))
+    assert wartosci, "definicja ref.engine sparsowana na pusto"
+    return wartosci
+
+
+def _puls(etykieta, *, engine=None, mode="demo", status="running",
+          wiek_min=1.0):
+    """Wiersz taki, jaki oddaje zapytanie czujki. `engine` = NULL dla nadzoru."""
+    from datetime import datetime, timezone
+
+    return {"engine": engine, "etykieta": etykieta, "mode": mode,
+            "status": status, "wiek_min": wiek_min,
+            "last_beat_at": datetime(2026, 9, 12, 3, 0, tzinfo=timezone.utc)}
+
+
+def _notify_z_enumem(poszly):
+    """Atrapa `notify`, która odrzuca `engine` spoza `ref.engine` — tak jak baza."""
+    silniki = _enum_silnikow()
+
+    async def notify(user_id, code, tytul, tresc, **kwargs):
+        silnik = kwargs.get("engine")
+        if silnik is not None and silnik not in silniki:
+            raise NieZnanySilnik(
+                f'invalid input value for enum ref.engine: "{silnik}"')
+        poszly.append((code, tytul, tresc, kwargs))
+
+    return notify
+
+
+def _zywotnosc(wiersze, *, wyslane_po=None, **kw):
+    """Uruchamia `sprawdz_zywotnosc` na atrapie znającej typ `ref.engine`.
+
+    Zwraca (kod, powiadomienia). `wyslane_po` to zbiór ETYKIET, dla których
+    udajemy powiadomienie zapisane już po ostatnim uderzeniu serca — czyli
+    awarię ZGŁOSZONĄ.
+    """
+    import asyncio
+
+    from services.engine.dozor import sprawdz_zywotnosc
+
+    wyslane = wyslane_po or set()
+    poszly = []
+
+    async def fetch_all(sql, params=None):
+        if "notify.notification" in sql:
+            return [{"x": 1}] if params[0] in wyslane else []
+        if "heartbeat" in sql:
+            return wiersze
+        if "is_active" in sql:
+            return [{"id": 1}]
+        raise AssertionError(f"nieoczekiwane zapytanie: {sql}")
+
+    kod = asyncio.run(sprawdz_zywotnosc(fetch_all, _notify_z_enumem(poszly), **kw))
+    return kod, poszly
+
+
+def test_kanarek_atrapa_LAPIE_znany_blad():
+    """Bez tego cisza pozostałych testów nie znaczyłaby „czysto", tylko
+    „atrapa przyjmuje wszystko".
+
+    Karmimy ją DOKŁADNIE tym wywołaniem, którym czujka padła na produkcji —
+    i osobno wartością prawdziwą, bo atrapa łapiąca wszystko nie łapie nic.
+    """
+    import asyncio
+
+    silniki = _enum_silnikow()
+    assert "crypto" in silniki
+    assert "dozorca-ryzyka:crypto:demo" not in silniki, \
+        "enum silników handlowych zna identyfikator procesu nadzoru — wtedy " \
+        "to nie jest już enum silników"
+
+    poszly = []
+    notify = _notify_z_enumem(poszly)
+    with pytest.raises(NieZnanySilnik):
+        asyncio.run(notify(1, "engine.down", "t", "b",
+                           engine="dozorca-ryzyka:crypto:demo"))
+    asyncio.run(notify(1, "engine.down", "t", "b", engine="crypto"))
+    asyncio.run(notify(1, "engine.down", "t", "b", engine=None))
+    assert len(poszly) == 2
+
+
+def test_puls_dozorcy_NIE_IDZIE_do_kolumny_enuma():
+    """Nazwa procesu nadzoru jedzie w `data`, a kolumna `engine` zostaje pusta.
+
+    To ta sama reguła, którą stosuje czujka pulsu workerów: „market" i „news"
+    też nie są silnikami handlowymi.
+    """
+    kod, poszly = _zywotnosc([_puls("dozorca-ryzyka:crypto:demo",
+                                    mode="nadzor", wiek_min=887.0)])
+    assert kod == 1
+    (code, tytul, tresc, kwargs), = poszly
+    assert code == "engine.down" and kwargs["severity"] == "critical"
+    assert kwargs["engine"] is None, \
+        "identyfikator procesu poszedł do kolumny typu ref.engine"
+    assert kwargs["data"]["proces"] == "dozorca-ryzyka:crypto:demo", \
+        "nazwa procesu nie jedzie w `data`, więc tłumienie nie ma po czym " \
+        "rozpoznać swojego powiadomienia"
+    assert "dozorca-ryzyka:crypto:demo" in tytul, \
+        "alarm nie mówi, KTÓRY proces zamilkł"
+    assert "trader-dozorca" in tresc and "trader-engine" not in tresc, \
+        "podpowiedź wysyła po log silnika kogoś, komu padł nadzorca"
+
+
+def test_martwy_silnik_NADAL_wypelnia_kolumne_engine():
+    """Poprawka nie ma prawa wylać dziecka z kąpielą: dla prawdziwego silnika
+    `engine` musi zostać wypełniony, bo po nim filtruje się dzwonek."""
+    kod, poszly = _zywotnosc([_puls("crypto", engine="crypto", wiek_min=99.0)])
+    assert kod == 1
+    (_, tytul, tresc, kwargs), = poszly
+    assert kwargs["engine"] == "crypto"
+    assert "proces" not in kwargs["data"]
+    assert tytul.startswith("Silnik crypto") and "trader-engine" in tresc
+
+
+def test_awaria_NADZORCY_nie_zabiera_ze_soba_alarmu_o_SILNIKU():
+    """Sedno regresji: jeden zły wiersz wywracał CAŁĄ czujkę.
+
+    Wyjątek z zapisu powiadomienia leciał przez `main` aż do `SystemExit`, więc
+    silnik martwy w tym samym przebiegu nie doczekał się już żadnego alarmu.
+    """
+    kod, poszly = _zywotnosc([
+        _puls("crypto", engine="crypto", wiek_min=99.0),
+        _puls("dozorca-ryzyka:crypto:demo", mode="nadzor", wiek_min=887.0),
+    ])
+    assert kod == 2                                   # dwa zgłoszenia, dwa znaleziska
+    assert [k["engine"] for _, _, _, k in poszly] == ["crypto", None]
+
+
+def test_tlumienie_awarii_NADZORCY_dziala_po_nazwie_procesu():
+    """`engine.down` jest always_on, więc omija zwykły cooldown. Gdyby
+    tłumienie pytało o samo `engine::text`, awaria dozorcy nie tłumiłaby się
+    NIGDY (kolumna jest wtedy NULL-em) — czujka krzyczałaby co dziesięć minut,
+    aż ktoś wyciszy kanał, a wyciszony kanał jest gorszy niż brak czujki."""
+    kod, poszly = _zywotnosc([_puls("dozorca-ryzyka:crypto:demo",
+                                    mode="nadzor", wiek_min=887.0)],
+                             wyslane_po={"dozorca-ryzyka:crypto:demo"})
+    assert poszly == []
+    assert kod == 0
+
+
+def test_stan_juz_zgloszony_NIE_ZNIKA_z_logu(capsys):
+    """Cisza w kodzie wyjścia nie ma prawa zabrać ze sobą logu — inaczej
+    zadanie zielone i log bez śladu są nieodróżnialne od spokoju."""
+    _zywotnosc([_puls("dozorca-ryzyka:crypto:demo", mode="nadzor",
+                      wiek_min=887.0)],
+               wyslane_po={"dozorca-ryzyka:crypto:demo"})
+    log = capsys.readouterr().out
+    assert "MARTWY" in log and "dozorca-ryzyka:crypto:demo" in log
+    assert "silnik bez pulsu" in log, \
+        "log nie mówi, DLACZEGO kod wyjścia jest zerem mimo znaleziska"
+
+
+def test_kanarek_STARY_KSZTALT_WIERSZA_wciaz_zabija_czujke():
+    """ODTWORZENIE AWARII Z PRODUKCJI, przez prawdziwą ścieżkę kodu.
+
+    Pozostałe testy karmią czujkę wierszem w kształcie, jaki oddaje POPRAWIONE
+    zapytanie — a to jest założenie, nie dowód. Tutaj podajemy kształt sprzed
+    poprawki (`nazwa AS engine`) i czujka pada dokładnie tym wyjątkiem, którym
+    padała w klastrze:
+
+        invalid input value for enum ref.engine: "dozorca-ryzyka:crypto:demo"
+
+    Ten test ma przechodzić ZAWSZE — po poprawce też. Pilnuje granicy między
+    zapytaniem a wysyłką: dopóki do klucza `engine` trafia identyfikator
+    procesu, powiadomienia NIE MA, bez względu na to, co robi reszta funkcji.
+    """
+    with pytest.raises(NieZnanySilnik):
+        _zywotnosc([_puls("dozorca-ryzyka:crypto:demo",
+                          engine="dozorca-ryzyka:crypto:demo",
+                          mode="nadzor", wiek_min=887.0)])
+
+
+def test_zapytanie_NIE_WPUSZCZA_nazwy_procesu_do_kolumny_enuma():
+    """Druga strona tej samej granicy: skoro atrapa nie wykonuje SQL-a, ktoś
+    musi patrzeć na sam kształt zapytania. `nazwa` ma iść do `etykieta`,
+    a `engine` dla wiersza nadzoru ma być NULL-em — i to jawnym, nie
+    domyślonym."""
+    # BEZ KOMENTARZY: ten plik opisuje starą postać zapytania słowami, więc
+    # asercja „nie ma tu napisu X" czytałaby własne uzasadnienie poprawki.
+    zrodlo = "\n".join(w for w in _cialo("sprawdz_zywotnosc").splitlines()
+                       if not w.lstrip().startswith("#"))
+    assert "NULL::text AS engine, nazwa AS etykieta" in zrodlo, \
+        "puls nadzorcy znowu wchodzi do kolumny typu ref.engine"
+    assert "nazwa AS engine" not in zrodlo
+
+
+def test_tlumienie_pyta_o_ETYKIETE_a_nie_o_sama_kolumne():
+    """Asercja o kształcie zapytania, bo atrapa nie wykonuje `WHERE`."""
+    assert "coalesce(engine::text, data->>'proces')" in _cialo("sprawdz_zywotnosc")
+
+
 # --- czujka kill-switcha ----------------------------------------------------
 def test_czujka_ryzyka_pomija_zdarzenia_zwolnione():
     """Kill-switch zwolniony ręcznie to problem OBSŁUŻONY — powtarzanie alarmu

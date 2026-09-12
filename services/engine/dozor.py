@@ -438,22 +438,37 @@ async def sprawdz_zywotnosc(fetch_all, notify, sucho: bool = False,
     #
     # Status `running` na sztywno: dozorca nie ma stanu posredniego. Albo bije,
     # albo go nie ma.
+    #
+    # DWIE KOLUMNY, NIE JEDNA: `engine` i `etykieta`. Do 2026-09-12 puls dozorcy
+    # wchodzil do tego zapytania jako `nazwa AS engine` i tak samo wychodzil do
+    # `notify(engine=...)`. Ale `notify.notification.engine` ma typ `ref.engine`,
+    # czyli enum SILNIKOW HANDLOWYCH ('crypto','equity') - a `nazwa` to
+    # identyfikator procesu, `dozorca-ryzyka:crypto:demo`. Zapis konczyl sie
+    # `InvalidTextRepresentation` i CZUJKA GINELA W CHWILI, W KTOREJ MIALA
+    # KRZYKNAC: dozorca lezal od pietnastu godzin, a jedyne, co bylo widac, to
+    # czerwony Job z powodem zupelnie niezwiazanym ze stanem silnika.
+    #
+    # `etykieta` jest tylko do MOWIENIA (log, tytul, tlumienie), `engine` tylko
+    # do KOLUMNY. Dla procesu nadzoru `engine` jest NULL-em - dokladnie tak jak
+    # przy pulsie workerow nizej, gdzie „market" i „news" tez nie sa silnikami.
     silniki = await fetch_all(
-        "SELECT engine::text AS engine, mode::text AS mode, status, last_beat_at,"
+        "SELECT engine::text AS engine, engine::text AS etykieta,"
+        " mode::text AS mode, status, last_beat_at,"
         " round(extract(epoch from (now() - last_beat_at))/60) AS wiek_min"
         " FROM risk.engine_heartbeat"
         " UNION ALL"
-        " SELECT nazwa AS engine, 'nadzor' AS mode, 'running' AS status, last_beat_at,"
+        " SELECT NULL::text AS engine, nazwa AS etykieta,"
+        " 'nadzor' AS mode, 'running' AS status, last_beat_at,"
         " round(extract(epoch from (now() - last_beat_at))/60) AS wiek_min"
         " FROM risk.dozorca_heartbeat"
-        " ORDER BY engine")
+        " ORDER BY etykieta")
     if not silniki:
         print("brak wpisow o zywotnosci silnikow")
         return 0
 
     martwe = []
     for s in silniki:
-        opis = f"{s['engine']}/{s['mode']}: {s['status']}, ostatnie uderzenie {s['wiek_min']:.0f} min temu"
+        opis = f"{s['etykieta']}/{s['mode']}: {s['status']}, ostatnie uderzenie {s['wiek_min']:.0f} min temu"
         if s["status"] != "running":
             print(f"  pomijam  {opis} — zatrzymany świadomie")
             continue
@@ -473,27 +488,42 @@ async def sprawdz_zywotnosc(fetch_all, notify, sucho: bool = False,
     odbiorcy = await fetch_all('SELECT id FROM app."user" WHERE is_active')
     zgloszone = trwale = 0
     for s in martwe:
+        # TLUMIENIE PYTA O ETYKIETE, NIE O KOLUMNE. Dla silnika etykieta siedzi
+        # w `engine`, dla procesu nadzoru w `data->>'proces'` - `coalesce` bierze
+        # ta, ktora istnieje. Gdyby pytalo o samo `engine::text`, awaria dozorcy
+        # nie tlumilaby sie NIGDY (kolumna jest wtedy NULL-em), czyli czujka
+        # krzyczalaby co dziesiec minut az do wyciszenia kanalu - a wyciszony
+        # kanal to gorszy stan niz brak czujki.
         juz = await fetch_all(
             "SELECT 1 FROM notify.notification WHERE event_code = 'engine.down'"
-            " AND engine::text = %s AND created_at > %s LIMIT 1",
-            (s["engine"], s["last_beat_at"]))
+            " AND coalesce(engine::text, data->>'proces') = %s"
+            " AND created_at > %s LIMIT 1",
+            (s["etykieta"], s["last_beat_at"]))
         if juz:
             # Cisza w kanale powiadomien - i cisza w kodzie wyjscia razem z nia.
             # Log zostaje glosny: linia "MARTWY ..." wyzej idzie przy kazdym
             # przebiegu, niezaleznie od tlumienia.
             trwale += 1
-            print(f"  (awaria {s['engine']} juz zgloszona — cisza)")
+            print(f"  (awaria {s['etykieta']} juz zgloszona — cisza)")
             continue
         zgloszone += 1
+        # Podpowiedz ma wskazywac TEN pod, ktory zamilkl. Jedna nazwa dla obu
+        # przypadkow wysylalaby po log silnika kogos, komu padl nadzorca.
+        pod = "trader-engine" if s["engine"] else "trader-dozorca"
         tresc = (f"Ostatnie uderzenie serca {s['wiek_min']:.0f} minut temu "
                  f"({s['last_beat_at']:%Y-%m-%d %H:%M} UTC), próg to {prog} min.\n\n"
-                 f"Sprawdź: kubectl logs deploy/trader-engine --tail=50")
+                 f"Sprawdź: kubectl logs deploy/{pod} --tail=50")
+        # `proces` idzie do `data` WYLACZNIE dla nadzoru i jest tam po to, zeby
+        # tlumienie wyzej mialo po czym rozpoznac swoje powiadomienie.
+        dane = {"wiek_min": float(s["wiek_min"]), "status": s["status"]}
+        czym = "Silnik" if s["engine"] else "Proces nadzoru"
+        if not s["engine"]:
+            dane["proces"] = s["etykieta"]
         for u in odbiorcy:
             await notify(u["id"], "engine.down",
-                         f"Silnik {s['engine']} przestał odpowiadać", tresc,
-                         engine=s["engine"], severity="critical",
-                         data={"wiek_min": float(s["wiek_min"]), "status": s["status"]})
-        print(f"  powiadomiono o {s['engine']}: {len(odbiorcy)} odbiorców")
+                         f"{czym} {s['etykieta']} przestał odpowiadać", tresc,
+                         engine=s["engine"], severity="critical", data=dane)
+        print(f"  powiadomiono o {s['etykieta']}: {len(odbiorcy)} odbiorców")
 
     # KOD WYJSCIA NIEZEROWY DOKLADNIE WTEDY, GDY POWIADOMIENIE POSZLO.
     #
@@ -842,7 +872,7 @@ async def sprawdz_cisze_pomiaru(fetch_all, notify, zatrzymane: set[tuple[str, st
             f"policzył.\n\n"
             f"Sprawdź w tej kolejności:\n"
             f"  kubectl logs deploy/trader-dozorca --tail=50\n"
-            f"  kubectl logs deploy/trader-silnik --tail=50\n"
+            f"  kubectl logs deploy/trader-engine --tail=50\n"
             f"  SELECT max(event_time) FROM risk.limit_usage;")
         for u in odbiorcy:
             await notify(u["id"], "risk.pomiar_zamilkl", tytul, tresc,
