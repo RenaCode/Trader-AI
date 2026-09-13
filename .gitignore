@@ -32,3 +32,16 @@ artifacts/
 # Worktree agentow pracujacych w tle. To osobne repozytoria, nie tresc projektu -
 # git add -A wciagnal je raz jako zagnieżdżone repo i zepsul commit.
 .claude/worktrees/
+
+# Lokalny stan narzedzi Claude / claude-flow / ruflo.
+# To sa artefakty konkretnej maszyny i sesji (liczniki edycji, polityki,
+# przyjeta konfiguracja) - nie opisuja projektu i nie naleza do repozytorium.
+# Definicje agentow (.claude/agents/) i CLAUDE.md zostaja SLEDZONE celowo.
+.claude-flow/
+.claude/proven-config.json
+.claude/.proven-config-version
+.claude/settings.local.json
+.claude/worktrees/
+.claude/sessions/
+.claude/todos/
+.specstory/
