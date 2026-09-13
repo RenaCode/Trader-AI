@@ -20,8 +20,8 @@ spec:
   schedule: {{ .Values.trainerCron.schedule | quote }}
   concurrencyPolicy: Forbid
   startingDeadlineSeconds: 3600
-  successfulJobsHistoryLimit: 3
-  failedJobsHistoryLimit: 3
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 1
   jobTemplate:
     spec:
       backoffLimit: 0

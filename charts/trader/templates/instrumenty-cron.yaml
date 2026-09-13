@@ -27,7 +27,7 @@ spec:
   schedule: {{ .Values.instrumentyCron.schedule | quote }}
   concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 1
-  failedJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 1
   startingDeadlineSeconds: 300
   jobTemplate:
     spec:
