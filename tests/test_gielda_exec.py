@@ -1,5 +1,6 @@
 """Egzekucja na giełdzie — to giełda rozstrzyga, nie nasze założenie o świecy."""
 import asyncio
+from dataclasses import replace
 from decimal import Decimal as D
 
 import pytest
@@ -863,3 +864,198 @@ def test_sprzatanie_pyta_baze_o_ILOSC_ZAKSIEGOWANA():
 
     zrodlo = Path("services/engine/gielda_exec.py").read_text(encoding="utf-8")
     assert "FROM exec.fill f" in zrodlo and "AS zaksiegowane" in zrodlo
+
+
+PROBA_F = Filtry(krok_ilosci=D("0.01"), min_ilosc=D("0.01"),
+                 min_wartosc=D("5"), krok_ceny=D("0.01"))
+
+
+class GieldaZPamiecia:
+    """Atrapa giełdy, która PAMIĘTA złożone zlecenia — tak jak prawdziwa.
+
+    Atrapa oddająca z góry zadany stan odpowiada identycznie w dwóch
+    sytuacjach, których cała próba dymna ma nie mylić: gdy zlecenie naprawdę
+    poszło na giełdę i gdy nie wysłano niczego. Dlatego `stan_zlecenia` widzi
+    tu wyłącznie to, co wcześniej przyjęło `zloz_zlecenie` — albo to, co siedzi
+    w `historia`, czyli wpis z poprzedniego przebiegu, który u prawdziwej
+    giełdy leży w historii zleceń przez siedem dni.
+
+    `posty` to lista zleceń, które NAPRAWDĘ zostały wysłane. Pusta lista przy
+    „przechodzącej" próbie znaczy, że próba potwierdziła własne echo.
+    """
+
+    def __init__(self, *, historia=(), wypelnij=False, status_po_zlozeniu="new",
+                 anulowanie=True, zombie=False, blad_zlozenia=None):
+        self.zlecenia = {}
+        self.posty = []
+        self.anulowane = []
+        self._n = 0
+        self._wypelnij = wypelnij
+        self._status = status_po_zlozeniu
+        self._anulowanie = anulowanie
+        self._zombie = zombie
+        self._blad_zlozenia = blad_zlozenia
+        for id_w in historia:
+            self._zapisz(id_w, D("0.12"), status="cancelled", wypelniono=D("0"))
+
+    def _zapisz(self, id_wlasne, ilosc, *, status, wypelniono):
+        self._n += 1
+        self.zlecenia[id_wlasne] = StanZlecenia(
+            id_wlasne=id_wlasne, id_gieldy=f"G{self._n}", status=status,
+            ilosc=ilosc, wypelniono=wypelniono,
+            srednia_cena=D("50") if wypelniono else None, prowizja=D("0"))
+        return self.zlecenia[id_wlasne]
+
+    async def zloz_zlecenie(self, **kw):
+        if self._blad_zlozenia:
+            raise self._blad_zlozenia
+        # SPRAWDZ, POTEM SKLADAJ — jak adapter Bybita. Gdy giełda zna nasz
+        # identyfikator, ŻADNE zapytanie POST nie wychodzi.
+        znane = self.zlecenia.get(kw["id_wlasne"])
+        if znane is not None:
+            return ZlozoneZlecenie(id_wlasne=kw["id_wlasne"], id_gieldy=znane.id_gieldy,
+                                   status=znane.status, juz_istnialo=True)
+        self.posty.append(kw)
+        z = self._zapisz(kw["id_wlasne"], kw["ilosc"],
+                         status="filled" if self._wypelnij else self._status,
+                         wypelniono=kw["ilosc"] if self._wypelnij else D("0"))
+        return ZlozoneZlecenie(id_wlasne=kw["id_wlasne"], id_gieldy=z.id_gieldy,
+                               status=z.status)
+
+    async def stan_zlecenia(self, id_wlasne, kategoria="spot"):
+        return self.zlecenia.get(id_wlasne)
+
+    async def anuluj_zlecenie(self, **kw):
+        self.anulowane.append(kw["id_wlasne"])
+        z = self.zlecenia.get(kw["id_wlasne"])
+        if z is None or not self._anulowanie:
+            return False
+        if not self._zombie:
+            self.zlecenia[kw["id_wlasne"]] = replace(z, status="cancelled")
+        return True
+
+
+def _proba(gielda, znacznik="crypto"):
+    from services.engine.proba_egzekucji import przebieg
+
+    return asyncio.run(przebieg(gielda, symbol="SOLUSDC", f=PROBA_F,
+                                cena_rynkowa=D("200"), znacznik=znacznik))
+
+
+def _niepowodzenia(kroki):
+    """Kroki, które `main` liczy jako niezaliczenie próby."""
+    return [k for k in kroki if "NIE POWIODŁO" in k]
+
+
+def test_proba_egzekucji_NAPRAWDE_WYSYLA_ZLECENIE_na_gielde():
+    """Próba, która nic nie wysłała, nie sprawdziła niczego.
+
+    Liczymy ZŁOŻONE ZLECENIA, a nie komunikaty: przy stałym identyfikatorze
+    wszystkie kroki wypisywały się tak samo mimo zera zapytań POST — i dokładnie
+    tak wyglądał przebieg na produkcji.
+    """
+    g = GieldaZPamiecia()
+    kroki = _proba(g)
+
+    assert len(g.posty) == 1
+    assert _niepowodzenia(kroki) == []
+    # ARKUSZ MA ZOSTAC PUSTY. Próba zostawiająca zlecenie jest gorsza niż jej brak.
+    (id_w,) = [p["id_wlasne"] for p in g.posty]
+    assert g.zlecenia[id_w].status == "cancelled"
+
+
+def test_proba_egzekucji_DRUGIE_URUCHOMIENIE_tez_wysyla_zlecenie():
+    """Narzędzie mające łapać regresję nie może przestać działać po pierwszym użyciu.
+
+    `stan_zlecenia` przeszukuje także historię zleceń, a `zloz_zlecenie` pyta
+    o stan ZANIM cokolwiek wyśle. Stały identyfikator sprawiał więc, że drugie
+    uruchomienie odnajdywało wpis po pierwszym: idempotencja „potwierdzała się"
+    bez jednego zapytania POST, anulowanie meldowało „nie było czego", a próba
+    kończyła się słowami „przechodzi cały obieg".
+    """
+    g = GieldaZPamiecia()
+    for _ in range(2):
+        assert _niepowodzenia(_proba(g)) == []
+
+    assert len(g.posty) == 2                      # OBA przebiegi coś wysłały
+    assert len({p["id_wlasne"] for p in g.posty}) == 2
+
+
+def test_proba_egzekucji_NIE_ZALICZA_gdy_gielda_ZNA_JUZ_identyfikator(monkeypatch):
+    """Drugi bezpiecznik, na wypadek gdyby identyfikator przestał być świeży.
+
+    Gdy giełda zna nasz jednorazowy identyfikator, nic nie zostało wysłane —
+    a wtedy reszta próby ogląda cudzy wpis: anulowanie zdejmuje nie to zlecenie,
+    a idempotencja potwierdza się sama.
+    """
+    import services.engine.proba_egzekucji as pe
+
+    monkeypatch.setattr(pe, "id_proby", lambda znacznik: "proba-egz-stale")
+    g = GieldaZPamiecia(historia=["proba-egz-stale"])
+    with pytest.raises(pe.Niezaliczona) as exc:
+        _proba(g)
+
+    assert g.posty == []
+    assert "ZNAŁA JUŻ" in str(exc.value)
+
+
+def test_proba_egzekucji_ODRZUCA_odczyt_zlecenia_KTORE_NIE_LEZY_W_ARKUSZU():
+    """Świeżo złożone zlecenie ma leżeć w arkuszu jako `new`.
+
+    Na produkcji odczyt zwrócił `cancelled` — wpis z poprzedniego przebiegu —
+    a próba przyjęła to jako poprawny stan i poszła dalej sprawdzać idempotencję
+    zlecenia, którego już nie było.
+    """
+    from services.engine.proba_egzekucji import Niezaliczona
+
+    g = GieldaZPamiecia(status_po_zlozeniu="cancelled")
+    with pytest.raises(Niezaliczona) as exc:
+        _proba(g)
+    assert "'cancelled'" in str(exc.value)
+
+
+def test_proba_egzekucji_NIE_ZALICZA_gdy_NIE_BYLO_CZEGO_anulowac():
+    """„Nie było czego zdjąć" po świeżo złożonym zleceniu to awaria anulowania.
+
+    Zlecenie leżało tam sekundę wcześniej i nie było wypełnione. Odpowiedź
+    „nie znam takiego" znaczy więc, że anulowanie trafia gdzie indziej — a na
+    nim opiera się kill-switch.
+    """
+    g = GieldaZPamiecia(anulowanie=False)
+    kroki = _proba(g)
+    assert g.anulowane                            # próbowaliśmy
+    assert _niepowodzenia(kroki)
+
+
+def test_proba_egzekucji_POTWIERDZA_ANULOWANIE_ODCZYTEM_a_nie_odpowiedzia():
+    """Bybit na zlecenie już wypełnione odpowiada kodem, który adapter tłumaczy
+    na „nie było czego zdejmować" — samo „poszło bez błędu" nie znaczy więc, że
+    arkusz jest czysty. Liczy się stan po anulowaniu, nie potwierdzenie."""
+    g = GieldaZPamiecia(zombie=True)              # potwierdza, ale nie zdejmuje
+    kroki = _proba(g)
+    assert _niepowodzenia(kroki)
+
+
+def test_proba_egzekucji_MELDUJE_ODRZUCENIE_gieldy_jako_wynik():
+    """Odrzucenie złożenia jest WYNIKIEM próby, nie jej awarią — tak wygląda
+    parametr, którego podmiot nie przyjmuje (dziś `timeInForce: PostOnly`).
+    Ślad stosu mówiłby o naszym kodzie zamiast o giełdzie."""
+    from services.engine.proba_egzekucji import Niezaliczona
+
+    g = GieldaZPamiecia(blad_zlozenia=ExchangeError("PostOnly nieobsługiwany"))
+    with pytest.raises(Niezaliczona) as exc:
+        _proba(g)
+    assert "ODRZUCIŁA" in str(exc.value)
+
+
+def test_identyfikator_proby_JEST_INNY_przy_kazdym_uruchomieniu():
+    """Odwrotnie niż w egzekucji, gdzie stały identyfikator z planu jest jedyną
+    ochroną przed podwójną pozycją. Tutaj stałość unieważnia całą próbę."""
+    from services.engine.proba_egzekucji import PREFIKS, id_proby
+
+    ident = [id_proby("crypto") for _ in range(5)]
+    assert len(set(ident)) == 5
+    assert all(i.startswith(PREFIKS) for i in ident)   # nie do pomylenia z planem
+    assert all(len(i) <= 36 for i in ident)            # limit orderLinkId u Bybita
+
+
