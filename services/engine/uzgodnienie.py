@@ -538,6 +538,9 @@ async def main() -> int:
                                   sucho=args.sucho, kind=args.kind)
         except Nieuzgadnialne as e:
             print(f"uzgodnienie {args.engine}/{args.mode}: NIEWYKONALNE — {e}")
+            if args.mode == "demo":
+                print(f"uzgodnienie: tryb demo (internal paper trading) — nie traktuję NIEWYKONALNE jako awarii czujki")
+                return 0
             return 2
         finally:
             await adapter.close()
