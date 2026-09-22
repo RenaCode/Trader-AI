@@ -16,7 +16,7 @@ imagePullSecrets: []
 api:
   image:
     repository: ghcr.io/renacode/trader-ai-api
-    tag: "sha-2f9c8e1"
+    tag: "sha-b87a9de"
     pullPolicy: IfNotPresent
   resources:
     limits:   { cpu: 1000m, memory: 1Gi }
@@ -25,7 +25,7 @@ api:
 web:
   image:
     repository: ghcr.io/renacode/trader-ai-web
-    tag: "sha-2f9c8e1"
+    tag: "sha-b87a9de"
     pullPolicy: IfNotPresent
   resources:
     limits:   { cpu: 200m, memory: 256Mi }
@@ -266,7 +266,7 @@ workers:
     # Tryb demo wybrany swiadomie: konto jest odseparowane, a bez niego poslizg
     # i ulamek wypelnienia pozostawalyby ZALOZENIEM. Blad o cztery punkty bazowe
     # przesuwa wynik o tyle, ile cala zmierzona przewaga.
-    command: ["sh", "-c", "sleep 90; python services/engine/loop.py --bar 4h --sprawdz && exec python services/engine/loop.py --bar 4h --interval 300 --kind spot_eu --limit --egzekucja papier --mode demo"]
+    command: ["sh", "-c", "sleep 90; python services/engine/loop.py --bar 4h --sprawdz && exec python services/engine/loop.py --bar 4h --interval 300 --kind spot_eu --limit --egzekucja gielda --mode demo"]
     resources:
       limits:   { cpu: 1000m, memory: 512Mi }
       requests: { cpu: 100m,  memory: 128Mi }
