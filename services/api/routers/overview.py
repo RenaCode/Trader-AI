@@ -1,21 +1,31 @@
 """Zakladka STAN: krzywa kapitalu, pozycje, ekspozycja, heartbeat silnika."""
 from __future__ import annotations
 
+from typing import Literal
+
 from fastapi import APIRouter, Query
 
 from services.engine.horizons import DEFAULT_BAR
 from ..db import fetch_all, fetch_one
 
+# Silnik i tryb to w bazie enumy (`ref.engine`, `ref.trade_mode`). psycopg
+# wysyla `str` jako `unknown`, wiec literal rzutuje dopiero Postgres - przy
+# nieznanej wartosci konczylo sie to InvalidTextRepresentation, czyli 500
+# ("Internal Server Error") na zwykla literowke w adresie. Domkniecie listy
+# TUTAJ sprawia, ze FastAPI odmawia 422 ZANIM powstanie jakiekolwiek zapytanie.
+Silnik = Literal["crypto", "equity"]
+Tryb = Literal["demo", "live"]
+
 router = APIRouter(prefix="/api/engines/{engine}", tags=["overview"])
 
 
 @router.get("/overview")
-async def overview(engine: str, mode: str = Query("demo")):
+async def overview(engine: Silnik, mode: Tryb = Query("demo")):
     latest = await fetch_one(
         """
         SELECT equity, cash, unrealized, realized_cum, exposure, event_time
         FROM exec.equity_point
-        WHERE engine = %s AND mode = %s
+        WHERE engine::text = %s AND mode::text = %s
         ORDER BY event_time DESC LIMIT 1
         """,
         (engine, mode),
@@ -25,7 +35,7 @@ async def overview(engine: str, mode: str = Query("demo")):
     day_ago = await fetch_one(
         """
         SELECT equity FROM exec.equity_point
-        WHERE engine = %s AND mode = %s AND event_time <= now() - interval '24 hours'
+        WHERE engine::text = %s AND mode::text = %s AND event_time <= now() - interval '24 hours'
         ORDER BY event_time DESC LIMIT 1
         """,
         (engine, mode),
@@ -34,14 +44,14 @@ async def overview(engine: str, mode: str = Query("demo")):
     first = await fetch_one(
         """
         SELECT equity FROM exec.equity_point
-        WHERE engine = %s AND mode = %s
+        WHERE engine::text = %s AND mode::text = %s
         ORDER BY event_time ASC LIMIT 1
         """,
         (engine, mode),
     )
 
     heartbeat = await fetch_one(
-        "SELECT status, last_beat_at, detail FROM risk.engine_heartbeat WHERE engine = %s",
+        "SELECT status, last_beat_at, detail FROM risk.engine_heartbeat WHERE engine::text = %s",
         (engine,),
     )
 
@@ -49,7 +59,7 @@ async def overview(engine: str, mode: str = Query("demo")):
         # Jawny filtr po horyzoncie: od migracji 0025 stanow jest wiecej niz jeden
         # na silnik, a dashboard pokazuje ten, ktorym silnik handluje.
         "SELECT status, reason, updated_at FROM learn.learning_state"
-        " WHERE engine = %s AND bar = %s",
+        " WHERE engine::text = %s AND bar = %s",
         (engine, DEFAULT_BAR),
     )
 
@@ -75,12 +85,12 @@ async def overview(engine: str, mode: str = Query("demo")):
 
 
 @router.get("/equity-curve")
-async def equity_curve(engine: str, mode: str = Query("demo"), days: int = Query(30, le=365)):
+async def equity_curve(engine: Silnik, mode: Tryb = Query("demo"), days: int = Query(30, le=365)):
     rows = await fetch_all(
         """
         SELECT event_time, equity, exposure
         FROM exec.equity_point
-        WHERE engine = %s AND mode = %s AND event_time >= now() - make_interval(days => %s)
+        WHERE engine::text = %s AND mode::text = %s AND event_time >= now() - make_interval(days => %s)
         ORDER BY event_time
         """,
         (engine, mode, days),
@@ -92,14 +102,14 @@ async def equity_curve(engine: str, mode: str = Query("demo"), days: int = Query
 
 
 @router.get("/positions")
-async def positions(engine: str, mode: str = Query("demo")):
+async def positions(engine: Silnik, mode: Tryb = Query("demo")):
     rows = await fetch_all(
         """
         SELECT p.id, i.symbol, p.side, p.qty, p.avg_price, p.opened_at,
                p.realized_pnl, p.fees_paid, p.closed_at
         FROM exec.position p
         JOIN ref.instrument i ON i.id = p.instrument_id
-        WHERE p.engine = %s AND p.mode = %s AND p.closed_at IS NULL
+        WHERE p.engine::text = %s AND p.mode::text = %s AND p.closed_at IS NULL
         ORDER BY p.opened_at DESC
         """,
         (engine, mode),

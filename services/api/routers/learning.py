@@ -6,16 +6,22 @@ jest domyslnie sygnalem przeuczenia, nie alfy.
 """
 from __future__ import annotations
 
+from typing import Literal
+
 from fastapi import APIRouter, Query
 
 from services.engine.horizons import DEFAULT_BAR
 from ..db import fetch_all, fetch_one
 
+# Patrz overview.py: wartosc zamknieta tutaj, zeby nieznany silnik konczyl sie
+# odmowa 422, a nie bledem rzutowania enuma w Postgresie (500).
+Silnik = Literal["crypto", "equity"]
+
 router = APIRouter(prefix="/api/engines/{engine}/learning", tags=["learning"])
 
 
 @router.get("/state")
-async def state(engine: str):
+async def state(engine: Silnik):
     row = await fetch_one(
         """
         SELECT ls.status, ls.windows_total, ls.windows_positive, ls.median_oos_sharpe,
@@ -29,7 +35,7 @@ async def state(engine: str):
         -- Jawny filtr po horyzoncie: od migracji 0025 jeden silnik ma wiele
         -- stanow nauki, po jednym na trenowana swiece. Zakladka pokazuje ten,
         -- ktorym silnik faktycznie handluje - pozostale sa torami porownawczymi.
-        WHERE ls.engine = %s AND ls.bar = %s
+        WHERE ls.engine::text = %s AND ls.bar = %s
         """,
         (engine, DEFAULT_BAR),
     )
@@ -67,7 +73,7 @@ async def state(engine: str):
 
 
 @router.get("/weights")
-async def weights(engine: str, bar: str = Query("4h")):
+async def weights(engine: Silnik, bar: str = Query("4h")):
     """Wagi sygnalow: wyliczone przez trening kontra zalozenia poczatkowe.
 
     To jest najbardziej konkretna odpowiedz na pytanie "czy algorytm sie uczy".
@@ -124,7 +130,7 @@ async def weights(engine: str, bar: str = Query("4h")):
 
 
 @router.get("/walk-forward")
-async def walk_forward(engine: str, limit: int = Query(40, le=200)):
+async def walk_forward(engine: Silnik, limit: int = Query(40, le=200)):
     """Metryki per okno walk-forward. Jedyny dopuszczalny protokol oceny."""
     rows = await fetch_all(
         """
@@ -136,7 +142,7 @@ async def walk_forward(engine: str, limit: int = Query(40, le=200)):
         JOIN learn.model_version mv ON mv.id = tr.model_version_id
         JOIN learn.model m ON m.id = mv.model_id
         LEFT JOIN learn.wf_metric mt ON mt.wf_window_id = w.id
-        WHERE m.engine = %s
+        WHERE m.engine::text = %s
         GROUP BY w.id, w.idx, w.train_from, w.train_to, w.test_from, w.test_to,
                  w.n_trades, w.dominant_regime
         ORDER BY w.idx DESC
@@ -158,7 +164,7 @@ async def walk_forward(engine: str, limit: int = Query(40, le=200)):
 
 
 @router.get("/calibration")
-async def calibration(engine: str):
+async def calibration(engine: Silnik):
     """Czy pewnosc 70% oznacza trafnosc ~70%. Rozjazd = model klamie o swojej pewnosci.
 
     Zwracamy tez PODSUMOWANIE, bo sam wykres latwo przeczytac zyczeniowo.
@@ -174,7 +180,7 @@ async def calibration(engine: str):
         FROM learn.calibration_bin cb
         JOIN learn.model_version mv ON mv.id = cb.model_version_id
         JOIN learn.model m ON m.id = mv.model_id
-        WHERE m.engine = %s
+        WHERE m.engine::text = %s
           AND cb.evaluated_at = (
               SELECT max(evaluated_at) FROM learn.calibration_bin
               WHERE model_version_id = cb.model_version_id)
@@ -226,7 +232,7 @@ async def calibration(engine: str):
 
 
 @router.get("/drift")
-async def drift(engine: str, limit: int = Query(12, le=60)):
+async def drift(engine: Silnik, limit: int = Query(12, le=60)):
     """Dryf rozkladu cech. UWAGA: kolumna nazywa sie `psi`, ale to NIE JEST PSI.
 
     `train.py` liczy standaryzowane przesuniecie sredniej (d Cohena) powiekszone
@@ -253,7 +259,7 @@ async def drift(engine: str, limit: int = Query(12, le=60)):
         JOIN feat.feature_def fd ON fd.id = d.feature_def_id
         JOIN learn.model_version mv ON mv.id = d.model_version_id
         JOIN learn.model m ON m.id = mv.model_id
-        WHERE m.engine = %s
+        WHERE m.engine::text = %s
           AND d.event_time = (SELECT max(event_time) FROM learn.drift_metric
                               WHERE model_version_id = d.model_version_id)
         ORDER BY d.psi DESC NULLS LAST
@@ -274,7 +280,7 @@ async def drift(engine: str, limit: int = Query(12, le=60)):
 
 
 @router.get("/signal-performance")
-async def signal_performance(engine: str):
+async def signal_performance(engine: Silnik):
     """Skutecznosc per sygnal - ktora hipoteza faktycznie cos wnosi."""
     rows = await fetch_all(
         """
@@ -287,7 +293,7 @@ async def signal_performance(engine: str):
         JOIN journal.decision d ON d.id = dc.decision_id
         JOIN sig.signal_def   sd ON sd.id = dc.ref_id AND dc.kind = 'signal'
         LEFT JOIN exec.position p ON p.open_decision_id = d.id AND p.closed_at IS NOT NULL
-        WHERE d.engine = %s
+        WHERE d.engine::text = %s
         GROUP BY sd.name, sd.family
         ORDER BY count(*) DESC
         """,
@@ -305,12 +311,12 @@ async def signal_performance(engine: str):
 
 
 @router.get("/postmortems")
-async def postmortems(engine: str, limit: int = Query(5, le=50)):
+async def postmortems(engine: Silnik, limit: int = Query(5, le=50)):
     """Dziennik jakosciowy generowany przez Claude z zamknietych transakcji."""
     rows = await fetch_all(
         """
         SELECT id, period_from, period_to, model, summary, findings, created_at
-        FROM learn.postmortem WHERE engine = %s
+        FROM learn.postmortem WHERE engine::text = %s
         ORDER BY created_at DESC LIMIT %s
         """,
         (engine, limit),

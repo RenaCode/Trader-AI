@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import re
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
@@ -11,6 +12,9 @@ from ..auth import audit, current_user, require_csrf
 from ..db import execute, fetch_all, fetch_one
 from ..notifications import notify
 from ..security import SecretBox
+
+# Kanaly dostarczania = enum notify.channel_kind (migracja 0027).
+Kanal = Literal["inapp", "whatsapp", "webhook"]
 
 router = APIRouter(prefix="/api/notifications", tags=["notifications"])
 
@@ -29,7 +33,12 @@ class ChannelBody(BaseModel):
 class PreferenceBody(BaseModel):
     event_code: str
     enabled: bool
-    channels: list[str]
+    # Kolumna `notify.preference.channels` jest tablica enuma notify.channel_kind.
+    # Gola `list[str]` przepuszczala wartosc spoza enuma az do bazy, ktora
+    # odmawiala rzutowania - uzytkownik dostawal 500 zamiast 422. Najbardziej
+    # prawdopodobna pomylka to kanal USUNIETY w migracji 0027: byl w enumie,
+    # wiec siedzi w cudzych zakladkach i w starych przykladach.
+    channels: list[Kanal]
     cooldown_s: int | None = Field(default=None, ge=0, le=86400)
 
 
