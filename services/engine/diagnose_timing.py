@@ -63,7 +63,8 @@ from services.engine.koszty import runda
 from services.engine.portfolio import Egzekucja, precompute_panels, simulate_portfolio
 from services.engine.risk_rules import MIN_CONFIDENCE
 from services.engine.train import (
-    DEFAULT_WEIGHTS, MIN_INSTRUMENTS, atr_threshold, load_panel, score_threshold,
+    DEFAULT_WEIGHTS, MIN_INSTRUMENTS, _bez_martwych, atr_threshold, ic_weights, load_panel,
+    martwe_sygnaly, score_threshold,
 )
 from services.engine.uniwersum import SQL_UNIWERSUM_DECYZYJNE, odcisk
 
@@ -100,6 +101,13 @@ def main() -> int:
     ap.add_argument("--limit", action=argparse.BooleanOptionalAction, default=True,
                     help="zlecenia z limitem (domyślnie); --no-limit dla rynkowych")
     ap.add_argument("--losowan", type=int, default=LOSOWAN)
+    # KTORA STRATEGIA JEST TESTOWANA. `bazowe` = DEFAULT_WEIGHTS - wariant BEZ
+    # zmierzonej przewagi (docs/03: 20/40 okien, Sharpe +0,008). Produkcja
+    # i +6,8% pochodza z wag `ic`. Pomiar z 22.09.2026 na `bazowe` dal
+    # percentyl ~50 i zostal odczytany jako "brak timingu" - a mowil tylko,
+    # ze strategia bez przewagi nie ma timingu. Domysl zostaje `bazowe` dla
+    # porownywalnosci z 07.09; wlasciwe pytanie zadaje `--wagi ic`.
+    ap.add_argument("--wagi", default="bazowe", choices=("bazowe", "ic"))
     args = ap.parse_args()
 
     url = os.environ.get("DATABASE_URL")
@@ -160,11 +168,19 @@ def main() -> int:
         trening = {s: [r for r in panels[s] if start <= r["t"] < train_to] for s in test}
         prog = {s: atr_threshold(trening[s]) for s in test}
         cache_tr = precompute_panels(trening, prog, h)
-        gates = {s: score_threshold(trening[s], DEFAULT_WEIGHTS, prog[s], h, cache_tr[s])
+        # DOKLADNIE TA SAMA SCIEZKA CO W TRENERZE (train.py, petla okien):
+        # martwe sygnaly poza kalibracja, bramki z wag bazowych po
+        # wyzerowaniu martwych, handel wagami `ic` z okna treningowego.
+        # Rozjazd w ktorymkolwiek z tych trzech krokow mierzylby inna
+        # strategie niz ta, ktora chodzi na produkcji.
+        martwe = martwe_sygnaly(cache_tr)
+        bazowe = _bez_martwych(DEFAULT_WEIGHTS, martwe)
+        wagi = ic_weights(trening, cache_tr, martwe) if args.wagi == "ic" else bazowe
+        gates = {s: score_threshold(trening[s], bazowe, prog[s], h, cache_tr[s])
                  for s in test}
         cache_te = precompute_panels(test, prog, h)
 
-        res = simulate_portfolio(test, DEFAULT_WEIGHTS, prog, gates, h, MIN_CONFIDENCE,
+        res = simulate_portfolio(test, wagi, prog, gates, h, MIN_CONFIDENCE,
                                  instrument_ids=inst_ids, cache=cache_te,
                                  kind=args.kind, egzekucja=egz)
         if len(res.trades) < h.min_trades:

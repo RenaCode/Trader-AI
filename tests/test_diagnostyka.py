@@ -100,3 +100,17 @@ def test_kierunek_dlugi_jest_zapisany_wprost():
     a zwracałoby jedynkę zawsze — na spocie krótkich pozycji nie ma."""
     assert "kierunek" not in _kod(TIMING), \
         "kierunek pozycji nadal jest wyliczany zamiast zapisany wprost"
+
+
+def test_test_permutacyjny_umie_mierzyc_STRATEGIE_PRODUKCYJNA():
+    """22.09.2026: pomiar na DEFAULT_WEIGHTS (wariant bez przewagi) dał percentyl
+    ~50 i został odczytany jako „brak timingu" — mówił tylko, że strategia bez
+    przewagi nie ma timingu. `--wagi ic` ma iść DOKŁADNIE ścieżką trenera:
+    martwe sygnały, bramki z wag bazowych po wyzerowaniu martwych, handel
+    wagami ic z okna treningowego."""
+    assert '"--wagi"' in TIMING and '"ic"' in TIMING
+    assert "martwe = martwe_sygnaly(cache_tr)" in TIMING
+    assert "bazowe = _bez_martwych(DEFAULT_WEIGHTS, martwe)" in TIMING
+    assert "ic_weights(trening, cache_tr, martwe)" in TIMING
+    assert "score_threshold(trening[s], bazowe," in TIMING, "bramki z wag BAZOWYCH jak w trenerze"
+    assert "simulate_portfolio(test, wagi," in TIMING
