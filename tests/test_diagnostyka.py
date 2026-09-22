@@ -57,8 +57,10 @@ TIMING = Path("services/engine/diagnose_timing.py").read_text()
 def test_test_permutacyjny_zachowuje_wszystko_poza_czasem():
     """Jeśli losowanie zmieniłoby liczbę transakcji, ich długość albo instrument,
     różnica nie pochodziłaby już z momentu wejścia — a to jest całe pytanie."""
-    assert "wzorce.append((t[\"symbol\"], max(1, i1 - i0)))" in TIMING, \
-        "wzorce transakcji nie zachowują instrumentu i długości"
+    # Wzorzec niesie instrument, swiece wejscia i dlugosc; tryb `czas` losuje
+    # WYLACZNIE swiece wejscia (dlugosc i instrument z wzorca).
+    assert "wzorce.append((t[\"symbol\"], i0, max(1, i1 - i0)))" in TIMING, \
+        "wzorce transakcji nie zachowują instrumentu, wejścia i długości"
     assert "rng.randrange(0, len(seria) - dlugosc - 2)" in TIMING, \
         "losowany jest nie tylko moment wejścia"
 
