@@ -1,41 +1,81 @@
--- Próba pożarowa czyta dziennik decyzji — ogniwo 3 łańcucha kill-switcha.
+-- Próba pożarowa dostaje ODCZYT PIĘCIU KOLUMN `journal.decision`.
 --
--- DLACZEGO TA MIGRACJA W OGÓLE ISTNIEJE
+-- Rola: `trader_proba` (i tylko ona — nie silnik, nie dozorca, nie czujka).
+-- Zakres: SELECT na kolumnach (engine, mode, decided_at, action, powod_holdu)
+--         jednej tabeli. Bez zapisu, bez pozostałych kolumn, bez pozostałych
+--         tabel schematu, bez uprawnienia domyślnego na tabele przyszłe.
 --
--- Do 2026-09-22 `services/engine/proba_killswitcha.py` sprawdzała ogniwa 1-2
--- i 4, a na końcu wypisywała BEZWARUNKOWO „wszystkie ogniwa zadziałały".
--- Ogniwo 3 — „kill-switch aktywny -> silnik wstrzymał wejścia" — było wypisane
--- w nagłówku modułu i nigdy nie odpytane, mimo że jako jedyne z czterech
--- dotyczy PIENIĘDZY; pozostałe trzy opisują zapis i powiadomienie.
+-- CO SIĘ TU ROZLUŹNIA I DLACZEGO W OGÓLE
 --
--- Śladem wstrzymania jest `journal.decision.powod_holdu = 'wstrzymanie_ryzykiem'`
--- (migracja 0040). Rola `trader_proba` nie miała do schematu `journal` ani
--- USAGE, ani SELECT — z rozdziału ról w 0034 wynikało dla niej wyłącznie to,
--- czego wymagało podniesienie progu i zwolnienie własnego zdarzenia.
+-- `services/engine/proba_killswitcha.py` mierzy cztery ogniwa łańcucha
+-- kill-switcha. Do 2026-09-22 mierzyła trzy, a o czterech meldowała: między
+-- etykietami „OGNIWO 1-2" i „OGNIWO 4" nie stało ani jedno zapytanie o to, czy
+-- silnik NAPRAWDĘ wstrzymał wejścia, a na końcu bezwarunkowo drukowało się
+-- zdanie „wszystkie ogniwa zadziałały". Pominięte było jedyne ogniwo, które
+-- dotyczy PIENIĘDZY — pozostałe trzy opisują zapis i powiadomienie.
 --
--- Bez tego nadania zapytanie ogniwa 3 kończy się `permission denied for schema
--- journal` W ŚRODKU próby: wyjątek leci przez `finally` (próg wraca, zdarzenie
--- zostaje zwolnione), ale zadanie cykliczne pokazuje ślad stosu zamiast wyniku,
--- a łańcuch nie jest sprawdzony ani razu. To jest dokładnie ta klasa rozjazdu,
--- którą opisuje `tests/test_role_bazodanowe.py`: kod i nadanie wyglądają
--- poprawnie Z OSOBNA, a Postgres mówi o rozjeździe dopiero przy wykonaniu.
+-- Jedyny ślad, jaki wstrzymane wejście zostawia w bazie, to wiersz
+-- `journal.decision` z `powod_holdu = 'wstrzymanie_ryzykiem'` (migracja 0040,
+-- zapis w `loop.py`: akcja `enter_*` jest podmieniana na `hold` i ten powód
+-- wpisywany). Roli `trader_proba` migracja 0034 dała dostęp wyłącznie do tego,
+-- czego wymagało podniesienie progu i zwolnienie własnego zdarzenia: `exec`,
+-- `ref`, `risk`, `notify`. Do schematu `journal` nie ma ani USAGE, ani SELECT.
 --
--- ZAKRES: SAM ODCZYT, SAMA JEDNA TABELA
+-- CZEGO PRÓBOWANO ZAMIAST TEGO — I DLACZEGO NIE WYSTARCZA
 --
--- Próba liczy w `journal.decision` dwie rzeczy i nic więcej: ile zamiarów
--- wejścia zostało wstrzymanych po zadziałaniu bezpiecznika i ile wejść mimo
--- niego zapisano. Nadanie na cały schemat (albo domyślne uprawnienie na przyszłe
--- tabele) dałoby jej wgląd w `journal.planned_order` i w każdą następną tabelę
--- dziennika — czyli rozszerzałoby zasięg procesu przy każdej kolejnej migracji,
--- bez niczyjej decyzji. Dziennik jest zapisem tego, co system postanowił;
--- proces, który go czyta szerzej, niż mierzy, przestaje być wąskim narzędziem.
+-- Rola ma już SELECT na `exec.position` i `exec.order`, więc WEJŚCIE mimo
+-- aktywnego bezpiecznika dałoby się wykryć bez żadnego nowego nadania: pozycja
+-- z `opened_at` późniejszym niż `triggered_at` nie ma prawa powstać. To jednak
+-- pokrywa wyłącznie połowę NEGATYWNĄ i pokrywa ją PÓŹNIEJ — dopiero po
+-- wypełnieniu; zlecenie wejścia złożone mimo zatrzymania i leżące w arkuszu
+-- nie zostawia tam nic. Przede wszystkim zaś nie istnieje poza `journal`
+-- ŻADEN ślad połowy POZYTYWNEJ, czyli tego, że silnik chciał wejść i został
+-- zatrzymany. Bez niej ogniwo 3 dałoby się tylko OBALIĆ, nigdy POTWIERDZIĆ,
+-- a wynik „zaliczona" pozostałby zdaniem bez pomiaru — czyli dokładnie tym,
+-- co ta zmiana naprawia. `exec.*` zostaje jako droga zapasowa, gdyby to
+-- nadanie kiedyś odebrano: wykryje mniej i później, ale wykryje.
 --
--- ZAPISU NIE MA I NIE MOŻE BYĆ. `journal.decision` jest niemutowalna
--- (wyzwalacz `decision_immutable`, migracja 0005), a próba, która mogłaby do
--- dziennika dopisać, mierzyłaby własny INSERT zamiast zachowania silnika —
--- ten sam powód, dla którego 0034 odmawia jej INSERT-u na `risk.killswitch_event`.
+-- CO TO ZNACZY DLA ROZDZIAŁU RÓL
+--
+-- Kierunek przepływu informacji jest tu bezpieczny: czytającym jest OBSERWATOR,
+-- czytanym — OBSERWOWANY. Silnik nie dostaje tą migracją niczego; zdanie
+-- „nadzorca nie może dzielić losu z nadzorowanym" (docs/06) dotyczy sytuacji
+-- odwrotnej i pozostaje nienaruszone.
+--
+-- `journal.decision` jest przy tym NIEMUTOWALNA (wyzwalacz `decision_immutable`,
+-- migracja 0005), a próba nie dostaje tu zapisu i nie ma go z czego odziedziczyć.
+-- To nie jest formalność: próba, która mogłaby dopisać do dziennika, mierzyłaby
+-- WŁASNY INSERT zamiast zachowania silnika — ten sam powód, dla którego 0034
+-- odmawia jej INSERT-u na `risk.killswitch_event`.
+--
+-- ZAPYTANIE ZOSTAJE W PRÓBIE, A NIE WĘDRUJE DO RiskKernela. Kernel jest wspólny
+-- dla silnika i dozorcy, a dozorca `journal` nie widzi (0034 daje mu tylko
+-- `exec`, `ref` i dwie tabele `risk`). Odczyt dziennika wstawiony do wspólnego
+-- komponentu wywróciłby więc NADZORCĘ, i to po cichu — na tę właściwość tego
+-- projektu natrafiono już wcześniej.
+--
+-- USAGE NA SCHEMACIE JEST W POSTGRESIE WARUNKIEM KONIECZNYM dostępu do
+-- czegokolwiek w nim i samo w sobie nie daje wglądu w żadne dane: bez nadania
+-- na konkretny obiekt rola nie odczyta ani jednego wiersza. Świadomie NIE MA
+-- tu `GRANT SELECT ON ALL TABLES IN SCHEMA journal` ani `ALTER DEFAULT
+-- PRIVILEGES` — dzięki temu każda następna tabela dziennika (i każda nowa
+-- kolumna `journal.decision`) pozostaje dla próby niewidoczna do czasu czyjejś
+-- świadomej decyzji, a nie staje się widoczna przy okazji.
+--
+-- NADANIE KOLUMNOWE, A NIE TABELARYCZNE, jest tu celowo ciasne aż do
+-- niewygody: zapytanie ogniwa 3 sięga dokładnie tych pięciu kolumn i po każde
+-- następne trzeba będzie wrócić do tego pliku. Ten sam wzór stosuje 0034 do
+-- `UPDATE (value, updated_at)` na limicie i do `UPDATE (released_at,
+-- released_auto, release_note)` na zdarzeniu. `count(*)` działa przy nadaniu
+-- kolumnowym, bo nie odwołuje się do żadnej kolumny z osobna.
 
 GRANT USAGE ON SCHEMA journal TO trader_proba;
-GRANT SELECT ON journal.decision TO trader_proba;
 
+GRANT SELECT (engine, mode, decided_at, action, powod_holdu)
+    ON journal.decision TO trader_proba;
+
+-- Zapisu nie nadano wyżej, więc to odebranie jest formalnie zbędne. Zostaje
+-- z tego samego powodu co bliźniaczy REVOKE w 0034: jest jedynym miejscem,
+-- które mówi WPROST, czego tu nie ma. Uprawnienie, którego brak jest tylko
+-- brakiem, wraca przy pierwszym „dodajmy próbie zapis, bo coś nie działa".
 REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON journal.decision FROM trader_proba;

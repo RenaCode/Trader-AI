@@ -338,7 +338,35 @@ def test_rola_proby_MA_NADANIE_na_dziennik_decyzji():
     zwarty = " ".join(kod.split())
 
     assert "GRANT USAGE ON SCHEMA journal TO trader_proba" in zwarty
-    assert "GRANT SELECT ON journal.decision TO trader_proba" in zwarty
-    assert "INSERT ON journal.decision TO trader_proba" not in zwarty, (
-        "próba, która może dopisać do dziennika, mierzy własny INSERT zamiast "
-        "zachowania silnika")
+
+    # NADANIE KOLUMNOWE, i to na DOKLADNIE te kolumny, ktorych dotyka zapytanie.
+    # Nadanie na cala tabele przeszloby test slabszy ("czy w ogole czyta"),
+    # a wpuscilo probe w `feature_snapshot`, `rationale_model` i kazda kolumne
+    # dopisana pozniej - czyli rozszerzaloby jej zasieg przy okazji.
+    import re
+
+    from services.engine.proba_killswitcha import _ogniwo_3
+
+    m = re.search(r"GRANT SELECT \(([^)]*)\) ON journal\.decision "
+                  r"TO trader_proba", zwarty)
+    assert m, ("nadanie na `journal.decision` nie jest kolumnowe — "
+               "`GRANT SELECT ON <tabela>` daje próbie cały dziennik decyzji")
+    nadane = {k.strip() for k in m.group(1).split(",")}
+
+    import inspect
+    sql = " ".join(inspect.getsource(_ogniwo_3).split())
+    dotykane = set(re.findall(r"\bd\.(\w+)", sql))
+    assert dotykane <= nadane, (
+        f"zapytanie ogniwa 3 czyta {sorted(dotykane - nadane)} — kolumny bez "
+        f"nadania. Postgres powie o tym dopiero przy wykonaniu, czyli w środku "
+        f"próby")
+    assert nadane <= dotykane, (
+        f"nadane, a nieczytane: {sorted(nadane - dotykane)} — nadanie szersze "
+        f"niż pomiar przestaje być decyzją i staje się zapasem na przyszłość")
+
+    for zapis in ("INSERT", "UPDATE", "DELETE"):
+        assert f"GRANT {zapis} ON journal.decision TO trader_proba" not in zwarty, (
+            "próba, która może dopisać do dziennika, mierzy własny INSERT "
+            "zamiast zachowania silnika")
+    assert ("GRANT SELECT ON ALL TABLES IN SCHEMA journal TO trader_proba"
+            not in zwarty), "nadanie na cały schemat dziennika"
