@@ -275,6 +275,9 @@ def niezgodnosc(wartosc, rodzaj: str) -> str | None:
     poprawne, a `"proba-pozarowa"` nie. Liczba jedzie z własnym typem, więc do
     kolumny tekstowej nie wejdzie wcale.
     """
+    # `json` jest tu pominięty CELOWO i nie jest to już ślepa plamka: o kolumnach
+    # json rozstrzyga `niezgodnosc_json`, patrząc na KSZTAŁT wyrażenia w kodzie,
+    # a nie na wartość stałej. Kryterium jest tam inne, więc i funkcja osobna.
     if wartosc is None or rodzaj in (NIESPRAWDZANE, "json", "bajty", "czas"):
         return None
 
@@ -304,6 +307,74 @@ def niezgodnosc(wartosc, rodzaj: str) -> str | None:
         return (f"{type(wartosc).__name__} {wartosc!r} w kolumnie tekstowej — "
                 f"jedzie z własnym typem, więc baza nie zrzutuje go po cichu")
 
+    return None
+
+
+# --------------------------------------------------------- zgodność z kolumną json
+
+# Wolno wstawić w `json`/`jsonb` tylko to, co psycopg umie na JSON zamienić.
+OPAKOWANIA_JSON = ("Jsonb", "Json", "dumps")
+
+
+def _nazwa_wywolania(wezel: ast.AST) -> str | None:
+    """Ostatni człon wywoływanej nazwy: `Jsonb(x)`, `json.dumps(x)` -> 'Jsonb', 'dumps'."""
+    if not isinstance(wezel, ast.Call):
+        return None
+    cel = wezel.func
+    if isinstance(cel, ast.Attribute):
+        return cel.attr
+    if isinstance(cel, ast.Name):
+        return cel.id
+    return None
+
+
+def niezgodnosc_json(wezel: ast.AST) -> str | None:
+    """Opis niezgodności WYRAŻENIA z kolumną json/jsonb albo None, gdy pasuje.
+
+    DLACZEGO TU NIE PATRZYMY NA WARTOŚĆ, TYLKO NA KSZTAŁT
+
+    Reszta tego pliku sprawdza stałe, bo typ zmiennej jest znany dopiero
+    w czasie wykonania. Dla kolumn json to kryterium przepuściło `audit()`:
+    parametry szły tam jako gołe nazwy (`before`, `after`), więc `isinstance(
+    param, ast.Constant)` odsiewało je bez słowa, a `niezgodnosc` i tak
+    pomijała rodzaj „json". Dwie ślepe plamki nałożone na siebie — i efekt:
+    `dict` wkładany prosto w `%s`, co psycopg odrzuca PRZY WIĄZANIU
+    PARAMETRU, już po zatwierdzonym zapisie wołającego.
+
+    Ale o kolumnie json da się orzekać bez znajomości wartości, bo poprawny kod
+    MUSI pokazać opakowanie w miejscu wywołania: psycopg nie adaptuje ani
+    `dict`, ani `list` (ta druga jedzie jako tablica Postgresa, nie JSON), więc
+    `Jsonb(...)` albo `json.dumps(...)` jest jedyną drogą. Brak opakowania jest
+    widoczny statycznie i zawsze błędny — niezależnie od tego, co w zmiennej
+    siedzi. To odwrócenie kryterium: nie „czy ta wartość pasuje", tylko „czy
+    w ogóle użyto formy, która ma szansę wejść".
+    """
+    if isinstance(wezel, ast.Constant):
+        # Stała: `None` to NULL, napis to gotowy JSON. Liczba/bool — nie.
+        if wezel.value is None or isinstance(wezel.value, str):
+            return None
+        return (f"{type(wezel.value).__name__} {wezel.value!r} w kolumnie json — "
+                f"opakuj w Jsonb(...)")
+
+    if isinstance(wezel, (ast.Dict, ast.DictComp)):
+        return "goły dict w kolumnie json — psycopg go nie zaadaptuje, brak Jsonb(...)"
+    if isinstance(wezel, (ast.List, ast.ListComp, ast.Tuple, ast.Set)):
+        return ("goła lista w kolumnie json — psycopg wyśle ją jako tablicę "
+                "Postgresa, nie JSON; brak Jsonb(...)")
+
+    if isinstance(wezel, ast.IfExp):
+        # `None if x is None else Jsonb(x)` — obie gałęzie muszą być dobre.
+        return (niezgodnosc_json(wezel.body) or niezgodnosc_json(wezel.orelse))
+    if isinstance(wezel, ast.BoolOp):
+        return next((o for o in map(niezgodnosc_json, wezel.values) if o), None)
+
+    if _nazwa_wywolania(wezel) in OPAKOWANIA_JSON:
+        return None
+
+    if isinstance(wezel, (ast.Name, ast.Attribute, ast.Subscript, ast.Call)):
+        return ("wartość bez Jsonb(...)/json.dumps(...) w kolumnie json — "
+                "psycopg nie adaptuje dict ani list, więc jeśli to nie jest "
+                "gotowy napis, odrzuci to przy wiązaniu parametru")
     return None
 
 
@@ -337,12 +408,17 @@ def znajdz_niezgodnosci(sql: str, parametry, linia=0, plik="") -> list[str]:
         if miejsce is None:
             continue
         tabela, kolumna, rzutowanie = miejsce
-        if not (isinstance(param, ast.Constant)):
-            continue          # zmienna — typ znany dopiero w czasie wykonania
         typ = ("text" if rzutowanie else SCHEMAT.get(tabela, {}).get(kolumna))
         if typ is None:
             continue          # kolumna spoza tej tabeli (JOIN, alias) — nie zgaduję
-        opis = niezgodnosc(param.value, _rodzaj(typ))
+        if _rodzaj(typ) == "json":
+            # Kolumny json rozstrzyga kształt wyrażenia, więc TU nie wychodzimy
+            # na niestałej — to na niej właśnie przeszła wpadka `audit()`.
+            opis = niezgodnosc_json(param)
+        elif isinstance(param, ast.Constant):
+            opis = niezgodnosc(param.value, _rodzaj(typ))
+        else:
+            continue          # zmienna — typ znany dopiero w czasie wykonania
         if opis:
             braki.append(
                 f"{plik}:{linia} parametr {indeks + 1} -> "
@@ -383,6 +459,66 @@ def test_wykrywacz_LAPIE_znany_blad():
     braki = znajdz_niezgodnosci(sql, parametry, 159, "proba_killswitcha.py")
     assert len(braki) == 1, f"detektor nie widzi znanego błędu: {braki}"
     assert "released_by" in braki[0] and "bigint" in braki[0]
+
+
+def _wyr(kod: str) -> ast.AST:
+    """Wyrażenie Pythona jako węzeł — tak, jak widzi je detektor w kodzie."""
+    return ast.parse(kod, mode="eval").body
+
+
+# Zapis audytu dokładnie w postaci sprzed poprawki. Trzymany osobno, bo używają
+# go dwa twierdzenia: kanarek reguły i sprawdzenie, że poprawka go ucisza.
+SQL_AUDYTU = ("INSERT INTO app.audit_log (actor_user_id, action, entity,"
+              " entity_id, before, after, ip, user_agent)"
+              " VALUES (%s,%s,%s,%s,%s,%s,%s,%s)")
+
+
+def test_wykrywacz_LAPIE_goly_dict_w_kolumnie_jsonb():
+    """DRUGI KANAREK DETEKTORA.
+
+    Ten plik miał podwójną ślepą plamkę: sprawdzał wyłącznie stałe, a kolumny
+    json pomijał. `audit()` trafiała w obie naraz — parametry szły tam jako
+    gołe nazwy zmiennych — i przez to przeszła wpadka, która na produkcji
+    dawała 500 po zatwierdzonym już zapisie wołającego. Tu jest podana
+    dokładnie ta wersja zapisu: musi zostać zgłoszona.
+    """
+    parametry = [_wyr(k) for k in ("user_id", "action", "entity", "entity_id",
+                                   "before", "after", "ip", "ua")]
+    braki = znajdz_niezgodnosci(SQL_AUDYTU, parametry, 97, "services/api/auth.py")
+    assert len(braki) == 2, f"detektor nie widzi gołego dicta w jsonb: {braki}"
+    assert "before" in braki[0] and "jsonb" in braki[0]
+    assert "after" in braki[1] and "jsonb" in braki[1]
+
+
+def test_wykrywacz_MILCZY_na_audycie_po_poprawce():
+    """Kanarek do kanarka wyżej: poprawiona postać ma przechodzić bez słowa,
+    inaczej reguła jest nie do utrzymania i zostanie wyłączona."""
+    parametry = [_wyr(k) for k in (
+        "user_id", "action", "entity", "entity_id",
+        "None if before is None else Jsonb(before)",
+        "None if after is None else Jsonb(after)", "ip", "ua")]
+    assert not znajdz_niezgodnosci(SQL_AUDYTU, parametry)
+
+
+@pytest.mark.parametrize("kod,ma_zglosic", [
+    ("{'a': 1}", True),                      # goły dict — to był ten błąd
+    ("[{'a': 1}]", True),                    # goła lista jedzie jako tablica PG
+    ("dane", True),                          # zmienna bez opakowania
+    ("check.permissions", True),
+    ("Jsonb(dane)", False),
+    ("psycopg.types.json.Jsonb(detal)", False),
+    ("Jsonb(detail or {})", False),
+    ("json.dumps(dane)", False),
+    ('__import__("json").dumps({"lista": check.permissions})', False),
+    ("None if dane is None else Jsonb(dane)", False),
+    ("None if dane is None else dane", True),  # jedna gałąź zła wystarczy
+    ("None", False),                         # NULL, a nie jsonowy null
+    ("'{}'", False),                         # gotowy napis JSON
+    ("7", True),
+])
+def test_regula_json(kod, ma_zglosic):
+    """Sama reguła json, bez parsowania SQL — żeby awaria wskazywała, co pękło."""
+    assert bool(niezgodnosc_json(_wyr(kod))) is ma_zglosic
 
 
 def test_wykrywacz_NIE_krzyczy_na_zapisie_poprawnym():

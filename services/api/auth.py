@@ -9,6 +9,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from fastapi import Cookie, Depends, Header, HTTPException, Request, Response
+from psycopg.types.json import Jsonb
 
 from .db import fetch_one, execute
 from .security import SESSION_COOKIE, session_token_hash
@@ -94,10 +95,17 @@ async def audit(action: str, *, user_id: int | None = None, entity: str | None =
         fwd = request.headers.get("x-forwarded-for")
         ip = (fwd.split(",")[0].strip() if fwd else (request.client.host if request.client else None))
         ua = request.headers.get("user-agent")
+    # Goly dict psycopg odrzuca przy WIAZANIU PARAMETRU, a wolajacy zdazyl juz
+    # zapisac swoja zmiane (pula chodzi z autocommit=True) - uzytkownik dostawal
+    # 500 po dokonanej zmianie, bez sladu w audycie. `Jsonb` jak w puls.py
+    # i dozorca.py. None zostaje None, zeby w bazie byl NULL (brak stanu),
+    # a nie jsonowy `null` (stan pusty) - to dwie rozne rzeczy przy czytaniu.
     await execute(
         "INSERT INTO app.audit_log (actor_user_id, action, entity, entity_id, before, after, ip, user_agent)"
         " VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
-        (user_id, action, entity, entity_id, before, after, ip, ua),
+        (user_id, action, entity, entity_id,
+         None if before is None else Jsonb(before),
+         None if after is None else Jsonb(after), ip, ua),
     )
 
 
