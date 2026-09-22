@@ -24,7 +24,7 @@ import psycopg
 from psycopg.rows import tuple_row
 
 from services.exchanges.base import ExchangeError
-from services.exchanges.bybit import BybitAdapter
+from services.exchanges.fabryka import adapter_danych
 
 # Ile minut trwa jedna swieca danego timeframe'u - do przesuwania okna paginacji.
 TF_MINUTES = {"1m": 1, "3m": 3, "5m": 5, "15m": 15, "30m": 30, "1h": 60, "4h": 240, "1d": 1440}
@@ -231,12 +231,12 @@ async def przebieg(conn, *, engine: str, timeframe: str, since: datetime,
         raise RuntimeError(f"brak pasujacych instrumentow (engine={engine},"
                            f" symbol={symbol})")
 
-    adapter = BybitAdapter(api_key="", api_secret="", mode="demo")
+    adapter = adapter_danych(conn, engine)
     grand = 0
     try:
         for iid, sym, venue in instruments:
-            if venue != "bybit":
-                print(f"  {sym:10s} pominiete ({venue} nieobslugiwany w backfillu)")
+            if venue != adapter.venue_code:
+                print(f"  {sym:10s} pominiete ({venue} to nie gielda silnika {engine})")
                 continue
             grand += await backfill_symbol(adapter, conn, iid, sym, timeframe,
                                            since, napraw=napraw)

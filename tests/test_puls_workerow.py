@@ -498,6 +498,8 @@ def test_cechy_nie_bija_pulsu_gdy_pada_DRUGI_horyzont(monkeypatch):
 
 
 class AtrapaGieldy:
+    venue_code = "bybit"
+
     def __init__(self, *a, **kw):
         pass
 
@@ -519,7 +521,7 @@ def test_rynek_bije_puls_po_udanym_cyklu(monkeypatch):
 
     monkeypatch.setenv("DATABASE_URL", "postgresql://atrapa")
     monkeypatch.setattr(market_worker.psycopg, "connect", lambda url, **kw: conn)
-    monkeypatch.setattr(market_worker, "BybitAdapter", AtrapaGieldy)
+    monkeypatch.setattr(market_worker, "adapter_danych", lambda conn, engine, mode="demo": AtrapaGieldy(api_key="", api_secret="", mode=mode))
     monkeypatch.setattr(market_worker, "cycle", cykl_ok)
     monkeypatch.setattr(sys, "argv", _market_argv())
 
@@ -544,7 +546,7 @@ def test_rynek_liczy_nieudane_pobranie_jako_awarie_cyklu(monkeypatch):
 
     monkeypatch.setenv("DATABASE_URL", "postgresql://atrapa")
     monkeypatch.setattr(market_worker.psycopg, "connect", lambda url, **kw: conn)
-    monkeypatch.setattr(market_worker, "BybitAdapter", AtrapaGieldy)
+    monkeypatch.setattr(market_worker, "adapter_danych", lambda conn, engine, mode="demo": AtrapaGieldy(api_key="", api_secret="", mode=mode))
     monkeypatch.setattr(market_worker, "cycle", cykl_z_bledem)
     monkeypatch.setattr(sys, "argv", _market_argv())
 
@@ -565,7 +567,7 @@ def test_rynek_konczy_proces_po_pieciu_awariach(monkeypatch, capsys):
 
     monkeypatch.setenv("DATABASE_URL", "postgresql://atrapa")
     monkeypatch.setattr(market_worker.psycopg, "connect", lambda url, **kw: conn)
-    monkeypatch.setattr(market_worker, "BybitAdapter", AtrapaGieldy)
+    monkeypatch.setattr(market_worker, "adapter_danych", lambda conn, engine, mode="demo": AtrapaGieldy(api_key="", api_secret="", mode=mode))
     monkeypatch.setattr(market_worker, "cycle", cykl_pada)
     monkeypatch.setattr(sys, "argv", ["market_worker.py", "--interval", "0"])
 

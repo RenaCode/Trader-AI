@@ -60,6 +60,15 @@ from services.ingest import puls
 # starzalby sie w nieskonczonosc jako „martwy worker".
 PULS = "history"
 
+
+def _puls(engine: str) -> str:
+    """Nazwa pulsu: `history` dla krypto (zgodnosc z czujka), `history-<silnik>` dalej."""
+    return PULS if engine == "crypto" else f"{PULS}-{engine}"
+
+
+class _Pominiete(Exception):
+    """Krok, ktory dla tego silnika nie istnieje (funding poza krypto)."""
+
 # Ile awarii pod rzad konczy proces. Wypisanie bledu do logu NIE JEST
 # widocznoscia - logu poda nikt nie czyta o trzeciej w nocy. Restart poda jest
 # widoczny: rosnie licznik restartow, pod wpada w CrashLoopBackOff i widac to
@@ -98,7 +107,15 @@ async def cykl(url: str, *, engine: str, timeframe: str, days: int,
             conn.rollback()
             bledy.append(f"swiece {timeframe}: {type(e).__name__}: {e}")
 
+        # FUNDING I POZYCJONOWANIE TO ZJAWISKA PERPETUALI. Akcje nie maja
+        # stawki finansowania ani long/short ratio, wiec dla `equity` oba kroki
+        # sa POMIJANE JAWNIE - a nie wykonywane z zerowym wynikiem, ktory
+        # wygladalby jak "pobrano 0 rynkow" i mylil czujke pulsu.
+        krypto = engine == "crypto"
+        ile_tlumu = rynkow = rynkow_t = 0
         try:
+            if not krypto:
+                raise _Pominiete
             ile_stawek, rynkow, bledy_rynkow = await stawki.przebieg(
                 conn, engine=engine, since=since)
             # Nieudany pojedynczy rynek tez jest awaria cyklu. Bez tego jeden
@@ -106,6 +123,8 @@ async def cykl(url: str, *, engine: str, timeframe: str, days: int,
             bledy += [f"funding {b}" for b in bledy_rynkow]
             if verbose:
                 print(f"  funding: {rynkow} rynków")
+        except _Pominiete:
+            pass
         except Exception as e:                                # noqa: BLE001
             conn.rollback()
             bledy.append(f"funding: {type(e).__name__}: {e}")
@@ -118,11 +137,15 @@ async def cykl(url: str, *, engine: str, timeframe: str, days: int,
         # NIE WPLYWA NA ANI JEDNO ZLECENIE. To jest zbieranie danych; czy z tych
         # liczb plynie przewaga, rozstrzyga trener walk-forward.
         try:
+            if not krypto:
+                raise _Pominiete
             ile_tlumu, rynkow_t, bledy_t = await tlum.przebieg(
                 conn, engine=engine, since=since)
             bledy += [f"pozycjonowanie {b}" for b in bledy_t]
             if verbose:
                 print(f"  pozycjonowanie: {rynkow_t} rynków, {ile_tlumu} godzin")
+        except _Pominiete:
+            pass
         except Exception as e:                                # noqa: BLE001
             conn.rollback()
             bledy.append(f"pozycjonowanie: {type(e).__name__}: {e}")
@@ -135,13 +158,13 @@ async def cykl(url: str, *, engine: str, timeframe: str, days: int,
         # `pod_rzad`: pusta lista bledow. Druga definicja awarii „na potrzeby
         # pulsu" rozjechalaby czujke z licznikiem restartow tego samego procesu.
         if bledy:
-            puls.zglos_awarie(conn, PULS, interwal_s, pod_rzad + 1, bledy[0])
+            puls.zglos_awarie(conn, _puls(engine), interwal_s, pod_rzad + 1, bledy[0])
         else:
             # Blad zapisu pulsu NIE JEST tu lapiany - patrz `puls.bij`. Wpadnie
             # do `except` w `main` i zostanie policzony jako awaria cyklu, bo
             # nim jest: worker, ktorego czujka nie widzi, jest dla nadzoru
             # nieodrozninalny od workera, ktorego nie ma.
-            puls.bij(conn, PULS, interwal_s,
+            puls.bij(conn, _puls(engine), interwal_s,
                      {"engine": engine, "timeframe": timeframe, "dni_okna": days,
                       "swiece": ile_swiec, "stawki": ile_stawek})
 

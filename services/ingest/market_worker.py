@@ -40,7 +40,7 @@ import psycopg
 from psycopg.rows import dict_row
 
 from services.exchanges.base import ExchangeError
-from services.exchanges.bybit import BybitAdapter
+from services.exchanges.fabryka import adapter_danych
 from services.ingest import puls
 
 # Ile cykli pod rzad zakonczonych bledem konczy proces - ta sama stala co
@@ -102,19 +102,25 @@ async def main() -> int:
     ap.add_argument("--interval", type=int, default=60)
     ap.add_argument("--depth", type=int, default=25)
     ap.add_argument("--once", action="store_true")
+    # Silnik wybiera gielde (przez ref.venue i fabryke adapterow) ORAZ nazwe
+    # pulsu: dwa workery bijace w ten sam wiersz `risk.worker_heartbeat`
+    # zaslanialyby sobie nawzajem awarie.
+    ap.add_argument("--engine", default="crypto")
     args = ap.parse_args()
+    puls_nazwa = PULS if args.engine == "crypto" else f"{PULS}-{args.engine}"
 
     url = os.environ.get("DATABASE_URL")
     if not url:
         sys.exit("DATABASE_URL nie jest ustawiony")
 
-    adapter = BybitAdapter(api_key="", api_secret="", mode="demo")
+    with psycopg.connect(url, row_factory=dict_row) as conn:
+        adapter = adapter_danych(conn, args.engine)
     try:
         with psycopg.connect(url, row_factory=dict_row) as conn:
             cur = conn.cursor()
             cur.execute(
                 "SELECT i.id, i.symbol FROM ref.instrument i JOIN ref.venue v ON v.id=i.venue_id"
-                " WHERE v.code='bybit' AND i.active ORDER BY i.symbol")
+                " WHERE v.code = %s AND i.active ORDER BY i.symbol", (adapter.venue_code,))
             instruments = cur.fetchall()
             print(f"Obserwowane instrumenty: {', '.join(i['symbol'] for i in instruments)}")
 
@@ -141,7 +147,7 @@ async def main() -> int:
                         # Blad zapisu pulsu celowo NIE jest lapiany osobno
                         # (patrz `puls.bij`) - wpadnie do `except` nizej
                         # i policzy sie jako awaria cyklu, bo nia jest.
-                        puls.bij(conn, PULS, args.interval,
+                        puls.bij(conn, puls_nazwa, args.interval,
                                  {"instrumenty": len(instruments),
                                   "swiece": s["swiece"],
                                   "orderbooki": s["orderbooki"],
@@ -157,7 +163,7 @@ async def main() -> int:
                     # Puls „zyje" przy pieciu awariach pod rzad jest gorszy niz
                     # jego brak: mowi czujce dokladnie to, co czujka chce
                     # uslyszec, w chwili gdy jest najbardziej nieprawdziwe.
-                    puls.zglos_awarie(conn, PULS, args.interval, pod_rzad, blad)
+                    puls.zglos_awarie(conn, puls_nazwa, args.interval, pod_rzad, blad)
                     print(f"[{t0:%H:%M:%S}] cykl nieudany ({pod_rzad}/{POD_RZAD_MAX})")
                     if pod_rzad >= POD_RZAD_MAX:
                         print(f"{POD_RZAD_MAX} cykli pod rząd zakończonych błędem — "
