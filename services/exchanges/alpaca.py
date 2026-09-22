@@ -93,15 +93,28 @@ def _dec_albo_nic(v) -> Decimal | None:
 
 
 def _czas(s: str) -> datetime:
-    # Alpaca oddaje RFC 3339 z nanosekundami ("2026-09-22T14:30:00.123456789Z");
-    # `fromisoformat` przyjmuje najwyzej mikrosekundy.
+    """RFC 3339 Alpaki -> datetime UTC.
+
+    Dwie pulapki, obie zmierzone: nanosekundy ("...:00.123456789Z"), ktorych
+    `fromisoformat` nie przyjmuje, oraz przesuniecie strefy zamiast "Z"
+    ("2026-09-22T06:11:51.022556-04:00" z `/v2/clock`). Pierwsza wersja
+    zbierala WSZYSTKIE cyfry po kropce - razem z "04:00" ze strefy - i oddawala
+    czas naiwny, czyli o 4 h za wczesnie. Zegar sesji mowil wtedy "06:11 UTC"
+    o 10:11 UTC, a silnik equity liczylby otwarcie gieldy z czterogodzinnym
+    bledem.
+    """
     s = s.replace("Z", "+00:00")
     if "." in s:
         glowa, reszta = s.split(".", 1)
-        ulamek = "".join(ch for ch in reszta if ch.isdigit())
-        strefa = reszta[len(ulamek):]
-        s = f"{glowa}.{ulamek[:6]}{strefa}"
-    return datetime.fromisoformat(s).astimezone(timezone.utc)
+        n = 0
+        while n < len(reszta) and reszta[n].isdigit():
+            n += 1
+        ulamek, strefa = reszta[:n], reszta[n:]
+        s = f"{glowa}.{ulamek[:6].ljust(6, '0')}{strefa}"
+    t = datetime.fromisoformat(s)
+    if t.tzinfo is None:
+        raise ValueError(f"czas bez strefy od Alpaki: {s!r}")
+    return t.astimezone(timezone.utc)
 
 
 @dataclass(frozen=True)

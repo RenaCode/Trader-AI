@@ -151,6 +151,16 @@ def test_czas_z_nanosekundami_jest_parsowany():
     assert t.microsecond == 123456 and t.tzinfo is not None
 
 
+def test_czas_z_przesunieciem_strefy_NIE_gubi_czterech_godzin():
+    """Dokladna probka z `/v2/clock` 22.09.2026: pierwsza wersja parsera
+    zbierala cyfry strefy do ulamka i oddawala 06:11 UTC zamiast 10:11 UTC."""
+    t = _czas("2026-09-22T06:11:51.022556-04:00")
+    assert t.hour == 10 and t.minute == 11 and t.microsecond == 22556
+    assert _czas("2026-09-22T06:11:51-04:00").hour == 10
+    with pytest.raises(ValueError):
+        _czas("2026-09-22T06:11:51")
+
+
 def test_zegar_sesji():
     def handler(r):
         return _json(200, {"timestamp": "2026-09-22T14:30:00Z", "is_open": True,
