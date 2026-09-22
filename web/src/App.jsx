@@ -93,7 +93,17 @@ export default function App() {
             <div className="logo-text">Trader AI</div>
             <div style={{ display: 'flex', gap: 6, marginTop: 3 }}>
               <span className="logo-badge demo">DEMO</span>
-              {health.data && <span className="logo-badge">API OK</span>}
+              {/* Trzy stany, nie jeden: "API OK" swiecilo zawsze, gdy fetch
+                  sie udal, i nie mowilo niczego. Teraz mowi, czy API odpowiada,
+                  kiedy ostatnio sprawdzono i ile migracji ma baza. */}
+              <span className={`logo-badge ${health.error ? 'bad' : health.data ? '' : 'muted'}`}
+                    title={health.error
+                      ? `API nie odpowiada: ${health.error}`
+                      : health.data
+                        ? `API odpowiada · migracji ${health.data.migrations} · sprawdzono ${new Date().toLocaleTimeString('pl-PL')}`
+                        : 'Sprawdzam API…'}>
+                {health.error ? 'API ✗' : health.data ? `API · ${health.data.migrations} migr.` : 'API …'}
+              </span>
             </div>
           </div>
         </div>

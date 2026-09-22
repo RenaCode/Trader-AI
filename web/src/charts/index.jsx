@@ -333,3 +333,98 @@ export function ContributionBars({ items }) {
     </div>
   );
 }
+
+/* ------------------------------------------------------------ MultiLineChart
+   Kilka serii na jednej osi - kapital obu platform i ich suma. Serie moga miec
+   dziury (null): silnik, ktory jeszcze nie ruszyl, nie jest rysowany jako zero,
+   bo zero wygladaloby jak strata calego kapitalu. */
+export function MultiLineChart({ data, series, height = 240, labelFmt, valueFmt }) {
+  const [hover, setHover] = useState(null);
+  const [ref, w] = useWidth();
+  const h = height;
+
+  const { lines, min, max, ticks, padL, xs } = useMemo(() => {
+    if (!data?.length) return { lines: [], min: 0, max: 0, ticks: [], padL: PAD.l, xs: [] };
+    const vals = data.flatMap((d) => series.map((s) => d[s.key]).filter((v) => v != null));
+    if (!vals.length) return { lines: [], min: 0, max: 0, ticks: [], padL: PAD.l, xs: [] };
+    let lo = Math.min(...vals), hi = Math.max(...vals);
+    const pad = (hi - lo) * 0.12 || Math.abs(hi) * 0.02 || 1;
+    lo -= pad; hi += pad;
+    const tk = niceTicks(lo, hi, 4);
+    const padL = axisPad(tk, valueFmt);
+    const iw = w - padL - PAD.r, ih = h - PAD.t - PAD.b;
+    const xs = data.map((_, i) => padL + (data.length === 1 ? iw / 2 : (i / (data.length - 1)) * iw));
+    const y = (v) => PAD.t + ih - ((v - lo) / (hi - lo)) * ih;
+    const lines = series.map((s) => {
+      let d = '', otwarta = false;
+      data.forEach((row, i) => {
+        const v = row[s.key];
+        if (v == null) { otwarta = false; return; }
+        d += `${otwarta ? 'L' : 'M'}${xs[i].toFixed(1)},${y(v).toFixed(1)} `;
+        otwarta = true;
+      });
+      return { ...s, d, y };
+    });
+    return { lines, min: lo, max: hi, ticks: tk, padL, xs };
+  }, [data, series, h, w, valueFmt]);
+
+  const ih = h - PAD.t - PAD.b;
+  const onMove = (e) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const x = ((e.clientX - rect.left) / rect.width) * w;
+    const iw = w - padL - PAD.r;
+    const idx = Math.round(((x - padL) / iw) * (data.length - 1));
+    if (idx >= 0 && idx < data.length) setHover(idx);
+  };
+
+  if (!lines.length) return <div className="chart-wrap" ref={ref}><div className="empty">Brak danych do wykresu</div></div>;
+  return (
+    <div className="chart-wrap" ref={ref}>
+      <svg viewBox={`0 0 ${w} ${h}`} width="100%" height={h} role="img"
+           onMouseMove={onMove} onMouseLeave={() => setHover(null)}>
+        {ticks.map((tv) => {
+          const y = PAD.t + ih - ((tv - min) / (max - min)) * ih;
+          return (
+            <g key={tv}>
+              <line x1={padL} y1={y} x2={w - PAD.r} y2={y} stroke="rgba(255,255,255,0.055)" />
+              <text x={padL - 8} y={y + 3.5} textAnchor="end" fill="var(--text-dim)"
+                    fontSize="10" fontFamily="var(--font-mono)">
+                {valueFmt ? valueFmt(tv) : tv.toFixed(0)}
+              </text>
+            </g>
+          );
+        })}
+        {lines.map((l) => (
+          <path key={l.key} d={l.d} fill="none" stroke={l.color}
+                strokeWidth={l.gruba ? 2.5 : 1.6} strokeDasharray={l.kreska ? '5 4' : undefined}
+                strokeLinejoin="round" strokeLinecap="round" />
+        ))}
+        {hover !== null && (
+          <g>
+            <line x1={xs[hover]} y1={PAD.t} x2={xs[hover]} y2={PAD.t + ih}
+                  stroke="rgba(255,255,255,0.2)" strokeDasharray="3 3" />
+            {lines.map((l) => data[hover][l.key] != null && (
+              <circle key={l.key} cx={xs[hover]} cy={l.y(data[hover][l.key])} r="3.5"
+                      fill={l.color} stroke="var(--bg-dark)" strokeWidth="2" />
+            ))}
+          </g>
+        )}
+      </svg>
+      <div className="chart-legend" style={{ flexWrap: 'wrap', gap: 14 }}>
+        {lines.map((l) => (
+          <span key={l.key} className="key" style={{ color: l.color }}>
+            ■ {l.label}
+            {hover !== null && data[hover][l.key] != null && (
+              <span className="mono" style={{ marginLeft: 6 }}>
+                {valueFmt ? valueFmt(data[hover][l.key]) : data[hover][l.key]}
+              </span>
+            )}
+          </span>
+        ))}
+        <span className="key dim">
+          {hover !== null && data[hover] ? (labelFmt ? labelFmt(data[hover]) : '') : 'Najedź, aby zobaczyć wartości'}
+        </span>
+      </div>
+    </div>
+  );
+}

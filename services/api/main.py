@@ -17,7 +17,8 @@ from fastapi import Depends
 from .auth import current_user
 from .db import close_pool, fetch_one, open_pool
 from .security import SecretBox
-from .routers import (auth, account, credentials, eksport, kapital, learning, moves,
+from .routers import (auth, account, credentials, eksport, kapital, kapital_laczny,
+                      learning, moves,
                       notifications,
                       overview, risk, settings, sources)
 
@@ -51,7 +52,7 @@ app.include_router(auth.router)
 _protected = [overview.router, learning.router, moves.router, sources.router,
               risk.router, credentials.router, settings.router,
               notifications.router, account.router, kapital.router,
-              eksport.router]
+              kapital_laczny.router, eksport.router]
 for r in _protected:
     app.include_router(r, dependencies=[Depends(current_user)])
 

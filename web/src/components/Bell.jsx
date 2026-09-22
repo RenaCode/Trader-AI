@@ -43,10 +43,19 @@ export default function Bell() {
     }
   };
 
+  const [error, setError] = useState('');
   const markAll = async () => {
-    await post('/api/notifications/read', {});
+    setError('');
+    try {
+      await post('/api/notifications/read', { ids: null });
+    } catch (e) {
+      // Blad ma byc WIDOCZNY. Wczesniej wyjatek przerywal te funkcje przed
+      // odswiezeniem licznika i przycisk wygladal na zepsuty bez slowa.
+      setError(e?.message || 'Nie udało się oznaczyć powiadomień');
+      return;
+    }
     setItems((xs) => (xs || []).map((x) => ({ ...x, read: true })));
-    refreshCount();
+    await refreshCount();
   };
 
   return (
@@ -71,6 +80,7 @@ export default function Bell() {
             )}
           </div>
 
+          {error && <div className="empty" style={{ color: 'var(--loss)' }}>{error}</div>}
           {items === null ? (
             <div className="empty loading-pulse">Wczytywanie…</div>
           ) : items.length === 0 ? (

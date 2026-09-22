@@ -76,8 +76,20 @@ async def unread_count(user: dict = Depends(current_user)):
     return {"unread": row["n"], "critical": row["krytyczne"]}
 
 
+class ReadBody(BaseModel):
+    ids: list[int] | None = None
+
+
 @router.post("/read", dependencies=[Depends(require_csrf)])
-async def mark_read(ids: list[int] | None = None, user: dict = Depends(current_user)):
+async def mark_read(body: ReadBody | None = None, user: dict = Depends(current_user)):
+    """Oznacza jako przeczytane: podane `ids` albo WSZYSTKIE, gdy ich brak.
+
+    Do 2026-09-22 parametrem byla gola lista (`ids: list[int] | None`), wiec
+    FastAPI oczekiwal w ciele JSON-owej tablicy. Front wysylal `{}` - obiekt -
+    i dostawal 422, a wyjatek przerywal `markAll` przed odswiezeniem licznika.
+    Przycisk "Oznacz wszystkie" nie robil nic i nie mowil dlaczego.
+    """
+    ids = body.ids if body else None
     if ids:
         await execute(
             "UPDATE notify.notification SET read_at = now()"

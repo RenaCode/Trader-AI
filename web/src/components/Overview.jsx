@@ -2,6 +2,7 @@
 import React from 'react';
 import { useApi } from '../utils/api';
 import { AreaChart } from '../charts';
+import KapitalLaczny from './KapitalLaczny';
 import {
   fmtMoney, fmtPct, fmtTime, fmtAgo, fmtNum,
   STATE_PL, STATE_TONE, ACTION_PL,
@@ -44,6 +45,8 @@ export default function Overview({ engine }) {
               tone={o && o.realized_cum >= 0 ? 'profit' : 'loss'}
               sub={o ? `niezrealizowany ${fmtMoney(o.unrealized)}` : ''} />
       </div>
+
+      <KapitalLaczny days={45} />
 
       <div className="glass-card">
         <div className="card-title">
