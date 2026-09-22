@@ -6,12 +6,22 @@ import {
   fmtMoney, fmtNum, fmtTime, ACTION_PL, REGIME_PL, VERDICT_PL, DIRECTION_PL,
 } from '../utils/format';
 
+/* Brak pomiaru to nie jest pomiar rowny zeru: `null * 100` dawalo "0%"
+   i wygladalo jak zmierzona zerowa pewnosc czy zerowa nowosc. */
+const fmtPct100 = (v) => (v == null ? '—' : `${Math.round(v * 100)}%`);
+
 function DecisionDetail({ engine, id, onClose }) {
   const [d, setD] = useState(null);
   const [err, setErr] = useState(null);
 
   React.useEffect(() => {
     let alive = true;
+    // Zerowanie na wejsciu, bo efekt biegnie od nowa przy kazdej decyzji:
+    // bez tego jeden blad zostawal na ekranie przy wszystkich nastepnych
+    // (`if (err)` stoi przed sprawdzeniem `d`), a w czasie ladowania widac
+    // bylo komplet danych POPRZEDNIEJ decyzji pod nowym numerem.
+    setErr(null);
+    setD(null);
     get(`/api/engines/${engine}/decisions/${id}`)
       .then((j) => alive && setD(j))
       .catch((e) => alive && setErr(e.message));
@@ -30,7 +40,7 @@ function DecisionDetail({ engine, id, onClose }) {
 
       <div className="grid grid-4" style={{ marginBottom: 14 }}>
         <div className="stat"><span className="stat-label">Pewność</span>
-          <span className="stat-value sm">{Math.round(d.confidence * 100)}%</span></div>
+          <span className="stat-value sm">{fmtPct100(d.confidence)}</span></div>
         <div className="stat"><span className="stat-label">Reżim</span>
           <span className="stat-value sm">{REGIME_PL[d.regime] || d.regime}</span></div>
         <div className="stat"><span className="stat-label">Werdykt ryzyka</span>
@@ -66,7 +76,7 @@ function DecisionDetail({ engine, id, onClose }) {
                 <div className="row-meta">
                   <span>{n.source}</span>
                   <span>{fmtTime(n.at)}</span>
-                  <span>nowość {Math.round((n.novelty ?? 0) * 100)}%</span>
+                  <span>nowość {fmtPct100(n.novelty)}</span>
                   <a className="src-link" href={n.url} target="_blank" rel="noopener noreferrer">źródło ↗</a>
                 </div>
               </div>
@@ -108,7 +118,11 @@ export default function Moves({ engine }) {
           Co system planuje
           <span className="hint">warunki wejścia oczekujące na spełnienie</span>
         </div>
-        {planned.data?.length ? (
+        {planned.error ? (
+          <div className="notice">Nie udało się wczytać planowanych zleceń: {planned.error}</div>
+        ) : planned.loading ? (
+          <div className="empty loading-pulse">Wczytywanie…</div>
+        ) : planned.data?.length ? (
           <div className="row-list" style={{ maxHeight: 320 }}>
             {planned.data.map((p) => (
               <div key={p.id} className="row-item clickable" onClick={() => setSelected(p.decision_id)}>
@@ -120,7 +134,7 @@ export default function Moves({ engine }) {
                 </div>
                 <div className="row-meta">
                   <span>typ: {p.order_type}</span>
-                  {p.limit_price && <span>limit: {fmtMoney(p.limit_price)}</span>}
+                  {p.limit_price != null && <span>limit: {fmtMoney(p.limit_price)}</span>}
                   <span>ważne do: {fmtTime(p.valid_until)}</span>
                 </div>
                 {p.trigger && (
@@ -141,14 +155,18 @@ export default function Moves({ engine }) {
           Dziennik decyzji
           <span className="hint">kliknij wiersz, żeby zobaczyć pełne uzasadnienie</span>
         </div>
-        {decisions.data?.length ? (
+        {decisions.error ? (
+          <div className="notice">Nie udało się wczytać dziennika decyzji: {decisions.error}</div>
+        ) : decisions.loading ? (
+          <div className="empty loading-pulse">Wczytywanie…</div>
+        ) : decisions.data?.length ? (
           <div className="row-list" style={{ maxHeight: 520 }}>
             {decisions.data.map((d) => (
               <div key={d.id} className="row-item clickable" onClick={() => setSelected(d.id)}>
                 <div className="row-head">
                   <span className="row-title">{d.symbol} · {ACTION_PL[d.action] || d.action}</span>
                   <span style={{ display: 'flex', gap: 6 }}>
-                    <span className="badge">{Math.round(d.confidence * 100)}%</span>
+                    <span className="badge">{fmtPct100(d.confidence)}</span>
                     <span className={`badge ${d.risk_verdict === 'allow' ? 'ok' : d.risk_verdict === 'block' ? 'bad' : 'warn'}`}>
                       {VERDICT_PL[d.risk_verdict]}
                     </span>
@@ -157,7 +175,7 @@ export default function Moves({ engine }) {
                 <div className="row-meta">
                   <span>{fmtTime(d.at)}</span>
                   <span>{REGIME_PL[d.regime] || d.regime}</span>
-                  {d.target_price && <span className="mono">{fmtMoney(d.target_price)}</span>}
+                  {d.target_price != null && <span className="mono">{fmtMoney(d.target_price)}</span>}
                 </div>
               </div>
             ))}
@@ -168,9 +186,13 @@ export default function Moves({ engine }) {
       <div className="glass-card">
         <div className="card-title">
           Zamknięte transakcje
-          <span className="hint">{trades.data?.length || 0} pozycji</span>
+          <span className="hint">{trades.error ? '—' : `${trades.data?.length || 0} pozycji`}</span>
         </div>
-        {trades.data?.length ? (
+        {trades.error ? (
+          <div className="notice">Nie udało się wczytać transakcji: {trades.error}</div>
+        ) : trades.loading ? (
+          <div className="empty loading-pulse">Wczytywanie…</div>
+        ) : trades.data?.length ? (
           <div className="table-scroll">
             <table className="table">
               <thead>
@@ -188,8 +210,10 @@ export default function Moves({ engine }) {
                     <td className="mono">{fmtMoney(t.avg_price)}</td>
                     <td className="dim">{fmtTime(t.opened_at)}</td>
                     <td className="dim">{fmtTime(t.closed_at)}</td>
-                    <td className={`mono ${t.realized_pnl >= 0 ? 'profit' : 'loss'}`}>
-                      {t.realized_pnl >= 0 ? '+' : ''}{fmtMoney(t.realized_pnl)}
+                    {/* `null >= 0` jest prawda w JS, wiec brak rozliczenia
+                        malowal sie na zielono. Brak wyniku ma byc neutralny. */}
+                    <td className={`mono ${t.realized_pnl == null ? 'dim' : t.realized_pnl >= 0 ? 'profit' : 'loss'}`}>
+                      {t.realized_pnl != null && t.realized_pnl >= 0 ? '+' : ''}{fmtMoney(t.realized_pnl)}
                     </td>
                     <td className="mono dim">{fmtNum(t.fees_paid, 2)}</td>
                   </tr>

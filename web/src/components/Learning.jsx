@@ -28,15 +28,26 @@ export default function Learning({ engine }) {
   const wag = useApi(`/api/engines/${engine}/learning/weights`, [engine], { refreshMs: 60000 });
 
   const s = st.data;
-  const pct = s?.windows_positive_pct ?? 0;
+  // Gdy nie ma wiersza stanu, API zwraca sam status i powod (routers/learning.py:36-37).
+  // Bez tego sprawdzenia karta pokazywala "undefined/undefined" i 0% na pasku -
+  // czyli brak pomiaru w przebraniu pomiaru.
+  const hasWindows = s?.windows_total != null;
+  const pct = hasWindows ? s.windows_positive_pct : null;
   const ci = s?.windows_positive_ci;
-  const passes = pct >= THRESHOLD_PCT;
+  const passes = pct != null && pct >= THRESHOLD_PCT;
 
-  const bars = (wf.data || []).map((w) => ({
-    label: `okno ${w.idx} · ${fmtDate(w.test_from)}–${fmtDate(w.test_to)} · ${w.n_trades} transakcji`,
-    v: w.metrics?.sharpe ?? 0,
-    regime: REGIME_PL[w.regime] || w.regime,
-  }));
+  // Okno bez metryki Sharpe'a wypadalo na wykresie jako zielony slupek zerowy,
+  // nie do odroznienia od okna zmierzonego na zero. Takie okna pomijamy i
+  // mowimy, ile ich bylo.
+  const wfRows = wf.data || [];
+  const bars = wfRows
+    .filter((w) => w.metrics?.sharpe != null)
+    .map((w) => ({
+      label: `okno ${w.idx} · ${fmtDate(w.test_from)}–${fmtDate(w.test_to)} · ${w.n_trades} transakcji`,
+      v: w.metrics.sharpe,
+      regime: REGIME_PL[w.regime] || w.regime,
+    }));
+  const wfBezMetryki = wfRows.length - bars.length;
 
   return (
     <div className="grid" style={{ gap: 16 }}>
@@ -46,18 +57,26 @@ export default function Learning({ engine }) {
         backtestu, bo wysoki wynik backtestu jest sygnałem przeuczenia, nie skuteczności.
       </div>
 
+      {st.error && (
+        <div className="notice">Nie udało się wczytać stanu nauki: {st.error}</div>
+      )}
+
       <div className="grid grid-4">
         <Metric label="Stan" value={STATE_PL[s?.status] || '—'} tone={s?.status === 'validated' ? 'profit' : ''}
                 hint={s?.model || 'brak aktywnego modelu'} />
-        <Metric label="Okna dodatnie (OOS)" value={s ? `${s.windows_positive}/${s.windows_total}` : '—'}
-                tone={passes ? 'profit' : 'loss'}
-                hint={ci
-                  ? `${fmtNum(pct, 1)}% (95%: ${fmtNum(ci[0], 0)}–${fmtNum(ci[1], 0)}%) · próg ${THRESHOLD_PCT}%`
-                  : `${fmtNum(pct, 1)}% · próg ${THRESHOLD_PCT}%`} />
+        <Metric label="Okna dodatnie (OOS)"
+                value={hasWindows ? `${s.windows_positive}/${s.windows_total}` : '—'}
+                tone={!hasWindows ? '' : passes ? 'profit' : 'loss'}
+                hint={!hasWindows
+                  ? 'brak okien walk-forward'
+                  : ci
+                    ? `${fmtNum(pct, 1)}% (95%: ${fmtNum(ci[0], 0)}–${fmtNum(ci[1], 0)}%) · próg ${THRESHOLD_PCT}%`
+                    : `${fmtNum(pct, 1)}% · próg ${THRESHOLD_PCT}%`} />
         <Metric label="Mediana Sharpe / transakcję" value={fmtNum(s?.median_oos_sharpe, 3)}
-                tone={(s?.median_oos_sharpe ?? 0) > 0 ? 'profit' : 'loss'} hint="out-of-sample, bez anualizacji" />
+                tone={s?.median_oos_sharpe == null ? '' : s.median_oos_sharpe > 0 ? 'profit' : 'loss'}
+                hint="out-of-sample, bez anualizacji" />
         <Metric label="Najgorszy drawdown" value={s?.max_drawdown != null ? `${fmtNum(s.max_drawdown, 2)}%` : '—'}
-                tone="loss" hint="w oknie testowym" />
+                tone={s?.max_drawdown != null ? 'loss' : ''} hint="w oknie testowym" />
       </div>
 
       {ci && ci[1] - ci[0] > 20 && (
@@ -79,13 +98,21 @@ export default function Learning({ engine }) {
         <div className="card-title">
           Czego algorytm się nauczył
           <span className="hint">
-            {wag.data?.wyuczone
-              ? `wersja modelu ${wag.data.wersja_modelu} · świeca ${wag.data.swieca}`
-              : 'brak zwalidowanego modelu'}
+            {wag.error ? 'odczyt nieudany'
+              : wag.data?.wyuczone
+                ? `wersja modelu ${wag.data.wersja_modelu} · świeca ${wag.data.swieca}`
+                : 'brak zwalidowanego modelu'}
           </span>
         </div>
-        {!wag.data ? (
-          <div className="empty">Wczytywanie…</div>
+        {/* Trzy stany, nie dwa. `!wag.data` po nieudanym zapytaniu zostaje
+            prawda na zawsze (hook zostawia `data` na null i ustawia `error`),
+            wiec karta krecila "Wczytywanie…" bez konca. */}
+        {wag.error ? (
+          <div className="notice">Nie udało się wczytać wag modelu: {wag.error}</div>
+        ) : wag.loading ? (
+          <div className="empty loading-pulse">Wczytywanie…</div>
+        ) : !wag.data ? (
+          <div className="empty">Brak danych o wagach</div>
         ) : !wag.data.wyuczone ? (
           <div className="empty">
             Silnik pracuje na jawnych założeniach początkowych. Żadna wersja modelu
@@ -131,8 +158,10 @@ export default function Learning({ engine }) {
         </div>
         <div style={{ position: 'relative' }}>
           <div className="bar-track" style={{ height: 12 }}>
+            {/* Brak pomiaru to pusty tor, nie pasek o dlugosci zero w kolorze
+                "nie osiagnieto progu" - tamto wygladalo jak zmierzone 0%. */}
             <div className="bar-fill" style={{
-              width: `${Math.min(100, pct)}%`,
+              width: `${Math.min(100, pct ?? 0)}%`,
               background: passes ? 'var(--gradient-profit), var(--profit)' : 'var(--color-orange)',
               backgroundColor: passes ? 'var(--profit)' : 'var(--color-orange)',
             }} />
@@ -143,8 +172,10 @@ export default function Learning({ engine }) {
           }} />
         </div>
         <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 8, fontSize: '0.78rem' }}>
-          <span className="mono" style={{ color: passes ? 'var(--profit)' : 'var(--color-orange)' }}>
-            {fmtNum(pct, 1)}%
+          <span className="mono" style={{
+            color: pct == null ? 'var(--text-muted)' : passes ? 'var(--profit)' : 'var(--color-orange)',
+          }}>
+            {pct == null ? '—' : `${fmtNum(pct, 1)}%`}
           </span>
           <span className="dim">{s?.reason}</span>
         </div>
@@ -155,7 +186,21 @@ export default function Learning({ engine }) {
           Sharpe na transakcję, per okno walk-forward
           <span className="hint">out-of-sample · najstarsze po lewej</span>
         </div>
-        <BarChart data={bars} height={210} valueFmt={(v) => v.toFixed(3)} />
+        {wf.error ? (
+          <div className="notice">Nie udało się wczytać okien walk-forward: {wf.error}</div>
+        ) : wf.loading ? (
+          <div className="empty loading-pulse">Wczytywanie…</div>
+        ) : (
+          <>
+            <BarChart data={bars} height={210} valueFmt={(v) => v.toFixed(3)} />
+            {wfBezMetryki > 0 && (
+              <div className="hint" style={{ marginTop: 8 }}>
+                Okien bez zapisanej metryki Sharpe'a: {wfBezMetryki} — pominięte na wykresie,
+                bo brak pomiaru nie jest pomiarem równym zeru.
+              </div>
+            )}
+          </>
+        )}
       </div>
 
       <div className="grid grid-2">
@@ -164,7 +209,13 @@ export default function Learning({ engine }) {
             Kalibracja pewności
             <span className="hint">błąd ECE: {fmtNum(s?.calibration_error, 3)}</span>
           </div>
-          <CalibrationChart data={cal.data?.kubelki || []} />
+          {cal.error ? (
+            <div className="notice">Nie udało się wczytać kalibracji: {cal.error}</div>
+          ) : cal.loading ? (
+            <div className="empty loading-pulse">Wczytywanie…</div>
+          ) : (
+            <CalibrationChart data={cal.data?.kubelki || []} />
+          )}
           {cal.data?.podsumowanie && (
             <div className="verdict" style={{ marginTop: 10 }}>
               <div className="verdict-line">{cal.data.podsumowanie.werdykt}</div>
@@ -193,7 +244,11 @@ export default function Learning({ engine }) {
               próg alarmowy: {fmtNum(drift.data?.prog_alarmu ?? 1.0, 2)}
             </span>
           </div>
-          {drift.data?.pozycje?.length ? (
+          {drift.error ? (
+            <div className="notice">Nie udało się wczytać dryfu cech: {drift.error}</div>
+          ) : drift.loading ? (
+            <div className="empty loading-pulse">Wczytywanie…</div>
+          ) : drift.data?.pozycje?.length ? (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 9 }}>
               {drift.data.pozycje.map((d) => {
                 // PROGI Z SERWERA, nie wpisane tutaj. Wlasna kopia tych liczb
@@ -203,16 +258,24 @@ export default function Learning({ engine }) {
                 // ktory system uznaje za normalny.
                 const progAlarm = drift.data.prog_alarmu ?? 1.0;
                 const progTrwaly = drift.data.prog_trwaly ?? 0.5;
-                const w = Math.min(100, (d.psi / (progAlarm * 1.2)) * 100);
-                const tone = d.psi > progAlarm ? 'var(--loss)'
-                  : d.psi > progTrwaly ? 'var(--color-orange)' : 'var(--profit)';
+                // Cecha bez pomiaru (psi = NULL) rysowala sie jako zielony pusty
+                // pasek, czyli brak pomiaru dryfu wygladal jak dryf zerowy.
+                const zmierzony = d.psi != null;
+                const w = zmierzony ? Math.min(100, (d.psi / (progAlarm * 1.2)) * 100) : 0;
+                const tone = !zmierzony ? 'var(--text-muted)'
+                  : d.psi > progAlarm ? 'var(--loss)'
+                    : d.psi > progTrwaly ? 'var(--color-orange)' : 'var(--profit)';
                 return (
                   <div key={d.feature}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.77rem', marginBottom: 4 }}>
                       <span className="mono" style={{ color: 'var(--text-muted)' }}>{d.feature}</span>
-                      <span className="mono" style={{ color: tone }}>{fmtNum(d.psi, 3)}</span>
+                      <span className="mono" style={{ color: tone }}>
+                        {zmierzony ? fmtNum(d.psi, 3) : '— brak pomiaru'}
+                      </span>
                     </div>
-                    <div className="bar-track"><div className="bar-fill" style={{ width: `${w}%`, background: tone }} /></div>
+                    <div className="bar-track">
+                      {zmierzony && <div className="bar-fill" style={{ width: `${w}%`, background: tone }} />}
+                    </div>
                   </div>
                 );
               })}
@@ -240,20 +303,33 @@ export default function Learning({ engine }) {
             Skuteczność sygnałów
             <span className="hint">która hipoteza faktycznie coś wnosi</span>
           </div>
-          {perf.data?.length ? (
+          {perf.error ? (
+            <div className="notice">Nie udało się wczytać skuteczności sygnałów: {perf.error}</div>
+          ) : perf.loading ? (
+            <div className="empty loading-pulse">Wczytywanie…</div>
+          ) : perf.data?.length ? (
             <div className="table-scroll">
               <table className="table">
                 <thead><tr><th>Sygnał</th><th>Rodzina</th><th>Użyć</th><th>Trafność</th><th>P&L</th></tr></thead>
                 <tbody>
-                  {perf.data.map((p) => (
-                    <tr key={p.name}>
-                      <td className="mono" style={{ fontSize: '0.78rem' }}>{p.name}</td>
-                      <td className="dim">{p.family}</td>
-                      <td className="mono">{p.used_count}</td>
-                      <td className="mono">{p.hit_rate != null ? `${(p.hit_rate * 100).toFixed(0)}%` : '—'}</td>
-                      <td className={`mono ${p.total_pnl >= 0 ? 'profit' : 'loss'}`}>{fmtNum(p.total_pnl, 0)}</td>
-                    </tr>
-                  ))}
+                  {perf.data.map((p) => {
+                    // `hit_rate` jest puste dokladnie wtedy, gdy zaden ruch z tym
+                    // sygnalem nie zostal jeszcze rozliczony - a API podstawia
+                    // wtedy 0.0 za sume P&L (routers/learning.py:301). Zero z
+                    // pustej sumy to nie jest wynik i nie moze byc zielone.
+                    const rozliczony = p.hit_rate != null;
+                    return (
+                      <tr key={p.name}>
+                        <td className="mono" style={{ fontSize: '0.78rem' }}>{p.name}</td>
+                        <td className="dim">{p.family}</td>
+                        <td className="mono">{p.used_count}</td>
+                        <td className="mono">{rozliczony ? `${(p.hit_rate * 100).toFixed(0)}%` : '—'}</td>
+                        <td className={`mono ${!rozliczony ? 'dim' : p.total_pnl >= 0 ? 'profit' : 'loss'}`}>
+                          {rozliczony ? fmtNum(p.total_pnl, 0) : '—'}
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
@@ -286,7 +362,11 @@ export default function Learning({ engine }) {
           Post-mortem <span className="badge ai">Claude</span>
           <span className="hint">dziennik jakościowy — nie zmienia wag automatycznie</span>
         </div>
-        {pm.data?.length ? (
+        {pm.error ? (
+          <div className="notice">Nie udało się wczytać analiz post-mortem: {pm.error}</div>
+        ) : pm.loading ? (
+          <div className="empty loading-pulse">Wczytywanie…</div>
+        ) : pm.data?.length ? (
           <div className="row-list">
             {pm.data.map((p) => (
               <div key={p.id} className="row-item">

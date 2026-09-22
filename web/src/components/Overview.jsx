@@ -25,8 +25,13 @@ export default function Overview({ engine }) {
   const recent = useApi(`/api/engines/${engine}/decisions?limit=6`, [engine], { refreshMs: 20000 });
 
   const o = ov.data;
+  // Brak punktu kapitalu w bazie: API podstawia wtedy 0.0 za kazda kwote
+  // (routers/overview.py:56-69), a zero wygladalo jak zmierzony stan rachunku -
+  // razem z zielonym "+0,00%". Brak pomiaru pokazujemy jako "—".
+  const hasPoint = !!o?.as_of;
   const beat = o?.heartbeat;
-  const beatAge = beat ? (Date.now() - new Date(beat.last_beat_at).getTime()) / 1000 : null;
+  const beatAt = beat?.last_beat_at;
+  const beatAge = beatAt ? (Date.now() - new Date(beatAt).getTime()) / 1000 : null;
   // SILNIK ZATRZYMANY ŚWIADOMIE TO NIE JEST MARTWY SILNIK.
   //
   // `halted` ustawia człowiek albo zasiew demo (`detail.source = seed_demo`) —
@@ -36,24 +41,36 @@ export default function Overview({ engine }) {
   // — zatrzymany świadomie”), interfejs nie. Alarm o awarii, której nie ma,
   // uczy ignorować alarm o awarii, która będzie.
   const beatHalted = beat?.status === 'halted';
+  // Silnik, który NIGDY nie zgłosił pulsu, nie ma wiersza w risk.engine_heartbeat
+  // (albo ma go bez daty) — a wtedy nie wiadomo nawet, czy został zatrzymany
+  // świadomie. Dead-man switch liczony z wieku pulsu z definicji go omijał:
+  // wiek był `null`, więc badge pokazywał „—" i wyglądało to na stan znany.
+  const beatMissing = !!o && !beatHalted && beatAge == null;
   // Dead-man switch: brak heartbeatu > 5 min traktujemy jako silnik nieżywy,
   // niezależnie od tego, co deklaruje kolumna status — ale NIE gdy jest
   // zatrzymany świadomie.
-  const beatStale = !beatHalted && beatAge != null && beatAge > 300;
+  const beatStale = !beatHalted && (beatMissing || (beatAge != null && beatAge > 300));
 
   return (
     <div className="grid" style={{ gap: 16 }}>
+      {ov.error && (
+        <div className="notice">
+          Nie udało się wczytać stanu rachunku: {ov.error}
+          <br />Liczby poniżej pochodzą z ostatniego udanego odczytu albo z niego nie pochodzą wcale.
+        </div>
+      )}
+
       <div className="grid grid-4">
-        <Stat label="Kapitał" value={o ? fmtMoney(o.equity) : '—'}
-              sub={o ? `na ${fmtTime(o.as_of)}` : ''} />
-        <Stat label="Zmiana 24h" value={o ? fmtPct(o.change_24h_pct) : '—'}
-              tone={o && o.change_24h_pct >= 0 ? 'profit' : 'loss'}
-              sub={o ? `od startu ${fmtPct(o.change_total_pct)}` : ''} />
-        <Stat label="Ekspozycja" value={o ? fmtMoney(o.exposure) : '—'}
-              sub={o ? `gotówka ${fmtMoney(o.cash)}` : ''} />
-        <Stat label="Zrealizowany P&L" value={o ? fmtMoney(o.realized_cum) : '—'}
-              tone={o && o.realized_cum >= 0 ? 'profit' : 'loss'}
-              sub={o ? `niezrealizowany ${fmtMoney(o.unrealized)}` : ''} />
+        <Stat label="Kapitał" value={hasPoint ? fmtMoney(o.equity) : '—'}
+              sub={hasPoint ? `na ${fmtTime(o.as_of)}` : 'brak punktu kapitału'} />
+        <Stat label="Zmiana 24h" value={hasPoint ? fmtPct(o.change_24h_pct) : '—'}
+              tone={hasPoint ? (o.change_24h_pct >= 0 ? 'profit' : 'loss') : ''}
+              sub={hasPoint ? `od startu ${fmtPct(o.change_total_pct)}` : ''} />
+        <Stat label="Ekspozycja" value={hasPoint ? fmtMoney(o.exposure) : '—'}
+              sub={hasPoint ? `gotówka ${fmtMoney(o.cash)}` : ''} />
+        <Stat label="Zrealizowany P&L" value={hasPoint ? fmtMoney(o.realized_cum) : '—'}
+              tone={hasPoint ? (o.realized_cum >= 0 ? 'profit' : 'loss') : ''}
+              sub={hasPoint ? `niezrealizowany ${fmtMoney(o.unrealized)}` : ''} />
       </div>
 
       <KapitalLaczny days={45} />
@@ -63,14 +80,20 @@ export default function Overview({ engine }) {
           Krzywa kapitału
           <span className="hint">tryb demo · 45 dni</span>
         </div>
-        <AreaChart
-          data={curve.data || []}
-          valueKey="equity"
-          height={240}
-          valueFmt={(v) => fmtMoney(v)}
-          labelFmt={(d) => fmtTime(d.t)}
-          color={o && o.change_total_pct >= 0 ? 'var(--profit)' : 'var(--loss)'}
-        />
+        {curve.error ? (
+          <div className="notice">Nie udało się wczytać krzywej kapitału: {curve.error}</div>
+        ) : curve.loading ? (
+          <div className="empty loading-pulse">Wczytywanie…</div>
+        ) : (
+          <AreaChart
+            data={curve.data || []}
+            valueKey="equity"
+            height={240}
+            valueFmt={(v) => fmtMoney(v)}
+            labelFmt={(d) => fmtTime(d.t)}
+            color={hasPoint && o.change_total_pct < 0 ? 'var(--loss)' : 'var(--profit)'}
+          />
+        )}
       </div>
 
       <div className="grid grid-2">
@@ -84,13 +107,14 @@ export default function Overview({ engine }) {
               <div className="row-head">
                 <span className="row-title">Pętla decyzyjna</span>
                 <span className={`badge ${beatStale ? 'bad' : beat?.status === 'running' ? 'ok' : 'warn'}`}>
-                  {beatStale ? 'BRAK SYGNAŁU'
-                    : beatHalted ? 'NIE URUCHOMIONY'
-                      : (beat?.status || '—').toUpperCase()}
+                  {beatMissing ? 'BRAK PULSU'
+                    : beatStale ? 'BRAK SYGNAŁU'
+                      : beatHalted ? 'NIE URUCHOMIONY'
+                        : (beat?.status || '—').toUpperCase()}
                 </span>
               </div>
               <div className="row-meta">
-                <span>ostatni heartbeat: {fmtAgo(beat?.last_beat_at)}</span>
+                <span>ostatni heartbeat: {fmtAgo(beatAt)}</span>
               </div>
               {beatHalted && (
                 <div className="row-body">
@@ -98,7 +122,13 @@ export default function Overview({ engine }) {
                   i nie składa zleceń. Dane rynkowe i kapitał rachunku zbierają się dalej.
                 </div>
               )}
-              {beatStale && (
+              {beatMissing ? (
+                <div className="row-body" style={{ color: 'var(--danger-light)' }}>
+                  Silnik nigdy nie zgłosił pulsu — nie ma wpisu, z którego dałoby się
+                  odczytać, czy pracuje. To nie to samo co zatrzymanie świadome:
+                  tamto jest zapisane w bazie i widać je wprost.
+                </div>
+              ) : beatStale && (
                 <div className="row-body" style={{ color: 'var(--danger-light)' }}>
                   Silnik nie zgłosił się od ponad 5 minut. Dead-man switch wstrzymuje
                   nowe zlecenia do czasu przywrócenia sygnału.
@@ -121,9 +151,13 @@ export default function Overview({ engine }) {
         <div className="glass-card">
           <div className="card-title">
             Otwarte pozycje
-            <span className="hint">{pos.data?.length || 0} aktywnych</span>
+            <span className="hint">{pos.error ? '—' : `${pos.data?.length || 0} aktywnych`}</span>
           </div>
-          {pos.data?.length ? (
+          {pos.error ? (
+            <div className="notice">Nie udało się wczytać pozycji: {pos.error}</div>
+          ) : pos.loading ? (
+            <div className="empty loading-pulse">Wczytywanie…</div>
+          ) : pos.data?.length ? (
             <div className="table-scroll">
               <table className="table">
                 <thead>
@@ -153,7 +187,11 @@ export default function Overview({ engine }) {
           Nad czym algorytm ostatnio pracował
           <span className="hint">ostatnie decyzje</span>
         </div>
-        {recent.data?.length ? (
+        {recent.error ? (
+          <div className="notice">Nie udało się wczytać decyzji: {recent.error}</div>
+        ) : recent.loading ? (
+          <div className="empty loading-pulse">Wczytywanie…</div>
+        ) : recent.data?.length ? (
           <div className="row-list" style={{ maxHeight: 300 }}>
             {recent.data.map((d) => (
               <div key={d.id} className="row-item">
@@ -162,13 +200,14 @@ export default function Overview({ engine }) {
                     {d.symbol} · {ACTION_PL[d.action] || d.action}
                   </span>
                   <span className={`badge ${d.risk_verdict === 'allow' ? 'ok' : d.risk_verdict === 'block' ? 'bad' : 'warn'}`}>
-                    {Math.round(d.confidence * 100)}% pewności
+                    {d.confidence == null ? 'pewność —' : `${Math.round(d.confidence * 100)}% pewności`}
                   </span>
                 </div>
                 <div className="row-meta">
                   <span>{fmtTime(d.at)}</span>
                   <span>{d.model}</span>
-                  {d.latency_ms && <span>{d.latency_ms} ms</span>}
+                  {/* `&&` na liczbie wypuszczalo samo 0 jako luzny tekst obok czasu. */}
+                  {d.latency_ms != null && <span>{d.latency_ms} ms</span>}
                 </div>
                 <div className="row-body">{d.rationale}</div>
               </div>

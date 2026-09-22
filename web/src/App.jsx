@@ -8,7 +8,7 @@ import Risk from './components/Risk';
 import Settings from './components/Settings';
 import Profile from './components/Profile';
 import Bell from './components/Bell';
-import { get, post, useApi } from './utils/api';
+import { get, post, useApi, setSessionExpiredHandler } from './utils/api';
 
 const SECTIONS = [
   { key: 'overview', label: 'Stan',           Component: Overview },
@@ -47,11 +47,17 @@ export default function App() {
     setAuthState('out');
   }, []);
 
-  // Sesja moze wygasnac w trakcie pracy - wtedy kazdy hook odczytu zglasza 401
-  // i aplikacja wraca na ekran logowania zamiast pokazywac scianę bledow.
-  const onUnauthorized = useCallback(() => { setUser(null); setAuthState('out'); }, []);
+  // Sesja moze wygasnac w trakcie pracy. Decyzje podejmuje warstwa HTTP - kazde
+  // 401 spoza logowania konczy sie tutaj, niezaleznie od tego, ktory komponent
+  // wyslal zapytanie. Wczesniej sluzyl do tego prop `onUnauthorized`, ktorego
+  // zadna sekcja nie odbierala: uzytkownik zostawal na pulpicie z danymi
+  // sprzed wygasniecia i nie mial jak tego zauwazyc.
+  useEffect(() => {
+    setSessionExpiredHandler(() => { setUser(null); setAuthState('out'); });
+    return () => setSessionExpiredHandler(null);
+  }, []);
 
-  const engines = useApi(authState === 'in' ? '/api/engines' : null, [authState], { onUnauthorized });
+  const engines = useApi(authState === 'in' ? '/api/engines' : null, [authState]);
   const health = useApi(authState === 'in' ? '/api/health' : null, [authState], { refreshMs: 60000 });
   const [engine, setEngine] = useState(null);
   const [section, setSection] = useState('overview');
@@ -164,7 +170,7 @@ export default function App() {
 
       {engine ? (
         <Active key={`${engine}-${section}`} engine={engine} user={user}
-                onUserChanged={checkSession} onUnauthorized={onUnauthorized} />
+                onUserChanged={checkSession} />
       ) : (
         <div className="empty loading-pulse">Wczytywanie silników…</div>
       )}
