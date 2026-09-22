@@ -99,10 +99,22 @@ export default function Settings({ user, onUserChanged }) {
   const [venues, setVenues] = useState(null);
   const [tests, setTests] = useState({});
   const [busyId, setBusyId] = useState(null);
+  const [loadErr, setLoadErr] = useState('');
 
   const load = useCallback(async () => {
-    setCreds(await get('/api/credentials'));
-    setVenues(await get('/api/credentials/venues'));
+    // Nieudany odczyt zostawial `creds` jako null, a karta wypisywala wtedy
+    // "Brak zapisanych kluczy" razem z opisem, co system w zwiazku z tym robi
+    // (zbiera tylko dane publiczne, nie ma dostepu do salda). To jest
+    // twierdzenie o stanie systemu postawione na podstawie awarii odczytu -
+    // grozniejsze niz sama awaria, bo brzmi jak pomiar.
+    setLoadErr('');
+    try {
+      setCreds(await get('/api/credentials'));
+      setVenues(await get('/api/credentials/venues'));
+    } catch (e) {
+      setCreds(null);
+      setLoadErr(e?.message || 'Nie udało się odczytać kluczy');
+    }
   }, []);
 
   useEffect(() => { load(); }, [load]);
@@ -125,6 +137,14 @@ export default function Settings({ user, onUserChanged }) {
     try {
       await del(`/api/credentials/${id}`);
       await load();
+    } catch (err) {
+      // Bez tego wyjatek przerywal funkcje przed odswiezeniem listy: klucz
+      // zostawal na ekranie, przycisk sie odmrazal i nic nie mowilo, ze
+      // usuniecie sie nie udalo. Wlasciciel wychodzil przekonany, ze usunal.
+      setTests((t) => ({
+        ...t,
+        [id]: { ok: false, message: err?.message || 'Nie udało się usunąć klucza' },
+      }));
     } finally {
       setBusyId(null);
     }
@@ -142,20 +162,37 @@ export default function Settings({ user, onUserChanged }) {
         serwera: <span className="mono">185.201.112.104</span>.
       </div>
 
+      {loadErr && (
+        <div className="form-error" style={{ marginBottom: 0 }}>
+          <strong>Nie udało się odczytać kluczy API:</strong> {loadErr}.
+          Nie wiadomo, ile kluczy jest zapisanych ani czy są aktywne — odśwież stronę.
+        </div>
+      )}
+
       <div className="glass-card">
         <div className="card-title">
           Dodaj klucz API
           <span className="hint">tryb demo · live zablokowany do końca fazy testowej</span>
         </div>
-        <AddForm venues={venues} onAdded={load} />
+        {venues ? <AddForm venues={venues} onAdded={load} /> : (
+          <div className="empty">
+            {loadErr
+              ? 'Lista giełd niedostępna — bez niej formularz nie zapisałby klucza poprawnie.'
+              : 'Wczytywanie…'}
+          </div>
+        )}
       </div>
 
       <div className="glass-card">
         <div className="card-title">
           Zapisane klucze
-          <span className="hint">{creds?.length || 0}</span>
+          <span className="hint">{creds ? creds.length : '—'}</span>
         </div>
-        {creds?.length ? (
+        {loadErr ? (
+          <div className="empty">Stan kluczy nieznany — odczyt nie powiódł się.</div>
+        ) : creds === null ? (
+          <div className="empty">Wczytywanie…</div>
+        ) : creds.length ? (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
             {creds.map((c) => (
               <div key={c.id} className="row-item">
@@ -343,9 +380,19 @@ function SecretsPanel() {
   const [saved, setSaved] = useState({});
   const [tested, setTested] = useState({});
   const [tryb, setTryb] = useState(null);
+  const [loadErr, setLoadErr] = useState('');
 
   const load = useCallback(async () => {
-    setSecrets(await get('/api/settings/secrets'));
+    // Bez tego catcha awaria odczytu renderowala karte z samymi poradami i bez
+    // jednego pola - ekran wygladal na kompletny, tylko "nie ma tu nic do
+    // ustawienia". Brak pol ma znaczyc brak pol, a nie brak odpowiedzi.
+    setLoadErr('');
+    try {
+      setSecrets(await get('/api/settings/secrets'));
+    } catch (e) {
+      setSecrets(null);
+      setLoadErr(e?.message || 'Nie udało się odczytać kluczy usług');
+    }
     // Tryb liczy SERWER ta sama funkcja, ktorej uzywa worker. Druga kopia
     // reguly tutaj rozjechalaby sie przy pierwszej zmianie - i to wlasnie ten
     // ekran zapewnialby wtedy, ze jest inaczej niz jest.
@@ -366,8 +413,11 @@ function SecretsPanel() {
   };
 
   const clear = async (name) => {
-    setBusy(name);
+    setBusy(name); setError((e) => ({ ...e, [name]: '' }));
     try { await del(`/api/settings/secrets/${name}`); await load(); }
+    // Nieudane usuniecie musi byc widoczne: klucz nadal dziala, a przy cichym
+    // bledzie wlasciciel wychodzi z ekranu przekonany, ze go wycofal.
+    catch (err) { setError((e) => ({ ...e, [name]: err?.message || 'Nie udało się usunąć klucza' })); }
     finally { setBusy(null); }
   };
 
@@ -437,6 +487,15 @@ function SecretsPanel() {
         przy dziesięciu kanałach RSS to rząd kilku dolarów miesięcznie.
       </div>
 
+      {loadErr && (
+        <div className="form-error">
+          <strong>Nie udało się odczytać stanu kluczy usług:</strong> {loadErr}.
+          Nie wiadomo, które są ustawione — porady powyżej mówią, jak je dodać,
+          ale nie mówią nic o tym, co jest w bazie.
+        </div>
+      )}
+      {!loadErr && secrets === null && <div className="empty">Wczytywanie…</div>}
+
       {(secrets || []).map((s) => (
         <div key={s.name} style={{ marginBottom: 18 }}>
           <div className="row-head" style={{ marginBottom: 6 }}>
@@ -502,8 +561,15 @@ function WalletsPanel() {
   const [ident, setIdent] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [loadErr, setLoadErr] = useState('');
 
-  const load = useCallback(async () => setWallets(await get('/api/settings/wallets')), []);
+  const load = useCallback(async () => {
+    // Pusta lista portfeli i NIEODCZYTANA lista portfeli wygladaly identycznie,
+    // a pierwsza z nich to zdanie "nie obserwujemy zadnego adresu".
+    setLoadErr('');
+    try { setWallets(await get('/api/settings/wallets')); }
+    catch (e) { setWallets(null); setLoadErr(e?.message || 'Nie udało się odczytać portfeli'); }
+  }, []);
   useEffect(() => { load(); }, [load]);
 
   const add = async (e) => {
@@ -518,7 +584,12 @@ function WalletsPanel() {
     } finally { setBusy(false); }
   };
 
-  const remove = async (id) => { setBusy(true); try { await del(`/api/settings/wallets/${id}`); await load(); } finally { setBusy(false); } };
+  const remove = async (id) => {
+    setBusy(true); setError('');
+    try { await del(`/api/settings/wallets/${id}`); await load(); }
+    catch (e) { setError(e?.message || 'Nie udało się usunąć portfela'); }
+    finally { setBusy(false); }
+  };
 
   return (
     <div className="glass-card">
@@ -561,6 +632,13 @@ function WalletsPanel() {
           {busy ? 'Zapisywanie…' : 'Dodaj portfel'}
         </button>
       </form>
+
+      {loadErr && (
+        <div className="form-error" style={{ marginTop: 16, marginBottom: 0 }}>
+          <strong>Nie udało się odczytać listy portfeli:</strong> {loadErr}.
+          Nie wiadomo, które adresy są obserwowane.
+        </div>
+      )}
 
       {wallets?.length > 0 && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginTop: 18 }}>

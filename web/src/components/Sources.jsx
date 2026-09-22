@@ -3,13 +3,31 @@ import React from 'react';
 import { useApi } from '../utils/api';
 import { fmtTime, fmtAgo, fmtLag, DIRECTION_PL } from '../utils/format';
 
+/* Pomiar, ktorego nie ma, nie jest zerem. `val ?? 0` rysowalo "pewnosc 0%"
+   dla artykulu bez analizy (LEFT JOIN nie dal wiersza) - czyli twierdzilo,
+   ze model ocenil artykul na zero, zamiast ze nikt go nie ocenial. */
+const fmtOcena = (v) => (v == null ? '—' : `${Math.round(v * 100)}%`);
+
 export default function Sources({ engine }) {
   const feeds = useApi(`/api/feeds?engine=${engine}`, [engine], { refreshMs: 60000 });
   const news = useApi(`/api/news?engine=${engine}&limit=40`, [engine], { refreshMs: 60000 });
   const spend = useApi('/api/api-spend?dni=30', [], { refreshMs: 60000 });
+  /* Czy klucz analizy w ogole jest wpisany, rozstrzyga SERWER - ta sama
+     funkcja, ktorej uzywa worker. Front wypisywal dotad instrukcje "wpisz
+     klucz" na podstawie samego zera wywolan, nie sprawdzajac, czy klucz jest.
+     Przy wpisanym kluczu i pustym koncie u dostawcy (przezyta awaria
+     z 09.09.2026) wlasciciel czytal polecenie wpisania klucza, ktory juz
+     wpisal - a prawdziwa przyczyna byla zupelnie gdzie indziej.
+
+     BEZ ODSWIEZANIA W PETLI: ten endpoint buduje i zamyka dostawce przy kazdym
+     wywolaniu (patrz komentarz w routers/settings.py), a zbior wpisanych kluczy
+     zmienia sie raz na kilka miesiecy. */
+  const tryb = useApi('/api/settings/analiza-tryb', []);
 
   const s = spend.data;
-  const wykorzystanie = s ? Math.min(1, s.dzis.wykorzystanie || 0) : 0;
+  // `wykorzystanie` jest nullem, gdy limit dobowy nie jest znany. `|| 0` dawalo
+  // wtedy zielone "0% · w normie" w miejscu, w ktorym nie ma zadnego pomiaru.
+  const wykorzystanie = s?.dzis?.wykorzystanie != null ? Math.min(1, s.dzis.wykorzystanie) : null;
   const perDzien = {};
   (s?.dobowe || []).forEach((d) => {
     perDzien[d.dzien] = (perDzien[d.dzien] || 0) + d.koszt_usd;
@@ -26,13 +44,44 @@ export default function Sources({ engine }) {
             {s ? `${s.koszt_okresu_usd.toFixed(2)} USD przez ${s.okres_dni} dni` : '—'}
           </span>
         </div>
-        {!s || s.dzis.wywolania === 0 ? (
-          <div className="empty">
-            Brak wywołań modelu. Skaner wiadomości rusza po wpisaniu klucza Anthropic
-            albo Google Gemini w Ustawieniach.
+        {spend.error && (
+          <div className="notice">
+            <strong>Nie udało się odczytać wydatków na model:</strong> {spend.error}.
+            To nie znaczy, że skaner nie pracuje — znaczy, że nie wiadomo, ile wydał.
           </div>
+        )}
+        {!s ? (
+          <div className="empty">{spend.error ? 'Koszt analizy nieznany.' : 'Wczytywanie…'}</div>
         ) : (
           <>
+            {s.dzis.wywolania === 0 && (
+              /* Trzy rozne przyczyny zera, trzy rozne rzeczy do zrobienia.
+                 Karta zostaje na ekranie w kazdym z tych przypadkow: wczesniej
+                 znikala w calosci, a razem z nia limit dobowy i koszt z 30 dni,
+                 ktore API liczy i zwraca. */
+              <div className="notice" style={{ marginBottom: 14 }}>
+                {tryb.data?.aktywny === false ? (
+                  <>
+                    <strong>Brak klucza analizy.</strong> {tryb.data.opis} Skaner wiadomości
+                    rusza po wpisaniu klucza Anthropic albo Google Gemini w Ustawieniach.
+                  </>
+                ) : tryb.data?.aktywny ? (
+                  <>
+                    <strong>Klucz jest wpisany, ale dziś nie było ani jednego wywołania.</strong>{' '}
+                    Dostawca: <span className="mono">{tryb.data.dostawca || 'mieszanka'}</span>.
+                    Zero wywołań przy ustawionym kluczu to zwykle wyczerpany limit dobowy,
+                    brak środków na koncie u dostawcy albo zatrzymany worker analizy —
+                    a nie brak konfiguracji.
+                  </>
+                ) : (
+                  <>
+                    <strong>Dziś nie było wywołań modelu.</strong> Nie udało się sprawdzić,
+                    czy klucz analizy jest wpisany
+                    {tryb.error ? ` (${tryb.error})` : ''}, więc przyczyna zera jest nieznana.
+                  </>
+                )}
+              </div>
+            )}
             <div className="kpi-row">
               <div className="kpi">
                 <div className="kpi-label">Dziś</div>
@@ -47,10 +96,11 @@ export default function Sources({ engine }) {
               <div className="kpi">
                 <div className="kpi-label">Wykorzystanie</div>
                 <div className={`kpi-value ${wykorzystanie > 0.8 ? 'neg' : ''}`}>
-                  {(wykorzystanie * 100).toFixed(0)}%
+                  {wykorzystanie == null ? '—' : `${(wykorzystanie * 100).toFixed(0)}%`}
                 </div>
                 <div className="kpi-sub">
-                  {wykorzystanie >= 1 ? 'analiza wstrzymana do północy UTC' : 'w normie'}
+                  {wykorzystanie == null ? 'limit dobowy nieznany — brak odniesienia'
+                    : wykorzystanie >= 1 ? 'analiza wstrzymana do północy UTC' : 'w normie'}
                 </div>
               </div>
             </div>
@@ -71,11 +121,17 @@ export default function Sources({ engine }) {
           </>
         )}
       </div>
+
       <div className="glass-card">
         <div className="card-title">
           Źródła danych
-          <span className="hint">{feeds.data?.length || 0} kanałów RSS</span>
+          <span className="hint">{feeds.data ? `${feeds.data.length} kanałów RSS` : '—'}</span>
         </div>
+        {feeds.error && (
+          <div className="notice">
+            <strong>Nie udało się odczytać listy źródeł:</strong> {feeds.error}.
+          </div>
+        )}
         {feeds.data?.length ? (
           <div className="table-scroll">
             <table className="table">
@@ -84,20 +140,31 @@ export default function Sources({ engine }) {
                     <th>Co N</th><th>Zachowane / pobrane</th><th>24h</th></tr>
               </thead>
               <tbody>
-                {feeds.data.map((f) => (
-                  <tr key={f.id}>
+                {feeds.data.map((f) => {
+                  /* Wylaczony kanal wygladal dokladnie jak dzialajacy: status
+                     `ok` i odczyt sprzed trzech dni, bo to ostatni odczyt
+                     SPRZED wylaczenia. Stary sukces nie jest dowodem pracy. */
+                  const wylaczony = f.enabled === false;
+                  return (
+                  <tr key={f.id} style={{ opacity: wylaczony ? 0.55 : 1 }}>
                     <td>
                       <div style={{ fontWeight: 600 }}>{f.name}</div>
                       <a className="src-link" href={f.url} target="_blank" rel="noopener noreferrer">{f.url}</a>
                     </td>
                     <td className="dim">{f.engine || 'makro'}</td>
                     <td>
-                      <span className={`badge ${f.last_status === 'ok' ? 'ok' : f.last_status ? 'bad' : ''}`}>
-                        {f.last_status || 'brak'}
-                      </span>
+                      {wylaczony ? (
+                        <span className="badge warn" title="kanał wyłączony — nie jest odpytywany">
+                          wyłączony
+                        </span>
+                      ) : (
+                        <span className={`badge ${f.last_status === 'ok' ? 'ok' : f.last_status ? 'bad' : ''}`}>
+                          {f.last_status || 'brak'}
+                        </span>
+                      )}
                     </td>
                     <td className="dim">{fmtAgo(f.last_polled_at)}</td>
-                    <td className="mono dim">{f.poll_interval_s}s</td>
+                    <td className="mono dim">{wylaczony ? '—' : `${f.poll_interval_s}s`}</td>
                     <td className="mono">
                       {f.articles_kept} / {f.articles_seen}
                       {f.keep_rate != null && (
@@ -106,11 +173,16 @@ export default function Sources({ engine }) {
                     </td>
                     <td className="mono">{f.last_24h}</td>
                   </tr>
-                ))}
+                  );
+                })}
               </tbody>
             </table>
           </div>
-        ) : <div className="empty">Brak skonfigurowanych źródeł</div>}
+        ) : feeds.data ? (
+          <div className="empty">Brak skonfigurowanych źródeł</div>
+        ) : feeds.error ? (
+          <div className="empty">Lista źródeł nieznana.</div>
+        ) : <div className="empty">Wczytywanie…</div>}
         <div className="row-body" style={{ marginTop: 10 }}>
           Niski odsetek zachowanych artykułów jest oczekiwany, nie alarmujący — tani model
           odsiewa szum, a droższy analizuje tylko to, co przeszło filtr istotności.
@@ -120,8 +192,13 @@ export default function Sources({ engine }) {
       <div className="glass-card">
         <div className="card-title">
           Przeanalizowane artykuły <span className="badge ai">Claude</span>
-          <span className="hint">najnowsze {news.data?.length || 0}</span>
+          <span className="hint">{news.data ? `najnowsze ${news.data.length}` : '—'}</span>
         </div>
+        {news.error && (
+          <div className="notice">
+            <strong>Nie udało się odczytać artykułów:</strong> {news.error}.
+          </div>
+        )}
         {news.data?.length ? (
           <div className="row-list" style={{ maxHeight: 620 }}>
             {news.data.map((n) => (
@@ -153,10 +230,14 @@ export default function Sources({ engine }) {
                       <div key={lbl} style={{ flex: 1 }}>
                         <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 3 }}>
                           <span className="dim">{lbl}</span>
-                          <span className="mono" style={{ color: col }}>{Math.round((val ?? 0) * 100)}%</span>
+                          <span className="mono" style={{ color: val == null ? 'var(--text-dim)' : col }}>
+                            {fmtOcena(val)}
+                          </span>
                         </div>
                         <div className="bar-track" style={{ height: 4 }}>
-                          <div className="bar-fill" style={{ width: `${(val ?? 0) * 100}%`, background: col }} />
+                          {val != null && (
+                            <div className="bar-fill" style={{ width: `${val * 100}%`, background: col }} />
+                          )}
                         </div>
                       </div>
                     ))}
@@ -171,7 +252,11 @@ export default function Sources({ engine }) {
               </div>
             ))}
           </div>
-        ) : <div className="empty">Brak przeanalizowanych artykułów</div>}
+        ) : news.data ? (
+          <div className="empty">Brak przeanalizowanych artykułów</div>
+        ) : news.error ? (
+          <div className="empty">Nie wiadomo, czy są przeanalizowane artykuły.</div>
+        ) : <div className="empty">Wczytywanie…</div>}
         <div className="row-body" style={{ marginTop: 10 }}>
           <strong>Nowość</strong> jest osobnym wymiarem od siły sygnału: news, który rynek już
           wycenił, ma dla systemu wartość bliską zeru niezależnie od tego, jak mocno brzmi.

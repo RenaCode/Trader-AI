@@ -1,7 +1,7 @@
 /* Zakladka PROFIL: konto, bezpieczenstwo, sesje, powiadomienia, aktywnosc.
    Kazda sekcja zapisuje sie osobno i daje wlasna informacje zwrotna - jeden
    przycisk "zapisz wszystko" ukrywa, co sie faktycznie zmienilo. */
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { get, post, put, del } from '../utils/api';
 import { fmtTime, fmtAgo } from '../utils/format';
 
@@ -9,6 +9,16 @@ const CATEGORY_LABEL = {
   ryzyko: 'Ryzyko', handel: 'Handel', uczenie: 'Uczenie',
   konto: 'Konto', system: 'System',
 };
+
+/* Odstep miedzy powiadomieniami tego samego typu. Zaokraglanie do minut dawalo
+   "nie czesciej niz co 0 min" dla 20 s - czyli komunikat, ze odstepu nie ma. */
+function fmtOdstep(s) {
+  if (s == null) return '—';
+  if (s < 60) return `${s} s`;
+  const min = Math.floor(s / 60);
+  const reszta = s % 60;
+  return reszta ? `${min} min ${reszta} s` : `${min} min`;
+}
 
 function Section({ title, hint, children }) {
   return (
@@ -72,7 +82,7 @@ function AccountSection({ profile, reload }) {
       <div className="row-body">
         Strefa czasowa steruje godzinami ciszy powiadomień i formatem dat w interfejsie.
       </div>
-      <button className="btn-ghost" onClick={save} disabled={busy} style={{ marginTop: 6 }}>
+      <button className="btn-ghost" onClick={save} disabled={busy || !profile} style={{ marginTop: 6 }}>
         {busy ? 'Zapisywanie…' : 'Zapisz'}
       </button>
       <Feedback state={state} />
@@ -134,11 +144,23 @@ function SessionsSection() {
   const [password, setPassword] = useState('');
   const [state, setState] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [loadErr, setLoadErr] = useState('');
 
-  const load = useCallback(async () => setSessions(await get('/api/account/sessions')), []);
+  const load = useCallback(async () => {
+    // "Brak aktywnych sesji" na ekranie, ktory da sie otworzyc WYLACZNIE
+    // z aktywna sesja, to stan logicznie niemozliwy: /account/sessions zwraca
+    // co najmniej biezaca. Jedyna droga do tego napisu byla awaria odczytu.
+    setLoadErr('');
+    try { setSessions(await get('/api/account/sessions')); }
+    catch (e) { setSessions(null); setLoadErr(e?.message || 'Nie udało się odczytać sesji'); }
+  }, []);
   useEffect(() => { load(); }, [load]);
 
-  const revoke = async (id) => { await del(`/api/account/sessions/${id}`); await load(); };
+  const revoke = async (id) => {
+    setState(null);
+    try { await del(`/api/account/sessions/${id}`); await load(); }
+    catch (e) { setState({ ok: false, message: e?.message || 'Nie udało się unieważnić sesji' }); }
+  };
 
   const revokeAll = async () => {
     setBusy(true); setState(null);
@@ -152,7 +174,13 @@ function SessionsSection() {
   };
 
   return (
-    <Section title="Aktywne sesje" hint={`${sessions?.length || 0}`}>
+    <Section title="Aktywne sesje" hint={sessions ? `${sessions.length}` : '—'}>
+      {loadErr && (
+        <div className="form-error">
+          <strong>Nie udało się odczytać listy sesji:</strong> {loadErr}.
+          Co najmniej bieżąca sesja istnieje — inaczej nie widziałbyś tego ekranu.
+        </div>
+      )}
       {sessions?.length ? (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
           {sessions.map((s) => (
@@ -177,7 +205,16 @@ function SessionsSection() {
             </div>
           ))}
         </div>
-      ) : <div className="empty">Brak aktywnych sesji</div>}
+      ) : sessions === null ? (
+        <div className="empty">{loadErr ? 'Lista sesji nieznana.' : 'Wczytywanie…'}</div>
+      ) : (
+        /* Pusta lista przy UDANYM odczycie tez nie powinna sie zdarzyc - mowimy
+           wiec, ze cos jest nie tak, a nie ze nikt nie jest zalogowany. */
+        <div className="empty">
+          Serwer nie zwrócił żadnej sesji, choć ta przeglądarka jest zalogowana —
+          zgłoś to, bo taki stan nie powinien wystąpić.
+        </div>
+      )}
 
       <div className="row-body" style={{ marginTop: 14 }}>
         Jeśli podejrzewasz, że ktoś ma dostęp do konta, wyloguj wszystkie inne urządzenia.
@@ -205,11 +242,33 @@ function NotificationsSection() {
   const [state, setState] = useState(null);
   const [busy, setBusy] = useState(false);
   const [form, setForm] = useState({ kind: 'whatsapp', label: '', telefon: '', apikey: '', url: '' });
+  const [errs, setErrs] = useState({});
+  const [quietState, setQuietState] = useState(null);
+  // Ostatnia wartosc ciszy POTWIERDZONA przez serwer. Pola edytuja `quiet`,
+  // ale przy nieudanym zapisie cofamy sie wlasnie tutaj - inaczej na ekranie
+  // zostawalaby godzina, ktorej w bazie nie ma.
+  const quietSaved = useRef(null);
 
   const load = useCallback(async () => {
-    setPrefs(await get('/api/notifications/preferences'));
-    setChannels(await get('/api/notifications/channels'));
-    setQuiet(await get('/api/notifications/quiet'));
+    // Trzy NIEZALEZNE odczyty. Wczesniej szly kolejnymi `await` bez catcha:
+    // awaria pierwszego przerywala funkcje, `quiet` zostawalo nullem, a pola
+    // ciszy renderowaly wtedy wartosc domyslna ('08:00') jako USTAWIONA.
+    // Kazda edycja wysylala potem PUT z jednym polem, a QuietBody dopelniala
+    // reszte DOMYSLNYMI - czyli nadpisywala realne ustawienia ciszy.
+    const [p, c, q] = await Promise.allSettled([
+      get('/api/notifications/preferences'),
+      get('/api/notifications/channels'),
+      get('/api/notifications/quiet'),
+    ]);
+    setPrefs(p.status === 'fulfilled' ? p.value : null);
+    setChannels(c.status === 'fulfilled' ? c.value : null);
+    if (q.status === 'fulfilled') { setQuiet(q.value); quietSaved.current = q.value; }
+    else { setQuiet(null); quietSaved.current = null; }
+    setErrs({
+      prefs: p.status === 'rejected' ? (p.reason?.message || 'odczyt nie powiódł się') : '',
+      channels: c.status === 'rejected' ? (c.reason?.message || 'odczyt nie powiódł się') : '',
+      quiet: q.status === 'rejected' ? (q.reason?.message || 'odczyt nie powiódł się') : '',
+    });
   }, []);
   useEffect(() => { load(); }, [load]);
 
@@ -238,19 +297,58 @@ function NotificationsSection() {
   };
 
   const testChannel = async (id) => {
-    setBusy(true);
+    setBusy(true); setState(null);
     try {
       const r = await post(`/api/notifications/channels/${id}/test`);
       setState({ ok: r.ok, message: r.message });
       await load();
+    } catch (e) {
+      // Blad ma byc WIDOCZNY. Przy 500 wyjatek przerywal funkcje przed setState
+      // i przycisk tylko mrugal - ten sam wzorzec, co naprawiony w Bell.markAll.
+      setState({ ok: false, message: e?.message || 'Nie udało się wysłać wiadomości testowej' });
     } finally { setBusy(false); }
   };
 
-  const saveQuiet = async (patch) => {
-    const next = { ...quiet, ...patch };
-    setQuiet(next);
-    try { await put('/api/notifications/quiet', next); }
-    catch (e) { setState({ ok: false, message: e.message }); }
+  const removeChannel = async (id) => {
+    setBusy(true); setState(null);
+    try { await del(`/api/notifications/channels/${id}`); await load(); }
+    catch (e) { setState({ ok: false, message: e?.message || 'Nie udało się usunąć kanału' }); }
+    finally { setBusy(false); }
+  };
+
+  /* Edycja pol ciszy NIE wysyla zapisu. PUT szedl dotad na kazde `onChange`
+     inputa type="time", czyli takze na polowicznie wpisanej godzinie. */
+  const editQuiet = (patch) => setQuiet((q) => (q ? { ...q, ...patch } : q));
+
+  const commitQuiet = async () => {
+    const saved = quietSaved.current;
+    // Bez wczytanych ustawien nie ma z czym scalic zmiany, a serwer dopelnilby
+    // brakujace pola DOMYSLNYMI - kasujac realna cisze. Lepiej nie zapisac.
+    if (!quiet || !saved) return;
+    if (quiet.quiet_from === saved.quiet_from && quiet.quiet_to === saved.quiet_to
+        && quiet.digest_at === saved.digest_at) return;
+    if (!quiet.digest_at) {
+      setQuiet(saved);
+      setQuietState({ ok: false, message: 'Godzina podsumowania nie może być pusta.' });
+      return;
+    }
+    const next = { ...quiet, quiet_from: quiet.quiet_from || null, quiet_to: quiet.quiet_to || null };
+    try {
+      await put('/api/notifications/quiet', next);
+      quietSaved.current = next;
+      setQuiet(next);
+      // Komunikat NAZYWA zapisane wartosci. Puste pole godziny to zapis "bez
+      // ciszy" - jesli ktos wyszedl z pola w polowie wpisywania, ma to zobaczyc.
+      setQuietState({
+        ok: true,
+        message: `Zapisano: cisza ${next.quiet_from && next.quiet_to
+          ? `${next.quiet_from}–${next.quiet_to}` : 'wyłączona'}, `
+          + `podsumowanie dnia o ${next.digest_at}.`,
+      });
+    } catch (e) {
+      setQuiet(saved);
+      setQuietState({ ok: false, message: e?.message || 'Nie udało się zapisać godzin ciszy' });
+    }
   };
 
   const grouped = (prefs || []).reduce((acc, p) => {
@@ -268,6 +366,13 @@ function NotificationsSection() {
           a w odpowiedzi dostaniesz klucz API przypisany do swojego numeru.
           Nie wymaga to konta Meta ani zatwierdzania szablonów.
         </div>
+
+        {errs.channels && (
+          <div className="form-error">
+            <strong>Nie udało się odczytać listy kanałów:</strong> {errs.channels}.
+            To, że poniżej nic nie ma, nie znaczy, że nie masz skonfigurowanych kanałów.
+          </div>
+        )}
 
         {channels?.length > 0 && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 16 }}>
@@ -294,7 +399,7 @@ function NotificationsSection() {
                       Wyślij test
                     </button>
                     <button className="btn-ghost" disabled={busy}
-                            onClick={async () => { await del(`/api/notifications/channels/${c.id}`); load(); }}
+                            onClick={() => removeChannel(c.id)}
                             style={{ padding: '6px 14px', fontSize: '0.78rem',
                                      borderColor: 'rgba(239,68,68,0.3)', color: 'var(--danger-light)' }}>
                       Usuń
@@ -353,24 +458,40 @@ function NotificationsSection() {
         <Feedback state={state} />
       </Section>
 
-      <Section title="Godziny ciszy" hint="alerty krytyczne przechodzą zawsze">
+      <Section title="Godziny ciszy"
+               hint={quiet ? 'alerty krytyczne przechodzą zawsze'
+                           : (errs.quiet ? 'ustawienia nieodczytane' : 'wczytywanie…')}>
+        {errs.quiet && (
+          <div className="form-error">
+            <strong>Nie udało się odczytać godzin ciszy:</strong> {errs.quiet}.
+            Pola są zablokowane celowo — zapis jednego pola kazałby serwerowi dopełnić
+            pozostałe wartościami domyślnymi i skasowałby to, co jest ustawione naprawdę.
+          </div>
+        )}
         <div className="grid grid-3" style={{ gap: 12 }}>
           <label className="field" style={{ marginBottom: 0 }}>
             <span className="field-label">Cisza od</span>
-            <input className="input-field" type="time" value={quiet?.quiet_from || ''}
-                   onChange={(e) => saveQuiet({ quiet_from: e.target.value || null })} />
+            <input className="input-field" type="time" disabled={!quiet}
+                   value={quiet?.quiet_from || ''} onBlur={commitQuiet}
+                   onChange={(e) => editQuiet({ quiet_from: e.target.value })} />
           </label>
           <label className="field" style={{ marginBottom: 0 }}>
             <span className="field-label">Cisza do</span>
-            <input className="input-field" type="time" value={quiet?.quiet_to || ''}
-                   onChange={(e) => saveQuiet({ quiet_to: e.target.value || null })} />
+            <input className="input-field" type="time" disabled={!quiet}
+                   value={quiet?.quiet_to || ''} onBlur={commitQuiet}
+                   onChange={(e) => editQuiet({ quiet_to: e.target.value })} />
           </label>
           <label className="field" style={{ marginBottom: 0 }}>
             <span className="field-label">Podsumowanie dnia</span>
-            <input className="input-field" type="time" value={quiet?.digest_at || '08:00'}
-                   onChange={(e) => saveQuiet({ digest_at: e.target.value })} />
+            <input className="input-field" type="time" disabled={!quiet}
+                   value={quiet?.digest_at || ''} onBlur={commitQuiet}
+                   onChange={(e) => editQuiet({ digest_at: e.target.value })} />
           </label>
         </div>
+        <div className="row-body" style={{ marginTop: 6 }}>
+          Zmiana zapisuje się po wyjściu z pola, nie przy każdym wciśniętym znaku.
+        </div>
+        <Feedback state={quietState} />
         <div className="row-body">
           W godzinach ciszy alerty nie idą na WhatsAppa ani webhook, ale nadal trafiają
           do dzwonka. <strong>Kill-switch i martwy silnik przechodzą zawsze</strong> —
@@ -378,7 +499,16 @@ function NotificationsSection() {
         </div>
       </Section>
 
-      <Section title="Co ma mnie powiadamiać" hint={`${prefs?.length || 0} typów zdarzeń`}>
+      <Section title="Co ma mnie powiadamiać"
+               hint={prefs ? `${prefs.length} typów zdarzeń`
+                           : (errs.prefs ? 'lista nieodczytana' : 'wczytywanie…')}>
+        {errs.prefs && (
+          <div className="form-error">
+            <strong>Nie udało się odczytać reguł powiadamiania:</strong> {errs.prefs}.
+            Pusta lista poniżej nie znaczy, że nic Cię nie powiadamia — znaczy, że
+            nie wiadomo, co Cię powiadamia.
+          </div>
+        )}
         {Object.entries(grouped).map(([cat, list]) => (
           <div key={cat} style={{ marginBottom: 18 }}>
             <div className="stat-label" style={{ marginBottom: 8 }}>
@@ -414,7 +544,7 @@ function NotificationsSection() {
                       ))}
                       {p.cooldown_s > 0 && (
                         <span className="dim" style={{ fontSize: '0.74rem', alignSelf: 'center' }}>
-                          nie częściej niż co {Math.round(p.cooldown_s / 60)} min
+                          nie częściej niż co {fmtOdstep(p.cooldown_s)}
                         </span>
                       )}
                     </div>
@@ -432,10 +562,23 @@ function NotificationsSection() {
 /* ------------------------------------------------------------------ aktywnosc */
 function ActivitySection() {
   const [items, setItems] = useState(null);
-  useEffect(() => { get('/api/account/activity?limit=60').then(setItems).catch(() => setItems([])); }, []);
+  const [err, setErr] = useState('');
+  // Catch podstawial dotad PUSTA LISTE, wiec awaria odczytu renderowala sie
+  // jako "Brak zapisanych zdarzen" - dziennik bezpieczenstwa twierdzil, ze na
+  // koncie nic sie nie dzialo, akurat wtedy, gdy nie dalo sie tego sprawdzic.
+  useEffect(() => {
+    get('/api/account/activity?limit=60')
+      .then(setItems)
+      .catch((e) => { setItems(null); setErr(e?.message || 'odczyt nie powiódł się'); });
+  }, []);
 
   return (
     <Section title="Dziennik aktywności" hint="ostatnie operacje na koncie">
+      {err && (
+        <div className="form-error">
+          <strong>Nie udało się odczytać dziennika:</strong> {err}.
+        </div>
+      )}
       {items?.length ? (
         <div className="row-list" style={{ maxHeight: 420 }}>
           {items.map((a) => (
@@ -452,6 +595,8 @@ function ActivitySection() {
             </div>
           ))}
         </div>
+      ) : items === null ? (
+        <div className="empty">{err ? 'Zawartość dziennika nieznana.' : 'Wczytywanie…'}</div>
       ) : <div className="empty">Brak zapisanych zdarzeń</div>}
     </Section>
   );
@@ -459,32 +604,63 @@ function ActivitySection() {
 
 export default function Profile({ user }) {
   const [profile, setProfile] = useState(null);
-  const load = useCallback(async () => setProfile(await get('/api/account/profile')), []);
+  const [profileErr, setProfileErr] = useState('');
+
+  const load = useCallback(async () => {
+    // Bez tego catcha `profile` zostawal nullem, a karta ponizej czytala
+    // `profile?.totp_enabled` jako falsz i pokazywala na CZERWONO, ze drugi
+    // skladnik jest wylaczony - przy koncie, ktore ma go wlaczony. Wlasciciel
+    // widzial wtedy utrate drugiego skladnika i szedl go wlaczac ponownie.
+    // "Nie wiem" i "wylaczona" to dwie rozne odpowiedzi.
+    setProfileErr('');
+    try { setProfile(await get('/api/account/profile')); }
+    catch (e) { setProfile(null); setProfileErr(e?.message || 'Nie udało się odczytać profilu'); }
+  }, []);
   useEffect(() => { load(); }, [load]);
+
+  const znane = profile != null;
 
   return (
     <div className="grid" style={{ gap: 16 }}>
+      {profileErr && (
+        <div className="form-error" style={{ marginBottom: 0 }}>
+          <strong>Nie udało się odczytać danych konta:</strong> {profileErr}.
+          Stan drugiego składnika, kodów zapasowych i ostatniego logowania jest
+          nieznany — pola poniżej nie są pomiarem.
+        </div>
+      )}
+
       <AccountSection profile={profile} reload={load} />
 
-      <Section title="Bezpieczeństwo" hint={profile?.totp_enabled ? 'drugi składnik włączony' : 'drugi składnik wyłączony'}>
+      <Section
+        title="Bezpieczeństwo"
+        hint={znane
+          ? (profile.totp_enabled ? 'drugi składnik włączony' : 'drugi składnik wyłączony')
+          : (profileErr ? 'stan nieznany — odczyt nie powiódł się' : 'wczytywanie…')}
+      >
         <div className="grid grid-3">
           <div className="stat">
             <span className="stat-label">Weryfikacja dwuetapowa</span>
-            <span className={`stat-value sm ${profile?.totp_enabled ? 'profit' : 'loss'}`}>
-              {profile?.totp_enabled ? 'Włączona' : 'Wyłączona'}
+            <span className={`stat-value sm ${znane ? (profile.totp_enabled ? 'profit' : 'loss') : 'dim'}`}>
+              {znane ? (profile.totp_enabled ? 'Włączona' : 'Wyłączona') : '—'}
             </span>
-            <span className="stat-sub">konfiguracja w zakładce Ustawienia</span>
+            <span className="stat-sub">
+              {znane ? 'konfiguracja w zakładce Ustawienia'
+                     : 'brak odczytu — to nie znaczy „wyłączona”'}
+            </span>
           </div>
           <div className="stat">
             <span className="stat-label">Kody zapasowe</span>
-            <span className="stat-value sm">
-              {profile ? `${profile.backup_codes_left} / ${profile.backup_codes_total}` : '—'}
+            <span className={`stat-value sm ${znane ? '' : 'dim'}`}>
+              {znane ? `${profile.backup_codes_left} / ${profile.backup_codes_total}` : '—'}
             </span>
             <span className="stat-sub">niewykorzystane</span>
           </div>
           <div className="stat">
             <span className="stat-label">Ostatnie logowanie</span>
-            <span className="stat-value sm">{profile ? fmtAgo(profile.last_login_at) : '—'}</span>
+            <span className={`stat-value sm ${znane ? '' : 'dim'}`}>
+              {znane ? fmtAgo(profile.last_login_at) : '—'}
+            </span>
           </div>
         </div>
       </Section>

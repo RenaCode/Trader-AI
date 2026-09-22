@@ -23,6 +23,7 @@ w interfejsie, która pokazywała komunikat „odblokowanie wymaga ręcznego
 potwierdzenia" i nie dawała czym potwierdzić.
 """
 import asyncio
+import re
 from decimal import Decimal
 from pathlib import Path
 
@@ -200,7 +201,7 @@ def test_proba_odmawia_przy_juz_aktywnym_killswitchu():
 
 
 def _baza_proby(*, aktywnych=1, dni_blokady=0.0, dni_od_potwierdzenia=None,
-                zdarzenie=None, powiadomien=0):
+                zdarzenie=None, powiadomien=0, wstrzymane=1, wejscia=0):
     """Atrapa bazy dla próby: odpowiada po fragmencie zapytania.
 
     Nie udaje Postgresa — oddaje dokładnie te wiersze, o które próba pyta,
@@ -220,6 +221,12 @@ def _baza_proby(*, aktywnych=1, dni_blokady=0.0, dni_od_potwierdzenia=None,
         # zdarzenia tam, gdzie proba czeka na licznik.
         if "notify.notification" in p:
             return {"n": powiadomien}
+        # To samo dotyczy ogniwa 3: pyta o `journal.decision`, ale granice okna
+        # bierze podzapytaniem z `risk.killswitch_event`. Domyslnie jeden slad
+        # wstrzymania i zero wejsc, czyli ogniwo 3 potwierdzone - inaczej kazdy
+        # test nizej mierzylby przy okazji sciezke braku pomiaru.
+        if "journal.decision" in p:
+            return {"wstrzymane": wstrzymane, "wejscia": wejscia}
         if "risk.killswitch_event" in p:
             return zdarzenie
         if "risk.limit_def" in p:
@@ -506,14 +513,94 @@ def test_interfejs_pokazuje_REGULE_WZNOWIENIA_przy_limicie():
     assert "ld.wznowienie" in api
 
 
+def _bloki_warunkowe(zrodlo: str) -> list[tuple[str, str]]:
+    """Pary (warunek, treść) dla `{warunek && ( ... )}` — tak ten front renderuje
+    warunkowo. Nawiasy domykane licznikiem, nie wyrażeniem regularnym: treść
+    bloku sama zawiera nawiasy i wyrażenie regularne ucięłoby ją w losowym
+    miejscu, a strażnik zaczął by przechodzić z powodu błędu w sobie."""
+    bloki = []
+    for m in re.finditer(r"\{([^{}]{1,240}?)&&\s*\(", zrodlo):
+        i = zrodlo.index("(", m.end() - 1)
+        start, glebokosc = i, 0
+        while i < len(zrodlo):
+            if zrodlo[i] == "(":
+                glebokosc += 1
+            elif zrodlo[i] == ")":
+                glebokosc -= 1
+                if glebokosc == 0:
+                    break
+            i += 1
+        bloki.append((m.group(1), zrodlo[start:i]))
+    return bloki
+
+
 def test_interfejs_pokazuje_PULS_DOZORCY():
     """Martwy dozorca wygląda dokładnie jak dozorca, który nie ma co zgłaszać —
     różnicę widać wyłącznie w wieku pulsu. Bez tego widoku autonomia jest
-    niewidoczna: system decyduje sam, a interfejs pokazuje tylko skutki."""
+    niewidoczna: system decyduje sam, a interfejs pokazuje tylko skutki.
+
+    DLACZEGO TEN STRAŻNIK NIE PILNUJE NAPISU
+
+    Pilnował: sprawdzał literał „DOZORCA NIE BIJE". Napis przeszedł przez
+    przeredagowanie ekranu i strażnik zaczął padać na kodzie LEPSZYM od tego,
+    którego bronił — bo bronił sformułowania, a nie rzeczy. Gorszy wariant tej
+    samej pomyłki jest cichy: literał zostaje w pliku w martwej gałęzi albo
+    w komentarzu, strażnik świeci na zielono, a na ekranie nie ma nic.
+
+    Znaczenie niosą trzy rzeczy i one są tu sprawdzane:
+      * trzy ROZŁĄCZNE stany (żyje / nie bije / nie wiadomo) — awaria odczytu
+        pulsu nie może wyglądać jak brak dozorcy ani jak dozorca zdrowy;
+      * WIEK pulsu, i to najstarszy ze wszystkich dozorców — zdanie mówi
+        o wszystkich, więc musi je opisywać ten, który bije najrzadziej;
+      * ostrzeżenie w bloku WIDOCZNYM (`notice`/`form-error`), nie w szarym
+        `hint` obok tytułu karty.
+    """
     api = Path("services/api/routers/risk.py").read_text(encoding="utf-8")
     assert "dozorca_heartbeat" in api and '"/dozorca"' in api
+    # Bez tych dwóch pól w odpowiedzi front nie ma z czego rozróżnić stanów.
+    for pole in ('"zyje"', '"sekund_temu"'):
+        assert pole in api, f"API nie oddaje {pole} — puls jest nierozróżnialny"
+
     ui = Path("web/src/components/Risk.jsx").read_text(encoding="utf-8")
-    assert "risk/dozorca" in ui and "DOZORCA NIE BIJE" in ui
+    zapytanie = re.search(
+        r"const\s+(\w+)\s*=\s*useApi\(\s*[`'\"][^`'\"]*risk/dozorca", ui)
+    assert zapytanie, "front w ogóle nie pyta o puls dozorcy"
+    doz = zapytanie.group(1)
+
+    # --- stan 1 i 2: żyje / nie bije ---------------------------------------
+    assert "zyje" in ui, "front nie odróżnia dozorcy żywego od niebijącego"
+    # --- stan 3: nie wiadomo ------------------------------------------------
+    # Nieudany odczyt pulsu MUSI mieć własną gałąź. Bez sięgnięcia po kanał
+    # błędu zapytania „nie wiem" zlewa się z „brak dozorcy" — czyli awaria
+    # nadzoru wygląda jak świadoma decyzja, żeby nadzoru nie mieć.
+    assert re.search(rf"\b{doz}\.error\b", ui), (
+        "awaria odczytu pulsu nie ma własnego stanu — zlewa się z brakiem dozorcy")
+    # --- trzeci stan musi też być rozłączny z pustą listą -------------------
+    assert re.search(rf"\b{doz}\.data\b", ui), "front nie czyta listy dozorców"
+
+    # --- wiek pulsu, i to NAJSTARSZY ---------------------------------------
+    assert "sekund_temu" in ui, "interfejs nie pokazuje wieku pulsu"
+    # `?.[0]` liczy sie tak samo jak `[0]` - to ten sam pierwszy wiersz.
+    assert not re.search(rf"\b{doz}\.data\s*\??\.?\s*\[\s*0\s*\]", ui), (
+        "wiek pulsu brany z PIERWSZEGO dozorcy po ORDER BY nazwa — zdanie mówi "
+        "o wszystkich dozorcach, więc musi je opisywać najstarszy puls")
+    assert re.search(r"(Math\.max|\.reduce\(|\.sort\()[^\n]*sekund_temu", ui) \
+        or re.search(r"sekund_temu[^\n]*(Math\.max|\.reduce\(|\.sort\()", ui), (
+            "wiek pulsu nie jest agregatem po wszystkich dozorcach")
+
+    # --- ostrzeżenie w miejscu, które widać --------------------------------
+    # Nazwy zmiennych nieistotne; liczy się, że stan „nie bije" jest wyprowadzony
+    # z pola `zyje` i że TEN stan bramkuje blok o widocznej klasie.
+    z_zyje = {m.group(1) for m in re.finditer(r"const\s+(\w+)\s*=[^;]*\bzyje\b", ui)}
+    assert z_zyje, "stan „nie bije” nie jest nigdzie wyprowadzony z pola `zyje`"
+    widoczne = [
+        tresc for warunek, tresc in _bloki_warunkowe(ui)
+        if any(nazwa in warunek for nazwa in z_zyje)
+        and re.search(r'className="(notice|form-error)', tresc)
+    ]
+    assert widoczne, (
+        "ostrzeżenie o niebijącym dozorcy nie trafia do widocznego bloku "
+        "(notice/form-error) — szary `hint` obok tytułu karty to nie alarm")
 
 
 def test_prog_zywotnosci_dozorcy_jest_wielokrotnoscia_interwalu():
