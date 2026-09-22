@@ -233,9 +233,13 @@ class AtrapaBazy:
 
 
 def zdarzenie(wiek_min: float, **kw) -> dict:
+    # `proba_w_toku`/`proba_do` liczy SQL czujki (migracja 0045); atrapa oddaje
+    # je jawnie, bo czujka czyta klucz wprost - brak klucza ma byc bledem, nie
+    # cichym "False".
     return {"id": 2, "engine": "crypto", "mode": "demo",
             "reason": "Kapitał 100063.09 spadł do progu 100563.00",
-            "triggered_at": TERAZ, "wiek_min": wiek_min, **kw}
+            "triggered_at": TERAZ, "wiek_min": wiek_min,
+            "proba_w_toku": False, "proba_do": None, **kw}
 
 
 def uruchom(atrapa, **kw):
@@ -469,3 +473,46 @@ def test_zwolnienie_pozostaje_RECZNE_i_nietkniete():
     for zakazane in ("UPDATE", "INSERT", "DELETE"):
         assert zakazane not in cialo, \
             f"czujka pisze do bazy ({zakazane}) — ma tylko patrzeć"
+
+
+# ------------------------------------------------ próba pożarowa a czujka
+
+def test_zdarzenie_w_oknie_proby_NIE_alarmuje_i_NIE_maluje_na_czerwono(capsys):
+    """Próba pożarowa (05:20 lokalnie) trwa ~10 min; czujka (co 10 min) trafia
+    w to okno CO RANO. Do 2026-09-22 wysyłała drugie powiadomienie o zdarzeniu,
+    które dozór już zgłosił, i kończyła się kodem 1 — codzienny fałszywy alarm
+    o stałej porze, czyli szkoła ignorowania alarmu o tej porze.
+
+    Zdarzenie próby jest nieodróżnialne po treści (celowo — próba mierzy
+    prawdziwą ścieżkę), więc czujka czyta znacznik `proba_do` z limitu.
+    """
+    a = AtrapaBazy([zdarzenie(9, proba_w_toku=True,
+                              proba_do=TERAZ + timedelta(minutes=9))])
+    kod, wyslane = uruchom(a)
+    assert wyslane == [], "zdarzenie próby poszło jako alarm"
+    assert kod == 0
+    log = capsys.readouterr().out
+    assert "PRÓBA POŻAROWA" in log, "stan próby ma być widoczny w logu"
+    assert "KILL-SWITCH crypto/demo" not in log
+
+
+def test_po_wygasnieciu_okna_proby_zdarzenie_JEST_zwyklym_killswitchem():
+    """Próba, która zginęła przed `finally`, nie może zostawić maskowania na
+    zawsze. `proba_w_toku` liczy baza jako `proba_do > now()` — po terminie
+    znacznik jest martwy i zdarzenie wraca jako alarm."""
+    a = AtrapaBazy([zdarzenie(30, proba_w_toku=False,
+                              proba_do=TERAZ - timedelta(minutes=5))])
+    kod, wyslane = uruchom(a)
+    assert wyslane, "zdarzenie po wygasłym oknie próby zostało przemilczane"
+    assert kod != 0
+
+
+def test_czujka_liczy_okno_proby_ZEGAREM_BAZY_a_nie_flaga():
+    """Gdyby czujka czytała `proba_do IS NOT NULL`, znacznik po padniętej
+    próbie maskowałby każdy przyszły kill-switch na tym limicie."""
+    a = AtrapaBazy([zdarzenie(5)])
+    uruchom(a)
+    sql = next(q for q in a.zapytania if "risk.killswitch_event" in q)
+    assert "proba_do > now()" in sql
+    assert "LEFT JOIN risk.limit_def" in sql, (
+        "stare zdarzenia bez limit_name nie mogą wypaść z listy")

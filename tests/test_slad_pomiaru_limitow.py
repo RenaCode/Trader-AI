@@ -394,7 +394,7 @@ def zdarzenie_ks(engine="crypto", mode="demo"):
     return {"id": 7, "engine": engine, "mode": mode,
             "reason": "Obsunięcie 12% przekroczyło limit 10%",
             "triggered_at": datetime(2026, 9, 9, 3, 0, tzinfo=timezone.utc),
-            "wiek_min": 30}
+            "wiek_min": 30, "proba_w_toku": False, "proba_do": None}
 
 
 def test_KANAREK_cisza_pomiaru_daje_NIEZEROWY_kod_wyjscia_bez_kill_switcha():

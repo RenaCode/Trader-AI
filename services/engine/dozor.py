@@ -927,11 +927,21 @@ async def sprawdz_ryzyko(fetch_all, notify, sucho: bool = False) -> int:
     obsluzony przez czlowieka, a powtarzanie alarmu o nim nauczyloby ignorowac
     alarm o nastepnym.
     """
+    # `proba_w_toku` - czy zdarzenie powstalo w oknie proby pozarowej TEGO
+    # limitu (`risk.limit_def.proba_do`, migracja 0045). Liczone zegarem bazy,
+    # tym samym co `wiek_min`. LEFT JOIN, bo stare zdarzenia nie maja
+    # `limit_name`, a limit o zasiegu instrumentu nie jest tym, ktory proba
+    # podnosi - `scope = 'engine'` zawezajac do jednego wiersza na limit.
     zdarzenia = await fetch_all(
         "SELECT k.id, k.engine::text AS engine, k.mode::text AS mode, k.reason,"
         "       k.triggered_at,"
-        "       round(extract(epoch from (now() - k.triggered_at))/60) AS wiek_min"
+        "       round(extract(epoch from (now() - k.triggered_at))/60) AS wiek_min,"
+        "       coalesce(d.proba_do > now(), false) AS proba_w_toku,"
+        "       d.proba_do"
         " FROM risk.killswitch_event k"
+        " LEFT JOIN risk.limit_def d"
+        "   ON d.engine = k.engine AND d.mode = k.mode AND d.name = k.limit_name"
+        "  AND d.scope = 'engine'"
         " WHERE k.released_at IS NULL"
         " ORDER BY k.triggered_at")
 
@@ -954,6 +964,20 @@ async def sprawdz_ryzyko(fetch_all, notify, sucho: bool = False) -> int:
     odbiorcy = await fetch_all('SELECT id FROM app."user" WHERE is_active')
     for z in zdarzenia:
         wiek_min = float(z["wiek_min"])
+        if z["proba_w_toku"]:
+            # SKUTEK PROBY POZAROWEJ, NIE ALARM. Proba podniosla prog, silnik
+            # zadzialal, dozor powiadomil - to sa trzy ogniwa, ktore proba
+            # sprawdza, i wszystkie trzy MAJA sie odezwac. Czwarte, czyli ta
+            # czujka, do 2026-09-22 dokladalo codzienne drugie powiadomienie
+            # i czerwone zadanie o 05:30 - alarm o stalej porze, ktory po
+            # tygodniu nikt juz nie czyta. Stan idzie do logu, kanal
+            # powiadomien i kod wyjscia milcza. Gdy proba zginie bez
+            # sprzatania, znacznik wygasa sam i zdarzenie wraca tu jako
+            # zwykly kill-switch - patrz `OKNO_PROBY_S` w probie.
+            print(f"  PRÓBA POŻAROWA {z['engine']}/{z['mode']}: zdarzenie "
+                  f"id={z['id']} ({wiek_min:.0f} min temu) jest jej skutkiem, "
+                  f"okno do {z['proba_do']:%H:%M:%S} — nie alarmuję")
+            continue
         print(f"  KILL-SWITCH {z['engine']}/{z['mode']}: {z['reason']} "
               f"({wiek_min:.0f} min temu)")
 

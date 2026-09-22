@@ -215,10 +215,13 @@ def _baza_proby(*, aktywnych=1, dni_blokady=0.0, dni_od_potwierdzenia=None,
             return {"n": aktywnych, "dni_blokady": dni_blokady}
         if "released_auto = false" in p and "released_by IS NULL" in p:
             return {"dni": dni_od_potwierdzenia}
-        if "risk.killswitch_event" in p:
-            return zdarzenie
+        # Zapytanie o powiadomienia ZAWIERA podzapytanie do killswitch_event,
+        # wiec musi byc rozpoznane PRZED nim - inaczej atrapa oddaje wiersz
+        # zdarzenia tam, gdzie proba czeka na licznik.
         if "notify.notification" in p:
             return {"n": powiadomien}
+        if "risk.killswitch_event" in p:
+            return zdarzenie
         if "risk.limit_def" in p:
             return {"value": 8_000}
         raise AssertionError(f"atrapa nie zna zapytania: {p}")
@@ -556,3 +559,32 @@ def test_proba_pozarowa_NIE_udaje_wznowienia_automatycznego():
     assert "PRÓBA POŻAROWA" in ogon[:800], (
         "notatka musi nazywać źródło zwolnienia — bez `released_by` to ona "
         "jest jedynym miejscem, w którym stoi, co to było")
+
+
+def test_proba_ZAPOWIADA_okno_w_tym_samym_zapisie_co_podniesienie_progu():
+    """Czujka żywotności rozpoznaje zdarzenie próby po `risk.limit_def.proba_do`
+    (migracja 0045). Znacznik musi wejść w JEDNYM UPDATE z wartością — osobny
+    zapis zostawiałby chwilę, w której próg jest już podniesiony, silnik może
+    już wywołać zdarzenie, a czujka nie ma po czym poznać, że to próba.
+    W `finally` znacznik schodzi razem z progiem."""
+    from services.engine import proba_killswitcha as pk
+
+    fetch_one, fetch_all, execute, wykonane = _baza_proby(
+        aktywnych=0,
+        zdarzenie={"id": 5, "reason": "kapital ponizej progu",
+                   "limit_name": "min_equity"},
+        powiadomien=1)
+    assert asyncio.run(pk.uruchom(fetch_all, fetch_one, execute)) == 0
+
+    podniesienia = [(s, p) for s, p in wykonane
+                    if "UPDATE risk.limit_def SET value" in s and "proba_do = now()" in s]
+    assert len(podniesienia) == 1, "podniesienie progu bez znacznika okna próby"
+    sql, params = podniesienia[0]
+    assert params[1] == pk.OKNO_PROBY_S
+    assert pk.OKNO_PROBY_S > pk.CZEKAJ_SILNIK_S + pk.CZEKAJ_DOZOR_S, (
+        "okno krótsze niż najdłuższa możliwa próba - czujka pod koniec próby "
+        "widziałaby zwykły kill-switch")
+
+    przywrocenia = [s for s, _ in wykonane
+                    if "UPDATE risk.limit_def SET value" in s and "proba_do = NULL" in s]
+    assert przywrocenia, "przywrócenie progu nie zdejmuje znacznika okna"

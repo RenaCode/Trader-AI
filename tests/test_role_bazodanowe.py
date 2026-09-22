@@ -49,6 +49,11 @@ import yaml
 
 KORZEN = Path(__file__).resolve().parents[1]
 MIGRACJA = KORZEN / "db" / "migrations" / "0034_role_procesow.sql"
+# Późniejsze migracje, które ROZSZERZAJĄ nadania z 0034. Każda musi tu trafić
+# jawnie - inaczej testy poniżej opisywałyby stan sprzed niej i przechodziły.
+MIGRACJE_NADAN = [
+    KORZEN / "db" / "migrations" / "0045_okno_proby_pozarowej.sql",
+]
 ROLA_APLIKACJI = KORZEN / "db" / "migrations" / "0013_rola_aplikacji.sql"
 MIGRACJE = KORZEN / "db" / "migrations"
 VALUES = KORZEN / "charts" / "trader" / "values.yaml"
@@ -188,7 +193,8 @@ class Nadania:
 
 @pytest.fixture(scope="module")
 def sql() -> str:
-    return _bez_komentarzy(MIGRACJA.read_text(encoding="utf-8"))
+    return "\n".join(_bez_komentarzy(m.read_text(encoding="utf-8"))
+                     for m in [MIGRACJA, *MIGRACJE_NADAN])
 
 
 @pytest.fixture(scope="module")
@@ -355,7 +361,9 @@ def test_proba_rusza_WARTOSC_ale_nie_wylacza_limitu(nadania):
     niespełniony, więc nikt tego nie zauważy do chwili, w której byłby
     potrzebny."""
     kol = nadania.kolumnowe("trader_proba", "risk.limit_def", "UPDATE")
-    assert kol == {"value", "updated_at"}, f"próba może zapisać {kol}"
+    # `proba_do` doszło w 0045: próba zapowiada nim swoje okno czujce
+    # żywotności. Nadal ani `enabled`, ani `action`.
+    assert kol == {"value", "updated_at", "proba_do"}, f"próba może zapisać {kol}"
     assert "UPDATE" not in nadania.na_tabeli("trader_proba", "risk.limit_def")
 
 

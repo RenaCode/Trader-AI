@@ -68,6 +68,12 @@ LIMIT_PROBY = "min_equity"
 # Ile czekać na cykl silnika (biegnie co 300 s) i na dozór (co 600 s).
 CZEKAJ_SILNIK_S = int(os.environ.get("PROBA_CZEKAJ_SILNIK_S", "420"))
 CZEKAJ_DOZOR_S = int(os.environ.get("PROBA_CZEKAJ_DOZOR_S", "660"))
+
+# Okno, w ktorym zdarzenie kill-switcha na `LIMIT_PROBY` jest skutkiem proby
+# (`risk.limit_def.proba_do`, migracja 0045). Dluzsze niz najdluzsza mozliwa
+# proba (oba czekania) plus margines na cykl czujki (10 min) - bo czujka,
+# ktora ruszyla tuz przed koncem proby, czyta znacznik chwile po nim.
+OKNO_PROBY_S = CZEKAJ_SILNIK_S + CZEKAJ_DOZOR_S + 600
 KROK_S = 15
 
 # ILE DÓB BEZ POTWIERDZENIA, ZANIM SAMA CISZA JEST AWARIĄ.
@@ -214,10 +220,21 @@ async def przeprowadz(fetch_all, fetch_one, execute, engine: str = "crypto",
 
     try:
         print(f"\n--- podnoszę {LIMIT_PROBY} na {prog_proby} (powyżej kapitału) ---")
+        # ZAPOWIEDZ OKNA PROBY W TYM SAMYM ZAPISIE, CO PODNIESIENIE PROGU.
+        #
+        # Czujka zywotnosci (`dozor.sprawdz_ryzyko`) widzi zdarzenie proby
+        # jako zwykly kill-switch - i do 2026-09-22 co rano wysylala o nim
+        # drugie powiadomienie i konczyla sie kodem 1. Znacznik `proba_do`
+        # (migracja 0045) mowi jej, ze zdarzenie na tym limicie przed tym
+        # terminem jest SKUTKIEM PROBY. Idzie w jednym UPDATE z wartoscia,
+        # zeby nie bylo chwili, w ktorej prog jest juz podniesiony, a znacznika
+        # jeszcze nie ma. Termin, a nie flaga - proba, ktora zginie przed
+        # `finally`, nie moze zostawic znacznika na zawsze.
         await execute(
-            "UPDATE risk.limit_def SET value = %s, updated_at = now()"
+            "UPDATE risk.limit_def SET value = %s, updated_at = now(),"
+            "       proba_do = now() + %s * interval '1 second'"
             " WHERE engine::text=%s AND mode::text=%s AND name=%s",
-            (prog_proby, engine, mode, LIMIT_PROBY))
+            (prog_proby, OKNO_PROBY_S, engine, mode, LIMIT_PROBY))
 
         print(f"\n--- OGNIWO 1-2: czekam na cykl silnika (do {CZEKAJ_SILNIK_S}s) ---")
 
@@ -299,8 +316,10 @@ async def przeprowadz(fetch_all, fetch_one, execute, engine: str = "crypto",
         # PRZYWRACANIE W `finally`, nie na końcu bloku: próg musi wrócić także
         # wtedy, gdy próba padnie w połowie albo zostanie przerwana.
         print(f"\n--- przywracanie {LIMIT_PROBY} na {prog_przed:.2f} ---")
+        # Znacznik okna schodzi razem z progiem. Gdyby ten zapis nie doszedl,
+        # termin i tak wygasnie sam - patrz `OKNO_PROBY_S`.
         await execute(
-            "UPDATE risk.limit_def SET value = %s, updated_at = now()"
+            "UPDATE risk.limit_def SET value = %s, updated_at = now(), proba_do = NULL"
             " WHERE engine::text=%s AND mode::text=%s AND name=%s",
             (prog_przed, engine, mode, LIMIT_PROBY))
         po = await fetch_one(
