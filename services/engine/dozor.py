@@ -964,22 +964,29 @@ async def sprawdz_ryzyko(fetch_all, notify, sucho: bool = False) -> int:
     odbiorcy = await fetch_all('SELECT id FROM app."user" WHERE is_active')
     for z in zdarzenia:
         wiek_min = float(z["wiek_min"])
-        if z["proba_w_toku"]:
-            # SKUTEK PROBY POZAROWEJ, NIE ALARM. Proba podniosla prog, silnik
-            # zadzialal, dozor powiadomil - to sa trzy ogniwa, ktore proba
-            # sprawdza, i wszystkie trzy MAJA sie odezwac. Czwarte, czyli ta
-            # czujka, do 2026-09-22 dokladalo codzienne drugie powiadomienie
-            # i czerwone zadanie o 05:30 - alarm o stalej porze, ktory po
-            # tygodniu nikt juz nie czyta. Stan idzie do logu, kanal
-            # powiadomien i kod wyjscia milcza. Gdy proba zginie bez
-            # sprzatania, znacznik wygasa sam i zdarzenie wraca tu jako
-            # zwykly kill-switch - patrz `OKNO_PROBY_S` w probie.
+        # SKUTEK PROBY POZAROWEJ - POWIADAMIAMY, ALE NIE ALARMUJEMY.
+        #
+        # Proba (`proba_killswitcha.py`) podnosi prog, silnik zadziala, a ogniwo 4
+        # proby brzmi "czy dozor zglosil" - i tym dozorem JEST TA CZUJKA. Jedyne
+        # powiadomienie `killswitch.triggered` w dziennikach 20-22.09 pochodzi
+        # z jej przebiegu o 03:30, nie z `trader-dozorca`. Wyciszenie tu
+        # kanalu powiadomien (pierwsza wersja tej poprawki, 2026-09-22 rano)
+        # zlamaloby probe: ogniwo 4 czekaloby 660 s na nic.
+        #
+        # Wiec powiadomienie IDZIE - ale przedstawia sie jako proba, bo odbiorca
+        # o 05:30 ma wiedziec, ze to sprawdzian kanalu, nie strata. Nie idzie
+        # natomiast do kodu wyjscia: czerwone zadanie co rano o stalej porze
+        # to alarm, ktorego po tygodniu nikt nie czyta - a wlasnie o tej porze
+        # prawdziwy nocny kill-switch bylby najbardziej prawdopodobny.
+        proba = bool(z["proba_w_toku"])
+        if proba:
             print(f"  PRÓBA POŻAROWA {z['engine']}/{z['mode']}: zdarzenie "
                   f"id={z['id']} ({wiek_min:.0f} min temu) jest jej skutkiem, "
-                  f"okno do {z['proba_do']:%H:%M:%S} — nie alarmuję")
-            continue
-        print(f"  KILL-SWITCH {z['engine']}/{z['mode']}: {z['reason']} "
-              f"({wiek_min:.0f} min temu)")
+                  f"okno do {z['proba_do']:%H:%M:%S} — powiadamiam jako próbę, "
+                  f"kod wyjścia bez zmian")
+        else:
+            print(f"  KILL-SWITCH {z['engine']}/{z['mode']}: {z['reason']} "
+                  f"({wiek_min:.0f} min temu)")
 
         # WIEK ostatniego zgloszenia, a nie sam fakt jego istnienia. Warunek
         # "istnieje powiadomienie mlodsze niz triggered_at" byl prawdziwy na
@@ -1019,19 +1026,27 @@ async def sprawdz_ryzyko(fetch_all, notify, sucho: bool = False) -> int:
             # niesie stan przy kazdym z 144 przebiegow doby. Tutaj dopisujemy
             # tylko powod ciszy, a `trwale` przenosi ten sam werdykt do kodu
             # wyjscia: znalezisko realne, ale NIE NOWE.
-            trwale += 1
+            if not proba:
+                trwale += 1
             print(f"    (zgłoszone {od_min:.0f} min temu, przypomnienie co "
                   f"{odstep_przypomnienia_ks(wiek_min)} h — cisza w kanale "
                   f"powiadomień; handel STOI, stan opisany w linii wyżej)")
             continue
 
-        zgloszone += 1
+        if not proba:
+            zgloszone += 1
         if sucho:
             print(f"    {werdykt['powod']} — tryb suchy, powiadomienie nie wysyłane.")
             continue
 
         godzin = wiek_min / 60
-        if werdykt["pierwsze"]:
+        if proba:
+            tytul = f"PRÓBA POŻAROWA: kill-switch zadziałał ({z['engine']})"
+            wstep = ("To PRÓBA POŻAROWA, nie strata: próg został podniesiony "
+                     "celowo, żeby sprawdzić, czy silnik się zatrzyma i czy "
+                     "to powiadomienie dojdzie. Próba sama zwolni bezpiecznik "
+                     "i przywróci próg.\n\n")
+        elif werdykt["pierwsze"]:
             tytul = f"Kill-switch zadziałał ({z['engine']})"
             wstep = ""
         else:
@@ -1053,6 +1068,7 @@ async def sprawdz_ryzyko(fetch_all, notify, sucho: bool = False) -> int:
                          data={"reason": z["reason"], "event_id": z["id"],
                                "wiek_min": wiek_min,
                                "przypomnienie": not werdykt["pierwsze"],
+                               "proba": proba,
                                "odstep_h": werdykt["odstep_h"]})
         print(f"    powiadomiono: {len(odbiorcy)} odbiorców")
 

@@ -477,23 +477,45 @@ def test_zwolnienie_pozostaje_RECZNE_i_nietkniete():
 
 # ------------------------------------------------ próba pożarowa a czujka
 
-def test_zdarzenie_w_oknie_proby_NIE_alarmuje_i_NIE_maluje_na_czerwono(capsys):
+def test_zdarzenie_w_oknie_proby_POWIADAMIA_jako_probe_ale_NIE_maluje_na_czerwono(capsys):
     """Próba pożarowa (05:20 lokalnie) trwa ~10 min; czujka (co 10 min) trafia
-    w to okno CO RANO. Do 2026-09-22 wysyłała drugie powiadomienie o zdarzeniu,
-    które dozór już zgłosił, i kończyła się kodem 1 — codzienny fałszywy alarm
-    o stałej porze, czyli szkoła ignorowania alarmu o tej porze.
+    w to okno CO RANO. Do 2026-09-22 kończyła się wtedy kodem 1 — codzienny
+    fałszywy alarm o stałej porze, czyli szkoła ignorowania alarmu o tej porze.
+
+    ALE POWIADOMIENIE MUSI PÓJŚĆ. Ogniwo 4 próby brzmi „czy dozór zgłosił",
+    a tym dozorem jest TA czujka: jedyne `killswitch.triggered` w dziennikach
+    20-22.09 pochodzi z jej przebiegu o 03:30, nie z `trader-dozorca`. Pierwsza
+    wersja tej poprawki wyciszała kanał — i próba przestałaby się zaliczać.
 
     Zdarzenie próby jest nieodróżnialne po treści (celowo — próba mierzy
-    prawdziwą ścieżkę), więc czujka czyta znacznik `proba_do` z limitu.
+    prawdziwą ścieżkę), więc czujka czyta znacznik `proba_do` z limitu,
+    powiadamia z tytułem PRÓBA i nie liczy tego do kodu wyjścia.
     """
     a = AtrapaBazy([zdarzenie(9, proba_w_toku=True,
                               proba_do=TERAZ + timedelta(minutes=9))])
     kod, wyslane = uruchom(a)
-    assert wyslane == [], "zdarzenie próby poszło jako alarm"
-    assert kod == 0
+    assert len(wyslane) == len(a.odbiorcy), "ogniwo 4 próby: powiadomienie MA pójść"
+    assert all(w["code"] == "killswitch.triggered" for w in wyslane), (
+        "próba liczy powiadomienia po tym kodzie - inny kod jej nie zaliczy")
+    assert all(w["tytul"].startswith("PRÓBA POŻAROWA") for w in wyslane), (
+        "odbiorca o 05:30 ma wiedzieć, że to sprawdzian, nie strata")
+    assert all(w["data"]["proba"] for w in wyslane)
+    assert kod == 0, "skutek próby nie maluje zadania na czerwono"
     log = capsys.readouterr().out
     assert "PRÓBA POŻAROWA" in log, "stan próby ma być widoczny w logu"
     assert "KILL-SWITCH crypto/demo" not in log
+
+
+def test_drugi_przebieg_w_oknie_proby_milczy_i_NIE_liczy_sie_jako_trwale(capsys):
+    """Czujka, która trafiła w okno próby po raz drugi (już powiadomiła), ma
+    milczeć w rytmie jak przy zwykłym zdarzeniu — i nadal nie zaliczać próby
+    do kodu wyjścia ani do licznika znalezisk trwałych."""
+    a = AtrapaBazy([zdarzenie(9, proba_w_toku=True,
+                              proba_do=TERAZ + timedelta(minutes=9))],
+                   od_zgloszenia_min=8)
+    kod, wyslane = uruchom(a)
+    assert wyslane == []
+    assert kod == 0
 
 
 def test_po_wygasnieciu_okna_proby_zdarzenie_JEST_zwyklym_killswitchem():
