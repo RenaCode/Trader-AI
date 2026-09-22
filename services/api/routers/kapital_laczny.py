@@ -7,9 +7,10 @@ silnika w punkcie siatki to jego OSTATNI znany kapitał nie później niż ten
 punkt — czyli to, co naprawdę było wtedy na rachunku, także w nocy i w weekend,
 gdy giełda tradycyjna stoi.
 
-Silnik bez ani jednego punktu w oknie (dziś: equity, zatrzymany świadomie)
-wchodzi jako brak — nie jako zero — żeby suma nie kłamała o spadku, gdy
-druga platforma po prostu jeszcze nie ruszyła.
+Silnik bez punktu w danej chwili wchodzi jako brak — nie jako zero — a suma
+istnieje tylko tam, gdzie znane są WSZYSTKIE silniki. Inaczej „Razem"
+kłamałoby dwa razy: o spadku (zero) albo o zysku (skok o kapitał drugiej
+platformy w chwili jej pierwszego punktu).
 """
 from __future__ import annotations
 
@@ -28,6 +29,7 @@ async def laczny(days: int = Query(45, ge=1, le=365), mode: str = Query("demo"))
             SELECT generate_series(
                 date_trunc('hour', now() - make_interval(days => %s)),
                 date_trunc('hour', now()), interval '1 hour') AS t
+            UNION SELECT now()   -- ostatni punkt to TERAZ, nie pelna godzina
         ),
         silniki AS (
             SELECT DISTINCT engine::text AS engine FROM exec.equity_point
@@ -52,8 +54,11 @@ async def laczny(days: int = Query(45, ge=1, le=365), mode: str = Query("demo"))
         p[r["engine"]] = float(r["equity"]) if r["equity"] is not None else None
     seria = []
     for p in punkty.values():
-        znane = [p[e] for e in silniki if p.get(e) is not None]
-        p["razem"] = sum(znane) if znane else None
+        # SUMA TYLKO Z KOMPLETU. Suma z jednego silnika, gdy drugi jeszcze nie
+        # ma danych, dalaby "Razem" rowne krypto, a potem skok o caly kapital
+        # gieldy w chwili jej pierwszego punktu - wygladaloby to jak zysk.
+        wart = [p.get(e) for e in silniki]
+        p["razem"] = sum(wart) if all(v is not None for v in wart) else None
         seria.append(p)
 
     def zmiana(klucz: str) -> dict:
