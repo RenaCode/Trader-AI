@@ -23,6 +23,13 @@ zadziałaniu wygląda tak samo jak silnik bez sygnału do wejścia.
     ogniwo 3  aktywny -> silnik wstrzymał wejścia
     ogniwo 4  dozór -> powiadomienie
 
+OGNIWO 3 BYŁO DO 2026-09-22 WYPISANE W TEJ LIŚCIE I NIESPRAWDZANE W KODZIE.
+Między etykietami „OGNIWO 1-2" i „OGNIWO 4" nie stało ani jedno zapytanie o to,
+czy silnik cokolwiek wstrzymał, a na końcu bezwarunkowo drukowało się zdanie
+„wszystkie ogniwa zadziałały". Pominięte było jedyne, które chroni PIENIĄDZE —
+pozostałe trzy opisują zapis i powiadomienie. Próba meldowała więc sukces,
+którego nie zmierzyła, i to przez jedyny kanał, jaki ten bezpiecznik ma.
+
 CO ZOSTAJE ZMIENIONE
 
 Jedna wartość: próg kapitału podniesiony powyżej bieżącego stanu, żeby silnik
@@ -39,8 +46,11 @@ TRZY WYNIKI, NIE DWA
     ZALICZONA (0)          łańcuch zadziałał od limitu po powiadomienie
     NIEZALICZONA (1)       próba się WYKONAŁA i któreś ogniwo padło —
                            to jest awaria zabezpieczenia i ma krzyczeć
-    NIEROZSTRZYGNIĘTA (0)  próby NIE DA SIĘ przeprowadzić, bo kill-switch już
-                           stoi: nie ma czego wywołać ze stanu spoczynku
+    NIEROZSTRZYGNIĘTA (0)  któregoś ogniwa NIE DA SIĘ zmierzyć. Dwie przyczyny:
+                           kill-switch już stoi (nie ma czego wywołać ze stanu
+                           spoczynku) albo silnik nie miał w oknie próby ani
+                           jednego zamiaru wejścia, więc ogniwo 3 nie zostawiło
+                           śladu. Wynik nazywa ogniwo, którego nie zmierzył
     NIESPRAWDZONE (2)      nierozstrzygnięta zbyt długo — patrz niżej
 
 Do 2026-09-10 istniały dwa pierwsze i trzeci wpadał do drugiego, czyli aktywny
@@ -53,6 +63,58 @@ identycznie i utonęłaby w tych powtórkach.
 NIEROZSTRZYGNIĘTA NIE JEST JEDNAK ZALICZONA. Kod zerowy znaczy tu tylko tyle, że
 nie ma o czym budzić człowieka w nocy; komunikat mówi wprost, że w tym cyklu
 NIKT nie sprawdził, czy bezpiecznik działa.
+
+ILE Z OGNIWA 3 DA SIĘ ZMIERZYĆ W OKNIE PRÓBY — LICZBY, NIE NADZIEJE
+
+Ślad wstrzymania wejść powstaje w `journal.decision` TYLKO wtedy, gdy silnik
+w tym oknie w ogóle chciał wejść: `loop.py` podmienia wtedy akcję na `hold`
+i zapisuje `powod_holdu='wstrzymanie_ryzykiem'`. Samo niewejście nie zostawia
+śladu, bo niewejście jest tu stanem normalnym.
+
+A decyzje zapadają RAZ NA ŚWIECĘ na instrument, przy `DEFAULT_BAR = '4h'`
+(`horizons.py`), a nie co cykl. W oknie próby (kilkanaście minut) mieści się
+więc około jednej dwunastej świecy, a zamiarów wejścia jest w tym systemie
+rzędu dwóch na dobę (818 decyzji przez czternaście dni, z tego 36 nie-holdów —
+migracja 0040). Ogniwo 3 jest zatem mierzalne WYŁĄCZNIE OKAZJONALNIE i żadne
+czekanie mieszczące się w `activeDeadlineSeconds` tego nie zmieni.
+
+Stąd trzy decyzje, na których stoi kod niżej:
+
+  * NA OGNIWO 3 NIE CZEKAMY. Pytamy o nie dwa razy — zaraz po wykryciu
+    zdarzenia i jeszcze raz po ogniwie 4 — więc obejmujemy całe okno próby,
+    nie wydłużając jej ani o sekundę. Czekanie kupiłoby ułamek procenta szansy
+    za cały pozostały budżet czasu.
+  * „NIE ZMIERZONO" JEST TU WYNIKIEM CZĘSTYM i nie wolno go mylić z awarią.
+    Próba świecąca na czerwono codziennie zostanie wyłączona w tydzień — i
+    wtedy nie sprawdza się już NIC.
+  * ALE NIE WOLNO GO TEŻ MYLIĆ Z SUKCESEM. Niezmierzone ogniwo 3 znaczy, że
+    łańcuch NIE został potwierdzony w całości, więc taki przebieg kończy się
+    jako NIEROZSTRZYGNIĘTY, a nie jako ZALICZONY, i mówi wprost, czego nie
+    zmierzył.
+
+CZEGO TU ŚWIADOMIE NIE MA: ESKALACJI PO N DOBACH BEZ OGNIWA 3
+
+Cisza wokół ogniwa 3 jest stanem NORMALNYM (powody wyżej), więc licznik
+„ile dób bez potwierdzenia ogniwa 3" zapalałby zadanie na czerwono w kółko,
+przy działającym bezpieczniku. `MAX_DNI_BEZ_POTWIERDZENIA` stosuje się nadal
+do próby ZABLOKOWANEJ przez zastany kill-switch — tam cisza ma inną przyczynę
+(ktoś nie zwolnił zatrzymania) i sama w sobie jest do naprawienia.
+
+Ceną jest jedna rzecz i trzeba ją nazwać: przebieg, który zmierzył ogniwa 1-2
+i 4, a ogniwa 3 nie, kończy się kodem ZERO. Widać go wyłącznie w treści —
+tak samo jak wynik NIEROZSTRZYGNIĘTY. Odróżnienie go kodem wyjścia wymagałoby
+zapamiętania, kiedy łańcuch był potwierdzony OSTATNI RAZ W CAŁOŚCI, a tego nie
+da się dziś odczytać: `_dni_od_potwierdzenia` rozpoznaje próbę po trójce kolumn,
+którą zwolnienie z `finally` zapisuje tak samo jak zwolnienie po sukcesie.
+Właściwym miejscem na to rozróżnienie jest KOLUMNA w `risk.killswitch_event`
+(migracja plus nadanie), a nie sprytniejsze zapytanie ani dopasowanie notatki —
+tego ostatniego zabrania wprost test `test_slad_poprzednich_prob_czytany_
+z_TROJKI_KOLUMN_a_nie_z_notatki`.
+
+Jedno zdarzenie jest w ogniwie 3 rozstrzygające w drugą stronę i nie wymaga
+żadnej okazji: DECYZJA WEJŚCIOWA zapisana po zadziałaniu bezpiecznika. Silnik,
+który mimo aktywnego kill-switcha zapisał `enter_long`/`enter_short`, nie
+wstrzymał wejść — i to jest awaria najcięższa z możliwych, bo dotyczy pieniędzy.
 """
 from __future__ import annotations
 
@@ -64,7 +126,28 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from services.engine.loop import OPIS_POWODU_HOLDU  # noqa: E402
+
 LIMIT_PROBY = "min_equity"
+
+# NAZWA GALEZI Z JEDNEGO ZRODLA, PRZEZ INDEKSOWANIE MAPY.
+#
+# `loop.OPIS_POWODU_HOLDU` jest zbiorem zamknietym, tym samym, ktorego pilnuje
+# CHECK z migracji 0040. Wpisany tu na sztywno napis rozjechalby sie z nim po
+# cichu: zapytanie nizej przestaloby znajdowac wiersze, a proba meldowalaby, ze
+# silnik NIE wstrzymal wejsc - czyli falszywa awarie bezpiecznika, ktory dziala.
+# Indeksowanie mapy zamienia ten rozjazd w KeyError przy imporcie, czyli w blad
+# widoczny natychmiast i dla kazdego przebiegu.
+POWOD_WSTRZYMANIA = "wstrzymanie_ryzykiem"
+OPIS_WSTRZYMANIA = OPIS_POWODU_HOLDU[POWOD_WSTRZYMANIA]
+
+# Stany pojedynczego ogniwa. Trzy, nie dwa - „nie zmierzylem" jest tu wynikiem
+# czestym (patrz naglowek) i myleniem go z ktorymkolwiek z pozostalych dwoch
+# stoi cala wada, ktora ten modul naprawia.
+ZADZIALALO = "zadziałało"
+NIEZMIERZONE = "NIE ZMIERZONO"
+PADLO = "NIE ZADZIAŁAŁO"
+
 # Ile czekać na cykl silnika (biegnie co 300 s) i na dozór (co 600 s).
 CZEKAJ_SILNIK_S = int(os.environ.get("PROBA_CZEKAJ_SILNIK_S", "420"))
 CZEKAJ_DOZOR_S = int(os.environ.get("PROBA_CZEKAJ_DOZOR_S", "660"))
@@ -111,9 +194,14 @@ class Nierozstrzygnieta(RuntimeError):
 
     Niesie `dni` — ile dób minęło od ostatniego POTWIERDZENIA, że łańcuch
     działa. Bez tej liczby trzeci wynik byłby nieodróżnialny od sukcesu.
+
+    `dni is None` znaczy coś jeszcze innego i nie wolno tego zastąpić zerem:
+    w dzienniku NIE MA ANI JEDNEGO pełnego potwierdzenia, więc nie ma od czego
+    liczyć ciszy. Zero czytałoby się jako „potwierdzono przed chwilą", czyli
+    dokładnie odwrotnie niż jest.
     """
 
-    def __init__(self, powod: str, dni: float):
+    def __init__(self, powod: str, dni: float | None):
         super().__init__(powod)
         self.dni = dni
 
@@ -146,6 +234,16 @@ async def _dni_od_potwierdzenia(fetch_one, engine: str, mode: str) -> float | No
     treści `release_note` działałoby do pierwszej zmiany sformułowania — ten sam
     błąd, przed którym ostrzega migracja 0029 przy `limit_name`.
 
+    CZEGO TA TRÓJKA NIE ROZRÓŻNIA — i trzeba to wiedzieć, czytając tę liczbę.
+    Zwolnienie z bloku `finally` (próba przerwana albo taka, która ogniwa 3 nie
+    zmierzyła) pisze DOKŁADNIE te same trzy wartości co zwolnienie po próbie
+    zaliczonej; różni je tylko treść notatki, a notatki ta funkcja świadomie nie
+    czyta (patrz wyżej — i test `test_slad_poprzednich_prob_czytany_z_TROJKI_
+    KOLUMN_a_nie_z_notatki`, który tego pilnuje). „Ostatnie potwierdzenie" znaczy
+    więc dziś „ostatni przebieg, który doszedł do wywołania zdarzenia", a nie
+    „ostatni przebieg, który potwierdził cały łańcuch". Rozróżnienie wymagałoby
+    KOLUMNY w `risk.killswitch_event`, nie sprytniejszego zapytania.
+
     Liczymy od `released_at`, nie od `triggered_at`: potwierdzeniem jest moment,
     w którym łańcuch przeszedł do końca, a nie ten, w którym się zaczął.
 
@@ -161,6 +259,45 @@ async def _dni_od_potwierdzenia(fetch_one, engine: str, mode: str) -> float | No
     if r and r["dni"] is not None:
         return float(r["dni"])
     return None
+
+
+async def _ogniwo_3(fetch_one, engine: str, mode: str, id_zdarzenia: int
+                    ) -> tuple[int, int]:
+    """Ile śladów wstrzymania i ile WEJŚĆ zapisał silnik PO zadziałaniu.
+
+    Zwraca `(wstrzymane, wejscia)` — obie liczby z okna zaczynającego się
+    w `triggered_at` TEGO zdarzenia i dla TEJ pary engine/mode.
+
+    OBA LICZNIKI SĄ POTRZEBNE I MÓWIĄ O CZYM INNYM:
+
+      * `wstrzymane` > 0 — silnik chciał wejść i został zatrzymany. Jedyny
+        POZYTYWNY dowód, że ogniwo 3 działa. Bywa rzadko, bo wymaga zamiaru
+        wejścia w oknie próby (patrz nagłówek modułu).
+      * `wejscia` > 0 — silnik zapisał wejście MIMO aktywnego bezpiecznika.
+        Dowód NEGATYWNY i rozstrzygający: nie wymaga żadnej okazji, bo sam
+        jest tą okazją. Pod wstrzymaniem taki wiersz nie ma prawa powstać —
+        `loop.py` podmienia wtedy akcję na `hold` PRZED zapisem decyzji.
+
+    Zero i zero nie znaczy ani jednego, ani drugiego: znaczy, że w tym oknie
+    silnik nie miał czego wstrzymywać. To jest brak pomiaru i tak ma być
+    zgłoszone.
+
+    Granicą okna jest `triggered_at` czytane W BAZIE, podzapytaniem — tak samo
+    jak w ogniwie 4. Przeliczanie chwili w Pythonie wymagałoby zgadywania
+    strefy, a strefa pomylona o dwie godziny przy oknie kilkunastominutowym
+    daje okno całkowicie rozminięte z próbą.
+    """
+    r = await fetch_one(
+        "SELECT count(*) FILTER (WHERE d.powod_holdu = %s) AS wstrzymane,"
+        "       count(*) FILTER (WHERE d.action::text LIKE 'enter%%') AS wejscia"
+        "  FROM journal.decision d"
+        " WHERE d.engine::text = %s AND d.mode::text = %s"
+        "   AND d.decided_at > (SELECT triggered_at FROM risk.killswitch_event"
+        "                       WHERE id = %s)",
+        (POWOD_WSTRZYMANIA, engine, mode, id_zdarzenia))
+    if not r:
+        return 0, 0
+    return int(r["wstrzymane"] or 0), int(r["wejscia"] or 0)
 
 
 async def przeprowadz(fetch_all, fetch_one, execute, engine: str = "crypto",
@@ -218,6 +355,21 @@ async def przeprowadz(fetch_all, fetch_one, execute, engine: str = "crypto",
     # w srodku zdazylo sie wykonac.
     moje_zdarzenie: int | None = None
 
+    # STAN KAZDEGO OGNIWA Z OSOBNA, a nie jedna flaga „poszlo dobrze".
+    # Komunikat koncowy powstaje WYLACZNIE z tego slownika, wiec nie da sie
+    # napisac w nim niczego, czego ten przebieg nie zmierzyl - a to wlasnie
+    # rozjazd miedzy zdaniem koncowym a pomiarem byl tu cala wada.
+    ogniwa: dict[str, str] = {
+        "1-2 limit -> zdarzenie": NIEZMIERZONE,
+        "3 aktywny -> silnik wstrzymał wejścia": NIEZMIERZONE,
+        "4 dozór -> powiadomienie": NIEZMIERZONE,
+    }
+
+    def wypisz_ogniwa() -> None:
+        print("\n--- ogniwa łańcucha ---")
+        for nazwa, stan in ogniwa.items():
+            print(f"  ogniwo {nazwa}: {stan}")
+
     try:
         print(f"\n--- podnoszę {LIMIT_PROBY} na {prog_proby} (powyżej kapitału) ---")
         # ZAPOWIEDZ OKNA PROBY W TYM SAMYM ZAPISIE, CO PODNIESIENIE PROGU.
@@ -246,6 +398,7 @@ async def przeprowadz(fetch_all, fetch_one, execute, engine: str = "crypto",
 
         z = await _czekaj_na(zdarzenie, CZEKAJ_SILNIK_S, "zdarzenie")
         if not z:
+            wypisz_ogniwa()
             raise Niezaliczona(
                 "silnik nie uruchomił kill-switcha mimo kapitału poniżej progu")
         moje_zdarzenie = z["id"]
@@ -254,24 +407,73 @@ async def przeprowadz(fetch_all, fetch_one, execute, engine: str = "crypto",
             raise Niezaliczona(
                 f"zadziałał inny limit ({z['limit_name']}) — próba mierzy nie to, "
                 f"co zakłada")
+        ogniwa["1-2 limit -> zdarzenie"] = ZADZIALALO
+
+        # OGNIWO 3, PYTANIE PIERWSZE. Bez czekania: slad zapisuje cykl, ktory
+        # zdarzenie wywolal, wiec jesli w ogole powstal, to juz tu jest.
+        print("\n--- OGNIWO 3, pytanie 1 z 2: czy silnik wstrzymał wejścia ---")
+        wstrzymane, wejscia = await _ogniwo_3(fetch_one, engine, mode, z["id"])
+        print(f"  wstrzymanych zamiarów wejścia: {wstrzymane}, "
+              f"wejść mimo bezpiecznika: {wejscia} — pytam jeszcze raz po "
+              f"ogniwie 4, żeby objąć całe okno próby")
 
         print(f"\n--- OGNIWO 4: czy dozór zgłosił (do {CZEKAJ_DOZOR_S}s) ---")
 
         async def powiadomienie():
+            # FILTR PO SILNIKU I PO IDENTYFIKATORZE ZDARZENIA, nie po samym
+            # kodzie zdarzenia. `killswitch.triggered` wysylaja takze
+            # `uzgodnienie.py` i `wznowienie.py`, a dozor powtarza je dla
+            # zdarzenia zastanego co dziesiec minut (komentarz w uzgodnienie.py)
+            # - czyli w oknie `CZEKAJ_DOZOR_S` zaliczenie CUDZEGO powiadomienia
+            # jako swojego nie bylo teoretyczne, tylko prawdopodobne. Ogniwo 4
+            # meldowaloby wtedy dzialajacy kanal alarmowy na podstawie maila
+            # o czyms innym.
+            #
+            # `event_id` w `data` wstawia `dozor.py` przy kazdym zgloszeniu
+            # kill-switcha; wzor filtra po silniku stoi tamze, przy liczeniu
+            # odstepu miedzy przypomnieniami.
             r = await fetch_one(
                 "SELECT count(*) AS n FROM notify.notification"
                 " WHERE event_code = 'killswitch.triggered'"
+                "   AND engine::text = %s"
+                "   AND data->>'event_id' = %s"
                 "   AND created_at > (SELECT triggered_at FROM risk.killswitch_event"
-                "                     WHERE id = %s)", (z["id"],))
+                "                     WHERE id = %s)",
+                (engine, str(z["id"]), z["id"]))
             return r["n"] or None
 
         n = await _czekaj_na(powiadomienie, CZEKAJ_DOZOR_S, "powiadomienie")
         if not n:
             # Cichy kill-switch jest gorszy niz jego brak, bo daje zludzenie
             # kontroli. To jest osobne niepowodzenie od braku zadzialania.
+            ogniwa["4 dozór -> powiadomienie"] = PADLO
+            wypisz_ogniwa()
             raise Niezaliczona(
                 "kill-switch zadziałał, a nikt się o tym nie dowiedział")
         print(f"  powiadomień: {n}")
+        ogniwa["4 dozór -> powiadomienie"] = ZADZIALALO
+
+        # OGNIWO 3, PYTANIE DRUGIE. Czekanie na ogniwo 4 trwalo do jedenastu
+        # minut i przez ten czas silnik zrobil kilka cykli - pytamy wiec jeszcze
+        # raz, za darmo, o CALE okno proby zamiast o sam jej poczatek.
+        print("\n--- OGNIWO 3, pytanie 2 z 2: całe okno próby ---")
+        wstrzymane_2, wejscia_2 = await _ogniwo_3(fetch_one, engine, mode, z["id"])
+        wstrzymane, wejscia = max(wstrzymane, wstrzymane_2), max(wejscia, wejscia_2)
+
+        if wejscia:
+            ogniwa["3 aktywny -> silnik wstrzymał wejścia"] = PADLO
+            wypisz_ogniwa()
+            raise Niezaliczona(
+                f"silnik zapisał {wejscia} decyzji wejściowych PO zadziałaniu "
+                f"kill-switcha — bezpiecznik nie wstrzymał wejść, czyli nie "
+                f"zrobił jedynej rzeczy, która chroni pieniądze")
+        if wstrzymane:
+            ogniwa["3 aktywny -> silnik wstrzymał wejścia"] = ZADZIALALO
+            print(f"  wstrzymanych zamiarów wejścia: {wstrzymane} "
+                  f"({OPIS_WSTRZYMANIA})")
+        else:
+            print("  ani jednego zamiaru wejścia w oknie próby — ogniwa 3 NIE "
+                  "DA SIĘ z tego przebiegu rozstrzygnąć")
 
         # ZWOLNIENIE PRZEZ PROBE NIE JEST WZNOWIENIEM AUTOMATYCZNYM.
         #
@@ -304,13 +506,31 @@ async def przeprowadz(fetch_all, fetch_one, execute, engine: str = "crypto",
         #   released_auto = false, released_by = NULL  -> zwolnila proba pozarowa
         #
         # Notatka niesie reszte: co to bylo i skad przyszlo.
+        wypisz_ogniwa()
+
+        # ZDANIE KONCOWE JEST WNIOSKIEM Z POMIARU, A NIE STALA W KODZIE.
+        #
+        # Do 2026-09-22 stal tu bezwarunkowy `print` o wszystkich ogniwach -
+        # wypisywany takze wtedy, gdy jedno z nich nie zostalo nawet odpytane.
+        # Zdanie o sukcesie, ktorego nikt nie zmierzyl, jest w tym miejscu
+        # gorsze od braku proby: brak proby nikogo nie uspokaja.
+        niezmierzone = [n for n, s in ogniwa.items() if s != ZADZIALALO]
+        if niezmierzone:
+            # Zwolnienie idzie przez `finally` - z notatka BEZ prefiksu
+            # potwierdzenia, wiec ten przebieg nie odnowi licznika ciszy.
+            raise Nierozstrzygnieta(
+                "łańcuch NIE został potwierdzony w całości — nie zmierzono: "
+                + ", ".join(f"ogniwo {n}" for n in niezmierzone),
+                await _dni_od_potwierdzenia(fetch_one, engine, mode))
+
         await execute(
             "UPDATE risk.killswitch_event SET released_at = now(),"
             " released_auto = false, release_note = %s"
             " WHERE id = %s",
-            ("PRÓBA POŻAROWA — zdarzenie wywołane celowo przez "
+            ("PRÓBA POŻAROWA ZALICZONA — zdarzenie wywołane celowo przez "
              "services/engine/proba_killswitcha.py", z["id"]))
-        print("\n=== PRÓBA ZALICZONA: wszystkie ogniwa zadziałały ===")
+        print("\n=== PRÓBA ZALICZONA: wszystkie cztery ogniwa ZMIERZONE "
+              "i zadziałały ===")
         return 0
     finally:
         # PRZYWRACANIE W `finally`, nie na końcu bloku: próg musi wrócić także
@@ -352,9 +572,10 @@ async def przeprowadz(fetch_all, fetch_one, execute, engine: str = "crypto",
                 "UPDATE risk.killswitch_event SET released_at = now(),"
                 " released_auto = false, release_note = %s"
                 " WHERE id = %s AND released_at IS NULL",
-                ("PRÓBA POŻAROWA PRZERWANA — zdarzenie wywołane celowo przez "
+                ("PRÓBA POŻAROWA NIEDOKOŃCZONA — zdarzenie wywołane celowo przez "
                  "services/engine/proba_killswitcha.py, przyczyna (podniesiony "
-                 "próg) już nie istnieje. Łańcuch NIE został potwierdzony.",
+                 "próg) już nie istnieje. Łańcuch NIE został potwierdzony "
+                 "w całości: próba padła albo któregoś ogniwa nie zmierzyła.",
                  moje_zdarzenie))
 
 
@@ -387,6 +608,15 @@ async def uruchom(fetch_all, fetch_one, execute, **kw) -> int:
               "jest potwierdzenie,", file=sys.stderr)
         print("  że kill-switch zadziała, tylko brak możliwości sprawdzenia.",
               file=sys.stderr)
+        if e.dni is None:
+            # CISZY NIE DA SIE ZMIERZYC, BO NIE MA OD CZEGO. Zadna proba nie
+            # potwierdzila dotad calego lancucha, wiec licznik nie ma poczatku -
+            # a wpisanie tu zera albo nieskonczonosci byloby wymyslona data.
+            # Roznica jest widoczna w komunikacie i nie zapala zadania.
+            print("  Pełnego potwierdzenia łańcucha NIE MA w dzienniku ani "
+                  "razu — licznik ciszy nie ma od czego liczyć.",
+                  file=sys.stderr)
+            return 0
         print(f"  Od ostatniego potwierdzenia: {e.dni:.1f} doby "
               f"(próg: {MAX_DNI_BEZ_POTWIERDZENIA}).", file=sys.stderr)
         if e.dni > MAX_DNI_BEZ_POTWIERDZENIA:

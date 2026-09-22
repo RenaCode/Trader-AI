@@ -153,6 +153,80 @@ def test_prog_bierze_WIEKSZY_z_kroku_i_minimalnej_wartosci():
     assert len(rozjazdy({}, {"ADA": D("7")}, progi=progi)) == 1
 
 
+def test_kierunek_KAZDEGO_agregatu_daje_prog_MNIEJSZY():
+    """Jedno aktywo bazowe ma kilka par i to zapytanie je ŁĄCZY.
+
+    Docstring `progi_bezwzgledne` mówi: „Bierzemy NAJMNIEJSZY krok i NAJWYŻSZĄ
+    cenę, czyli w obu członach wariant dający próg MNIEJSZY". Kod robił
+    `min(i.lot_size)` i `max(c.close)` zgodnie z tym zdaniem, ale
+    `max(i.min_notional)` PRZECIWNIE: drugi człon progu brzmi
+    `min_wartosc / cena`, więc najwyższe minimum wartości daje próg NAJWIĘKSZY.
+    Sprzeczność siedziała wewnątrz jednej funkcji, dwie linie pod akapitem
+    ostrzegającym, że „błąd w stronę progu za dużego jest tu najgorszy
+    z możliwych: wycisza rozjazd, który był prawdziwy".
+
+    Nie było to teoretyczne: migracja 0023 zostawiła pary USDT jako `active`,
+    zdejmując im tylko `tradeable`, więc `GROUP BY i.base_ccy` naprawdę łączy
+    dwie pary tego samego aktywu o różnych minimach wartości.
+
+    SPRAWDZENIE NA ŹRÓDLE, bo agregat liczy Postgres, a nie Python. Atrapa
+    w tym pliku oddaje wiersze JUŻ zagregowane — podmiana `min` na `max`
+    niczego by w niej nie zmieniła, więc test na zachowaniu mierzyłby wyłącznie
+    samą atrapę. To jest sprawdzenie słabsze niż reszta pliku i jest tak nazwane
+    (ten sam kompromis co przy wieku świecy niżej).
+    """
+    import inspect
+    import re
+
+    sql = " ".join(inspect.getsource(progi_bezwzgledne).split())
+
+    # Kolumna -> agregat, ktory daje prog MNIEJSZY. Mapa, a nie jeden `assert
+    # "min(i.min_notional)"`, bo pytanie brzmi „w ktora strone myli sie kazdy
+    # z trzech czlonow", a nie „czy ktos poprawil ten jeden napis".
+    kierunek = {"i.lot_size": "min",      # krok: mniejszy krok, mniejszy prog
+                "i.min_notional": "min",  # prog to min_wartosc/cena -> mniejsze
+                "c.close": "max"}         # prog to min_wartosc/cena -> wieksza
+    for kolumna, oczekiwany in kierunek.items():
+        m = re.search(rf"(\w+)\(\s*{re.escape(kolumna)}\s*\)", sql)
+        assert m, f"zapytanie o próg nie agreguje {kolumna}"
+        assert m.group(1).lower() == oczekiwany, (
+            f"{m.group(1)}({kolumna}) daje próg WIĘKSZY niż wariant "
+            f"{oczekiwany}({kolumna}) — a próg za duży wycisza rozjazd, "
+            f"który był prawdziwy")
+
+
+def test_prog_dla_aktywa_o_DWOCH_parach_bierze_TANSZA_pare():
+    """Konsekwencja poprzedniego, policzona na liczbach.
+
+    SOL stoi na dwóch parach: SOLUSDT o minimum wartości 1 USD i SOLUSDC
+    o minimum 5 USD. Resztka warta 3 USD jest do sprzedania na pierwszej
+    z nich, czyli JEST prawdziwą pozycją — a przy progu z `max` (5 USD)
+    uzgodnienie milczało o rozjeździe, który da się zamknąć.
+    """
+    progi_tansza = asyncio.run(progi_bezwzgledne(
+        _fetch_wiersze([{"aktywo": "SOL", "lot": D("0.001"),
+                         "min_wartosc": D("1"), "cena": D("100")}]), "crypto"))
+    progi_drozsza = asyncio.run(progi_bezwzgledne(
+        _fetch_wiersze([{"aktywo": "SOL", "lot": D("0.001"),
+                         "min_wartosc": D("5"), "cena": D("100")}]), "crypto"))
+
+    rozjazd = {"SOL": D("0.03")}      # 3 USD po cenie 100
+    assert len(rozjazdy({}, rozjazd, progi=progi_tansza)) == 1, (
+        "3 USD sprzedawalne na parze o minimum 1 USD to prawdziwy rozjazd")
+    assert rozjazdy({}, rozjazd, progi=progi_drozsza) == [], (
+        "kanarek: przy progu z DROŻSZEJ pary ten sam rozjazd milczy — i o to "
+        "dokładnie chodziło w `max(i.min_notional)`")
+
+
+def _fetch_wiersze(wiersze):
+    """Atrapa oddająca podane wiersze na zapytanie o próg. Bez agregacji —
+    agregat robi Postgres, więc kierunku `min`/`max` pilnuje test wyżej."""
+    async def fetch_all(sql, params=None):
+        assert "min(i.lot_size)" in sql, f"nieoczekiwane zapytanie: {sql}"
+        return wiersze
+    return fetch_all
+
+
 def test_brak_SWIEZEJ_ceny_zostawia_sam_krok_a_nie_prog_z_powietrza():
     """Cena sprzed trzech dni przeliczona na ilość daje próg oderwany od rynku,
     a błąd w stronę progu ZA DUŻEGO wycisza rozjazd, który był prawdziwy.
