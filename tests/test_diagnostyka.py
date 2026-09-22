@@ -114,3 +114,13 @@ def test_test_permutacyjny_umie_mierzyc_STRATEGIE_PRODUKCYJNA():
     assert "ic_weights(trening, cache_tr, martwe)" in TIMING
     assert "score_threshold(trening[s], bazowe," in TIMING, "bramki z wag BAZOWYCH jak w trenerze"
     assert "simulate_portfolio(test, wagi," in TIMING
+
+
+def test_permutacja_DLUGOSCI_zostawia_wejscia_na_miejscu():
+    """H2 stratega: przewaga w regule wyjścia, nie w wejściu. Tasowanie
+    długości MIĘDZY transakcjami okna przy wejściu w faktycznej świecy —
+    ten sam rozkład długości, inny przydział."""
+    assert '"--losuj"' in TIMING and '"dlugosc"' in TIMING
+    assert "rng.shuffle(dlugosci)" in TIMING
+    assert "zwrot_losowej(test[sym], i0 - 1, dl, koszt)" in TIMING, (
+        "wejście ma zostać w swojej świecy (start = i0-1, bo zwrot_losowej wchodzi w start+1)")

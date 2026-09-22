@@ -108,6 +108,15 @@ def main() -> int:
     # ze strategia bez przewagi nie ma timingu. Domysl zostaje `bazowe` dla
     # porownywalnosci z 07.09; wlasciwe pytanie zadaje `--wagi ic`.
     ap.add_argument("--wagi", default="bazowe", choices=("bazowe", "ic"))
+    # CO JEST LOSOWANE. `czas`: wejscie w losowej swiecy przy zachowanej
+    # dlugosci (pytanie: czy strategia wyczuwa MOMENT). `dlugosc`: wejscie
+    # w faktycznej swiecy, a dlugosci trzymania POTASOWANE miedzy transakcjami
+    # okna (ten sam rozklad; pytanie: czy przewaga siedzi w REGULE WYJSCIA).
+    # Hipoteza stratega z 22.09.2026: trafnosc ~53% w kazdym rezimie przy
+    # profit factor 1,76 znaczy, ze o wyniku decyduje wielkosc wygranych
+    # i przegranych - a te ustala wyjscie, nie wejscie. Test `czas` tego
+    # wymiaru z konstrukcji nie widzi, bo trzyma dlugosci stale.
+    ap.add_argument("--losuj", default="czas", choices=("czas", "dlugosc"))
     args = ap.parse_args()
 
     url = os.environ.get("DATABASE_URL")
@@ -120,7 +129,7 @@ def main() -> int:
     koszt = runda(args.kind, args.limit)
     egz = Egzekucja(limit=args.limit)
 
-    print(f"Test permutacyjny czasu wejscia — świeca {h.bar}, {args.losowan} losowań na okno")
+    print(f"Test permutacyjny ({'czasu wejścia' if args.losuj == 'czas' else 'długości trzymania'}, wagi {args.wagi}) — świeca {h.bar}, {args.losowan} losowań na okno")
     print(f"Egzekucja: {args.kind}, koszt rundy {koszt * 100:.3f}%\n")
 
     with psycopg.connect(url, row_factory=dict_row) as conn:
@@ -205,22 +214,33 @@ def main() -> int:
             # Zapisuje to jawnie, zamiast wyliczac kierunek ze znaku zwrotu -
             # taki wzor wygladalby na obsluge shortow, a faktycznie zwracalby
             # jedynke zawsze.
-            wzorce.append((t["symbol"], max(1, i1 - i0)))
+            wzorce.append((t["symbol"], i0, max(1, i1 - i0)))
         if len(wzorce) < h.min_trades:
             start += timedelta(days=h.step_days)
             continue
 
         losowe = []
+        dlugosci = [d for _, _, d in wzorce]
         for _ in range(args.losowan):
             zwroty = []
-            for sym, dlugosc in wzorce:
-                seria = test[sym]
-                if len(seria) - dlugosc - 2 <= 0:
-                    continue
-                i = rng.randrange(0, len(seria) - dlugosc - 2)
-                z = zwrot_losowej(seria, i, dlugosc, koszt)
-                if z is not None:
-                    zwroty.append(z)
+            if args.losuj == "dlugosc":
+                # Tasowanie dlugosci MIEDZY transakcjami okna: kazda transakcja
+                # dostaje dlugosc innej, wejscie zostaje w swojej swiecy.
+                # `zwrot_losowej` wchodzi w swiecy start+1, wiec start = i0-1.
+                rng.shuffle(dlugosci)
+                for (sym, i0, _), dl in zip(wzorce, dlugosci):
+                    z = zwrot_losowej(test[sym], i0 - 1, dl, koszt) if i0 >= 1 else None
+                    if z is not None:
+                        zwroty.append(z)
+            else:
+                for sym, _, dlugosc in wzorce:
+                    seria = test[sym]
+                    if len(seria) - dlugosc - 2 <= 0:
+                        continue
+                    i = rng.randrange(0, len(seria) - dlugosc - 2)
+                    z = zwrot_losowej(seria, i, dlugosc, koszt)
+                    if z is not None:
+                        zwroty.append(z)
             if zwroty:
                 losowe.append(statistics.fmean(zwroty))
         if len(losowe) < args.losowan // 2:
