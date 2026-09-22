@@ -45,8 +45,19 @@ async def limits(engine: Silnik, mode: Tryb = Query("demo")):
             # i milczy o tym, czy sam wroci - a to jest pierwsze pytanie, jakie
             # zadaje sie o autonomiczny bezpiecznik.
             "wznowienie": r["wznowienie"], "max_wznowien": r["max_wznowien"],
-            "used": float(r["used"]) if r["used"] is not None else 0.0,
-            "utilization": r["utilization"] or 0.0,
+            # LIMIT NIGDY NIEZMIERZONY ODDAJEMY JAKO `null`, NIE JAKO ZERO.
+            #
+            # `0.0` i `r["utilization"] or 0.0` sprawialy, ze brak wiersza
+            # w `risk.limit_usage` byl nie do odroznienia od pomiaru rownego
+            # zeru. Skutek jest odwrotny do intuicji: gdy dozorca PRZESTANIE
+            # pisac pomiary, wszystkie paski zjezdzaja do zera i zakladka
+            # "Ryzyko" wyglada LEPIEJ niz przed awaria - awaria nadzoru maluje
+            # sie na ekranie jako wzorowa dyscyplina.
+            #
+            # `as_of` i `enabled` zostaja: front na nich polega, a data pomiaru
+            # jest jedynym swiadkiem tego, ze pomiar w ogole byl.
+            "used": float(r["used"]) if r["used"] is not None else None,
+            "utilization": float(r["utilization"]) if r["utilization"] is not None else None,
             "as_of": r["event_time"].isoformat() if r["event_time"] else None,
         }
         for r in rows

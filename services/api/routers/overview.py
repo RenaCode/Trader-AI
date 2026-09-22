@@ -63,20 +63,36 @@ async def overview(engine: Silnik, mode: Tryb = Query("demo")):
         (engine, DEFAULT_BAR),
     )
 
-    equity = float(latest["equity"]) if latest else 0.0
-    start = float(first["equity"]) if first else 0.0
-    prev = float(day_ago["equity"]) if day_ago else start
+    # BRAK PUNKTU TO `null`, NIE ZERO.
+    #
+    # Podstawienie 0.0 za brak wiersza w `exec.equity_point` sprawialo, ze
+    # silnik bez ani jednego pomiaru wygladal na rachunek WYZEROWANY - kapital
+    # 0,00, ekspozycja 0,00, gotowka 0,00 - i do tego ze wzrostem "+0,00%"
+    # w tonie zysku. Dwa rozne stany swiata ("nie wiemy") i ("wiemy, ze zero")
+    # trafialy na ten sam ekran jako ta sama liczba, a gorszy z nich byl tym,
+    # ktorego nie dalo sie zobaczyc.
+    equity = float(latest["equity"]) if latest else None
+    start = float(first["equity"]) if first else None
+
+    # ZMIANA 24H MA BYC ZMIANA 24-GODZINNA.
+    #
+    # `prev = ... if day_ago else start` robilo z braku punktu sprzed doby
+    # odniesienie do PIERWSZEGO punktu w ogole. Silnik dzialajacy szesc godzin
+    # pokazywal w kaflu "Zmiana 24h" zmiane od startu - liczbe prawdziwa,
+    # podpisana nieprawdziwym okresem. Bez punktu starszego niz doba ta zmiana
+    # nie istnieje i tak ma byc podana.
+    prev = float(day_ago["equity"]) if day_ago else None
 
     return {
         "engine": engine,
         "mode": mode,
         "equity": equity,
-        "cash": float(latest["cash"]) if latest else 0.0,
-        "unrealized": float(latest["unrealized"]) if latest else 0.0,
-        "realized_cum": float(latest["realized_cum"]) if latest else 0.0,
-        "exposure": float(latest["exposure"]) if latest else 0.0,
-        "change_24h_pct": ((equity - prev) / prev * 100) if prev else 0.0,
-        "change_total_pct": ((equity - start) / start * 100) if start else 0.0,
+        "cash": float(latest["cash"]) if latest else None,
+        "unrealized": float(latest["unrealized"]) if latest else None,
+        "realized_cum": float(latest["realized_cum"]) if latest else None,
+        "exposure": float(latest["exposure"]) if latest else None,
+        "change_24h_pct": ((equity - prev) / prev * 100) if equity is not None and prev else None,
+        "change_total_pct": ((equity - start) / start * 100) if equity is not None and start else None,
         "as_of": latest["event_time"] if latest else None,
         "heartbeat": heartbeat,
         "learning_status": state["status"] if state else "warmup",
