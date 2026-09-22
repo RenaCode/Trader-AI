@@ -51,9 +51,19 @@ export default function KapitalLaczny({ days = 45 }) {
         Kapitał łączny obu platform
         <span className="hint">tryb demo · {days} dni · siatka godzinowa</span>
       </div>
-      {dane.error && <div className="empty">Nie udało się pobrać: {dane.error}</div>}
-      <MultiLineChart data={d?.punkty || []} series={series} height={240}
-                      valueFmt={(v) => fmtMoney(v)} labelFmt={(p) => fmtTime(p.t)} />
+      {/* Wykres dostajac pusta serie pisze "Brak danych do wykresu" - i ma do
+          tego prawo, bo nie wie, DLACZEGO jej nie ma. Wiedza o tym tutaj.
+          Po nieudanym odczycie to zdanie bylo drugim, sprzecznym komunikatem
+          pod komunikatem o awarii: raz "nie udalo sie pobrac", raz "nie ma
+          danych". Przy danych z poprzedniego udanego odczytu wykres zostaje -
+          stare punkty sa prawdziwe, trzeba tylko powiedziec, ze sa stare. */}
+      {dane.error && (
+        <div className="empty">Nie udało się pobrać: {dane.error}</div>
+      )}
+      {dane.error && !d?.punkty?.length ? null : (
+        <MultiLineChart data={d?.punkty || []} series={series} height={240}
+                        valueFmt={(v) => fmtMoney(v)} labelFmt={(p) => fmtTime(p.t)} />
+      )}
       <div style={{ display: 'grid', gap: 6, marginTop: 10 }}>
         {[...silniki, 'razem'].map((k) => (
           <div key={k} className="row-item" style={{ display: 'flex', justifyContent: 'space-between',
