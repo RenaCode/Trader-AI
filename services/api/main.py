@@ -64,11 +64,19 @@ async def health():
 
 @app.get("/api/engines", dependencies=[Depends(current_user)])
 async def engines():
-    """Lista silnikow = zakladki w UI. Zrodlem prawdy jest baza, nie stala w kodzie."""
+    """Lista silnikow = zakladki w UI. Zrodlem prawdy jest baza, nie stala w kodzie.
+
+    JEDEN WPIS NA SILNIK, nie na gielde. Do 2026-09-22 zapytanie szlo po
+    `ref.venue` bez grupowania, wiec dopisanie drugiej gieldy equity (alpaca
+    obok placeholderu ibkr) dalo DWIE zakladki "Gielda". Gielda silnika to ta,
+    z ktora umiemy rozmawiac (`fabryka.OBSLUGIWANE`) - ta sama lista, ktora
+    filtruje formularz kluczy - a nie pierwszy wiersz z brzegu.
+    """
+    from services.exchanges.fabryka import OBSLUGIWANE
     rows = await fetch_one(
         """
         SELECT jsonb_agg(x ORDER BY x->>'engine') AS engines FROM (
-            SELECT jsonb_build_object(
+            SELECT DISTINCT ON (v.engine) jsonb_build_object(
                 'engine', v.engine,
                 'venue', v.name,
                 'venue_code', v.code,
@@ -77,7 +85,9 @@ async def engines():
                                 WHERE i.venue_id = v.id AND i.active)
             ) AS x
             FROM ref.venue v
+            ORDER BY v.engine, (v.code = ANY(%s)) DESC, v.id
         ) s
-        """
+        """,
+        (list(OBSLUGIWANE),),
     )
     return rows["engines"] if rows and rows["engines"] else []
