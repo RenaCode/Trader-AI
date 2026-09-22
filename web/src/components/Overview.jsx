@@ -27,9 +27,19 @@ export default function Overview({ engine }) {
   const o = ov.data;
   const beat = o?.heartbeat;
   const beatAge = beat ? (Date.now() - new Date(beat.last_beat_at).getTime()) / 1000 : null;
+  // SILNIK ZATRZYMANY ŚWIADOMIE TO NIE JEST MARTWY SILNIK.
+  //
+  // `halted` ustawia człowiek albo zasiew demo (`detail.source = seed_demo`) —
+  // silnik equity nigdy nie został uruchomiony, więc jego heartbeat jest sprzed
+  // miesiąca i dead-man switch malował zakładkę na czerwono „BRAK SYGNAŁU”.
+  // Czujka żywotności rozróżnia te stany od 12.09 („pomijam equity/demo: halted
+  // — zatrzymany świadomie”), interfejs nie. Alarm o awarii, której nie ma,
+  // uczy ignorować alarm o awarii, która będzie.
+  const beatHalted = beat?.status === 'halted';
   // Dead-man switch: brak heartbeatu > 5 min traktujemy jako silnik nieżywy,
-  // niezależnie od tego, co deklaruje kolumna status.
-  const beatStale = beatAge != null && beatAge > 300;
+  // niezależnie od tego, co deklaruje kolumna status — ale NIE gdy jest
+  // zatrzymany świadomie.
+  const beatStale = !beatHalted && beatAge != null && beatAge > 300;
 
   return (
     <div className="grid" style={{ gap: 16 }}>
@@ -74,12 +84,20 @@ export default function Overview({ engine }) {
               <div className="row-head">
                 <span className="row-title">Pętla decyzyjna</span>
                 <span className={`badge ${beatStale ? 'bad' : beat?.status === 'running' ? 'ok' : 'warn'}`}>
-                  {beatStale ? 'BRAK SYGNAŁU' : (beat?.status || '—').toUpperCase()}
+                  {beatStale ? 'BRAK SYGNAŁU'
+                    : beatHalted ? 'NIE URUCHOMIONY'
+                      : (beat?.status || '—').toUpperCase()}
                 </span>
               </div>
               <div className="row-meta">
                 <span>ostatni heartbeat: {fmtAgo(beat?.last_beat_at)}</span>
               </div>
+              {beatHalted && (
+                <div className="row-body">
+                  Silnik tego rynku jest zatrzymany świadomie — nie podejmuje decyzji
+                  i nie składa zleceń. Dane rynkowe i kapitał rachunku zbierają się dalej.
+                </div>
+              )}
               {beatStale && (
                 <div className="row-body" style={{ color: 'var(--danger-light)' }}>
                   Silnik nie zgłosił się od ponad 5 minut. Dead-man switch wstrzymuje
