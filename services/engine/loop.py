@@ -1063,6 +1063,81 @@ def close_paper(cur, position: dict, price: Decimal, as_of: datetime,
                               else "natychmiastowe")})
 
 
+def zamknij_pozycje_papierowe(conn, engine: str, mode: str, kind: str,
+                              now: datetime | None = None) -> list[dict]:
+    """Zamyka NA PAPIERZE pozycje otwarte na rachunku papierowym, zanim silnik
+    zacznie wysylac zlecenia na gielde. Zwraca liste zamknietych.
+
+    DLACZEGO TO ISTNIEJE. Pozycja z rachunku papierowego istnieje tylko
+    w naszej bazie - gielda jej nie zna. Silnik przelaczony na `--egzekucja
+    gielda` widzialby ja jak kazda inna: wyslalby wyjscie, gielda odrzucilaby
+    sprzedaz aktywa, ktorego konto nie ma, a uzgodnienie zglosiloby
+    pozycje-widmo i zatrzymalo wejscia. 13.09.2026 dokladnie ten stan skonczyl
+    sie zejsciem CALEGO silnika z powrotem na papier i wyciszeniem uzgodnienia
+    w demo - czyli utrata jedynego pomiaru poslizgu, dla ktorego tryb demo
+    w ogole istnieje.
+
+    CO ZAMYKA: wylacznie pozycje, ktorych zlecenie otwierajace ma
+    `raw->>'execution' = 'internal_paper'`. Pozycja otwarta NA GIELDZIE zostaje
+    nietknieta - gielda ja ma i to ona ja zamknie.
+
+    JAK: po ostatniej cenie minutowej, przez `close_paper` (ta sama sciezka co
+    zwykle wyjscie papierowe, z tym samym znacznikiem `internal_paper`, wiec
+    pomiar poslizgu nadal to odrzuci). Decyzja w dzienniku jest jawna: akcja
+    `exit`, uzasadnienie mowi wprost, ze to zamkniecie administracyjne przy
+    przelaczeniu egzekucji, `risk_reason` tak samo. Dziennik jest append-only
+    i ma pozostac prawdziwy: ta pozycja NIE zostala zamknieta przez model.
+    """
+    now = now or datetime.now(timezone.utc)
+    cur = conn.cursor(row_factory=dict_row)
+    cur.execute(
+        "SELECT p.*, i.symbol"
+        " FROM exec.position p"
+        " JOIN ref.instrument i ON i.id = p.instrument_id"
+        " WHERE p.engine::text = %s AND p.mode::text = %s AND p.closed_at IS NULL"
+        "   AND EXISTS (SELECT 1 FROM exec.\"order\" o"
+        "               WHERE o.decision_id = p.open_decision_id"
+        "                 AND o.raw->>'execution' = 'internal_paper')"
+        " ORDER BY p.id",
+        (engine, mode))
+    pozycje = cur.fetchall()
+    zamkniete: list[dict] = []
+    for p in pozycje:
+        cena = cena_odniesienia(cur, p["instrument_id"], now)
+        if cena["cena"] is None:
+            # Bez ceny nie ma uczciwego zamkniecia - lepiej zostawic pozycje
+            # i powiedziec o tym glosno, niz zaksiegowac wyjscie po zerze.
+            print(f"  {p['symbol']}: brak ceny minutowej - pozycji papierowej "
+                  f"NIE zamykam, silnik nie wystartuje")
+            raise RuntimeError(
+                f"pozycja papierowa {p['symbol']} (id={p['id']}) bez ceny - "
+                f"nie da sie jej zamknac przed przelaczeniem na gielde")
+        cur.execute(
+            """
+            INSERT INTO journal.decision (engine, mode, instrument_id, decided_at, action,
+                target_qty, target_price, confidence, regime, feature_snapshot,
+                risk_verdict, risk_reason, rationale, rationale_model, latency_ms)
+            VALUES (%s,%s,%s,%s,'exit',%s,%s,0,'n/d','{}','allow',
+                    'zamkniecie administracyjne - przelaczenie egzekucji papier -> gielda',
+                    %s, 'administracyjne', 0)
+            RETURNING id
+            """,
+            (engine, mode, p["instrument_id"], now, p["qty"], cena["cena"],
+             f"Pozycja otwarta na rachunku papierowym ({p['side']} {p['qty']} "
+             f"{p['symbol']} @ {p['avg_price']}) zamknieta administracyjnie po "
+             f"ostatniej cenie minutowej {cena['cena']} (wiek {cena['wiek_min']:.0f} min), "
+             f"bo silnik przechodzi na egzekucje gieldowa, a gielda tej pozycji nie ma. "
+             f"To NIE jest decyzja modelu."))
+        did = cur.fetchone()["id"]
+        close_paper(cur, p, cena["cena"], now, did, kind, limit=False)
+        conn.commit()
+        zamkniete.append({"id": p["id"], "symbol": p["symbol"], "side": p["side"],
+                          "qty": p["qty"], "cena": cena["cena"], "decision_id": did})
+        print(f"  {p['symbol']}: pozycja papierowa {p['side']} {p['qty']} zamknieta "
+              f"administracyjnie @ {cena['cena']} (decyzja {did})")
+    return zamkniete
+
+
 def zapisz_wyjscie_bez_pozycji(cur, engine: str, mode: str, plan: dict,
                                cena: Decimal, wypelniono: datetime,
                                now: datetime) -> str:
@@ -2072,6 +2147,12 @@ async def main() -> int:
     if args.egzekucja == "gielda":
         gielda = await zbuduj_adapter(url, args.mode)
         print(f"EGZEKUCJA NA GIEŁDZIE ({args.mode}) — zlecenia idą naprawdę.")
+        # POZYCJE PAPIEROWE NIE PRZECHODZA NA GIELDE - patrz `zamknij_pozycje_papierowe`.
+        with psycopg.connect(url, row_factory=dict_row) as conn:
+            zamkniete = zamknij_pozycje_papierowe(conn, args.engine, args.mode, args.kind)
+        if zamkniete:
+            print(f"Zamknięto administracyjnie {len(zamkniete)} pozycji z rachunku "
+                  f"papierowego — giełda ich nie miała.")
 
     from services.engine.koszty import runda
     print(f"Silnik {args.engine}, świeca {h.bar} — jedna decyzja na świecę.")

@@ -538,9 +538,11 @@ async def main() -> int:
                                   sucho=args.sucho, kind=args.kind)
         except Nieuzgadnialne as e:
             print(f"uzgodnienie {args.engine}/{args.mode}: NIEWYKONALNE — {e}")
-            if args.mode == "demo":
-                print(f"uzgodnienie: tryb demo (internal paper trading) — nie traktuję NIEWYKONALNE jako awarii czujki")
-                return 0
+            # W demo TEZ jest to awaria czujki. Wyciszenie z 15.09.2026 (return 0
+            # dla demo) powstalo, gdy silnik chodzil na rachunku papierowym
+            # i uzgodnienie nie mialo czego porownywac; od 22.09 demo znow
+            # wysyla zlecenia na gielde, a uzgodnienie, ktore milczy, gdy nie
+            # umie porownac, jest gorsze niz jego brak.
             return 2
         finally:
             await adapter.close()
