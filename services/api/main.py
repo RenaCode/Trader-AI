@@ -59,8 +59,43 @@ for r in _protected:
 
 @app.get("/api/health")
 async def health():
+    """GOTOWOSC: czy ten proces moze obsluzyc zapytanie - razem z baza.
+
+    Zaleznosc od bazy jest tu CELOWA i ma zostac. Pod, ktory nie dosiega bazy,
+    nie ma czego oddac dashboardowi, wiec `readinessProbe` (charts/trader/
+    templates/api.yaml) ma go wypisac z Service.
+
+    NIE JEST to sonda zywotnosci - od tego jest `/api/zywy` nizej. Restart
+    procesu nie naprawia wolnej ani zatrzymanej bazy, a zabija jedyne miejsce,
+    w ktorym widac, co sie dzieje.
+    """
     row = await fetch_one("SELECT count(*) AS n FROM schema_migrations")
     return {"status": "ok", "migrations": row["n"] if row else 0}
+
+
+@app.get("/api/zywy")
+async def zywy():
+    """ZYWOTNOSC: czy proces zyje i obsluguje petle zdarzen. Nic wiecej.
+
+    DLACZEGO OSOBNY ENDPOINT, A NIE `/api/health`
+
+    Do 2026-09-22 `livenessProbe` pytala o `/api/health`, czyli o zapytanie do
+    bazy, z domyslnym `timeoutSeconds: 1`. Trzy wolne odpowiedzi z rzedu -
+    a okno obciazenia jest znane, kopia o 03:17 i trener o 04:40 - i kubelet
+    zabijal poda API. Restart nie naprawia wolnej bazy, za to kontener startowy
+    `migrate` wchodzi w backoff, wiec dwuminutowa przerwa bazy (db.yaml,
+    strategia `Recreate`) zamieniala sie w kilkuminutowa niedostepnosc JEDYNEGO
+    miejsca, w ktorym widac stan systemu.
+
+    Zaleznosc zewnetrzna nalezy do GOTOWOSCI, nie do zywotnosci: brak bazy ma
+    wypisac poda z Service, a nie go zabic. Ta funkcja nie dotyka wiec ani
+    bazy, ani Redisa, ani zadnego procesu poza wlasnym - jesli odpowiada,
+    znaczy to dokladnie tyle, ze proces zyje i przyjmuje polaczenia.
+
+    PUBLICZNY bez uwierzytelnienia, bo kubelet nie ma czym sie zalogowac,
+    i celowo nie zwraca ZADNEJ informacji o stanie systemu.
+    """
+    return {"status": "zywy"}
 
 
 @app.get("/api/engines", dependencies=[Depends(current_user)])

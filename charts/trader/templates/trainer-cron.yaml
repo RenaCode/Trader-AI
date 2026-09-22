@@ -25,6 +25,32 @@ spec:
   jobTemplate:
     spec:
       backoffLimit: 0
+      # TWARDY LIMIT CZASU PRZEBIEGU - 3 godziny.
+      #
+      # Bez niego `concurrencyPolicy: Forbid` dziala przeciwko nam: zawieszone
+      # zapytanie do bazy albo zablokowany socket trzymaja Joba bez konca,
+      # a kazdy kolejny dobowy przebieg jest po cichu POMIJANY. Model zamarza
+      # na ostatniej policzonej wersji i nie zglasza tego NIC - czujka stanu
+      # nauki (`--co stan-nauki`) porownuje dwa ostatnie wpisy dziennika
+      # i melduje cisze, bo stan, ktory stoi, sie nie zmienia
+      # (services/engine/dozor.py, "Bez zmiany istotnej — cisza").
+      #
+      # SKAD 10800, a nie 2400 ani 86400:
+      #   * przebieg liczy SEKWENCYJNIE dwa horyzonty (`horyzonty: ["4h","1h"]`),
+      #     a pojedynczy trening jest w repo opisany jako "dziesiatki minut"
+      #     (values.yaml, workers.trainer) - gorny szacunek legalnego przebiegu
+      #     to wiec okolo dwoch godzin, a limit ma zabijac ZAWIESZENIE,
+      #     nie dlugie liczenie: 3 h zostawia okolo 50% zapasu,
+      #   * 40 minut miedzy trenerem (04:40) a proba pozarowa (05:20) NIE jest
+      #     tu gorna granica: proba to osobny CronJob z wlasnym `Forbid`,
+      #     dzieli z trenerem tylko wezel. Przyciecie limitu do tego okna
+      #     zabijaloby legalne przebiegi drugiego horyzontu,
+      #   * 3 h to nadal osmiokrotnie mniej niz doba, wiec zawieszony przebieg
+      #     umiera dlugo przed nastepnym terminem i `Forbid` nie zjada zadnego.
+      #
+      # LICZBA JEST DO SKORYGOWANIA POMIAREM, nie do przepisywania w ciemno -
+      # polecenie w raporcie (czas trwania ostatnich Jobow trenera).
+      activeDeadlineSeconds: 10800
       template:
         spec:
           restartPolicy: Never
@@ -51,14 +77,44 @@ spec:
                   # Dozor WYLACZNIE dla horyzontu produkcyjnego: tory porownawcze
                   # maja wlasny stan, ale alarm o modelu, ktorym nikt nie handluje,
                   # bylby halasem.
+                  #
+                  # KOD WYJSCIA DOZORU JEST ZBIERANY, tak samo jak kod trenera.
+                  # Do 2026-09-22 nie byl: `exit $RC` nizej niosl WYLACZNIE kod
+                  # trenera, wiec wywrocony dozor konczyl sie Jobem ZIELONYM.
+                  # Polaczone z brakiem `SECRETS_KEY` w env (nizej) dawalo to
+                  # najgorszy mozliwy uklad: model traci przewage -> dozor
+                  # probuje powiadomic -> `SecretBox()` rzuca -> zadanie
+                  # zielone, ArgoCD zdrowe, powiadomienie nigdy nie wyszlo.
+                  # `--co stan-nauki` i `--co dryf` nie sa wolane nigdzie
+                  # indziej, wiec byl to CALY nadzor nad jakoscia modelu.
                   python services/engine/dozor.py --bar {{ .Values.trainerCron.bar | quote }} --kod-trenera $RC
+                  D=$?
+                  [ "$D" = 0 ] || RC=$D
                   # Czujka stanu TRWALEGO, osobno od czujki zmiany powyzej.
                   # Bez tego wiersza dryf, ktory wszedl wysoko i tam stanal,
                   # jest niewidoczny: dozor stanu nauki zglasza ZMIANE, a stan,
-                  # ktory stoi, sie nie zmienia. Kod wyjscia jest tu swiadomie
-                  # pomijany - zadanie ma zawiesc, gdy zawiodl TRENER, a dryf
-                  # jest stanem znanym i czekajacym na reakcje, nie awaria
-                  # przebiegu.
+                  # ktory stoi, sie nie zmienia.
+                  #
+                  # `|| true` ZOSTAJE - i oto dlaczego akurat ta jedna sciezka
+                  # ma prawo milczec. `sprawdz_dryf` zwraca 1 jako STAN ("dryf
+                  # trwaly, powiadomienie poszlo"), a nie jako awarie przebiegu
+                  # (services/engine/dozor.py). Bez `|| true` KAZDY przebieg
+                  # z utrzymujacym sie dryfem konczylby sie Jobem czerwonym,
+                  # codziennie, przez caly czas trwania problemu - czyli
+                  # dokladnie ten wzorzec, ktory w zywotnosc-cron.yaml
+                  # wyprodukowal 144 padniete Joby na dobe i nauczyl przewijac
+                  # cala kategorie.
+                  #
+                  # CENA JEST ZNANA I SWIADOMA: `|| true` polyka tak samo
+                  # WYWROTKE tej linii, bo traceback tez konczy sie kodem 1
+                  # i po kodzie wyjscia nie da sie ich odroznic. Zostaja dwa
+                  # zabezpieczenia: traceback jest widoczny w logu Joba, a caly
+                  # ten proces dzieli srodowisko i importy z linia `stan-nauki`
+                  # wyzej, ktorej kod JEST zbierany - awaria systemowa (brak
+                  # `SECRETS_KEY`, martwa baza, zly obraz) wywroci najpierw
+                  # tamta i zapali zadanie na czerwono. Rozroznienie stanu od
+                  # awarii wlasnym kodem wyjscia nalezy do dozor.py, nie do
+                  # tego szablonu.
                   python services/engine/dozor.py --co dryf --bar {{ .Values.trainerCron.bar | quote }} || true
                   exit $RC
               env:
@@ -78,6 +134,19 @@ spec:
                 # jedno miejsce i test, zamiast szablonu bez żadnego z dwóch.
                 - name: GIT_SHA
                   value: {{ .Values.api.image.tag | quote }}
+                # KLUCZ SZYFRUJACY - BEZ NIEGO DOZOR NIE MA JAK POWIADOMIC.
+                #
+                # `notify()` (services/api/notifications.py) tworzy `SecretBox()`
+                # POZA blokiem `try` i PRZED petla po kanalach, a `SecretBox`
+                # bez `SECRETS_KEY` rzuca `RuntimeError`
+                # (services/api/security.py). Trener chodzi wiec na tym samym
+                # kluczu co proba pozarowa (proba-cron.yaml) - nie dlatego, ze
+                # cos szyfruje, tylko dlatego, ze WOLA dozor, a dozor wola
+                # `notify()`. Bez tej zmiennej kazde powiadomienie o stanie
+                # nauki i o dryfie wywracalo sie na pierwszej linii.
+                - name: SECRETS_KEY
+                  valueFrom:
+                    secretKeyRef: { name: {{ .Values.secretName }}, key: SECRETS_KEY }
                 - name: PYTHONUNBUFFERED
                   value: "1"
               resources: {{- toYaml .Values.trainerCron.resources | nindent 16 }}

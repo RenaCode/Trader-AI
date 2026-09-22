@@ -32,9 +32,40 @@ spec:
   concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 1
   failedJobsHistoryLimit: 1
+  # TERMIN URUCHOMIENIA - 600 s, tak jak w pozostalych zadaniach chartu.
+  #
+  # To bylo JEDYNE zadanie cykliczne bez tego pola, a jego brak ma skutek
+  # gorszy niz spoznione uruchomienie: kontroler liczy wtedy WSZYSTKIE pominiete
+  # terminy od ostatniego przebiegu i po przekroczeniu stu przestaje planowac
+  # zadanie CALKOWICIE, z bledem tylko we wlasnych zdarzeniach. Przy przebiegu
+  # dobowym wystarczy sto dni bez planowania - ale liczone sa takze terminy
+  # pominiete przy zatrzymanym kontrolerze, wiec dluzsza awaria wezla potrafi
+  # zuzyc ten limit w jeden dzien. Harmonogram zamiera wtedy CICHO: kopia po
+  # prostu przestaje powstawac.
+  startingDeadlineSeconds: 600
   jobTemplate:
     spec:
       backoffLimit: 2
+      # TWARDY LIMIT CZASU - 90 minut na CALE zadanie, razem z ponowieniami.
+      #
+      # Drugi brak w tym samym miejscu: bez niego zawieszony `pg_dump` albo
+      # `psql` czekajacy na baze, ktora nie odpowiada, trzyma Joba bez konca,
+      # a `Forbid` pomija kazdy kolejny dobowy termin. Objawem jest cisza -
+      # dokladnie ta, przed ktora ostrzega docstring `sprawdz_kopie`
+      # w services/engine/dozor.py: "pelny wolumen, padniety wezel i skasowany
+      # CronJob objawiaja sie tak samo".
+      #
+      # UWAGA: `activeDeadlineSeconds` liczy sie dla JOBA, nie dla poda, wiec
+      # te 90 minut dzieli sie na maksymalnie trzy proby (`backoffLimit: 2`).
+      # Zdrowy zrzut tej bazy to minuty, nie dziesiatki minut, wiec zapas jest
+      # duzy - ale liczba jest oszacowaniem i nalezy ja skorygowac pomiarem
+      # (polecenie w raporcie).
+      #
+      # Przyciecie legalnego zrzutu tym limitem NIE jest cicha awaria: brak
+      # swiezego wiersza w `app.backup_run` zglasza czujka `--co kopie` po
+      # 26 godzinach (KOPIA_STARA_PO_H), niezaleznie od tego, jak kopia nie
+      # powstala.
+      activeDeadlineSeconds: 5400
       template:
         spec:
           restartPolicy: OnFailure
@@ -199,6 +230,31 @@ spec:
                   # a przy okazji przezywalyby zrzut, ktorego dotycza.
                   find /backup -type f -name 'trader-*' -mtime "+${RETENCJA_DNI}" -delete
                   echo "==> kopie na dysku: $(ls -1 /backup/trader-*.dump | wc -l)"
+              # ZASOBY - do 2026-09-22 ten kontener nie mial ich wcale, jako
+              # jedyny w chartcie. Wezel ma 7,8 GB i dzieli je z trzema innymi
+              # projektami, wiec zrzut bez zadnego sufitu moze zabrac pamiec
+              # procesowi, ktory handluje.
+              #
+              # LIMIT PAMIECI JEST USTAWIONY WYSOKO SWIADOMIE. Przekroczony
+              # limit pamieci to OOMKill w polowie zrzutu, czyli brak kopii -
+              # skutek gorszy niz brak limitu, bo do tego cichy. `pg_dump
+              # --format=custom` strumieniuje tabela po tabeli (nie buduje
+              # zrzutu w pamieci), stan kompresora zlib na poziomie 9 to okolo
+              # megabajta, `psql -tAc` pobiera pojedyncze skalary, a
+              # `pg_restore --list` czyta sam spis tresci archiwum. Realne
+              # zapotrzebowanie idzie wiec w dziesiatki megabajtow; 512Mi to
+              # kilkunastokrotny zapas, a nie oszacowanie na styk.
+              #
+              # CPU MOZE BYC CIETE OSTRZEJ, bo limit CPU DlAWI, a nie zabija:
+              # `--compress=9` jest jednowatkowy i pracochlonny, wiec 1000m
+              # oddaje mu caly rdzen, a gdyby zabraklo, zrzut potrwa dluzej
+              # i nadal powstanie.
+              #
+              # Zapotrzebowanie (`requests`) celowo male: zadanie ma sie
+              # zaplanowac takze na wezle, na ktorym stoi juz cala reszta.
+              resources:
+                limits:   { cpu: 1000m, memory: 512Mi }
+                requests: { cpu: 100m,  memory: 128Mi }
               volumeMounts:
                 - name: backup
                   mountPath: /backup
