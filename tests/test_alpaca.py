@@ -315,3 +315,26 @@ def test_stan_konta_i_pozycje_z_wycena_gieldy():
     assert st["equity"] == D("100250.5") and st["ekspozycja"] == D("40250.5")
     poz = uruchom(a.pozycje_szczegoly())
     assert poz[0]["unrealized_pl"] == D("250.5") and poz[0]["qty"] == D("100")
+
+
+def test_blad_transportu_NAZYWA_typ_wyjatku(monkeypatch):
+    """ReadTimeout ma puste `str()` — komunikat „Alpaca: transport: " nie mówił
+    nic. 22.09 tak właśnie wyglądało przekroczenie 15 s przy zapytaniu o 400 dni
+    świec, zanim domyślny limit czasu poszedł na 60 s."""
+    async def bez_snu(_):
+        pass
+    monkeypatch.setattr(asyncio, "sleep", bez_snu)
+
+    def handler(r):
+        raise httpx.ReadTimeout("")
+
+    with pytest.raises(ExchangeError) as e:
+        uruchom(_adapter(handler).fetch_balances())
+    assert "ReadTimeout" in str(e.value)
+    assert e.value.retryable
+
+
+def test_domyslny_limit_czasu_starcza_na_dlugi_backfill():
+    from services.exchanges.alpaca import AlpacaAdapter
+    import inspect
+    assert inspect.signature(AlpacaAdapter.__init__).parameters["timeout"].default >= 60.0

@@ -158,8 +158,13 @@ def _blad_z_odpowiedzi(r: httpx.Response) -> ExchangeError:
 class AlpacaAdapter:
     venue_code = "alpaca"
 
+    # 60 s, nie 15 jak u Bybita - ZMIERZONE 2026-09-22: zapytanie o swiece 1h
+    # z zakresem 400 dni konczylo sie na 15 s pustym bledem transportu
+    # (`httpx.ReadTimeout` bez tresci), a backfill historii to wlasnie takie
+    # zapytania. Krotszy limit czasu zamienia dlugi odczyt w awarie, ktora
+    # w logu nie mowi nawet, co ja spowodowalo.
     def __init__(self, api_key: str, api_secret: str, mode: str = "demo",
-                 timeout: float = 15.0, host: str | None = None,
+                 timeout: float = 60.0, host: str | None = None,
                  data_host: str | None = None, feed: str = "iex",
                  http: httpx.AsyncClient | None = None):
         if mode not in HOSTS:
@@ -188,7 +193,11 @@ class AlpacaAdapter:
                 r = await self._client.request(metoda, url, params=params, json=json,
                                                headers=self._naglowki)
             except httpx.HTTPError as e:
-                ostatni = ExchangeError(f"Alpaca: transport: {e}", retryable=True)
+                # `str(e)` bywa PUSTE (ReadTimeout), wiec sama tresc nie mowi
+                # nic - typ wyjatku mowi wszystko.
+                ostatni = ExchangeError(
+                    f"Alpaca: transport: {type(e).__name__}: {e or 'bez treści'}",
+                    retryable=True)
             else:
                 if r.status_code < 400:
                     return r

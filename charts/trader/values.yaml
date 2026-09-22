@@ -368,12 +368,21 @@ workers:
     #
     # Tryb wybierany jest przy KAZDYM cyklu, nie raz przy starcie: klucz pojawia
     # sie wtedy, gdy uzytkownik wpisze go w UI, a nie gdy restartujemy poda.
-    # --silniki crypto: pobieramy kanaly krypto i makro, pomijamy gieldowe.
+    # --silniki crypto,equity: od 2026-09-22 pobieramy TAKZE kanaly gieldowe.
     #
-    # Silnik equity nie istnieje, a kanaly do niego przypisane to polowa ruchu
-    # (225 z 476 artykulow w ciagu dwoch dob, glownie zgloszenia 8-K). Przy
-    # limicie 5 USD na dobe silnik krypto placilby za filtrowanie material,
-    # ktory nie moze go dotyczyc. Do listy wrocic, gdy ruszy drugi silnik.
+    # Wczesniej byl tu sam `crypto`, bo silnik equity nie istnial, a jego kanaly
+    # to polowa ruchu (225 z 476 artykulow na dwie doby, glownie zgloszenia 8-K)
+    # - krypto placiloby za filtrowanie materialu, ktory go nie dotyczy. Teraz
+    # equity ma konto, instrumenty i dane rynkowe, a RSS NIE ODDA JUTRO tego,
+    # czego dzis nie pobierzemy: bez tych kanalow silnik equity wystartuje bez
+    # ani jednego artykulu w historii i cecha `news_sent` zacznie sie od zera
+    # w dniu uruchomienia.
+    # Cena jest policzona, nie zgadnieta: dedup po `content_hash` (migracja 0044)
+    # sprawia, ze triaz placi za artykul RAZ - 22.09 to 38 wywolan na dobe przy
+    # 80 artykulach krypto. Kanaly gieldowe dodaja rzedu 110 artykulow/dobe,
+    # czyli ~150 wywolan triazu lacznie - nadal ulamek darmowego progu Gemini.
+    # Waskim gardlem jest ANALIZA (model `flash`, ~6 wywolan/dobe na progu
+    # darmowym), wiec czesc materialu poczeka na analize - ale poczeka ZAPISANA.
     # Petla w serwisie, bez `|| true` - patrz komentarz przy silniku.
     #
     # `--quiet` WROCILO, ale znaczy juz co innego. Wczesniej wyciszalo takze
@@ -381,7 +390,7 @@ workers:
     # czym byly. Teraz opisy bledow ida ZAWSZE, poza tym przelacznikiem, a
     # `--quiet` wycisza wylacznie rutynowy postep - w tym uzasadnienie odsiania
     # kazdego pojedynczego artykulu, ktorego bywa kilkadziesiat na cykl.
-    command: ["sh", "-c", "exec python services/ingest/news_worker.py --auto --quiet --silniki crypto --interval 300"]
+    command: ["sh", "-c", "exec python services/ingest/news_worker.py --auto --quiet --silniki crypto,equity --interval 300"]
     resources:
       limits:   { cpu: 1000m, memory: 512Mi }
       requests: { cpu: 50m,   memory: 128Mi }
