@@ -73,7 +73,7 @@ class KursorSekwencyjny(Kursor):
 
 def rozstrzygnij(plany, *dalsze_odpowiedzi):
     cur = KursorSekwencyjny([list(plany), *dalsze_odpowiedzi])
-    st = rozstrzygnij_plany(cur, "crypto", "demo", H, TERAZ, "spot", False)
+    st = rozstrzygnij_plany(cur, "crypto", "demo", H, TERAZ, "spot", verbose=False)
     return cur, st
 
 
@@ -139,7 +139,7 @@ def test_wyjscie_bez_pozycji_JEST_widoczne_na_ekranie(capsys):
     """Silnik czyta się z logu cyklu. Rozstrzygnięcie, które nie zostawia tam
     linijki, nie istnieje dla nikogo, kto ten log ogląda."""
     cur = KursorSekwencyjny([[plan()], SWIECA, None])
-    rozstrzygnij_plany(cur, "crypto", "demo", H, TERAZ, "spot", True)
+    rozstrzygnij_plany(cur, "crypto", "demo", H, TERAZ, "spot", verbose=True)
 
     assert "wyjscie_bez_pozycji" in capsys.readouterr().out
 

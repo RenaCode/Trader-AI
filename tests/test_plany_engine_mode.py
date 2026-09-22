@@ -187,7 +187,7 @@ def test_rachunek_papierowy_bierze_TYLKO_swoje_plany():
     i tak by go nie zobaczył — limit ekspozycji liczyłby się z niepełnego stanu.
     """
     cur = KursorDyspozytor([])
-    rozstrzygnij_plany(cur, "crypto", "demo", H, TERAZ, "spot", False)
+    rozstrzygnij_plany(cur, "crypto", "demo", H, TERAZ, "spot", verbose=False)
     sql, params = _zapytanie_o_plany(cur)
 
     assert predykat_wzorcowy() in sql, (
@@ -242,7 +242,7 @@ def test_kill_switch_ZDEJMUJE_plan_wejscia_na_rachunku_papierowym():
     cur = KursorDyspozytor([("FROM journal.planned_order p", [plan()]),
                             ("FROM market.candle", [SWIECA]),
                             ("RETURNING id", [ID_ZLECENIA])])
-    st = rozstrzygnij_plany(cur, "crypto", "demo", H, TERAZ, "spot", False,
+    st = rozstrzygnij_plany(cur, "crypto", "demo", H, TERAZ, "spot", verbose=False,
                             tylko_wyjscia=True)
 
     assert st["anulowane_wejscia"] == 1
@@ -258,7 +258,7 @@ def test_zdjety_plan_wejscia_jest_CANCELLED_a_nie_EXPIRED():
     czego nie sprawdziliśmy — i kłamałoby o przyczynie. `cancelled` to to samo
     słowo, którym ścieżka giełdowa opisuje to samo zdarzenie."""
     cur = KursorDyspozytor([("FROM journal.planned_order p", [plan()])])
-    rozstrzygnij_plany(cur, "crypto", "demo", H, TERAZ, "spot", False,
+    rozstrzygnij_plany(cur, "crypto", "demo", H, TERAZ, "spot", verbose=False,
                        tylko_wyjscia=True)
 
     assert cur.zawiera("UPDATE journal.planned_order SET status='cancelled'")
@@ -274,7 +274,7 @@ def test_kill_switch_NIE_dotyka_planow_WYJSCIA():
                             ("WHERE id=%s AND closed_at IS NULL", [POZYCJA]),
                             ("FROM exec.position p JOIN ref.instrument", [SKAD_POZYCJA]),
                             ("RETURNING id", [ID_ZLECENIA])])
-    st = rozstrzygnij_plany(cur, "crypto", "demo", H, TERAZ, "spot", False,
+    st = rozstrzygnij_plany(cur, "crypto", "demo", H, TERAZ, "spot", verbose=False,
                             tylko_wyjscia=True)
 
     assert st["anulowane_wejscia"] == 0
@@ -288,7 +288,7 @@ def test_BEZ_kill_switcha_plan_wejscia_rozstrzyga_sie_normalnie():
     cur = KursorDyspozytor([("FROM journal.planned_order p", [plan()]),
                             ("FROM market.candle", [SWIECA]),
                             ("RETURNING id", [ID_ZLECENIA])])
-    st = rozstrzygnij_plany(cur, "crypto", "demo", H, TERAZ, "spot", False)
+    st = rozstrzygnij_plany(cur, "crypto", "demo", H, TERAZ, "spot", verbose=False)
 
     assert st["anulowane_wejscia"] == 0
     assert st["wypelnione"] == 1
@@ -299,7 +299,7 @@ def test_licznik_zdjetych_wejsc_ISTNIEJE_zanim_kill_switch_zadziala():
     """Klucz pojawiający się dopiero przy zdarzeniu jest w heartbeacie nie do
     odróżnienia od klucza, którego nikt nie liczy."""
     st = rozstrzygnij_plany(KursorDyspozytor([]), "crypto", "demo", H, TERAZ,
-                            "spot", False)
+                            "spot", verbose=False)
 
     assert st["anulowane_wejscia"] == 0
 
@@ -363,6 +363,25 @@ def test_horyzont_JEST_WYMAGANY_przy_skladaniu():
     assert p.default is inspect.Parameter.empty, (
         "`h` ma wartość domyślną — brak horyzontu przestaje być błędem "
         "wywołania i znów staje się cichym poszerzeniem pasma")
+
+
+def test_verbose_i_tylko_wyjscia_SA_TYLKO_NAZWANE():
+    """Dwa bool-e obok siebie na końcu listy to pomyłka, której nic nie zgłasza.
+
+    `..., "spot", False, True)` nie da się przeczytać bez zaglądania do
+    definicji, a zamiana ich miejscami daje kill-switch, który przestaje
+    zdejmować plany wejścia i JEDNOCZEŚNIE milknie — cichy bezpiecznik zamiast
+    gadatliwego logu. `*` przed nimi zamienia tę pomyłkę w błąd wywołania.
+    """
+    import inspect
+
+    from services.engine.loop import rozstrzygnij_plany
+
+    p = inspect.signature(rozstrzygnij_plany).parameters
+    for nazwa in ("verbose", "tylko_wyjscia"):
+        assert p[nazwa].kind is inspect.Parameter.KEYWORD_ONLY, (
+            f"`{nazwa}` da się podać pozycyjnie — zamiana go z sąsiednim "
+            f"bool-em przechodzi bez słowa")
 
 
 def test_nazwa_parametru_JEST_TA_SAMA_co_na_sciezce_gieldowej():

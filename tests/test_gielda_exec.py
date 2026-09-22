@@ -284,7 +284,8 @@ def test_killswitch_zdejmuje_WEJSCIA_ale_zostawia_WYJSCIA():
     from services.engine.gielda_exec import anuluj_wejscia
 
     cur = Kursor()
-    asyncio.run(anuluj_wejscia(cur, Gielda(), kategoria="spot", powod="test"))
+    asyncio.run(anuluj_wejscia(cur, Gielda(), kategoria="spot", powod="test",
+                               engine="crypto", mode="demo"))
     (sql, _), = [(s, p) for s, p in cur.sql if "SELECT o.client_order_id" in s]
     assert "'rodzaj', 'wejscie') <> 'wyjscie'" in sql
 
@@ -322,7 +323,8 @@ def test_nieudane_anulowanie_zostawia_SLAD_a_nie_cisze():
     cur = Kursor([{"client_order_id": "tai-p1", "symbol": "SOLUSDC",
                    "planned_order_id": 1}])
     g = Gielda(blad_anulowania=ExchangeError("nie poszlo"))
-    zdjete, _ = asyncio.run(anuluj_wejscia(cur, g, kategoria="spot", powod="test"))
+    zdjete, _ = asyncio.run(anuluj_wejscia(cur, g, kategoria="spot", powod="test",
+                                           engine="crypto", mode="demo"))
     assert zdjete == 0
     assert any("anulowanie po kill-switchu nie powiodlo sie" in str(p)
                for _, p in cur.sql if p)
@@ -502,7 +504,8 @@ def test_killswitch_NIE_anuluje_zlecenia_ktore_sie_juz_wypelnilo():
                    "planned_order_id": 1}])
     g = Gielda(stan=_stan(D("10"), status="filled"))
     zdjete, wypelnione = asyncio.run(
-        anuluj_wejscia(cur, g, kategoria="spot", powod="test"))
+        anuluj_wejscia(cur, g, kategoria="spot", powod="test",
+                       engine="crypto", mode="demo"))
 
     assert (zdjete, wypelnione) == (0, 1)
     # PLAN NIETKNIETY — inaczej rozstrzygniecie juz go nie znajdzie.

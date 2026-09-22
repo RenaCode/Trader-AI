@@ -1253,13 +1253,19 @@ def termin_rozstrzygniecia(plan: dict, h: Horizon,
 
 
 def rozstrzygnij_plany(cur, engine: str, mode: str, h: Horizon, now: datetime,
-                       kind: str, verbose: bool,
+                       kind: str, *, verbose: bool,
                        tylko_wyjscia: bool = False) -> dict:
     """Sprawdza, czy plany z poprzedniej swiecy doczekaly sie wypelnienia.
 
     Reguly nie powtarzamy - uzywamy `portfolio._wypelnione`, tej samej funkcji,
     ktora rozstrzyga to w symulacji. Dwie kopie tej samej reguly rozjechalyby
     sie przy pierwszej zmianie, a roznica bylaby niewidoczna.
+
+    `verbose` I `tylko_wyjscia` SA TYLKO NAZWANE. Oba sa bool-ami stojacymi obok
+    siebie na koncu listy, wiec `..., "spot", False, True)` nie dawalo sie
+    przeczytac bez zagladania do definicji, a ich zamiana miejscami jest
+    pomylka, ktorej nic nie zglasza: kill-switch przestaje zdejmowac plany
+    wejscia i jednoczesnie milknie. Cichy bezpiecznik zamiast gadatliwego logu.
 
     `tylko_wyjscia` ma TE SAMA SEMANTYKE co w `gielda_exec.zloz_oczekujace`:
     stan po zadziałaniu kill-switcha. Wyjścia rozstrzygamy normalnie (kill-switch
@@ -1762,7 +1768,7 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
         # Bez tego warunku rachunek papierowy otwieral pozycje po zadzialaniu
         # bezpiecznika, ktory produkcje wlasnie zatrzymal.
         stats.update(rozstrzygnij_plany(cur, engine, mode, h, now,
-                                        kind_kosztow, verbose,
+                                        kind_kosztow, verbose=verbose,
                                         tylko_wyjscia=wejscia_wstrzymane))
         conn.commit()
 

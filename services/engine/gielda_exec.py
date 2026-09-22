@@ -513,9 +513,18 @@ async def rozstrzygnij_oczekujace(cur, adapter, *, engine: str, mode: str,
 
 
 async def anuluj_wejscia(cur, adapter, *, kategoria: str, powod: str,
-                         engine: str = "crypto", mode: str = "demo",
+                         engine: str, mode: str,
                          verbose: bool = True) -> tuple[int, int]:
     """Zdejmuje z giełdy oczekujące zlecenia WEJŚCIA. Wyjścia zostawia.
+
+    `engine` I `mode` NIE MAJĄ WARTOŚCI DOMYŚLNEJ, I TO JEST CELOWE. Rozstrzygają
+    one, CZYJE zlecenia zdejmujemy z giełdy — to ten sam klucz, przez który plany
+    trafiają do właściwego silnika, tyle że tutaj schowany w sygnaturze zamiast
+    w zapytaniu. Domyślne `crypto`/`demo` sprawiały, że wywołanie, które o nich
+    zapomni, zdejmuje cudze zlecenia albo nie znajduje żadnych — i w obu
+    przypadkach NIE WYGLĄDA NA AWARIĘ, tylko na kill-switch, który nie miał
+    czego zdejmować. Brak argumentu ma być błędem wywołania, a nie cichym
+    wyborem jednego z silników.
 
     KILL-SWITCH, KTORY ZOSTAWIA ZLECENIA NA GIELDZIE, NIE JEST KILL-SWITCHEM.
     Wstrzymanie wejść zatrzymuje podejmowanie NOWYCH decyzji, ale zlecenie

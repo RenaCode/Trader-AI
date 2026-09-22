@@ -21,6 +21,7 @@ wiąże pod niego tryb. Zachowanie bazy jest cudzą odpowiedzialnością; naszą
 nie wysłać instrukcji, która trafia w cudzy wiersz.
 """
 import asyncio
+from pathlib import Path
 
 from services.engine.gielda_exec import anuluj_wejscia
 from services.exchanges.base import ExchangeError, StanZlecenia
@@ -243,6 +244,50 @@ def test_wypelnione_zlecenie_nadal_ZOSTAWIA_plan_do_zaksiegowania():
 
 
 # --------------------------------------------- klucz unikalny to (mode, id)
+
+# ------------------------------- czyje zlecenia zdejmujemy: bez domyslnych
+
+def test_silnik_i_tryb_NIE_MAJA_wartosci_domyslnej():
+    """To jest ten sam klucz, co przy planach, tylko schowany w sygnaturze.
+
+    Domyślne `crypto`/`demo` sprawiały, że wywołanie, które o nich zapomni,
+    zdejmuje cudze zlecenia albo nie znajduje żadnych — i w obu przypadkach nie
+    wygląda na awarię, tylko na kill-switch, który nie miał czego zdejmować.
+    Taka pomyłka ma być błędem wywołania, a nie cichym wyborem silnika.
+    """
+    import inspect
+
+    from services.engine import gielda_exec
+
+    p = inspect.signature(gielda_exec.anuluj_wejscia).parameters
+    for nazwa in ("engine", "mode"):
+        assert p[nazwa].default is inspect.Parameter.empty, (
+            f"`{nazwa}` ma wartość domyślną — wywołanie bez niego przestaje być "
+            f"błędem i znów po cichu wybiera jeden z silników")
+
+
+def test_PETLA_podaje_SWOJ_silnik_i_tryb_a_nie_stale():
+    """Brak wartości domyślnej chroni przed pominięciem argumentu, ale nie przed
+    wpisaniem w nim stałej — a skutek jest ten sam i równie cichy.
+
+    Reguła żyje w `run_once`, którego testy jednostkowe nie obejmują (wymaga
+    bazy), więc sprawdzamy samo wywołanie. Żaden test w tym projekcie dotąd go
+    nie pilnował: `anuluj_wejscia` ma własne testy, ale wszystkie wołają ją
+    bezpośrednio, więc pętla mogła jej podawać cokolwiek.
+
+    KOMENTARZE SĄ ODFILTROWANE przed przeszukaniem — nad tym wywołaniem stoi
+    komentarz mówiący dokładnie to, czego szukamy.
+    """
+    zrodlo = Path("services/engine/loop.py").read_text(encoding="utf-8")
+    kod = "\n".join(w for w in zrodlo.splitlines()
+                    if not w.lstrip().startswith("#"))
+    i = kod.index("await anuluj_wejscia(")
+    wywolanie = kod[i:kod.index("conn.commit()", i)]
+
+    assert "engine=engine" in wywolanie and "mode=mode" in wywolanie, (
+        "pętla podaje kill-switchowi stałą zamiast własnego silnika/trybu — "
+        f"zdejmowałby cudze zlecenia albo żadnych: {wywolanie!r}")
+
 
 def _sprawdz_filtr_trybu(cur, fragment):
     """`UNIQUE (mode, client_order_id)` — sam identyfikator NIE jest kluczem.
