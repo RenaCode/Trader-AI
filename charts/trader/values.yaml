@@ -16,7 +16,7 @@ imagePullSecrets: []
 api:
   image:
     repository: ghcr.io/renacode/trader-ai-api
-    tag: "sha-a45cac9"
+    tag: "sha-5b319fe"
     pullPolicy: IfNotPresent
   resources:
     limits:   { cpu: 1000m, memory: 1Gi }
@@ -25,7 +25,7 @@ api:
 web:
   image:
     repository: ghcr.io/renacode/trader-ai-web
-    tag: "sha-a45cac9"
+    tag: "sha-5b319fe"
     pullPolicy: IfNotPresent
   resources:
     limits:   { cpu: 200m, memory: 256Mi }
@@ -193,6 +193,15 @@ workers:
     resources:
       limits:   { cpu: 500m, memory: 384Mi }
       requests: { cpu: 50m,  memory: 96Mi }
+
+  # Krzywa kapitalu equity z KSIAG konta paper (equity, gotowka, ekspozycja),
+  # dopoki silnik equity nie liczy jej z wlasnych wypelnien. Co 15 min.
+  kapital-equity:
+    enabled: true
+    command: ["python", "services/engine/kapital_gieldy.py", "--engine", "equity", "--mode", "demo", "--interval", "900"]
+    resources:
+      limits:   { cpu: 200m, memory: 256Mi }
+      requests: { cpu: 20m,  memory: 64Mi }
 
   history-equity:
     enabled: true
