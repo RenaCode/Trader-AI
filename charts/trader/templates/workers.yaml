@@ -75,6 +75,156 @@ spec:
       {{- with $.Values.imagePullSecrets }}
       imagePullSecrets: {{- toYaml . | nindent 8 }}
       {{- end }}
+      {{/*
+      BRAMKA MIGRACJI.
+
+      InitContainer `migrate` jest wylacznie przy API. Te dziewiec Deploymentow
+      chodzi na TYM SAMYM obrazie co API i ma `strategy: Recreate`, wiec przy
+      podbiciu tagu restartuja sie NATYCHMIAST - rownolegle z migracja, nie po
+      niej. Przez caly czas jej trwania nowy kod workerow pracuje na starym
+      schemacie. Gdy migracja padnie, API nie wstaje i to widac; petla decyzyjna
+      i dozorca ryzyka chodza dalej, na nowym kodzie i starym schemacie, i nie
+      mowi o tym nic.
+
+      TEN KONTENER TYLKO CZYTA - I TO JEST W NIM NAJWAZNIEJSZE.
+
+      Kopia initContainera `migrate` bylaby prostsza i bylaby bledem: migrator
+      dostaje haslo roli WLASCICIELA oraz - przez helper rozdajacy je wszystkie
+      naraz - hasla kazdej z pieciu rol procesow. Skopiowanie go tutaj
+      wstawiloby ten komplet do kazdego poda workera, w tym do `engine`, ktory
+      trzyma klucze gieldy i handluje. Silnik z haslem roli `trader_dozorca`
+      moglby zwolnic sobie kill-switcha; nie dlatego, ze ma taki kod, tylko
+      dlatego, ze MOZE. Rozdzial uprawnien jest wart tyle, ile rozdzial
+      POSWIADCZEN (values.yaml).
+
+      Bramka bierze wiec te sama WASKA role, co sam worker - `trader.rolaDbEnv`
+      nizej - i nie dostaje ani jednego poswiadczenia wiecej. SELECT na
+      `public.schema_migrations` nadaje tej roli migracja 0050.
+
+      WARUNEK: "baza jest co najmniej tak nowa jak moj kod".
+
+      Numer wymaganej migracji NIE JEST NIGDZIE WPISANY. Kontener czyta go
+      z katalogu `db/migrations` W SWOIM WLASNYM OBRAZIE - tym samym, ktory
+      niesie kod workera - wiec nie powstaje druga liczba do recznego
+      utrzymywania. Rozjazd dwoch takich list kosztowal juz 21 godzin martwych
+      cech 2026-09-04.
+      */}}
+      initContainers:
+        - name: czekaj-na-migracje
+          image: "{{ $.Values.api.image.repository }}:{{ $.Values.api.image.tag }}"
+          imagePullPolicy: {{ $.Values.api.image.pullPolicy }}
+          env:
+            {{/*
+            TA SAMA ROLA, CO WORKER - i nic poza nia. Ani helpera od hasel
+            wszystkich rol, ani hasla wlasciciela, ani hasla roli API.
+            Pilnuje tego tests/test_bramka_migracji.py.
+            */}}
+            {{- include "trader.rolaDbEnv" (dict "ctx" $ "rola" ($w.dbRole | default "silnik")) | nindent 12 }}
+            - name: PYTHONUNBUFFERED
+              value: "1"
+          command:
+            - python
+            - -c
+            - |
+              import os, pathlib, re, sys, time
+              import psycopg
+
+              # LIMIT CZASU - 600 s, i to jest liczba dobrana, nie zaokraglona.
+              #
+              # Gorna granica bierze sie z czujki pulsu: prog martwego workera
+              # ma podloge 900 s (dozor.py, MIN_PROG_S), wiec czekanie ponizej
+              # 600 s nie wywola falszywego alarmu, a wyczerpanie limitu
+              # przeciwnie - pod pada, puls milknie i czujka zglasza to sama,
+              # bez drugiego mechanizmu powiadamiania w tym pliku.
+              #
+              # Dolna granica: 120 s juz raz zabraklo o 10 s, bo start po
+              # awarii trwa dluzej niz start czysty - baza moze wlasnie
+              # odtwarzac sie po restarcie, a migrator stosowac kilka plikow
+              # po kolei.
+              #
+              # Przekroczenie NIE JEST nieodwracalne: kubelet ponawia kontener
+              # startowy z narastajacym odstepem, wiec za krotki limit kosztuje
+              # widoczny CrashLoopBackOff, a brak limitu - niewidoczne czekanie
+              # bez konca. `Recreate` znaczy, ze stary pod juz nie dziala, wiec
+              # czekanie w nieskonczonosc byloby cisza, nie bezpieczenstwem.
+              LIMIT_S = 600
+              OKRES_S = 5
+
+              # Numer migracji, ktora nadaje rolom procesow SELECT na
+              # public.schema_migrations. Nie jest progiem ani nastawa - jest
+              # nazwa jednego, niezmiennego pliku. Zgodnosc z rzeczywistoscia
+              # pilnuje tests/test_bramka_migracji.py.
+              NADANIE = 50
+
+              def numer(tekst):
+                  m = re.match(r"(\d+)", tekst)
+                  return int(m.group(1)) if m else -1
+
+              pliki = sorted(pathlib.Path("db/migrations").glob("*.sql"))
+              if not pliki:
+                  sys.exit("Brak db/migrations w obrazie - bramka nie ma czego porownac.")
+              wymagana = max(numer(p.stem) for p in pliki)
+
+              url = os.environ.get("DATABASE_URL")
+              if not url:
+                  sys.exit("DATABASE_URL nie jest ustawiony - bramka nie ma o co zapytac.")
+
+              koniec = time.monotonic() + LIMIT_S
+              powod = "brak polaczenia z baza"
+              while time.monotonic() < koniec:
+                  try:
+                      with psycopg.connect(url, connect_timeout=5) as conn:
+                          wolno = conn.execute(
+                              "SELECT has_table_privilege(current_user,"
+                              " 'public.schema_migrations', 'SELECT')").fetchone()[0]
+                          if not wolno:
+                              # Pytanie o prawo idzie PRZED zapytaniem, bo
+                              # odroznia dwa stany nie do odroznienia po samym
+                              # bledzie "permission denied":
+                              #
+                              #  * migracja NADANIE jeszcze nie zostala
+                              #    zastosowana, ale jest w tym obrazie - czyli
+                              #    baza nie dogonila kodu. Czekamy, o to chodzi.
+                              #
+                              #  * tego obrazu migracja NADANIE w ogole nie
+                              #    obejmuje - czyli szablon chartu wyprzedza
+                              #    obraz (ArgoCD synchronizuje `charts/` od razu,
+                              #    a tag podbija sie osobno). Bramka nie ma
+                              #    wtedy JAK zmierzyc czegokolwiek, a jej
+                              #    zamkniecie poloczyloby dziewiec workerow -
+                              #    petle decyzyjna i dozorce ryzyka - z powodu
+                              #    kolejnosci wdrozenia, a nie rozjazdu schematu.
+                              #    Przepuszczamy TEN SAM kod, ktory chodzil
+                              #    minute temu, i mowimy o tym glosno.
+                              if wymagana < NADANIE:
+                                  print("USTEPUJE: obraz nie zawiera migracji %d,"
+                                        " wiec bramka nie odczyta wersji schematu."
+                                        " Szablon chartu wyprzedza obraz - podbij"
+                                        " api.image.tag." % NADANIE, flush=True)
+                                  sys.exit(0)
+                              powod = ("rola nie ma jeszcze SELECT na"
+                                       " public.schema_migrations (migracja %d"
+                                       " niezastosowana)" % NADANIE)
+                          else:
+                              numery = [numer(r[0]) for r in conn.execute(
+                                  "SELECT version FROM public.schema_migrations")]
+                              zastosowana = max(numery) if numery else -1
+                              if zastosowana >= wymagana:
+                                  print("Baza na %d, obraz wymaga %d - startuje."
+                                        % (zastosowana, wymagana), flush=True)
+                                  sys.exit(0)
+                              powod = ("baza na %d, obraz wymaga %d"
+                                       % (zastosowana, wymagana))
+                  except Exception as blad:
+                      powod = "%s: %s" % (type(blad).__name__, blad)
+                  print("Czekam - " + powod, flush=True)
+                  time.sleep(OKRES_S)
+
+              # Blad, nie `exit 0`. Pod, ktory wstal po cichu na starym
+              # schemacie, jest dokladnie ta awaria, ktorej ten kontener ma
+              # zapobiec - tyle ze niewidoczna.
+              sys.exit("Migracje nie dogonily obrazu w %d s (%s)."
+                       " Pod NIE wstanie na starym schemacie." % (LIMIT_S, powod))
       containers:
         - name: {{ $name }}
           image: "{{ $.Values.api.image.repository }}:{{ $.Values.api.image.tag }}"

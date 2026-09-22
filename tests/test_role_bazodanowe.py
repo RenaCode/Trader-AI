@@ -53,7 +53,18 @@ MIGRACJA = KORZEN / "db" / "migrations" / "0034_role_procesow.sql"
 # jawnie - inaczej testy poniżej opisywałyby stan sprzed niej i przechodziły.
 MIGRACJE_NADAN = [
     KORZEN / "db" / "migrations" / "0045_okno_proby_pozarowej.sql",
+    # Próba czyta `journal.decision` — ogniwo 3 łańcucha (0049).
+    KORZEN / "db" / "migrations" / "0049_proba_czyta_dziennik_decyzji.sql",
+    # Role procesów czytają `public.schema_migrations` — bramka startowa
+    # workerów (0050). Odczyt, i tylko odczyt: pilnuje tego test niżej.
+    KORZEN / "db" / "migrations"
+           / "0050_role_procesow_czytaja_schema_migrations.sql",
 ]
+
+# Role procesów z 0034. Wypisane tutaj, a nie wyciągnięte z chartu, bo to
+# właśnie zgodność chartu z tą listą jest jednym z twierdzeń w tym pliku.
+ROLE_PROCESOW = ("trader_silnik", "trader_dozorca", "trader_czujka",
+                 "trader_proba")
 ROLA_APLIKACJI = KORZEN / "db" / "migrations" / "0013_rola_aplikacji.sql"
 MIGRACJE = KORZEN / "db" / "migrations"
 VALUES = KORZEN / "charts" / "trader" / "values.yaml"
@@ -310,6 +321,64 @@ def test_domyslne_uprawnienia_w_risk_daja_wylacznie_odczyt(nadania):
     assert not zapisy, f"domyślne prawo zapisu w schemacie risk: {zapisy}"
 
 
+# ------------------------------------------------- schemat public (bramka 0050)
+
+def test_role_procesow_czytaja_numer_migracji(nadania):
+    """0050 wpuściło procesy tła do `public.schema_migrations`, i to jest
+    potrzebne.
+
+    Bramka startowa workerów (`czekaj-na-migracje` w workers.yaml) porównuje
+    numer migracji zastosowanej w bazie z numerem obecnym we własnym obrazie.
+    Bez tego nadania kończy się na „permission denied for table
+    schema_migrations" — w kontenerze startowym, w pętli ponawiania, gdzie
+    wygląda dokładnie jak „baza jeszcze nie wstała".
+
+    Kanarek do testu niżej: samo odebranie wszystkiego też przeszłoby tamten,
+    a bramka by wtedy nie przepuściła ani jednego workera.
+    """
+    for rola in ROLE_PROCESOW:
+        assert "SELECT" in nadania.na_tabeli(rola, "public.schema_migrations"), (
+            f"{rola} nie odczyta numeru migracji — jej bramka padnie w starcie "
+            f"na błąd nieodróżnialny od niewstałej bazy")
+
+
+def test_role_procesow_maja_w_public_WYLACZNIE_odczyt(nadania):
+    """Zapis do tabeli migracji należy do migratora, który chodzi rolą
+    właściciela.
+
+    Proces tła z prawem zapisu potrafiłby zameldować migrację, której nie
+    zastosowano — i otworzyć sobie własną bramkę. Bramka mierzyłaby wtedy
+    własny wpis zamiast stanu schematu, czyli byłaby dokładnie tą klasą
+    zabezpieczenia, które sprawdza samo siebie.
+
+    Twierdzenie jest szersze niż jedna tabela: `public` to schemat, w którym
+    ląduje wszystko, czego nikt nie przypisał nigdzie indziej, więc „procesy tła
+    mają tu tylko odczyt tej jednej tabeli" musi obejmować także tabele, których
+    jeszcze nie ma.
+    """
+    for rola in ROLE_PROCESOW:
+        obiekty = {o for (r, o) in nadania.tabela
+                   if r == rola and o.startswith("public.")}
+        obiekty |= {o for (r, o) in nadania.kolumny
+                    if r == rola and o.startswith("public.")}
+        assert obiekty <= {"public.schema_migrations"}, (
+            f"{rola} dostała w schemacie public coś poza tabelą migracji: "
+            f"{sorted(obiekty - {'public.schema_migrations'})}")
+
+        prawa = nadania.na_tabeli(rola, "public.schema_migrations")
+        assert prawa == {"SELECT"}, (
+            f"{rola} ma na tabeli migracji {sorted(prawa)} — zapis do niej "
+            f"jest otwarciem sobie bramki startowej")
+        kolumnowe = nadania.kolumny.get((rola, "public.schema_migrations"), {})
+        assert not any(kolumnowe.values()), (
+            f"{rola} dostała nadanie kolumnowe na tabeli migracji: {kolumnowe}")
+
+    domyslne = [(r, p) for s, r, p in nadania.domyslne if s == "public"]
+    assert not domyslne, (
+        f"domyślne uprawnienia w schemacie public: {domyslne} — każda przyszła "
+        f"tabela w `public` byłaby dostępna procesom tła od chwili powstania")
+
+
 # ------------------------------------------------------- dozorca: co i tylko co
 
 def test_dozorca_zwalnia_ale_NIE_PRZEPISUJE_historii(nadania):
@@ -371,6 +440,52 @@ def test_proba_NIE_MOZE_wstawic_wlasnego_zatrzymania(nadania):
     """Próba ma czekać, aż SILNIK sam wykryje przekroczenie. Gdyby mogła wstawić
     wiersz sama, mierzyłaby własny INSERT zamiast łańcucha ogniw 1-2."""
     assert "INSERT" not in nadania.na_tabeli("trader_proba", "risk.killswitch_event")
+
+
+def test_proba_czyta_dziennik_decyzji_WYLACZNIE_do_odczytu(nadania):
+    """0049 wpuściło próbę do schematu `journal` — ogniwo 3 łańcucha.
+
+    Dopisanie tamtej migracji do MIGRACJE_NADAN sprawia, że model PRZESTAJE
+    opisywać stan sprzed niej. To jednak za mało: dopóki nic o tym nadaniu nie
+    twierdzi, każde jego poszerzenie przejdzie bez słowa. Ten plik jest jedynym
+    miejscem, które pilnuje zakresu nadań — więc pilnuje też tego.
+
+    Próba, która mogłaby dopisać do dziennika, mierzyłaby WŁASNY INSERT zamiast
+    zachowania silnika. To ten sam powód, dla którego 0034 odmawia jej INSERT-u
+    na `risk.killswitch_event`, i ta sama klasa błędu co bramka startowa
+    mierząca własny wpis w `public.schema_migrations`.
+    """
+    prawa = nadania.na_tabeli("trader_proba", "journal.decision")
+    for zapis in ("INSERT", "UPDATE", "DELETE", "TRUNCATE"):
+        assert zapis not in prawa, (
+            f"próba ma {zapis} na dzienniku decyzji — mierzyłaby własny zapis "
+            f"zamiast zachowania silnika")
+        assert not nadania.kolumnowe("trader_proba", "journal.decision", zapis), (
+            f"próba dostała {zapis} na kolumnie dziennika — nadanie kolumnowe "
+            f"jest zapisem tak samo jak tabelowe")
+
+    # Kanarek: samo odebranie wszystkiego też przeszłoby powyższe, a ogniwo 3
+    # kończyłoby się wtedy na „permission denied" W ŚRODKU próby pożarowej.
+    kolumny = nadania.kolumnowe("trader_proba", "journal.decision", "SELECT")
+    assert "powod_holdu" in kolumny, (
+        "próba nie odczyta śladu wstrzymania — ogniwo 3 da się tylko OBALIĆ, "
+        "nigdy POTWIERDZIĆ")
+    assert "SELECT" not in prawa, (
+        "próba dostała SELECT na CAŁEJ tabeli dziennika — nadanie kolumnowe "
+        "jest tu celowo ciasne, żeby każda nowa kolumna wymagała decyzji")
+
+
+def test_dozorca_NADAL_nie_widzi_dziennika_decyzji(nadania):
+    """Nadanie dla próby nie mogło zabrać ze sobą dozorcy.
+
+    RiskKernel jest wspólny dla silnika i dozorcy, a dozorca `journal` widzieć
+    nie ma: 0034 daje mu wyłącznie `exec`, `ref` i dwie tabele `risk`. Odczyt
+    dziennika wstawiony do wspólnego komponentu wywróciłby NADZORCĘ, i to po
+    cichu. Twierdzenie jest tu po to, żeby rozszerzenie nadania z `trader_proba`
+    na „obie role nadzoru" nie przeszło przy okazji.
+    """
+    assert not nadania.na_tabeli("trader_dozorca", "journal.decision")
+    assert not nadania.kolumnowe("trader_dozorca", "journal.decision", "SELECT")
 
 
 def _kolumny_zapisywane(plik: Path, tabela: str) -> set[str]:
