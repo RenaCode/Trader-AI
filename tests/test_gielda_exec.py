@@ -6,6 +6,7 @@ from decimal import Decimal as D
 import pytest
 
 from services.engine.gielda_exec import id_zlecenia, rozstrzygnij_plan, zloz_plan
+from services.engine.horizons import get as get_horizon
 from services.engine.zlecenia import Filtry
 from services.exchanges.base import ExchangeError, StanZlecenia, ZlozoneZlecenie
 
@@ -295,11 +296,11 @@ def test_wysylka_przy_killswitchu_obejmuje_TYLKO_wyjscia():
 
     cur = Kursor()
     asyncio.run(zloz_oczekujace(cur, Gielda(), engine="crypto", mode="demo",
-                                kategoria="spot", verbose=False,
-                                tylko_wyjscia=True))
+                                kategoria="spot", h=get_horizon("4h"),
+                                verbose=False, tylko_wyjscia=True))
     (sql, params), = [(s, p) for s, p in cur.sql if "journal.planned_order" in s]
     assert "p.trigger->>'rodzaj' = 'wyjscie'" in sql
-    assert params == ("atr_pct__4h", True)
+    assert params == ("atr_pct__4h", "crypto", "demo", True)
 
 
 def test_wysylka_bez_killswitcha_obejmuje_WSZYSTKIE_plany():
@@ -307,9 +308,10 @@ def test_wysylka_bez_killswitcha_obejmuje_WSZYSTKIE_plany():
 
     cur = Kursor()
     asyncio.run(zloz_oczekujace(cur, Gielda(), engine="crypto", mode="demo",
-                                kategoria="spot", verbose=False))
+                                kategoria="spot", h=get_horizon("4h"),
+                                verbose=False))
     (_, params), = [(s, p) for s, p in cur.sql if "journal.planned_order" in s]
-    assert params == ("atr_pct__4h", False)
+    assert params == ("atr_pct__4h", "crypto", "demo", False)
 
 
 def test_nieudane_anulowanie_zostawia_SLAD_a_nie_cisze():

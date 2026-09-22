@@ -1253,24 +1253,75 @@ def termin_rozstrzygniecia(plan: dict, h: Horizon,
 
 
 def rozstrzygnij_plany(cur, engine: str, mode: str, h: Horizon, now: datetime,
-                       kind: str, verbose: bool) -> dict:
+                       kind: str, verbose: bool,
+                       tylko_wyjscia: bool = False) -> dict:
     """Sprawdza, czy plany z poprzedniej swiecy doczekaly sie wypelnienia.
 
     Reguly nie powtarzamy - uzywamy `portfolio._wypelnione`, tej samej funkcji,
     ktora rozstrzyga to w symulacji. Dwie kopie tej samej reguly rozjechalyby
     sie przy pierwszej zmianie, a roznica bylaby niewidoczna.
+
+    `tylko_wyjscia` ma TE SAMA SEMANTYKE co w `gielda_exec.zloz_oczekujace`:
+    stan po zadziałaniu kill-switcha. Wyjścia rozstrzygamy normalnie (kill-switch
+    ma wyprowadzać z ryzyka, nie więzić w nim), a plany wejścia zdejmujemy —
+    dokładnie tak, jak `gielda_exec.anuluj_wejscia` zdejmuje je z arkusza giełdy.
     """
     # `wyjscie_bez_pozycji` W SLOWNIKU OD POCZATKU, z zerem - tak samo jak na
     # sciezce gieldowej. Klucz pojawiajacy sie dopiero przy anomalii znaczylby,
     # ze jego brak i jego zero to dwie rozne rzeczy, a sa tym samym.
+    #
+    # `anulowane_wejscia` z tego samego powodu: zero znaczy "kill-switch nie
+    # zdjal zadnego planu", a brak klucza znaczylby "nikt tego nie liczy".
     st = {"wypelnione": 0, "niewypelnione": 0, "czekaja": 0,
-          "wyjscie_bez_pozycji": 0}
+          "wyjscie_bez_pozycji": 0, "anulowane_wejscia": 0}
+    # SILNIK I TRYB Z DECYZJI, KTORA PLAN ZRODZILA.
+    #
+    # `journal.planned_order` nie ma kolumn engine/mode (0005, linia 68), wiec
+    # sam status 'pending' wybieral KAZDY plan w bazie - takze cudzego silnika
+    # i cudzego trybu, ktory zaksiegowalby sie tutaj jako NASZA pozycja
+    # (`execute_paper` dostaje `engine`/`mode` z argumentow petli, nie z planu).
+    # Asymetria byla jednostronna: `RiskKernel._open_exposure` dochodzi do tych
+    # samych wierszy przez `JOIN journal.decision d ... WHERE d.engine=%s AND
+    # d.mode=%s` (services/engine/risk.py:393-402), wiec limit ekspozycji widzi
+    # wylacznie WLASNE plany, a rozstrzyganie bralo WSZYSTKIE.
+    #
+    # KSZTALT JOIN-a JEST CELOWO TEN SAM CO W `_open_exposure`, zeby nie powstala
+    # druga regula obok istniejacej. Denormalizacja engine/mode do
+    # `planned_order` byloby prostsze w zapisie, ale to osobna decyzja
+    # (migracja + backfill), a nie poprawka przy okazji.
     cur.execute(
         "SELECT p.id, p.decision_id, p.instrument_id, p.side, p.qty, p.limit_price,"
         "       p.trigger, p.valid_until, i.symbol, i.quote_ccy"
         " FROM journal.planned_order p JOIN ref.instrument i ON i.id = p.instrument_id"
-        " WHERE p.status = 'pending' ORDER BY p.id")
+        " JOIN journal.decision d ON d.id = p.decision_id"
+        " WHERE d.engine = %s AND d.mode = %s"
+        "   AND p.status = 'pending' ORDER BY p.id", (engine, mode))
     for plan in cur.fetchall():
+        # KILL-SWITCH ZDEJMUJE PLANY WEJSCIA TAKZE NA RACHUNKU PAPIEROWYM.
+        #
+        # Sciezka gieldowa robi to przez `anuluj_wejscia`; papierowa nie robila
+        # tego wcale, wiec po zadzialaniu kill-switcha wypelnialy sie tu plany
+        # wejscia z poprzedniej swiecy - do `len(instrumenty)` nowych pozycji
+        # JUZ PO tym, jak system uznal, ze handlowac nie wolno.
+        #
+        # Rozjazd szedl w strone "symulacja wyglada lepiej": rachunek papierowy
+        # handlowal dalej tam, gdzie produkcja stawala, a to wlasnie symulacja
+        # jest wzorcem kalibracji dla trenera.
+        #
+        # 'cancelled', A NIE 'expired'. `expired` znaczy w tej funkcji dokladnie
+        # jedno: swieca nie dotknela limitu. Uzycie go tutaj wpisywaloby do
+        # dziennika, ze limit nie zostal trafiony - czego nie sprawdzilismy
+        # i co wprost klamie o przyczynie. To samo slowo, co na sciezce
+        # gieldowej, bo to samo zdarzenie.
+        if tylko_wyjscia and plan["trigger"].get("rodzaj") != "wyjscie":
+            cur.execute("UPDATE journal.planned_order SET status='cancelled',"
+                        " resolved_at=%s WHERE id=%s", (now, plan["id"]))
+            st["anulowane_wejscia"] += 1
+            if verbose:
+                print(f"  [anulowane]    {plan['symbol']} {plan['side']}"
+                      f" @ {float(plan['limit_price']):.6g} — wejścia wstrzymane")
+            continue
+
         sprawdzana, czekamy = termin_rozstrzygniecia(plan, h, now)
         if czekamy:
             st["czekaja"] += 1
@@ -1636,7 +1687,7 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
         from services.engine.gielda_exec import anuluj_wejscia
         zdjete, wypelnione = await anuluj_wejscia(
             cur, gielda, kategoria=kategoria, engine=engine, mode=mode,
-            powod=f"wstrzymanie wejść: {powod_wstrzymania}")
+            powod=f"wstrzymanie wejść: {powod_wstrzymania}", verbose=verbose)
         conn.commit()
         # KOMUNIKAT ZAWSZE, TAKZE PRZY ZERZE. Wczesniej pojawial sie wylacznie
         # przy `zdjete > 0`, wiec kill-switch, ktoremu NIE UDALO SIE zdjac ani
@@ -1705,8 +1756,14 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
             kategoria=kategoria, kind=kind_kosztow, verbose=verbose))
         conn.commit()
     elif limit:
+        # `tylko_wyjscia` TAK SAMO JAK NA SCIEZCE GIELDOWEJ. Tam kill-switch
+        # zdejmuje zlecenia wejscia z arkusza (`anuluj_wejscia`, wyzej);
+        # tutaj nie ma arkusza, wiec jego odpowiednikiem jest zdjecie planu.
+        # Bez tego warunku rachunek papierowy otwieral pozycje po zadzialaniu
+        # bezpiecznika, ktory produkcje wlasnie zatrzymal.
         stats.update(rozstrzygnij_plany(cur, engine, mode, h, now,
-                                        kind_kosztow, verbose))
+                                        kind_kosztow, verbose,
+                                        tylko_wyjscia=wejscia_wstrzymane))
         conn.commit()
 
     stats["instrumenty"] = len(instrumenty)
@@ -2053,7 +2110,7 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
     if limit and gielda is not None:
         from services.engine.gielda_exec import zloz_oczekujace
         stats.update(await zloz_oczekujace(
-            cur, gielda, engine=engine, mode=mode, kategoria=kategoria,
+            cur, gielda, engine=engine, mode=mode, kategoria=kategoria, h=h,
             verbose=verbose, tylko_wyjscia=wejscia_wstrzymane))
         conn.commit()
 
