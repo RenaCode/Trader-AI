@@ -12,14 +12,27 @@ import { MultiLineChart } from '../charts';
 const NAZWA = { crypto: 'Krypto (Bybit)', equity: 'Giełda (Alpaca)', razem: 'Razem' };
 const KOLOR = { crypto: 'var(--color-orange)', equity: 'var(--color-blue)', razem: 'var(--profit)' };
 
+/* `null >= 0` jest w JS PRAWDA, wiec brak wartosci renderowal sie jako zielone
+   "+—": kolor zysku i znak plus przy pomiarze, ktorego nie ma. Brak liczby ma
+   byc szary i bez znaku. */
+function Delta({ v, pct, etykieta }) {
+  if (v == null) {
+    return <span className="dim" style={{ marginLeft: 8 }}>{etykieta} —</span>;
+  }
+  return (
+    <span style={{ color: v >= 0 ? 'var(--profit)' : 'var(--loss)', marginLeft: 8 }}>
+      {etykieta} {v >= 0 ? '+' : ''}{fmtMoney(v)} ({fmtPct(pct)})
+    </span>
+  );
+}
+
 function Zmiana({ z }) {
   if (!z || z.teraz == null) return <span className="hint">brak danych</span>;
-  const tone = (v) => (v >= 0 ? 'var(--profit)' : 'var(--loss)');
   return (
     <span className="mono" style={{ fontSize: '0.82rem' }}>
       {fmtMoney(z.teraz)}
-      <span style={{ color: tone(z.doba), marginLeft: 8 }}>24 h {z.doba >= 0 ? '+' : ''}{fmtMoney(z.doba)} ({fmtPct(z.doba_pct)})</span>
-      <span style={{ color: tone(z.od_startu), marginLeft: 8 }}>okno {z.od_startu >= 0 ? '+' : ''}{fmtMoney(z.od_startu)} ({fmtPct(z.od_startu_pct)})</span>
+      <Delta etykieta="24 h" v={z.doba} pct={z.doba_pct} />
+      <Delta etykieta="okno" v={z.od_startu} pct={z.od_startu_pct} />
     </span>
   );
 }
@@ -38,9 +51,19 @@ export default function KapitalLaczny({ days = 45 }) {
         Kapitał łączny obu platform
         <span className="hint">tryb demo · {days} dni · siatka godzinowa</span>
       </div>
-      {dane.error && <div className="empty">Nie udało się pobrać: {dane.error}</div>}
-      <MultiLineChart data={d?.punkty || []} series={series} height={240}
-                      valueFmt={(v) => fmtMoney(v)} labelFmt={(p) => fmtTime(p.t)} />
+      {/* Wykres dostajac pusta serie pisze "Brak danych do wykresu" - i ma do
+          tego prawo, bo nie wie, DLACZEGO jej nie ma. Wiedza o tym tutaj.
+          Po nieudanym odczycie to zdanie bylo drugim, sprzecznym komunikatem
+          pod komunikatem o awarii: raz "nie udalo sie pobrac", raz "nie ma
+          danych". Przy danych z poprzedniego udanego odczytu wykres zostaje -
+          stare punkty sa prawdziwe, trzeba tylko powiedziec, ze sa stare. */}
+      {dane.error && (
+        <div className="empty">Nie udało się pobrać: {dane.error}</div>
+      )}
+      {dane.error && !d?.punkty?.length ? null : (
+        <MultiLineChart data={d?.punkty || []} series={series} height={240}
+                        valueFmt={(v) => fmtMoney(v)} labelFmt={(p) => fmtTime(p.t)} />
+      )}
       <div style={{ display: 'grid', gap: 6, marginTop: 10 }}>
         {[...silniki, 'razem'].map((k) => (
           <div key={k} className="row-item" style={{ display: 'flex', justifyContent: 'space-between',

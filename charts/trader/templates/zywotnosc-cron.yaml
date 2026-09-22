@@ -24,6 +24,21 @@ spec:
       # Bez ponawiania: awaria silnika nie naprawi sie przez powtorzenie
       # sprawdzenia, a kazde powtorzenie wyslaloby to samo powiadomienie.
       backoffLimit: 0
+      # TWARDY LIMIT CZASU - 540 s, czyli o minute krocej niz okres (600 s).
+      #
+      # To zadanie ma najwyzsza stawke ze wszystkich trzech: jeden zawieszony
+      # przebieg zatrzymuje przy `Forbid` CALA warstwe czujek naraz - dziewiec
+      # sprawdzen wypisanych nizej (zywotnosc, ryzyko, kopie, swiezosc, puls
+      # workerow, egzekucja, uzgodnienie, instrumenty, stawki) plus pomiar
+      # poslizgu. Zawieszenie w dowolnym z nich - urwane polaczenie z baza albo
+      # zapytanie do gieldy bez odpowiedzi - i od tej chwili nikt juz nie
+      # sprawdza NICZEGO, a objawem jest cisza, czyli to samo, co zdrowie.
+      #
+      # 540, a nie 600: przebieg ma umrzec ZANIM ruszy nastepny, inaczej
+      # `Forbid` pomija kolejny termin mimo dzialajacego limitu. Zdrowy przebieg
+      # to kilkanascie sekund (dziewiec krotkich zapytan), wiec 540 s jest
+      # trzydziestokrotnym zapasem - limit zabija zawieszenie, nie prace.
+      activeDeadlineSeconds: 540
       template:
         spec:
           restartPolicy: Never

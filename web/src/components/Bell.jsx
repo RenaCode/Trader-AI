@@ -35,15 +35,25 @@ export default function Bell() {
     };
   }, [open]);
 
+  const [error, setError] = useState('');
+  const [listError, setListError] = useState('');
+
   const toggle = async () => {
     const next = !open;
     setOpen(next);
     if (next) {
-      try { setItems(await get('/api/notifications?limit=25')); } catch { setItems([]); }
+      // Pusta lista po awarii klamala: panel mowil "Brak powiadomien", a
+      // plakietka obok swiecila liczba nieprzeczytanych z osobnego zapytania.
+      setListError('');
+      setItems(null);
+      try {
+        setItems(await get('/api/notifications?limit=25'));
+      } catch (e) {
+        setListError(e?.message || 'Nie udało się pobrać powiadomień');
+      }
     }
   };
 
-  const [error, setError] = useState('');
   const markAll = async () => {
     setError('');
     try {
@@ -81,7 +91,14 @@ export default function Bell() {
           </div>
 
           {error && <div className="empty" style={{ color: 'var(--loss)' }}>{error}</div>}
-          {items === null ? (
+          {listError ? (
+            <div className="notice">
+              Nie udało się wczytać powiadomień: {listError}
+              {count.unread > 0 && (
+                <><br />Licznik pokazuje {count.unread} nieprzeczytanych z wcześniejszego odczytu.</>
+              )}
+            </div>
+          ) : items === null ? (
             <div className="empty loading-pulse">Wczytywanie…</div>
           ) : items.length === 0 ? (
             <div className="empty">Brak powiadomień</div>

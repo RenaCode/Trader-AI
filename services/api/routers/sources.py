@@ -31,6 +31,22 @@ async def feeds(engine: str | None = None):
             "enabled": r["enabled"], "poll_interval_s": r["poll_interval_s"],
             "last_polled_at": r["last_polled_at"].isoformat() if r["last_polled_at"] else None,
             "last_status": r["last_status"], "last_error": r["last_error"],
+            # STAN KANALU - jedna odpowiedz na pytanie "czy to dziala", liczona
+            # TUTAJ, a nie w komponencie.
+            #
+            # `last_status` opisuje OSTATNI ODCZYT, a worker newsow pyta
+            # wylacznie kanaly `WHERE enabled` (news_worker.py). Kanal
+            # wylaczony trzyma wiec zamrozone `ok` z chwili sprzed wylaczenia
+            # i wyglada dokladnie jak kanal pracujacy - tyle ze z odczytem
+            # sprzed trzech dni. Stary sukces nie jest dowodem pracy, a wiersz
+            # bez odczytu w ogole nie jest wierszem ze statusem `ok`.
+            #
+            # Surowe `last_status` ZOSTAJE: to jedyny slad tego, jak kanal
+            # konczyl prace, i diagnostyka po wylaczeniu z niego korzysta.
+            # Zmienia sie tylko to, ktore pole odpowiada na pytanie o stan.
+            "stan": ("wylaczony" if not r["enabled"]
+                     else "nigdy_nieodpytany" if r["last_polled_at"] is None
+                     else r["last_status"] or "nieznany"),
             "articles_seen": r["articles_seen"], "articles_kept": r["articles_kept"],
             "last_24h": r["last_24h"],
             # Ile z pobranych artykulow przeszlo filtr istotnosci. ~95% to szum,

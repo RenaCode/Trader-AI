@@ -104,7 +104,13 @@ async def revoke_others(body: RevokeBody, request: Request,
     row = await fetch_one("SELECT password_hash FROM app.user WHERE id = %s", (user["id"],))
     ok, _ = verify_password(row["password_hash"], body.password)
     if not ok:
-        raise HTTPException(401, "Hasło jest nieprawidłowe")
+        # 403, NIE 401. Front na kazde 401 spoza /api/auth/ uznaje, ze sesja
+        # wygasla, i przerzuca uzytkownika na ekran logowania - a to jest
+        # operacja obronna, uruchamiana wlasnie wtedy, gdy podejrzewasz cudzy
+        # dostep. Literowka w hasle zabieralaby wtedy komunikat sprzed oczu
+        # i wygladala jak wylogowanie. Tu sesja JEST wazna; odmawiamy samego
+        # potwierdzenia, a to znaczy 403.
+        raise HTTPException(403, "Hasło jest nieprawidłowe")
 
     await execute(
         "UPDATE app.session SET revoked_at = now()"

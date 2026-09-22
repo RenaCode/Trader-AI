@@ -6,15 +6,22 @@ z bazy, a nie zgadniete.
 """
 from __future__ import annotations
 
+from typing import Literal
+
 from fastapi import APIRouter, HTTPException, Query
 
 from ..db import fetch_all, fetch_one
+
+# Patrz overview.py: wartosc zamknieta tutaj, zeby nieznany silnik konczyl sie
+# odmowa 422, a nie bledem rzutowania enuma w Postgresie (500).
+Silnik = Literal["crypto", "equity"]
+Tryb = Literal["demo", "live"]
 
 router = APIRouter(prefix="/api/engines/{engine}", tags=["moves"])
 
 
 @router.get("/decisions")
-async def decisions(engine: str, limit: int = Query(50, le=500), action: str | None = None):
+async def decisions(engine: Silnik, limit: int = Query(50, le=500), action: str | None = None):
     rows = await fetch_all(
         """
         SELECT d.id, d.decided_at, d.action, d.confidence, d.regime,
@@ -25,7 +32,7 @@ async def decisions(engine: str, limit: int = Query(50, le=500), action: str | N
         JOIN ref.instrument i ON i.id = d.instrument_id
         LEFT JOIN learn.model_version mv ON mv.id = d.model_version_id
         LEFT JOIN learn.model m ON m.id = mv.model_id
-        WHERE d.engine = %s AND (%s::text IS NULL OR d.action::text = %s)
+        WHERE d.engine::text = %s AND (%s::text IS NULL OR d.action::text = %s)
         ORDER BY d.decided_at DESC LIMIT %s
         """,
         (engine, action, action, limit),
@@ -45,7 +52,7 @@ async def decisions(engine: str, limit: int = Query(50, le=500), action: str | N
 
 
 @router.get("/decisions/{decision_id}")
-async def decision_detail(engine: str, decision_id: int):
+async def decision_detail(engine: Silnik, decision_id: int):
     """Pelne "dlaczego": wklad kazdej cechy, sygnalu i newsa w te decyzje."""
     head = await fetch_one(
         """
@@ -58,7 +65,7 @@ async def decision_detail(engine: str, decision_id: int):
                d.pokrycie_sygnalow
         FROM journal.decision d
         JOIN ref.instrument i ON i.id = d.instrument_id
-        WHERE d.id = %s AND d.engine = %s
+        WHERE d.id = %s AND d.engine::text = %s
         """,
         (decision_id, engine),
     )
@@ -111,7 +118,7 @@ async def decision_detail(engine: str, decision_id: int):
 
 
 @router.get("/planned")
-async def planned(engine: str):
+async def planned(engine: Silnik):
     """Co system PLANUJE: warunki wejscia i poziomy triggerow."""
     rows = await fetch_all(
         """
@@ -121,7 +128,7 @@ async def planned(engine: str):
         FROM journal.planned_order po
         JOIN ref.instrument i ON i.id = po.instrument_id
         JOIN journal.decision d ON d.id = po.decision_id
-        WHERE d.engine = %s AND po.status = 'pending'
+        WHERE d.engine::text = %s AND po.status = 'pending'
         ORDER BY po.created_at DESC
         """,
         (engine,),
@@ -141,14 +148,14 @@ async def planned(engine: str):
 
 
 @router.get("/trades")
-async def trades(engine: str, mode: str = Query("demo"), limit: int = Query(50, le=500)):
+async def trades(engine: Silnik, mode: Tryb = Query("demo"), limit: int = Query(50, le=500)):
     rows = await fetch_all(
         """
         SELECT p.id, i.symbol, p.side, p.qty, p.avg_price, p.opened_at, p.closed_at,
                p.realized_pnl, p.fees_paid, p.open_decision_id
         FROM exec.position p
         JOIN ref.instrument i ON i.id = p.instrument_id
-        WHERE p.engine = %s AND p.mode = %s AND p.closed_at IS NOT NULL
+        WHERE p.engine::text = %s AND p.mode::text = %s AND p.closed_at IS NOT NULL
         ORDER BY p.closed_at DESC LIMIT %s
         """,
         (engine, mode, limit),

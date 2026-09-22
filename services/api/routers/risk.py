@@ -1,17 +1,24 @@
 """Zakladka RYZYKO: limity, ich wykorzystanie, naruszenia, kill-switch."""
 from __future__ import annotations
 
+from typing import Literal
+
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from ..auth import audit, current_user, require_csrf
 from ..db import execute, fetch_all, fetch_one
 
+# Patrz overview.py: wartosc zamknieta tutaj, zeby nieznany silnik konczyl sie
+# odmowa 422, a nie bledem rzutowania enuma w Postgresie (500).
+Silnik = Literal["crypto", "equity"]
+Tryb = Literal["demo", "live"]
+
 router = APIRouter(prefix="/api/engines/{engine}/risk", tags=["risk"])
 
 
 @router.get("/limits")
-async def limits(engine: str, mode: str = Query("demo")):
+async def limits(engine: Silnik, mode: Tryb = Query("demo")):
     rows = await fetch_all(
         """
         SELECT ld.id, ld.name, ld.scope, ld.value, ld.unit, ld.action, ld.enabled,
@@ -23,7 +30,7 @@ async def limits(engine: str, mode: str = Query("demo")):
             SELECT used, utilization, event_time FROM risk.limit_usage
             WHERE limit_def_id = ld.id ORDER BY event_time DESC LIMIT 1
         ) lu ON true
-        WHERE ld.engine = %s AND ld.mode = %s
+        WHERE ld.engine::text = %s AND ld.mode::text = %s
         ORDER BY ld.name
         """,
         (engine, mode),
@@ -38,8 +45,19 @@ async def limits(engine: str, mode: str = Query("demo")):
             # i milczy o tym, czy sam wroci - a to jest pierwsze pytanie, jakie
             # zadaje sie o autonomiczny bezpiecznik.
             "wznowienie": r["wznowienie"], "max_wznowien": r["max_wznowien"],
-            "used": float(r["used"]) if r["used"] is not None else 0.0,
-            "utilization": r["utilization"] or 0.0,
+            # LIMIT NIGDY NIEZMIERZONY ODDAJEMY JAKO `null`, NIE JAKO ZERO.
+            #
+            # `0.0` i `r["utilization"] or 0.0` sprawialy, ze brak wiersza
+            # w `risk.limit_usage` byl nie do odroznienia od pomiaru rownego
+            # zeru. Skutek jest odwrotny do intuicji: gdy dozorca PRZESTANIE
+            # pisac pomiary, wszystkie paski zjezdzaja do zera i zakladka
+            # "Ryzyko" wyglada LEPIEJ niz przed awaria - awaria nadzoru maluje
+            # sie na ekranie jako wzorowa dyscyplina.
+            #
+            # `as_of` i `enabled` zostaja: front na nich polega, a data pomiaru
+            # jest jedynym swiadkiem tego, ze pomiar w ogole byl.
+            "used": float(r["used"]) if r["used"] is not None else None,
+            "utilization": float(r["utilization"]) if r["utilization"] is not None else None,
             "as_of": r["event_time"].isoformat() if r["event_time"] else None,
         }
         for r in rows
@@ -47,14 +65,14 @@ async def limits(engine: str, mode: str = Query("demo")):
 
 
 @router.get("/violations")
-async def violations(engine: str, limit: int = Query(30, le=200)):
+async def violations(engine: Silnik, limit: int = Query(30, le=200)):
     rows = await fetch_all(
         """
         SELECT v.id, v.occurred_at, v.observed, v.threshold, v.action_taken,
                ld.name AS limit_name, ld.unit, v.decision_id
         FROM risk.violation v
         JOIN risk.limit_def ld ON ld.id = v.limit_def_id
-        WHERE v.engine = %s ORDER BY v.occurred_at DESC LIMIT %s
+        WHERE v.engine::text = %s ORDER BY v.occurred_at DESC LIMIT %s
         """,
         (engine, limit),
     )
@@ -69,14 +87,14 @@ async def violations(engine: str, limit: int = Query(30, le=200)):
 
 
 @router.get("/killswitch")
-async def killswitch(engine: str, limit: int = Query(10, le=100)):
+async def killswitch(engine: Silnik, limit: int = Query(10, le=100)):
     rows = await fetch_all(
         """
         SELECT k.id, k.triggered_at, k.reason, k.limit_name, k.released_at,
                k.released_auto, k.release_note, u.login AS released_by
         FROM risk.killswitch_event k
         LEFT JOIN app.user u ON u.id = k.released_by
-        WHERE k.engine = %s ORDER BY k.triggered_at DESC LIMIT %s
+        WHERE k.engine::text = %s ORDER BY k.triggered_at DESC LIMIT %s
         """,
         (engine, limit),
     )
@@ -111,7 +129,7 @@ class ZwolnienieBody(BaseModel):
 
 
 @router.post("/killswitch/{event_id}/release", dependencies=[Depends(require_csrf)])
-async def zwolnij_killswitch(engine: str, event_id: int, body: ZwolnienieBody,
+async def zwolnij_killswitch(engine: Silnik, event_id: int, body: ZwolnienieBody,
                              request: Request, user: dict = Depends(current_user)):
     """Reczne zwolnienie kill-switcha.
 
@@ -156,7 +174,7 @@ async def zwolnij_killswitch(engine: str, event_id: int, body: ZwolnienieBody,
 
 
 @router.get("/dozorca")
-async def dozorca(engine: str):
+async def dozorca(engine: Silnik):
     """Puls dozorcy ryzyka — procesu, który ocenia limity NIEZALEŻNIE od silnika.
 
     Bez tego widoku autonomia jest niewidoczna: system podejmuje decyzje sam,

@@ -368,7 +368,7 @@ async def rozstrzygnij_plan(cur, adapter, plan: dict, f: Filtry, *, engine: str,
 
 
 async def zloz_oczekujace(cur, adapter, *, engine: str, mode: str,
-                          kategoria: str, verbose: bool = True,
+                          kategoria: str, h, verbose: bool = True,
                           tylko_wyjscia: bool = False) -> dict:
     """Wysyła na giełdę plany, które jeszcze tam nie poszły.
 
@@ -384,9 +384,24 @@ async def zloz_oczekujace(cur, adapter, *, engine: str, mode: str,
     nie otwieramy, ale zamykanie istniejących MUSI iść dalej. Zatrzymanie
     wszystkiego bez wyjątku uwięziłoby pozycje w chwili, w której system właśnie
     stwierdził, że ryzyko jest za duże.
+
+    `h` JEST WYMAGANY, bo od niego zależy nazwa cechy ATR — a od ATR pasmo
+    ceny. Wartość domyślna byłaby tu cichym „przy innym barze pasmo znika".
     """
     st = {"zlozone": 0, "odrzucone": 0}
     filtry = filtry_z_bazy(cur, engine)
+    # NAZWA CECHY Z HORYZONTU, NIE NA SZTYWNO.
+    #
+    # Wpisane wprost `atr_pct__4h` dzialalo wylacznie dla domyslnego bara. Przy
+    # `--bar 1h` podzapytanie oddawalo NULL, `atr_pct` schodzilo do None, a
+    # `zlecenia.prog_pasma` zwracalo wtedy pasmo AWARYJNE (SUFIT_PASMA = 0,25)
+    # zamiast policzyc wlasciwe ~0,105. Pasmo przestawalo wykluczac cokolwiek
+    # ponizej rzedu wielkosci - czyli tracilo swoja funkcje - i robilo to cicho,
+    # bo brak cechy wyglada identycznie jak zmiennosc nieznana.
+    #
+    # `Horizon.name` jest tu jedynym zrodlem prawdy o tej nazwie; tak samo
+    # wyprowadza ja `loop.atr_percentile_80` (services/engine/loop.py:394).
+    nazwa_atr = h.name("atr_pct")
     cur.execute(
         "SELECT p.id, p.decision_id, p.instrument_id, p.side, p.qty, p.limit_price,"
         "       p.trigger, p.valid_until, i.symbol, i.quote_ccy, i.base_ccy,"
@@ -399,12 +414,23 @@ async def zloz_oczekujace(cur, adapter, *, engine: str, mode: str,
         "        ORDER BY fv.event_time DESC LIMIT 1) AS atr_pct"
         "  FROM journal.planned_order p"
         "  JOIN ref.instrument i ON i.id = p.instrument_id"
-        " WHERE p.status = 'pending'"
+        # SILNIK I TRYB Z DECYZJI, KTORA PLAN ZRODZILA - patrz komentarz
+        # przy `rozstrzygnij_oczekujace` nizej.
+        "  JOIN journal.decision d ON d.id = p.decision_id"
+        " WHERE d.engine = %s AND d.mode = %s"
+        "   AND p.status = 'pending'"
         "   AND NOT EXISTS (SELECT 1 FROM exec.order o WHERE o.planned_order_id = p.id)"
         "   AND (NOT %s OR p.trigger->>'rodzaj' = 'wyjscie')"
-        " ORDER BY p.id", ("atr_pct__4h", tylko_wyjscia))
+        " ORDER BY p.id", (nazwa_atr, engine, mode, tylko_wyjscia))
     for plan in cur.fetchall():
         f = filtry.get(plan["instrument_id"], Filtry())
+        if plan.get("atr_pct") is None and verbose:
+            # BRAK CECHY DLA ZNANEGO HORYZONTU ZOSTAWIA SLAD. Pasmo awaryjne
+            # jest szersze od policzonego, wiec ta sciezka nie odrzuca zlecen,
+            # tylko przepuszcza wiecej - a to jest dokladnie ten rodzaj awarii,
+            # ktory bez linijki na ekranie wyglada jak spokojny dzien.
+            print(f"  UWAGA: {plan['symbol']} — brak {nazwa_atr} w feat."
+                  f"feature_value; pasmo ceny będzie AWARYJNE (szersze)")
         ok, msg = await zloz_plan(cur, adapter, plan, f, engine=engine,
                                   mode=mode, kategoria=kategoria)
         st["zlozone" if ok else "odrzucone"] += 1
@@ -422,6 +448,8 @@ async def rozstrzygnij_oczekujace(cur, adapter, *, engine: str, mode: str,
     TERMIN BIERZEMY Z TEJ SAMEJ FUNKCJI CO RACHUNEK PAPIEROWY. Gdyby jedna
     ścieżka pytała wcześniej, backtest i produkcja oglądałyby inny wycinek
     świecy — a różnica byłaby niewidoczna, bo obie wersje wyglądałyby poprawnie.
+
+    PLANY BIERZEMY TYLKO SWOJE — patrz komentarz przy zapytaniu niżej.
     """
     from services.engine.loop import termin_rozstrzygniecia
 
@@ -431,12 +459,33 @@ async def rozstrzygnij_oczekujace(cur, adapter, *, engine: str, mode: str,
     st = {"wypelnione": 0, "niewypelnione": 0, "czekaja": 0, "czesciowe": 0,
           "nie_do_zamkniecia": 0, "nie_zdjete": 0, "wyjscie_bez_pozycji": 0}
     filtry = filtry_z_bazy(cur, engine)
+    # SILNIK I TRYB Z DECYZJI, KTORA PLAN ZRODZILA.
+    #
+    # `journal.planned_order` nie ma kolumn engine/mode (0005, linia 68), wiec
+    # sam status 'pending' wybieral KAZDY plan w bazie - takze cudzego silnika
+    # i cudzego trybu. Asymetria byla jednostronna i wlasnie dlatego grozna:
+    # `RiskKernel._open_exposure` dochodzi do tych samych wierszy przez
+    # `JOIN journal.decision d ... WHERE d.engine=%s AND d.mode=%s`
+    # (services/engine/risk.py:393-402), wiec limit ekspozycji widzi wylacznie
+    # WLASNE plany, a egzekutor wykonywal WSZYSTKIE. Dopoki petla jest jedna
+    # (values.yaml:298) nie ma to skutku; adapter Alpaki i `--silniki
+    # crypto,equity` sa juz w repozytorium, wiec druga petla zapalilaby to
+    # przy pierwszym wspolnym cyklu: zlecenia silnika equity poszlyby na NASZ
+    # rachunek, a ich pozycje zaksiegowalyby sie jako crypto.
+    #
+    # KSZTALT JOIN-a JEST CELOWO TEN SAM CO W `_open_exposure`. Denormalizacja
+    # engine/mode do `planned_order` byloby prostsze w zapisie, ale to osobna
+    # decyzja (migracja + backfill + zgodnosc z dzisiejszymi wierszami), a nie
+    # poprawka przy okazji; dopoki jej nie ma, obie strony musza czytac te sama
+    # regule z tego samego miejsca, inaczej powstanie druga obok istniejacej.
     cur.execute(
         "SELECT p.id, p.decision_id, p.instrument_id, p.side, p.qty, p.limit_price,"
         "       p.trigger, p.valid_until, i.symbol, i.quote_ccy, i.base_ccy"
         "  FROM journal.planned_order p"
         "  JOIN ref.instrument i ON i.id = p.instrument_id"
-        " WHERE p.status = 'pending' ORDER BY p.id")
+        "  JOIN journal.decision d ON d.id = p.decision_id"
+        " WHERE d.engine = %s AND d.mode = %s"
+        "   AND p.status = 'pending' ORDER BY p.id", (engine, mode))
     for plan in cur.fetchall():
         _, czekamy = termin_rozstrzygniecia(plan, h, now)
         if czekamy:
@@ -464,8 +513,18 @@ async def rozstrzygnij_oczekujace(cur, adapter, *, engine: str, mode: str,
 
 
 async def anuluj_wejscia(cur, adapter, *, kategoria: str, powod: str,
-                         engine: str = "crypto", mode: str = "demo") -> tuple[int, int]:
+                         engine: str, mode: str,
+                         verbose: bool = True) -> tuple[int, int]:
     """Zdejmuje z giełdy oczekujące zlecenia WEJŚCIA. Wyjścia zostawia.
+
+    `engine` I `mode` NIE MAJĄ WARTOŚCI DOMYŚLNEJ, I TO JEST CELOWE. Rozstrzygają
+    one, CZYJE zlecenia zdejmujemy z giełdy — to ten sam klucz, przez który plany
+    trafiają do właściwego silnika, tyle że tutaj schowany w sygnaturze zamiast
+    w zapytaniu. Domyślne `crypto`/`demo` sprawiały, że wywołanie, które o nich
+    zapomni, zdejmuje cudze zlecenia albo nie znajduje żadnych — i w obu
+    przypadkach NIE WYGLĄDA NA AWARIĘ, tylko na kill-switch, który nie miał
+    czego zdejmować. Brak argumentu ma być błędem wywołania, a nie cichym
+    wyborem jednego z silników.
 
     KILL-SWITCH, KTORY ZOSTAWIA ZLECENIA NA GIELDZIE, NIE JEST KILL-SWITCHEM.
     Wstrzymanie wejść zatrzymuje podejmowanie NOWYCH decyzji, ale zlecenie
@@ -477,6 +536,19 @@ async def anuluj_wejscia(cur, adapter, *, kategoria: str, powod: str,
     z ryzyka, a nie uwięzić w nim. Zdjęcie zlecenia sprzedaży zostawiłoby
     otwartą pozycję bez czegokolwiek, co ją zamknie — czyli bezpiecznik
     zwiększyłby ekspozycję zamiast ją ściąć.
+
+    ZWRACANA PARA LICZY WYŁĄCZNIE STANY, KTÓRE ZNAMY: `zdjete` to zlecenia
+    zdjęte z arkusza, `wypelnione` — te, o których giełda powiedziała, że już
+    weszły. Zlecenie, którego stanu NIE UDAŁO SIĘ ODCZYTAĆ, nie trafia do
+    żadnej z nich: doliczenie go gdziekolwiek byłoby zaraportowaniem sukcesu
+    tam, gdzie nie wiemy nawet, czy mamy pozycję.
+
+    DLATEGO SAMA PARA NIE WYSTARCZA DO OCENY PRZEBIEGU i funkcja dopisuje
+    brakującą liczbę na ekran sama. „Zdjęto 3" przy pięciu rozpatrzonych
+    zleceniach czyta się jak komplet, a znaczy „3 z 5, o dwóch nie wiemy nic" —
+    i to jest różnica między kill-switchem, który zadziałał, a takim, który
+    zostawił dwa żywe zlecenia w arkuszu. Trwałym śladem po każdym z nich jest
+    `reject_reason` w `exec.order`, zapisany BEZ zmiany statusu.
     """
     cur.execute(
         "SELECT o.client_order_id, i.symbol, o.planned_order_id"
@@ -488,8 +560,14 @@ async def anuluj_wejscia(cur, adapter, *, kategoria: str, powod: str,
         "   AND o.engine::text = %s AND o.mode::text = %s"
         "   AND coalesce(p.trigger->>'rodzaj', 'wejscie') <> 'wyjscie'",
         (engine, mode))
-    zdjete, wypelnione = 0, 0
-    for o in cur.fetchall():
+    # `nieznane` NIE JEST TRZECIM ELEMENTEM ZWRACANEJ KROTKI, tylko liczba
+    # do komunikatu. Krotka jest czescia interfejsu tej funkcji i jej
+    # rozszerzenie nalezy do osobnej decyzji; pominiecie tej liczby na ekranie
+    # nie naleza do zadnej - bez niej operator nie ma jak odroznic "zdjeto
+    # wszystko" od "zdjeto tyle, ile sie udalo".
+    zdjete, wypelnione, nieznane = 0, 0, 0
+    zlecenia = cur.fetchall()
+    for o in zlecenia:
         # NAJPIERW PYTAMY GIELDE, POTEM ANULUJEMY.
         #
         # Nasz status jest stary: wiersz siedzi na 'new' przez cale dwie swiece,
@@ -509,8 +587,56 @@ async def anuluj_wejscia(cur, adapter, *, kategoria: str, powod: str,
         try:
             stan = await adapter.stan_zlecenia(o["client_order_id"],
                                                kategoria=kategoria)
-        except ExchangeError:
-            stan = None
+        except ExchangeError as e:
+            # NIEUDANY ODCZYT TO NIE JEST "NIC NIE WESZLO".
+            #
+            # Poprzednia wersja ustawiala tu `stan = None` i szla dalej, czyli
+            # w galaz anulujaca - a ta zapisuje `exec.order='cancelled'`
+            # i `planned_order='cancelled'`. Tym jednym zapisem obsluga bledu
+            # przewracala rozumowanie stojace 15 linii wyzej: plan przestaje
+            # byc 'pending', wiec `rozstrzygnij_oczekujace` juz NIGDY go nie
+            # zaksieguje, a wypelnienie, ktore moglo wejsc, przepada
+            # bezpowrotnie. Na gieldzie pozycja, w dzienniku nic.
+            #
+            # O stanie tego zlecenia nie wiemy NICZEGO - ani ze weszlo, ani ze
+            # nie. Jedynym ruchem, ktory niczego nie przesadza, jest NIE
+            # ZAPISYWAC STATUSU: `exec.order` zostaje na 'new'/'partial',
+            # wiec zapytanie na gorze zlapie to zlecenie w nastepnym cyklu
+            # i ponowi probe, a plan zostaje 'pending', wiec rozstrzyganie
+            # wciaz go widzi i zaksieguje to, co naprawde weszlo.
+            #
+            # Anulowania TEZ nie probujemy. Bybit na zlecenie juz wypelnione
+            # oddaje 110001, ktore adapter zamienia na `return False` bez
+            # wyjatku - odpowiedz nie do odroznienia od "nie bylo czego
+            # zdejmowac". Nie doniosloby to wiec niczego, czego nie wiemy,
+            # a przy zleceniu czesciowo wypelnionym zdjeloby reszte w oparciu
+            # o zgadywanie.
+            #
+            # Powod zapisujemy BEZ zmiany statusu - tym samym wzorcem, co
+            # nieudane anulowanie nizej. Bez tego jedynym sladem po nieznanym
+            # stanie bylaby linia na ekranie, a ekran nikogo nie obudzi.
+            cur.execute(
+                "UPDATE exec.order SET reject_reason=%s, updated_at=now()"
+                " WHERE client_order_id=%s AND mode::text=%s",
+                (f"kill-switch: stanu zlecenia nie udalo sie odczytac ({e})"
+                 f" - status BEZ ZMIANY, ponowimy w nastepnym cyklu",
+                 o["client_order_id"], mode))
+            if verbose:
+                print(f"  UWAGA: {o['symbol']} {o['client_order_id']} — stanu"
+                      f" zlecenia nie udało się odczytać ({e}); zostaje"
+                      f" w arkuszu i do rozstrzygnięcia w następnym cyklu")
+            # NIE LICZYMY GO ANI JAKO ZDJETE, ANI JAKO WYPELNIONE. Obie te
+            # liczby ida do komunikatu kill-switcha; zlecenie o nieznanym
+            # stanie w ktorejkolwiek z nich opisywaloby jako rozstrzygniete
+            # cos, czego nie rozstrzygnelismy. Osobny licznik idzie na ekran
+            # nizej - inaczej ta sama cisza wrocilaby w postaci zawyzonego
+            # poczucia, ze kill-switch zamknal sprawe.
+            nieznane += 1
+            continue
+        # `stan is None` ZNACZY JUZ TYLKO JEDNO: gielda nie zna tego zlecenia,
+        # czyli nie weszlo. Nieudany odczyt wyszedl wyzej przez `continue`,
+        # wiec ta sama wartosc nie miesza juz dwoch roznych rzeczy - tak samo
+        # jak w `rozstrzygnij_plan`, gdzie brak stanu wygasza plan.
         if stan is not None and stan.wypelniono > 0:
             # Reszte i tak zdejmujemy, zeby nie doszlo wiecej - ale planu NIE
             # ruszamy, zeby rozstrzygniecie zaksiegowalo to, co weszlo.
@@ -530,18 +656,31 @@ async def anuluj_wejscia(cur, adapter, *, kategoria: str, powod: str,
             # NIEUDANE ANULOWANIE JEST ZAPISYWANE, nie pomijane. Zlecenie zostaje
             # w arkuszu, wiec musi zostac slad - inaczej "kill-switch zadzialal"
             # znaczyloby cos innego, niz sie wydaje.
+            # FILTR PO TRYBIE, bo klucz unikalny to (mode, client_order_id),
+            # a nie sam identyfikator. `tai-p77` z demo i `tai-p77` z live to
+            # dwa rozne wiersze i oba pasuja do samego `client_order_id`:
+            # zapis bez trybu dopisalby powod takze cudzemu zleceniu.
             cur.execute("UPDATE exec.order SET reject_reason=%s, updated_at=now()"
-                        " WHERE client_order_id=%s",
+                        " WHERE client_order_id=%s AND mode::text=%s",
                         (f"anulowanie po kill-switchu nie powiodlo sie: {e}",
-                         o["client_order_id"]))
+                         o["client_order_id"], mode))
             continue
         cur.execute("UPDATE exec.order SET status='cancelled', updated_at=now(),"
-                    " reject_reason=%s WHERE client_order_id=%s",
-                    (powod, o["client_order_id"]))
+                    " reject_reason=%s WHERE client_order_id=%s AND mode::text=%s",
+                    (powod, o["client_order_id"], mode))
         if o["planned_order_id"]:
             cur.execute("UPDATE journal.planned_order SET status='cancelled',"
                         " resolved_at=now() WHERE id=%s", (o["planned_order_id"],))
         zdjete += 1
+
+    # PODSUMOWANIE Z MIANOWNIKIEM, nie sama liczba zdjetych. Wywolujacy
+    # (`loop.run_once`) wypisuje "zdjeto z gieldy N zlecen" z samego `zdjete`
+    # i nie ma skad wiedziec, ilu zlecen ta liczba nie obejmuje.
+    if nieznane and verbose:
+        print(f"  UWAGA: kill-switch NIE ROZSTRZYGNĄŁ {nieznane} z "
+              f"{len(zlecenia)} rozpatrzonych zleceń — stanu nie udało się "
+              f"odczytać, więc NIE MA ich w liczbie zdjętych; zostają "
+              f"w arkuszu giełdy do następnego cyklu")
     return zdjete, wypelnione
 
 

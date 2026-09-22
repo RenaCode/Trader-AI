@@ -215,8 +215,18 @@ async def progi_bezwzgledne(fetch_all, engine: str) -> dict[str, Decimal]:
     z par, na których stoi.
     """
     rows = await fetch_all(
+        # KAZDY Z TRZECH AGREGATOW WYBIERA WARIANT DAJACY PROG MNIEJSZY, bo prog
+        # ma odpowiadac na pytanie "czy resztki NIE DA SIE sprzedac na ZADNEJ
+        # z par". Dla `min_notional` wariantem mniejszym jest MINIMUM, mimo ze
+        # drugi czlon progu rosnie razem z nim: czlon ten brzmi
+        # `min_wartosc / cena`, wiec najnizsze minimum wartosci daje najnizszy
+        # prog. Do 2026-09-22 stalo tu `max` - a prog za duzy WYCISZA rozjazd,
+        # ktory byl prawdziwy (ostrzezenie dwa akapity wyzej). Nie bylo to
+        # teoretyczne: migracja 0023 zostawila pary USDT jako `active`, zdejmujac
+        # im tylko `tradeable`, wiec `GROUP BY i.base_ccy` naprawde laczy dwie
+        # pary tego samego aktywa o roznych minimach.
         "SELECT i.base_ccy AS aktywo, min(i.lot_size) AS lot,"
-        "       max(i.min_notional) AS min_wartosc, max(c.close) AS cena"
+        "       min(i.min_notional) AS min_wartosc, max(c.close) AS cena"
         "  FROM ref.instrument i"
         "  LEFT JOIN LATERAL ("
         "        SELECT k.close FROM market.candle k"

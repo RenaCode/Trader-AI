@@ -79,14 +79,41 @@ spec:
               value: "https://{{ .Values.ingress.host }}"
           ports:
             - containerPort: 8000
+          # DWIE SONDY, DWA PYTANIA - i one nie moga pytac o to samo.
+          #
+          # GOTOWOSC pyta, czy ten pod ma co oddac: `/api/health` robi
+          # `SELECT count(*) FROM schema_migrations`, wiec pod bez bazy zostaje
+          # wypisany z Service i wraca sam, gdy baza wroci. Zaleznosc zewnetrzna
+          # nalezy wlasnie tutaj.
+          #
+          # `timeoutSeconds: 5`, bo domyslna jedna sekunda jest progiem na
+          # OBCIAZENIE, a nie na awarie: okno kopii (03:17) i trenera (04:40)
+          # potrafi wydluzyc odpowiedz bazy ponad sekunde, a wypisanie poda
+          # z Service w takiej chwili odcina jedyny widok na system.
           readinessProbe:
             httpGet: { path: /api/health, port: 8000 }
             initialDelaySeconds: 8
             periodSeconds: 10
+            timeoutSeconds: 5
+          # ZYWOTNOSC pyta wylacznie o to, czy PROCES zyje - `/api/zywy`
+          # (services/api/main.py) nie dotyka bazy ani Redisa.
+          #
+          # Do 2026-09-22 stalo tu `/api/health` bez `timeoutSeconds`, czyli
+          # z domyslna 1 s, i bez `failureThreshold`, czyli z domyslnymi trzema
+          # probami: trzy wolne odpowiedzi bazy w ciagu 60 s zabijaly poda API.
+          # Restart nie naprawia wolnej bazy, a kontener startowy `migrate`
+          # wchodzi wtedy w backoff - przerwa bazy liczona w minutach robila
+          # sie niedostepnoscia API liczona w kilku minutach.
+          #
+          # Oba progi wpisane JAWNIE, mimo ze rowne domyslnym: sonda, ktora
+          # zabija kontener, nie ma prawa opierac sie na wartosciach, ktorych
+          # nie widac w pliku.
           livenessProbe:
-            httpGet: { path: /api/health, port: 8000 }
+            httpGet: { path: /api/zywy, port: 8000 }
             initialDelaySeconds: 25
             periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
           resources: {{- toYaml .Values.api.resources | nindent 12 }}
 ---
 apiVersion: v1

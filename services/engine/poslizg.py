@@ -22,19 +22,43 @@ którą da się z nimi zestawić — razem z uczciwą odpowiedzią „jeszcze ni
 CO JEST CENĄ ODNIESIENIA I DLACZEGO TO NIE JEST OBOJĘTNE
 
 Poślizg to odległość między ceną, NA KTÓREJ OPARTA BYŁA DECYZJA, a ceną, po
-której transakcja faktycznie poszła. Pierwsza z nich mieszka w dwóch miejscach
+której transakcja faktycznie poszła. Pierwsza z nich mieszka w trzech miejscach
 i wybór między nimi nie jest kosmetyczny:
 
-  * `journal.planned_order.limit_price` — cena, na którą system się zobowiązał
-    składając zlecenie z limitem. Giełda ma obowiązek wypełnić po niej ALBO
-    LEPIEJ, więc poślizg maker powinien wychodzić ujemny lub zerowy. Wynik
+  * `exec.order.limit_price` — cena, KTÓRĄ GIEŁDA DOSTAŁA. To jedyne
+    zobowiązanie, jakie w ogóle istnieje: giełda ma obowiązek wypełnić po niej
+    albo lepiej, więc poślizg maker powinien wychodzić ujemny lub zerowy. Wynik
     dodatni jest sam w sobie informacją: albo zlecenie przeszło przez spread
     (marketable limit, czyli faktycznie taker), albo coś jest nie tak z zapisem.
+  * `journal.planned_order.limit_price` — cena, na której stanął PLAN. Dla
+    KAŻDEGO wyjścia `zlecenia.sprawdz_zlecenie` podmienia ją na `cena_makera`
+    z księgi docelowej (services/engine/zlecenia.py), więc dla wyjść to NIE
+    JEST cena wysłana. Zostaje jako zapas dla wierszy bez zlecenia — i jako
+    drugi człon `rozjazd_ksiag` niżej.
   * `journal.decision.target_price` — cena z chwili decyzji, jedyna dostępna dla
     zlecenia rynkowego. To DOKŁADNIE to, co modeluje `POSLIZG_TAKER`: koszt
     przejścia przez spread między chwilą decyzji a chwilą wykonania.
 
-Brakuje trzeciej — nie ma jej i to trzeba powiedzieć wprost: ceny mid z arkusza
+CO MIERZYŁ TEN MODUŁ DO 2026-09-22 I DLACZEGO TO BYŁ BŁĄD POMIARU
+
+Odniesieniem była `cena_planu`, czyli `journal.planned_order.limit_price`.
+Na giełdę szła jednak `cena_makera` z księgi docelowej, zapisana w
+`exec.order.limit_price` — a rozjazd między księgami jest zmierzony i duży
+(w 16,8% świec przekracza całą rundę kosztową, patrz gielda_exec.py). Poślizg
+liczył się więc względem ceny, której giełda nigdy nie dostała: wyjście
+wypełnione CO DO GROSZA po naszej cenie (−0,00 pb, idealny maker) raportowało
+się jako +29,00 pb, czyli 1,45× cała runda kosztowa. Przy trzech takich
+wyjściach moduł wydawał werdykt „założenie poza przedziałem" — formalne żądanie
+podniesienia stałej kosztowej na podstawie własnego błędu pomiaru. Dokładnie ta
+klasa pomyłki, przed którą ostrzega akapit o rachunku papierowym niżej: liczba
+wyglądająca jak pomiar egzekucji, a będąca pomiarem nas samych.
+
+Różnica `planned_order.limit_price − exec.order.limit_price` jest osobną,
+sensowną wielkością — to rozjazd między księgą, na której stanął plan, a księgą,
+do której poszło zlecenie. Mierzymy ją i wypisujemy pod własną nazwą
+(`rozjazd_ksiag`), ale NIE jako poślizg: do kosztu egzekucji nie należy.
+
+Brakuje czwartej — nie ma jej i to trzeba powiedzieć wprost: ceny mid z arkusza
 w chwili składania zlecenia. Bez niej nie da się rozdzielić poślizgu na spread
 i na ruch rynku w czasie oczekiwania. Mierzymy więc SUMĘ obu, i to jest liczba
 właściwa dla wyceny strategii — bo to ona jest faktycznie płacona.
@@ -128,12 +152,21 @@ def rodzaj_zlecenia(order_type: str | None) -> str:
 def cena_odniesienia(w: dict) -> tuple[Decimal | None, str]:
     """Cena, na ktorej oparta byla decyzja. Zwraca (cena, skad).
 
-    Kolejnosc nie jest dowolna. `limit_price` jest zobowiazaniem zlozonym
-    gieldzie i to wzgledem niego mierzy sie jakosc wypelnienia zlecenia
-    z limitem. `target_price` z dziennika decyzji jest zapasem dla zlecen bez
-    limitu - i jedyna cena odniesienia, jaka wtedy istnieje.
+    KOLEJNOSC NIE JEST DOWOLNA I NIE JEST KOSMETYCZNA.
+
+    1. `cena_zlecenia` (`exec.order.limit_price`) - cena, KTORA GIELDA DOSTALA.
+       Zobowiazanie istnieje wylacznie wobec niej i tylko wzgledem niej da sie
+       mierzyc jakosc wypelnienia.
+    2. `cena_planu` (`journal.planned_order.limit_price`) - cena, na ktorej
+       stanal plan. Dla wyjsc `zlecenia.sprawdz_zlecenie` podmienia ja przed
+       wyslaniem (`cena_makera` z ksiegi docelowej), wiec jako odniesienie
+       mierzylaby ROZJAZD KSIAG i nazywala go poslizgiem - patrz naglowek
+       modulu. Zostaje jako zapas dla wierszy, ktore ceny zlecenia nie maja.
+    3. `cena_decyzji` (`journal.decision.target_price`) - jedyna cena, jaka
+       istnieje dla zlecenia bez limitu.
     """
-    for pole, skad in (("cena_planu", "plan"), ("cena_decyzji", "decyzja")):
+    for pole, skad in (("cena_zlecenia", "zlecenie"), ("cena_planu", "plan"),
+                       ("cena_decyzji", "decyzja")):
         v = w.get(pole)
         if v is None:
             continue
@@ -310,9 +343,45 @@ def ulamki(wiersze: list[dict]) -> dict:
     return rozjazd_z_ulamkow(pary) | {"bez_ulamka": bez_ulamka}
 
 
+def rozjazd_ksiag(wiersze: list[dict]) -> dict:
+    """Odleglosc miedzy cena PLANU a cena WYSLANA. CZYSTA FUNKCJA.
+
+    TO NIE JEST POSLIZG I NIE WOLNO TEGO TAK NAZWAC. Poslizg jest kosztem
+    egzekucji - placi sie go gieldzie. To tutaj jest roznica miedzy dwiema
+    NASZYMI cenami: ta, na ktorej stanal plan (swiece podmiotu globalnego,
+    na nich trenowany jest model), i ta, ktora `zlecenia.sprawdz_zlecenie`
+    wyslalo po podmianie na `cena_makera` z ksiegi docelowej. Do 2026-09-22
+    wielkosc ta byla wliczana w poslizg wyjscia i sama w sobie wystarczala,
+    zeby moduł zazadal podniesienia stalej kosztowej.
+
+    Mierzymy ja, bo jest czym: rozjazd ksiag jest jedynym powodem, dla ktorego
+    podmiana w ogole istnieje, a jego skala decyduje o tym, jak daleko od
+    modelu stoi realizacja. Wartosc BEZWZGLEDNA - kierunek zalezy od strony
+    rynku i usredniony kasowalby sie do zera przy dowolnie duzym rozjezdzie.
+    """
+    xs: list[float] = []
+    for w in wiersze:
+        if (w.get("zrodlo") or "") != ZRODLO_MIERZALNE:
+            continue
+        plan, zlecenie = w.get("cena_planu"), w.get("cena_zlecenia")
+        if plan is None or zlecenie is None:
+            continue
+        try:
+            p, z = Decimal(str(plan)), Decimal(str(zlecenie))
+        except (InvalidOperation, ValueError):
+            continue
+        if z <= 0:
+            continue
+        xs.append(abs(float((p - z) / z)))
+    if not xs:
+        return {"n": 0, "mediana": None, "najwiekszy": None}
+    return {"n": len(xs), "mediana": statistics.median(xs), "najwiekszy": max(xs)}
+
+
 def pomiar(wiersze: list[dict]) -> dict:
     """Cały pomiar naraz: poślizg per rodzaj + ułamek wypełnienia."""
-    return statystyki(wiersze) | {"ulamek": ulamki(wiersze)}
+    return statystyki(wiersze) | {"ulamek": ulamki(wiersze),
+                                  "rozjazd_ksiag": rozjazd_ksiag(wiersze)}
 
 
 # ------------------------------------------------------------------ wypisanie
@@ -365,6 +434,16 @@ def opis(p: dict) -> list[str]:
             f"przedział 95% {przedzial}; częściowych {u['czesciowych']}, "
             f"nie do zamknięcia {u['nie_do_zamkniecia']}")
 
+    # OSOBNA LINIA, OSOBNA NAZWA. Wpisana w poslizg ta liczba kazalaby podniesc
+    # stala kosztowa; wypisana obok mowi, jak daleko ksiega docelowa stoi od tej,
+    # na ktorej stanal plan - i nic ponadto.
+    r = p.get("rozjazd_ksiag") or {"n": 0}
+    if r["n"]:
+        linie.append(
+            f"rozjazd ksiąg (plan vs cena wysłana, NIE poślizg): n={r['n']}, "
+            f"mediana {_bp(r['mediana'], znak=False)}, "
+            f"największy {_bp(r['najwiekszy'], znak=False)}")
+
     for skad, n in sorted(p["odniesienia"].items()):
         linie.append(f"  cena odniesienia z: {skad} ({n})")
     for powod, n in sorted(p["pominiete"].items()):
@@ -388,6 +467,7 @@ SELECT o.order_type                     AS rodzaj_zlecenia,
        o.raw->>'execution'              AS zrodlo,
        o.raw->>'ulamek_wypelnienia'     AS ulamek,
        o.raw->>'rodzaj'                 AS rodzaj_wypelnienia,
+       o.limit_price                    AS cena_zlecenia,
        p.limit_price                    AS cena_planu,
        d.target_price                   AS cena_decyzji,
        f.price                          AS cena_wykonania,
