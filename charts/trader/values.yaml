@@ -142,9 +142,13 @@ llm:
   # Model ANALIZY - wytwarza wartosc cechy `news_sent`.
   #
   # UWAGA PRZY ZMIANIE: podmiana modelu w srodku doby wstawia w szereg cechy
-  # USKOK, ktorego kalibracja wagi nie zaklada (patrz `DostawcaMieszany` -
-  # analiza celowo NIE MA zejscia awaryjnego wlasnie z tego powodu). Zmieniac
-  # razem z decyzja, co zrobic z historia cechy, a nie mimochodem.
+  # USKOK, ktorego kalibracja wagi nie zaklada. Zmieniac razem z decyzja, co
+  # zrobic z historia cechy, a nie mimochodem.
+  #
+  # Od 2026-09-22 analiza MA zejscie awaryjne na model Gemini (`analysisModelGemini`),
+  # gdy Anthropic odmawia lub jest odciety - decyzja wlasciciela po 13 dniach
+  # dziury w cesze przy pustym koncie. Zejscie jest glosne w logu, a kazdy
+  # wiersz `news.article_analysis` niesie model, ktory go wytworzyl.
   analysisModel: "claude-opus-5"
   # Model TRIAZU - wybiera artykuly, nie ocenia ich. Zmiana zmienia probke,
   # nie wartosc cechy, wiec jest znacznie mniej rygorystyczna.

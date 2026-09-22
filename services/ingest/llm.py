@@ -729,6 +729,12 @@ class DostawcaMieszany(Dostawca):
     Dlatego tani dostawca idzie tam, gdzie jest wolumen, a mocny tam, gdzie jest
     POMIAR. Odwrócenie tego oszczędziłoby grosze i zepsuło cechę.
 
+    ZEJŚCIA AWARYJNE (od 2026-09-22 w OBIE strony): odcięty triaż idzie do
+    dostawcy analizy, odcięta analiza — do dostawcy triażu. Drugie było przez
+    dwa tygodnie zabronione z powodu uskoku w cesze; dlaczego właściciel to
+    odwrócił, stoi w `_analiza_zapasowa`. Zejście jest zawsze głośne w logu
+    i podpisane modelem w każdym wierszu, więc nie jest ciche.
+
     Model analizy MUSI być inny niż model triażu — inaczej nie da się
     rozstrzygnąć, do którego dostawcy skierować zapytanie, a milczący wybór
     „pierwszy z brzegu" trafiałby raz tu, raz tam.
@@ -788,10 +794,15 @@ class DostawcaMieszany(Dostawca):
                 raise TypeError(
                     f"{type(d).__name__} nie jest Dostawca - bezpiecznik "
                     f"trzyma stan w dostawcy i nie mialby go gdzie zapisac")
-        if triaz.model_triazu == analiza.model_analizy:
+        modele = [triaz.model_triazu, triaz.model_analizy,
+                  analiza.model_triazu, analiza.model_analizy]
+        if len(set(modele)) != len(modele):
+            # Kierowanie idzie PO NAZWIE MODELU (`_dla`), a od 2026-09-22 kazdy
+            # z czterech modeli moze byc zadany (zejscia awaryjne w obie
+            # strony). Powtorzona nazwa trafialaby raz tu, raz tam.
             raise ValueError(
-                "model triazu i model analizy sa identyczne - nie da sie "
-                "rozstrzygnac, do ktorego dostawcy skierowac zapytanie")
+                f"modele mieszanki musza byc rozne, a sa: {modele} - nie da sie "
+                f"rozstrzygnac, do ktorego dostawcy skierowac zapytanie")
         self._triaz = triaz
         self._analiza = analiza
         # Licznik odmow POD RZAD i chwila odciecia siedza w DOSTAWCY, ktory
@@ -810,7 +821,7 @@ class DostawcaMieszany(Dostawca):
         założenie przestaje być prawdziwe przy pierwszej zmianie w potoku,
         po cichu i z zachowaniem poprawnego wyglądu wyniku.
         """
-        if model == self.model_triazu:
+        if model in (self.model_triazu, self._triaz.model_analizy):
             return self._triaz
         if model in (self.model_analizy, self._analiza.model_triazu):
             return self._analiza
@@ -842,11 +853,11 @@ class DostawcaMieszany(Dostawca):
         dostawca = self._dla(model)
         if model == self.model_triazu and not dostawca.czy_ma_czym_pytac():
             return await self._triaz_zapasowy(system, user, schema, max_tokens)
+        if model == self.model_analizy and not dostawca.czy_ma_czym_pytac():
+            return await self._analiza_zapasowa(system, user, schema, max_tokens)
         if not dostawca.czy_ma_czym_pytac():
-            # ANALIZA NIE MA ZEJSCIA AWARYJNEGO (patrz nizej), wiec odciety
-            # dostawca analizy znaczy: w tym cyklu analizy nie bedzie. Mowimy to
-            # WPROST i bez wywolania API, zamiast oddawac ten sam wyjatek raz na
-            # artykul - wolajacy ma z czego zrobic jeden warunek.
+            # Model zapasowy zadany wprost u odcietego dostawcy - nie ma juz
+            # dokad zejsc. Mowimy to WPROST i bez wywolania API.
             raise BrakDostawcy(
                 f"analiza niemozliwa: {dostawca.nazwa} — "
                 f"{dostawca.powod_niedostepnosci()}")
@@ -858,13 +869,11 @@ class DostawcaMieszany(Dostawca):
             return data, usage
         except Przeciazony as e:
             self._zanotuj_odmowe(dostawca, e)
+            if model == self.model_analizy:
+                # ANALIZA SCHODZI NA DOSTAWCE TRIAZU - decyzja wlasciciela
+                # z 2026-09-22, odwracajaca poprzednia. Patrz `_analiza_zapasowa`.
+                return await self._analiza_zapasowa(system, user, schema, max_tokens)
             if model != self.model_triazu:
-                # ANALIZA NIE MA ZEJSCIA AWARYJNEGO, i to jest decyzja.
-                #
-                # Analiza WYTWARZA wartosc cechy `news_sent`. Podmiana modelu
-                # w polowie doby wstawilaby w srodek szeregu uskok, ktorego
-                # kalibracja wagi nie zaklada - a brakujaca analiza to tylko
-                # brakujacy wiersz, ktory widac. Uskok jest gorszy niz dziura.
                 raise
             # TRIAZ WOLNO PRZERZUCIC, bo on WYBIERA artykuly, a nie ocenia je.
             # Zmiana modelu zmienia probke, nie wartosc cechy - a triaz, ktory
@@ -934,25 +943,25 @@ class DostawcaMieszany(Dostawca):
                   file=sys.stderr, flush=True)
         else:
             print(f"[llm] analiza: {dostawca.nazwa} — {powod}; analiza "
-                  f"WSTRZYMANA na {ile_s / 60:.0f} min (zejscia awaryjnego nie "
-                  f"ma - podmiana modelu wstawilaby uskok w cechę news_sent)",
+                  f"przechodzi na {self._triaz.nazwa}/{self._triaz.model_analizy} "
+                  f"na {ile_s / 60:.0f} min — UWAGA: uskok w cesze news_sent, "
+                  f"wiersze sa podpisane modelem (news.article_analysis.model)",
                   file=sys.stderr, flush=True)
 
     def czy_ma_czym_pytac(self) -> bool:
-        """Mieszanka ma czym pytac, dopoki zyje dostawca ANALIZY.
+        """Mieszanka ma czym pytac, dopoki zyje KTORYKOLWIEK dostawca.
 
-        Nie "dopoki zyje ktorykolwiek". Analiza nie ma zejscia awaryjnego, wiec
-        odciety dostawca analizy znaczy, ze w tym cyklu nie powstanie ANI JEDNA
-        wartosc cechy `news_sent`. Sam triaz niczego nie zapisuje - artykul,
-        ktory go nie przejdzie, nie zostawia wiersza - wiec triaz bez analizy to
-        wydatek bez sladu. Odciecie OBU dostawcow jest szczegolnym przypadkiem
-        tego samego warunku, a nie osobna regula.
+        Od 2026-09-22 analiza schodzi na dostawce triazu (`_analiza_zapasowa`),
+        a triaz na dostawce analizy (`_triaz_zapasowy`), wiec jeden zywy
+        dostawca wystarcza do calego potoku. Do tej daty liczyl sie wylacznie
+        dostawca ANALIZY - i pusty rachunek Anthropica zatrzymywal ceche
+        `news_sent` na 13 dni, mimo zywego klucza Gemini.
 
         Uwaga dla wolajacego: False znaczy "nie analizuj w tym cyklu", a NIE
         "przerwij cykl". Artykuly nadal trzeba zapisywac - patrz kontrakt
         w `Dostawca`.
         """
-        return self._analiza.czy_ma_czym_pytac()
+        return self._analiza.czy_ma_czym_pytac() or self._triaz.czy_ma_czym_pytac()
 
     def powod_niedostepnosci(self) -> str:
         powody = [f"{d.nazwa}: {d.powod_niedostepnosci()}"
@@ -1030,6 +1039,42 @@ class DostawcaMieszany(Dostawca):
 
     def _dla_triazu_zapasowy(self) -> str:
         return self._analiza.model_triazu
+
+    async def _analiza_zapasowa(self, system: str, user: str, schema: dict,
+                                max_tokens: int) -> tuple[dict, dict]:
+        """ANALIZA SCHODZI NA DOSTAWCE TRIAZU. Decyzja wlasciciela z 2026-09-22.
+
+        Do tej daty analiza zejscia NIE MIALA - z uzasadnieniem, ze podmiana
+        modelu wstawia w szereg `news_sent` uskok, ktorego kalibracja wagi nie
+        zaklada, a brakujacy wiersz przynajmniej widac. Rachunek za to
+        wystawilo zycie: pusty kredyt Anthropica od 9 do 22 wrzesnia 2026
+        znaczyl 13 dni bez ANI JEDNEJ wartosci cechy przy zywym, darmowym
+        kluczu Gemini. Cecha miala wtedy 140 wierszy - nie bylo szeregu, ktory
+        uskok moglby zepsuc, byla dziura, ktora rosla. Wlasciciel zdecydowal:
+        dziura jest gorsza niz uskok.
+
+        Co zostaje z poprzedniej zasady i CHRONI przed cicha podmiana:
+          * kazdy wiersz `news.article_analysis` niesie `model` - trener moze
+            odfiltrowac albo porownac okresy,
+          * zejscie jest WYKRZYCZANE w logu przy kazdym odcieciu
+            (`_zanotuj_odmowe`), nigdy ciche,
+          * wraca samo: po `ZWARCIE_*_S` dostawca analizy jest pytany znowu,
+            wiec doladowane konto przejmuje analize bez restartu.
+        """
+        if not self._triaz.czy_ma_czym_pytac():
+            raise BrakDostawcy(f"obaj dostawcy odcieci — {self.powod_niedostepnosci()}")
+        zapasowy = self._triaz.model_analizy
+        try:
+            data, usage = await self._zapytaj_u(
+                self._triaz, zapasowy, system=system, user=user,
+                schema=schema, max_tokens=max_tokens)
+        except Przeciazony as e:
+            # Odmowa na sciezce zapasowej tez sie liczy - z tego samego powodu
+            # co w `_triaz_zapasowy`.
+            self._zanotuj_odmowe(self._triaz, e)
+            raise
+        self._triaz._odmowy_pod_rzad = 0
+        return data, usage
 
     async def zamknij(self) -> None:
         for d in (self._triaz, self._analiza):

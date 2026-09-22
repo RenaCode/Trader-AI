@@ -434,40 +434,35 @@ def test_triaz_schodzi_na_zapasowego_przy_LIMICIE():
     assert m.koszt(m.model_triazu, usage) == 42.0
 
 
-def test_ANALIZA_nie_ma_zejscia_awaryjnego():
-    """Analiza wytwarza wartość cechy `news_sent`. Podmiana modelu w połowie
-    doby wstawiłaby w środek szeregu uskok, którego kalibracja wagi nie zakłada.
+def test_ANALIZA_schodzi_na_dostawce_triazu_gdy_mocny_odmawia():
+    """Decyzja właściciela z 2026-09-22, odwracająca poprzednią: pusty kredyt
+    Anthropica od 9 do 22 września znaczył 13 dni bez ANI JEDNEJ wartości
+    cechy `news_sent` przy żywym kluczu Gemini. Cecha miała 140 wierszy —
+    nie było szeregu, który uskok mógłby zepsuć, była dziura, która rosła.
 
-    Brakująca analiza to tylko brakujący wiersz, który widać. Uskok jest gorszy
-    niż dziura.
+    Ochrona przed CICHĄ podmianą zostaje: wiersz jest podpisany modelem,
+    który go wytworzył, a zejście krzyczy w logu (`_zanotuj_odmowe`).
     """
     import asyncio
 
     from services.ingest.llm import DostawcaMieszany, Przeciazony
 
     class ZajetyNaAnalizie(_Fałszywy):
-        """Zapisuje, o co go pytano, ZANIM odmówi.
-
-        To jest sedno testu: bez zapisu nie da się odróżnić „nie ponowiono"
-        od „ponowiono i też się nie udało" — a pierwsza wersja tego testu
-        przechodziła w obu przypadkach.
-        """
-
         async def zapytaj(self, *, model, **kw):
             self.pytania.append(model)
             raise Przeciazony("429")
 
+    tani = _Fałszywy("tani", "flash-lite", "flash", (0.3, 2.5))
     drogi = ZajetyNaAnalizie("drogi", "haiku", "opus", (5.0, 25.0))
-    m = DostawcaMieszany(triaz=_Fałszywy("tani", "flash-lite", "flash", (0.3, 2.5)),
-                         analiza=drogi)
-    with pytest.raises(Przeciazony):
-        asyncio.run(m.zapytaj(model=m.model_analizy, system="", user="",
-                              schema={}, max_tokens=1))
+    m = DostawcaMieszany(triaz=tani, analiza=drogi)
+    data, usage = asyncio.run(m.zapytaj(model=m.model_analizy, system="", user="",
+                                        schema={}, max_tokens=1))
 
-    # ANI RAZU modelem triażu. Ponowienie analizy modelem `haiku` byłoby cichą
-    # podmianą: wartość cechy wytworzyłby słabszy model, a dziennik pokazałby
-    # analizę jak każdą inną.
-    assert drogi.pytania == ["opus"]
+    assert drogi.pytania == ["opus"], "mocny ma być spytany PIERWSZY"
+    assert tani.pytania == ["flash"], (
+        "zejście ma iść na model ANALIZY taniego dostawcy, nie na jego triaż")
+    assert usage["model_uzyty"] == "flash", (
+        "wiersz cechy musi być podpisany modelem, który go NAPRAWDĘ wytworzył")
 
 
 def test_zwykly_blad_NIE_uruchamia_dostawcy_zapasowego():
@@ -600,16 +595,21 @@ def test_UDANE_zapytanie_zeruje_licznik_odmow():
     assert ai._triaz._odmowy_pod_rzad == 0
 
 
-def test_ANALIZA_nadal_nie_ma_zejscia_awaryjnego():
-    """Analiza WYTWARZA wartość cechy `news_sent`. Podmiana modelu w połowie
-    doby wstawiłaby w środek szeregu uskok, którego kalibracja wagi nie zakłada
-    — a brakująca analiza to tylko brakujący wiersz, który widać. Bezpiecznik
-    nie może tego przypadkiem poluzować."""
-    from services.ingest.llm import Przeciazony
+def test_ANALIZA_bez_zadnego_zywego_dostawcy_daje_BrakDostawcy():
+    """Zejście ma dokąd iść tylko wtedy, gdy dostawca triażu żyje. Gdy odmawia
+    i on, wołający dostaje jeden jawny wyjątek, nie serię prób."""
+    from services.ingest.llm import BrakDostawcy, Przeciazony
 
-    ai, _, analiza = _mieszany()
-    analiza.zapytaj = _Odmawiajacy().zapytaj
+    ai, triaz, analiza = _mieszany()          # triaż = _Odmawiajacy
+    analiza.zapytaj = _Odmawiajacy().zapytaj  # analiza też odmawia
     with pytest.raises(Przeciazony):
+        _pytaj(ai, ai.model_analizy)          # odmówili obaj: mocny, potem tani
+    # kolejne odmowy zwierają bezpieczniki; potem nikt nie jest już pytany
+    for _ in range(4):
+        with pytest.raises((Przeciazony, BrakDostawcy)):
+            _pytaj(ai, ai.model_analizy)
+    assert not ai.czy_ma_czym_pytac()
+    with pytest.raises(BrakDostawcy):
         _pytaj(ai, ai.model_analizy)
 
 
@@ -959,9 +959,8 @@ def test_awaria_TRWALA_u_OBU_daje_jawny_sygnal_ze_NIE_MA_CZYM_PYTAC():
 
 
 def test_dostawca_ANALIZY_tez_ma_bezpiecznik():
-    """Analiza nie ma zejscia awaryjnego i wlasnie dlatego potrzebuje zwarcia:
-    bez niego kazdy artykul, ktory przeszedl triaz, kupuje wlasna odmowe
-    u dostawcy, o ktorym juz wiadomo, ze odmowi."""
+    """Bez zwarcia każdy artykuł, który przeszedł triaż, kupuje własną odmowę
+    u dostawcy, o którym już wiadomo, że odmówi — zanim zejdzie na zapasowego."""
     from services.ingest.llm import DostawcaMieszany
 
     class Zajety(_Dzialajacy):
@@ -970,23 +969,23 @@ def test_dostawca_ANALIZY_tez_ma_bezpiecznik():
             raise Przeciazony("HTTP 429")
 
     triaz, analiza = _Dzialajacy(), Zajety()
+    triaz.nazwa, triaz.model_triazu, triaz.model_analizy = "tani", "flash-lite", "flash"
     analiza.nazwa, analiza.model_triazu, analiza.model_analizy = "drogi", "haiku", "opus"
     ai = DostawcaMieszany(triaz=triaz, analiza=analiza)
 
     for _ in range(5):
-        with pytest.raises((Przeciazony, BrakDostawcy)):
-            _pytaj(ai, ai.model_analizy)
+        _pytaj(ai, ai.model_analizy)          # każde kończy się u taniego
     assert analiza.wywolan == ai.PROG_ZWARCIA, (
         f"po {ai.PROG_ZWARCIA} odmowach z rzedu dostawca analizy ma nie byc "
         f"pytany, a dostal {analiza.wywolan} zapytan")
-    assert not ai.czy_ma_czym_pytac(), "bez dostawcy analizy cykl nie ma co robic"
+    assert triaz.wywolan == 5, "kazda analiza ma trafic do zapasowego"
+    assert ai.czy_ma_czym_pytac(), (
+        "zywy dostawca triazu wystarcza do analizy - to sedno decyzji z 2026-09-22")
 
 
-def test_ANALIZA_dalej_nie_ma_zejscia_na_dostawce_triazu():
-    """Bezpiecznik nie moze przy okazji poluzowac tej zasady. Analiza WYTWARZA
-    wartosc cechy `news_sent`; podmiana modelu wstawia w srodek szeregu uskok,
-    ktorego kalibracja wagi nie zaklada. Brakujaca analiza to tylko brakujacy
-    wiersz, ktory widac."""
+def test_ANALIZA_po_odcieciu_mocnego_idzie_do_taniego_BEZ_pytania_martwego():
+    """Po zwarciu bezpiecznika analiza NIE dotyka już martwego dostawcy —
+    idzie wprost do taniego, a jego wiersz jest podpisany jego modelem."""
     from services.ingest.llm import DostawcaMieszany
 
     triaz = _Dzialajacy()
@@ -994,12 +993,13 @@ def test_ANALIZA_dalej_nie_ma_zejscia_na_dostawce_triazu():
     analiza = _Martwy("drogi", "haiku", "opus")
     ai = DostawcaMieszany(triaz=triaz, analiza=analiza)
 
-    with pytest.raises(Wyczerpany):
-        _pytaj(ai, ai.model_analizy)
-    with pytest.raises(BrakDostawcy):
-        _pytaj(ai, ai.model_analizy)
-    assert triaz.wywolan == 0, (
-        "analiza zeszla na model triazu — cecha `news_sent` dostalaby uskok")
+    _, usage = _pytaj(ai, ai.model_analizy)   # martwy odmawia TRWALE -> tani
+    assert usage["model_uzyty"] == "flash"
+    assert analiza.wywolan == 1
+    _, usage = _pytaj(ai, ai.model_analizy)
+    assert analiza.wywolan == 1, "martwy nie ma byc pytany drugi raz"
+    assert triaz.wywolan == 2
+    assert usage["model_uzyty"] == "flash"
 
 
 # ============ stan bezpiecznika MUSI przezyc cykl ============
