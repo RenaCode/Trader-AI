@@ -2049,8 +2049,12 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
     return stats
 
 
-async def zbuduj_adapter(url: str, mode: str):
-    """Adapter gieldy dla trybu, z hostem WZIETYM Z ref.venue.
+async def zbuduj_adapter(url: str, mode: str, engine: str = "crypto"):
+    """Adapter gieldy dla trybu I SILNIKA, z hostem WZIETYM Z ref.venue.
+
+    Gielda wynika z silnika: `crypto` -> bybit, `equity` -> alpaca (0046).
+    Wybor klasy adaptera siedzi w `services.exchanges.fabryka` - tu tylko
+    klucz i host.
 
     HOST Z TABELI, NIE Z TABLICY W ADAPTERZE. Podmiot unijny ma wlasne hosty,
     a klucz z bybit.eu odbity od hosta globalnego wraca z kodem 10003 -
@@ -2059,7 +2063,7 @@ async def zbuduj_adapter(url: str, mode: str):
     credentials.py przed nia ostrzegal.
     """
     from services.api.security import SecretBox
-    from services.exchanges.bybit import BybitAdapter
+    from services.exchanges.fabryka import zbuduj_adapter_gieldy
 
     with psycopg.connect(url, row_factory=dict_row) as conn:
         # NAJNOWSZY KLUCZ, NIE NAJSTARSZY. Rotacja zostawia na chwile dwa
@@ -2072,10 +2076,10 @@ async def zbuduj_adapter(url: str, mode: str):
         # inaczej silnik po restarcie handluje z innego rachunku.
         klucze = conn.execute(
             "SELECT c.id, c.key_hint, c.key_enc, c.secret_enc,"
-            "       v.demo_host, v.live_host"
+            "       v.code AS venue_code, v.demo_host, v.live_host"
             "  FROM app.api_credential c JOIN ref.venue v ON v.id = c.venue_id"
-            " WHERE v.code = 'bybit' AND c.mode::text = %s AND c.active"
-            " ORDER BY c.created_at DESC, c.id DESC", (mode,)).fetchall()
+            " WHERE v.engine::text = %s AND c.mode::text = %s AND c.active"
+            " ORDER BY c.created_at DESC, c.id DESC", (engine, mode)).fetchall()
     cred = klucze[0] if klucze else None
     # NIEDOKONCZONA ROTACJA MA BYC SLYSZALNA. Wybor jest juz jednoznaczny,
     # ale dwa aktywne klucze naraz to stan, ktorego nikt nie zaplanowal:
@@ -2089,13 +2093,14 @@ async def zbuduj_adapter(url: str, mode: str):
         # BRAK KLUCZA PRZY WLACZONEJ EGZEKUCJI TO BLAD KONFIGURACJI, nie powod
         # do cichego zejscia na rachunek papierowy. Silnik udajacy, ze handluje,
         # jest gorszy niz silnik, ktory nie wstal.
-        sys.exit(f"egzekucja na giełdzie wymaga aktywnego klucza dla trybu {mode}")
+        sys.exit(f"egzekucja na giełdzie wymaga aktywnego klucza dla silnika {engine} "
+                 f"i trybu {mode}")
 
     box = SecretBox()
-    return BybitAdapter(api_key=box.decrypt(bytes(cred["key_enc"])),
-                        api_secret=box.decrypt(bytes(cred["secret_enc"])),
-                        mode=mode,
-                        host=cred["demo_host"] if mode == "demo" else cred["live_host"])
+    return zbuduj_adapter_gieldy(
+        cred["venue_code"], box.decrypt(bytes(cred["key_enc"])),
+        box.decrypt(bytes(cred["secret_enc"])), mode=mode,
+        demo_host=cred["demo_host"], live_host=cred["live_host"])
 
 
 async def main() -> int:
@@ -2145,7 +2150,7 @@ async def main() -> int:
 
     gielda = None
     if args.egzekucja == "gielda":
-        gielda = await zbuduj_adapter(url, args.mode)
+        gielda = await zbuduj_adapter(url, args.mode, args.engine)
         print(f"EGZEKUCJA NA GIEŁDZIE ({args.mode}) — zlecenia idą naprawdę.")
         # POZYCJE PAPIEROWE NIE PRZECHODZA NA GIELDE - patrz `zamknij_pozycje_papierowe`.
         with psycopg.connect(url, row_factory=dict_row) as conn:

@@ -270,7 +270,7 @@ async def main() -> int:
                    min_wartosc=inst["min_notional"],
                    min_ilosc=Decimal(inst["min_ilosc"]) if inst["min_ilosc"] else None)
         url = os.environ["DATABASE_URL"]
-        adapter = await zbuduj_adapter(url, args.mode)
+        adapter = await zbuduj_adapter(url, args.mode, args.engine)
         print(f"próba egzekucji na {inst['symbol']}, cena rynkowa {inst['cena']}, "
               f"limit {UDZIAL_CENY:.0%} rynku (poza zasięgiem)")
         try:

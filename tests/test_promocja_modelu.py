@@ -223,8 +223,8 @@ class PolaczenieZKluczami:
 
 def _klucz(nr):
     return {"id": nr, "key_hint": f"••••{nr:04d}", "key_enc": f"k{nr}".encode(),
-            "secret_enc": f"s{nr}".encode(), "demo_host": "https://demo",
-            "live_host": "https://live"}
+            "secret_enc": f"s{nr}".encode(), "venue_code": "bybit",
+            "demo_host": "https://demo", "live_host": "https://live"}
 
 
 @pytest.fixture
@@ -239,8 +239,10 @@ def adapter_na_atrapie(monkeypatch):
             return dane.decode()
 
     class FalszywyAdapter:
-        def __init__(self, **kw):
-            self.kw = kw
+        # Fabryka (services.exchanges.fabryka) wola adapter POZYCYJNIE
+        # (klucz, sekret) i nazwanymi (mode, host) - atrapa przyjmuje oba.
+        def __init__(self, api_key=None, api_secret=None, **kw):
+            self.kw = dict(kw, api_key=api_key, api_secret=api_secret)
 
     monkeypatch.setattr(security, "SecretBox", FalszywySecretBox)
     monkeypatch.setattr(bybit, "BybitAdapter", FalszywyAdapter)

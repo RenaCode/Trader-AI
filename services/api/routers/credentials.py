@@ -163,15 +163,12 @@ async def test_credential(credential_id: int, request: Request,
     api_key = box.decrypt(bytes(row["key_enc"]))
     api_secret = box.decrypt(bytes(row["secret_enc"]))
 
-    if row["venue_code"] == "bybit":
-        from services.exchanges.bybit import BybitAdapter
-        # Host bierzemy z ref.venue, nie z tablicy w adapterze. Podmiot unijny
-        # ma wlasne hosty, a klucz z bybit.eu odbija sie od globalnego z kodem
-        # 10003 - komunikat nie do odroznienia od zlego klucza.
-        adapter = BybitAdapter(api_key, api_secret, mode=row["mode"],
-                               host=row["demo_host"] if row["mode"] == "demo"
-                               else row["live_host"])
-    else:
+    from services.exchanges.fabryka import zbuduj_adapter_gieldy
+    try:
+        adapter = zbuduj_adapter_gieldy(row["venue_code"], api_key, api_secret,
+                                        mode=row["mode"], demo_host=row["demo_host"],
+                                        live_host=row["live_host"])
+    except KeyError:
         raise HTTPException(501, f"Adapter dla {row['venue_code']} nie jest jeszcze gotowy")
 
     try:
