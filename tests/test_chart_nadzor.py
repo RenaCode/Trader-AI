@@ -43,6 +43,14 @@ CHART = Path(os.environ.get("CHART_TRADER", KORZEN / "charts/trader"))
 SZABLONY = CHART / "templates"
 API_MAIN = Path(os.environ.get("API_MAIN", KORZEN / "services/api/main.py"))
 
+# Stan przejsciowy 22.09.2026 - patrz test_zywotnosc_API_nie_pyta_o_baze.
+# `/api/zywy` jest celem; `/api/health` wolno wskazywac WYLACZNIE dopoki
+# produkcja chodzi na obrazie sprzed tej poprawki. Podbicie tagu zapala
+# tamten test, wiec ta para stalych jest calym mechanizmem przypomnienia.
+ZYWOTNOSC_DOCELOWA = "/api/zywy"
+TAG_SPRZED_POPRAWKI = "sha-0ea6f54"
+VALUES = yaml.safe_load((CHART / "values.yaml").read_text(encoding="utf-8"))
+
 _KOMENTARZ_HELMA = re.compile(r"\{\{-?/\*.*?\*/-?\}\}", re.S)
 _AKCJA_HELMA = re.compile(r"\{\{-?.*?-?\}\}", re.S)
 
@@ -228,20 +236,49 @@ def test_zywotnosc_API_nie_pyta_o_baze():
     schema_migrations`: trzy wolne odpowiedzi w oknie kopii (03:17) albo trenera
     (04:40) i pod API ginie, a `migrate` wchodzi w backoff — dwuminutowa przerwa
     bazy robi się kilkuminutową niedostępnością jedynego miejsca, w którym widać,
-    co się dzieje."""
+    co się dzieje.
+
+    Stan przejściowy 22.09.2026: ścieżka stoi z powrotem na `/api/health`,
+    bo `/api/zywy` istnieje w kodzie, ale NIE w obrazie chodzącym na produkcji
+    (`sha-0ea6f54`). ArgoCD wdraża chart natychmiast po merge'u, a tag obrazu
+    podbija się ręcznie — sonda pytała więc o endpoint nieznany uruchomionemu
+    procesowi i kubelet zabijał kontener API co niecałe półtorej minuty.
+
+    Dlatego reguła jest tu DWUCZĘŚCIOWA i sama się rozwiązuje: dopóki tag jest
+    ten sprzed poprawki, wolno wskazywać `/api/health`; z chwilą podbicia tagu
+    ten test ZACZNIE PADAĆ, dopóki ktoś nie przywróci `/api/zywy`. Wyłączenie
+    strażnika na czas obejścia zamieniłoby obejście w stan stały."""
     sonda = _kontener_api()["livenessProbe"]
     sciezka = sonda["httpGet"]["path"]
-    assert sciezka != "/api/health", (
-        "liveness wskazuje endpoint chodzący do bazy — restart nie naprawia "
-        "wolnej bazy, a zabija jedyny widok na system")
     kod = API_MAIN.read_text(encoding="utf-8")
-    assert f'"{sciezka}"' in kod, f"{sciezka} nie istnieje w {API_MAIN.name}"
+    assert f'"{sciezka}"' in kod, (
+        f"{sciezka} nie istnieje w {API_MAIN.name} — sonda pyta o endpoint, "
+        f"którego proces nie zna, i zabije kontener po failureThreshold próbach")
+
+    tag = VALUES["api"]["image"]["tag"]
+    if tag == TAG_SPRZED_POPRAWKI:
+        assert sciezka == "/api/health", (
+            "dopóki produkcja chodzi na obrazie sprzed tej poprawki, liveness "
+            "MUSI wskazywać endpoint, który ten obraz zna")
+        return
+
+    assert sciezka != "/api/health", (
+        f"tag obrazu to {tag}, czyli nie jest już obrazem sprzed poprawki — "
+        "przywróć liveness na /api/zywy. Endpoint chodzący do bazy zabija poda "
+        "przy WOLNEJ bazie, a restart wolnej bazy nie naprawia")
 
 
 def test_endpoint_zywotnosci_niczego_nie_odpytuje():
     """Kanarek do poprzedniego. Endpoint może się nazywać `/api/zywy` i i tak
-    chodzić do bazy — wtedy przeniesienie sondy nie zmieniło nic."""
+    chodzić do bazy — wtedy przeniesienie sondy nie zmieniło nic.
+
+    W stanie przejściowym (liveness na `/api/health`, patrz test wyżej) sprawdza
+    endpoint DOCELOWY, a nie ten wpisany w chart — inaczej milczałby dokładnie
+    wtedy, gdy obejście trwa, i nie zauważyłby, że `/api/zywy` w międzyczasie
+    zaczął chodzić do bazy."""
     sciezka = _kontener_api()["livenessProbe"]["httpGet"]["path"]
+    if sciezka == "/api/health":
+        sciezka = ZYWOTNOSC_DOCELOWA
     kod = API_MAIN.read_text(encoding="utf-8")
     poczatek = kod.index(f'"{sciezka}"')
     nastepny = kod.find("\n@app.", poczatek)

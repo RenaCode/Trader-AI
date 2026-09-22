@@ -108,8 +108,26 @@ spec:
           # Oba progi wpisane JAWNIE, mimo ze rowne domyslnym: sonda, ktora
           # zabija kontener, nie ma prawa opierac sie na wartosciach, ktorych
           # nie widac w pliku.
+          #
+          # 22.09.2026, PO WDROZENIU: sciezka wrocila TYMCZASOWO na
+          # `/api/health`. `/api/zywy` istnieje dopiero w kodzie z tego samego
+          # dnia, a na produkcji stal obraz `sha-0ea6f54` - ArgoCD synchronizuje
+          # `charts/` NATYCHMIAST po merge'u, natomiast tag obrazu podbija sie
+          # recznie, po zbudowaniu na VPS-ie. Przez te roznice sonda pytala
+          # o endpoint, ktorego uruchomiony proces nie znal: 404, trzy probki
+          # po 20 s i kubelet zabijal kontener API co niecale poltorej minuty.
+          #
+          # `/api/zywy` wraca tutaj DOPIERO po podbiciu `api.image.tag` na
+          # obraz zbudowany z tego commita. Kolejnosc jest czescia tej zmiany,
+          # nie formalnoscia - endpoint w chartcie nie moze wyprzedzac kodu
+          # w obrazie.
+          #
+          # Dopoki stoi `/api/health`, zywotnosc zalezy od bazy - ale
+          # `timeoutSeconds: 5` i `failureThreshold: 3` ZOSTAJA, wiec domyslny
+          # prog 1 s, ktory byl progiem na OBCIAZENIE (okno kopii 03:17
+          # i trenera 04:40), a nie na awarie, jest usuniety.
           livenessProbe:
-            httpGet: { path: /api/zywy, port: 8000 }
+            httpGet: { path: /api/health, port: 8000 }
             initialDelaySeconds: 25
             periodSeconds: 20
             timeoutSeconds: 5
