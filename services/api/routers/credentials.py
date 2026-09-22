@@ -80,8 +80,10 @@ async def list_credentials(user: dict = Depends(current_user)):
 
 @router.get("/venues")
 async def venues(user: dict = Depends(current_user)):
+    from services.exchanges.fabryka import OBSLUGIWANE
     rows = await fetch_all(
-        "SELECT code, name, engine, is_24_7, demo_host FROM ref.venue ORDER BY engine")
+        "SELECT code, name, engine, is_24_7, demo_host FROM ref.venue"
+        " WHERE code = ANY(%s) ORDER BY engine", (list(OBSLUGIWANE),))
     return [dict(r) for r in rows]
 
 

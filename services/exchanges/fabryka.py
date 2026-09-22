@@ -8,6 +8,11 @@ w adapterze (patrz komentarz w `credentials.py`).
 """
 from __future__ import annotations
 
+# Gieldy, z ktorymi UMIEMY rozmawiac. UI pokazuje w formularzu kluczy tylko
+# te - wpis w `ref.venue` bez adaptera (np. `ibkr`, placeholder z seeda 0008
+# z hostem localhost) kusilby do wpisania klucza, ktorego nic nie uzyje.
+OBSLUGIWANE = ("bybit", "alpaca")
+
 
 def zbuduj_adapter_gieldy(venue_code: str, api_key: str, api_secret: str, *,
                           mode: str, demo_host: str | None, live_host: str | None):
