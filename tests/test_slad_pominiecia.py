@@ -162,11 +162,17 @@ def test_wykrywacz_NIE_krzyczy_na_sladzie_zapisanym():
 # --------------------------------------------- zgodność kodu ze schematem
 
 def _check_powodow() -> set[str]:
-    """Dopuszczalne wartości `powod` odczytane z migracji, a nie przepisane."""
-    sql = MIGRACJA.read_text(encoding="utf-8")
-    m = re.search(r"CHECK \(powod IN \(([^)]*)\)\)", sql)
-    assert m, "migracja 0041 nie ma CHECK-a na kolumnie `powod`"
-    return set(re.findall(r"'([^']+)'", m.group(1)))
+    """Dopuszczalne wartości `powod` odczytane z migracji, a nie przepisane.
+
+    OSTATNIA migracja, która definiuje ten CHECK, wygrywa — 0048 przebudowała
+    ograniczenie z 0041. Czytanie tylko 0041 opisywałoby bazę sprzed niej."""
+    ostatni = None
+    for plik in sorted(MIGRACJA.parent.glob("*.sql")):
+        m = re.search(r"CHECK \(powod IN \(([^)]*)\)\)", plik.read_text(encoding="utf-8"))
+        if m:
+            ostatni = m
+    assert ostatni, "żadna migracja nie ma CHECK-a na kolumnie `powod`"
+    return set(re.findall(r"'([^']+)'", ostatni.group(1)))
 
 
 def _powody_w_kodzie() -> set[str]:
@@ -236,3 +242,19 @@ def test_licznik_pominiec_jest_ZAKLADANY_a_nie_dopisywany_warunkowo():
     for klucz in ("pominiete_bez_cech", "pominiete_bez_ceny", "instrumenty"):
         assert f'"{klucz}": 0' in init.group(1), \
             f"`{klucz}` nie jest zakładany zerem przy starcie przebiegu"
+
+
+def test_bramka_pokrycia_odklada_decyzje_PRZED_jej_zapisem():
+    """22.09.2026: przez 11 dni silnik decydował na 2 z 9 sygnałów, bo `MIN_CECH`
+    liczy sztuki, a 8 cech pochodnych jest gotowych 20–35 min przed cenowymi.
+    Bramka ma mierzyć POKRYCIE WAG i odkładać decyzję (continue w pierwszym
+    przebiegu, ze śladem), a nie ją zapisywać z pokryciem 0,05."""
+    from services.engine import loop
+
+    assert 0.5 <= loop.MIN_POKRYCIE < 1.0, "1,0 odkładałoby decyzję przy braku newsów"
+    zrodlo = LOOP.read_text(encoding="utf-8")
+    bramka = zrodlo.index("if pokrycie < MIN_POKRYCIE:")
+    slad = zrodlo.index('"niepelne_sygnaly"', bramka)
+    zapis = zrodlo.index("oceny.append(", bramka)
+    assert bramka < slad < zapis, "ślad odłożenia ma poprzedzać dopisanie do ocen"
+    assert "continue" in zrodlo[slad:zapis]

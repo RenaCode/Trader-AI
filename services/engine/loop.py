@@ -343,6 +343,17 @@ def decided_for_bar(cur, engine: str, mode: str, instrument_id: int,
 # sie nie liczy".
 MIN_CECH = 4
 
+# Ponizej tego POKRYCIA WAG decyzja jest ODKLADANA do nastepnego cyklu w oknie
+# swiecy, a nie podejmowana. `MIN_CECH` liczy sztuki; to liczy, jaka czesc
+# budzetu wag ma czym sie odezwac - i to jest wlasciwa miara. Zmierzone
+# 2026-09-22: 8 cech pochodnych (funding, arkusz, long_ratio, oi, newsy)
+# spelnialo MIN_CECH 20-35 min PRZED policzeniem cech cenowych, wiec silnik
+# przez 11 dni decydowal na 2 z 9 sygnalow przy pokryciu 0,02-0,10 - strategia,
+# ktorej trener nigdy nie modelowal (train.load_panel skleja komplet).
+# 0,9, nie 1,0: pojedyncza cecha bez wartosci (np. brak newsow w oknie) nie ma
+# odkladac decyzji bez konca. Patrz migracja 0048.
+MIN_POKRYCIE = 0.9
+
 
 def zapisz_pominiecie(cur, engine: str, mode: str, instrument_id: int,
                       bar_start: datetime, powod: str, szczegol: str) -> None:
@@ -1664,6 +1675,8 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
              # journal.pominiecie (0041), bo heartbeat ma `engine` w kluczu
              # glownym i kazdy przebieg kasuje poprzedni.
              "pominiete_bez_cech": 0, "pominiete_bez_ceny": 0,
+             # Decyzje ODLOZONE przez niepelne pokrycie wag - patrz MIN_POKRYCIE.
+             "odlozone_niepelne": 0,
              # POTOK SPOZNIONY, A NIE MARTWY - podzbior `pominiete_bez_cech`.
              #
              # Rozroznienie jest tu cala trescią licznika. "Brak cech" znaczy
@@ -1808,6 +1821,22 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
         # samych sygnalow mogly by sie rozjechac i pokrycie opisywaloby
         # decyzje, ktorej nie podjeto.
         pokrycie = pokrycie_wag([c["name"] for c in contributions], regime, weights)
+        if pokrycie < MIN_POKRYCIE:
+            # DECYZJA ODLOZONA, NIE ODWOLANA - ta sama zasada co przy `MIN_CECH`
+            # wyzej, tylko z miara, ktora naprawde rozstrzyga. `decided_for_bar`
+            # nie zamyka swiecy, wiec cykl 20-35 min pozniej zobaczy komplet
+            # i zdecyduje po tej samej cenie zamkniecia. Ślad pod WLASNYM
+            # powodem, zeby "potok spozniony" dalo sie policzyc.
+            stats["odlozone_niepelne"] += 1
+            brakujace = sorted(set(SIGNALS) - {c["name"] for c in contributions})
+            zapisz_pominiecie(
+                cur, engine, mode, iid, bar_start, "niepelne_sygnaly",
+                f"pokrycie wag {pokrycie:.2f} < {MIN_POKRYCIE} dla świecy "
+                f"{bar_start:%Y-%m-%d %H:%M}; bez sygnałów: {', '.join(brakujace)}")
+            if verbose:
+                print(f"  {symbol:10s} odłożony — pokrycie wag {pokrycie:.2f}, "
+                      f"czekam na komplet cech (bez: {', '.join(brakujace)})")
+            continue
         if pokrycie < 1.0 - 1e-9:
             stats["niepelne_sygnaly"] += 1
         oceny.append({"iid": iid, "symbol": symbol, "kind": inst["kind"],
