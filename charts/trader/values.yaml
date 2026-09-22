@@ -16,7 +16,7 @@ imagePullSecrets: []
 api:
   image:
     repository: ghcr.io/renacode/trader-ai-api
-    tag: "sha-715a2dd"
+    tag: "sha-fba589b"
     pullPolicy: IfNotPresent
   resources:
     limits:   { cpu: 1000m, memory: 1Gi }
@@ -25,7 +25,7 @@ api:
 web:
   image:
     repository: ghcr.io/renacode/trader-ai-web
-    tag: "sha-715a2dd"
+    tag: "sha-fba589b"
     pullPolicy: IfNotPresent
   resources:
     limits:   { cpu: 200m, memory: 256Mi }
@@ -177,6 +177,26 @@ workers:
   market:
     enabled: true
     command: ["python", "services/ingest/market_worker.py", "--interval", "60"]
+    resources:
+      limits:   { cpu: 500m, memory: 384Mi }
+      requests: { cpu: 50m,  memory: 96Mi }
+
+  # GIELDA TRADYCYJNA (Alpaca, paper) - te same procesy co dla krypto, inny
+  # silnik. Dane rynkowe Alpaki wymagaja klucza (Alpaca Data), wiec worker
+  # czyta go z app.api_credential jak silnik (SECRETS_KEY ma z workers.yaml).
+  # Poza sesja (16:00-09:30 ET, weekendy) cykle sa puste - to norma, nie
+  # awaria; puls bije, bo cykl SIE UDAL. Osobne nazwy pulsu: market-equity,
+  # history-equity.
+  market-equity:
+    enabled: true
+    command: ["python", "services/ingest/market_worker.py", "--interval", "60", "--engine", "equity", "--depth", "1"]
+    resources:
+      limits:   { cpu: 500m, memory: 384Mi }
+      requests: { cpu: 50m,  memory: 96Mi }
+
+  history-equity:
+    enabled: true
+    command: ["python", "services/ingest/history_worker.py", "--interval", "1200", "--days", "3", "--timeframe", "1h", "--engine", "equity"]
     resources:
       limits:   { cpu: 500m, memory: 384Mi }
       requests: { cpu: 50m,  memory: 96Mi }
