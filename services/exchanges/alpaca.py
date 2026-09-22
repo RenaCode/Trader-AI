@@ -273,13 +273,34 @@ class AlpacaAdapter:
         return [Balance(currency=acc.get("currency", "USD"), total=_dec(acc.get("cash")),
                         available=_dec(acc.get("buying_power")))]
 
-    async def pozycje(self) -> dict[str, Decimal]:
-        """Ilosc akcji na koncie wg symbolu, ze znakiem (short ujemny)."""
-        out: dict[str, Decimal] = {}
+    async def stan_konta(self) -> dict:
+        """Kapital rachunku Z KSIAG GIELDY: equity, gotowka, wartosc pozycji.
+
+        To jest zrodlo krzywej kapitalu silnika equity, dopoki (i takze gdy)
+        silnik nie liczy jej z wlasnych wypelnien: paper Alpaki jest prawdziwym
+        rachunkiem z prawdziwa wycena, a nie nasza symulacja.
+        """
+        acc = await self._get("/v2/account")
+        long_mv = _dec(acc.get("long_market_value"))
+        short_mv = _dec(acc.get("short_market_value"))
+        return {"equity": _dec(acc.get("equity")), "cash": _dec(acc.get("cash")),
+                "ekspozycja": abs(long_mv) + abs(short_mv),
+                "waluta": acc.get("currency", "USD"), "status": acc.get("status")}
+
+    async def pozycje_szczegoly(self) -> list[dict]:
+        """Pozycje z wycena gieldy: ilosc ze znakiem, wartosc, niezrealizowany P&L."""
+        out = []
         for p in await self._get("/v2/positions") or []:
             q = _dec(p["qty"])
-            out[p["symbol"]] = -q if p.get("side") == "short" else q
+            out.append({"symbol": p["symbol"], "qty": -q if p.get("side") == "short" else q,
+                        "avg_price": _dec(p.get("avg_entry_price")),
+                        "market_value": _dec(p.get("market_value")),
+                        "unrealized_pl": _dec(p.get("unrealized_pl"))})
         return out
+
+    async def pozycje(self) -> dict[str, Decimal]:
+        """Ilosc akcji na koncie wg symbolu, ze znakiem (short ujemny)."""
+        return {p["symbol"]: p["qty"] for p in await self.pozycje_szczegoly()}
 
     async def wypelnienia(self, *, od_ms: int | None = None,
                           symbol: str | None = None) -> list[Wypelnienie]:

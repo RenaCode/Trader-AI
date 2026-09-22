@@ -299,3 +299,19 @@ def test_pozycje_ze_znakiem_dla_shorta():
 
     p = uruchom(_adapter(handler).pozycje())
     assert p == {"AAPL": D("10"), "TSLA": D("-3")}
+
+
+def test_stan_konta_i_pozycje_z_wycena_gieldy():
+    def handler(r):
+        if r.url.path == "/v2/account":
+            return _json(200, dict(KONTO, equity="100250.5", cash="60000",
+                                   long_market_value="40250.5", short_market_value="0"))
+        return _json(200, [{"symbol": "AAPL", "qty": "100", "side": "long",
+                            "avg_entry_price": "400", "market_value": "40250.5",
+                            "unrealized_pl": "250.5"}])
+
+    a = _adapter(handler)
+    st = uruchom(a.stan_konta())
+    assert st["equity"] == D("100250.5") and st["ekspozycja"] == D("40250.5")
+    poz = uruchom(a.pozycje_szczegoly())
+    assert poz[0]["unrealized_pl"] == D("250.5") and poz[0]["qty"] == D("100")
