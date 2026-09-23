@@ -8,11 +8,26 @@ const TONE = { critical: 'bad', warning: 'warn', info: 'info' };
 export default function Bell() {
   const [open, setOpen] = useState(false);
   const [count, setCount] = useState({ unread: 0, critical: 0 });
+  /* ODCZYT, KTORY NIE DOSZEDL, NIE JEST ODCZYTEM ROWNYM ZERU.
+     `count` startuje jako zero, a plakietka rysowala sie wylacznie przy
+     `unread > 0`. Gdy endpoint zaczynal zwracac blad (baza niedostepna, 500),
+     stan zostawal na zerze i dzwonek wygladal IDENTYCZNIE jak dzwonek bez
+     powiadomien - w jedynym miejscu interfejsu, ktore ma krzyczec o
+     kill-switchu i martwym silniku (`notify.event_type.always_on`, migracja
+     0007). Odswiezanie co 30 s niczego nie zmienialo: kazdy kolejny blad byl
+     rownie cichy. Panel po otwarciu to rozroznial, ale plakietka jest tym,
+     na co sie patrzy, a nie klika. */
+  const [countErr, setCountErr] = useState('');
   const [items, setItems] = useState(null);
   const ref = useRef(null);
 
   const refreshCount = useCallback(async () => {
-    try { setCount(await get('/api/notifications/unread-count')); } catch { /* cicho */ }
+    try {
+      setCount(await get('/api/notifications/unread-count'));
+      setCountErr('');
+    } catch (e) {
+      setCountErr(e?.message || 'Nie udało się odczytać licznika powiadomień');
+    }
   }, []);
 
   useEffect(() => {
@@ -70,10 +85,17 @@ export default function Bell() {
 
   return (
     <div className="bell-wrap" ref={ref}>
-      <button className="bell-btn" onClick={toggle} aria-label="Powiadomienia"
+      <button className="bell-btn" onClick={toggle}
+              aria-label={countErr ? 'Powiadomienia — licznik nieznany' : 'Powiadomienia'}
               aria-expanded={open}>
         <span aria-hidden="true">🔔</span>
-        {count.unread > 0 && (
+        {countErr ? (
+          /* Plakietka stanu NIEZNANEGO zamiast jej schowania. Schowana znaczy
+             "zero", a zera tu nikt nie zmierzył. */
+          <span className="bell-badge nieznany" title={`Licznik powiadomień nieznany: ${countErr}`}>
+            !
+          </span>
+        ) : count.unread > 0 && (
           <span className={`bell-badge ${count.critical > 0 ? 'critical' : ''}`}>
             {count.unread > 99 ? '99+' : count.unread}
           </span>
@@ -90,6 +112,12 @@ export default function Bell() {
             )}
           </div>
 
+          {countErr && (
+            <div className="notice">
+              Licznik nieprzeczytanych jest nieznany: {countErr}. Plakietka „!" przy
+              dzwonku znaczy brak odczytu, a nie brak powiadomień.
+            </div>
+          )}
           {error && <div className="empty" style={{ color: 'var(--loss)' }}>{error}</div>}
           {listError ? (
             <div className="notice">

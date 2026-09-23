@@ -6,7 +6,7 @@ from typing import Literal
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
-from ..auth import audit, current_user, require_csrf
+from ..auth import audit, current_user, require_csrf, wymagaj_wlasciciela
 from ..db import execute, fetch_all, fetch_one
 
 # Patrz overview.py: wartosc zamknieta tutaj, zeby nieznany silnik konczyl sie
@@ -128,7 +128,8 @@ class ZwolnienieBody(BaseModel):
     note: str = Field(min_length=10, max_length=500)
 
 
-@router.post("/killswitch/{event_id}/release", dependencies=[Depends(require_csrf)])
+@router.post("/killswitch/{event_id}/release",
+             dependencies=[Depends(require_csrf), Depends(wymagaj_wlasciciela)])
 async def zwolnij_killswitch(engine: Silnik, event_id: int, body: ZwolnienieBody,
                              request: Request, user: dict = Depends(current_user)):
     """Reczne zwolnienie kill-switcha.

@@ -423,6 +423,10 @@ select.input-field option { background: var(--bg-dark); color: var(--text-main);
 }
 /* Alert krytyczny musi rzucac sie w oczy mocniej niz zwykly licznik. */
 .bell-badge.critical { background: var(--danger); animation: bell-pulse 2s ease-in-out infinite; }
+/* Licznik NIEZNANY - odczyt nie doszedl. Musi wygladac inaczej i od zera,
+   i od alarmu: brak plakietki klamalby "nie ma powiadomien", a czerwien
+   mowilaby o zdarzeniu, o ktorym nic nie wiemy. */
+.bell-badge.nieznany { background: var(--color-orange); }
 @keyframes bell-pulse {
   0%, 100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.55); }
   50%      { box-shadow: 0 0 0 6px rgba(239, 68, 68, 0); }

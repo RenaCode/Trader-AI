@@ -25,7 +25,7 @@ from decimal import Decimal
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
-from ..auth import audit, current_user, require_csrf
+from ..auth import audit, current_user, require_csrf, wymagaj_wlasciciela
 from ..db import execute, fetch_all, fetch_one
 
 router = APIRouter(prefix="/api/engines/{engine}/kapital", tags=["kapital"])
@@ -55,7 +55,8 @@ async def przeplywy(engine: str, mode: str = Query("demo"), limit: int = Query(5
     ]
 
 
-@router.post("/przeplywy", dependencies=[Depends(require_csrf)])
+@router.post("/przeplywy",
+             dependencies=[Depends(require_csrf), Depends(wymagaj_wlasciciela)])
 async def dodaj_przeplyw(engine: str, body: PrzeplywBody, request: Request,
                          user: dict = Depends(current_user)):
     """Zapisuje wpłatę albo wypłatę i przelicza jednostki po bieżącym nav."""

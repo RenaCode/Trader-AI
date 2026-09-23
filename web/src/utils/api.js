@@ -3,7 +3,7 @@
    Ciasteczko sesji jest HttpOnly, wiec JS go nie widzi i nie moze wyciec przez XSS.
    Token CSRF jest w osobnym, czytelnym ciasteczku i doklejamy go do kazdej metody
    zmieniajacej stan (double-submit cookie). */
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 export class ApiError extends Error {
   constructor(status, message) {
@@ -80,15 +80,42 @@ export function useApi(path, deps = [], { refreshMs = 0 } = {}) {
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(true);
 
+  /* STRAZNIK POKOLENIA: wynik zapytania, ktore zdazylo sie zdezaktualizowac,
+     jest ODRZUCANY, a nie wpisywany do stanu.
+
+     Bez niego wystarczylo przelaczyc zakladke Krypto -> Gielda w chwili, gdy
+     API jest wolne (okno obciazenia jest znane i opisane w main.py:83-88:
+     kopia 03:17, trener 04:40). Odpowiedz equity wracala pierwsza, po niej
+     ladowala spozniona odpowiedz crypto i `setData` ja NADPISYWALA. Na
+     zakladce "Gielda" stal wtedy kapital, ekspozycja i P&L rachunku krypto -
+     bez `error`, bez `loading`, bez jakiegokolwiek oznaczenia. Liczby
+     wygladaly na zmierzone, bo byly; tylko nie dla tego rynku.
+
+     To samo dotyczy nakladajacych sie cykli `refreshMs` (20 s w Overview,
+     30 s w Risk), gdzie starsza odpowiedz mogla wyprzec nowsza.
+
+     Licznik siedzi w `useRef`, wiec przezywa przerysowanie komponentu - a
+     wlasnie przerysowanie ze zmieniona sciezka jest tym momentem, o ktory
+     chodzi. Sprzatanie `useEffect` tego nie zalatwialo: kasowalo wylacznie
+     `setInterval`, a zadanie juz wyslane leci dalej. */
+  const pokolenie = useRef(0);
+
   const load = useCallback(async () => {
     if (!path) return;
+    const moje = (pokolenie.current += 1);
+    const aktualne = () => moje === pokolenie.current;
     try {
-      setData(await get(path));
+      const wynik = await get(path);
+      if (!aktualne()) return;
+      setData(wynik);
       setError(null);
     } catch (e) {
+      if (!aktualne()) return;
       setError(e.message);
     } finally {
-      setLoading(false);
+      // `loading` tez nalezy do biezacego zapytania. Zgaszony przez spozniona
+      // odpowiedz oglaszalby koniec wczytywania, ktore jeszcze trwa.
+      if (aktualne()) setLoading(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [path]);
