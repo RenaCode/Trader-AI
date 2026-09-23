@@ -215,6 +215,12 @@ class GieldaZWypelnieniem:
                             ilosc=D("10"), wypelniono=D("10"),
                             srednia_cena=D("100"), prowizja=D("0.25"))
 
+    async def wypelnienia(self, *, od_ms=None, symbol=None):
+        """`/v5/order/*` nie oddaje `feeCurrency`, więc egzekucja dopytuje
+        rejestr wykonan. Pusty rejestr zostawia walutę nieznaną — czyli
+        zachowanie sprzed poprawki, co dla tego kanarka nazw jest bez różnicy."""
+        return []
+
 
 def test_obie_sciezki_nazywaja_ten_sam_stan_TAK_SAMO():
     """Kanarek na rozjazd nazw.
@@ -224,7 +230,7 @@ def test_obie_sciezki_nazywaja_ten_sam_stan_TAK_SAMO():
     się go szuka: w zestawieniu obu ścieżek. Zmiana nazwy po JEDNEJ stronie ma
     wywrócić ten test.
     """
-    cur = Kursor([{"id": 1, "qty": D("10")}, None])
+    cur = Kursor([{"id": 1, "qty": D("10"), "submitted_at": None}, None])
     rodzaj, powod = asyncio.run(gielda_exec.rozstrzygnij_plan(
         cur, GieldaZWypelnieniem(),
         plan(id=44, trigger={"rodzaj": "wyjscie", "bar": BAR.isoformat(),

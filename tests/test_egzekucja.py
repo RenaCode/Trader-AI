@@ -271,7 +271,8 @@ def _wiersze_regul(aktywa):
     return out
 
 
-def _fetch_all_stub(pozycje, symbole=(("BTCUSDC", "BTC"),), od=None):
+def _fetch_all_stub(pozycje, symbole=(("BTCUSDC", "BTC"),), od=None,
+                    okno=None):
     """Rozdziela zapytania po treści SQL — jeden stub na cztery różne pytania."""
     async def fetch_all(sql, params=None):
         # Rozroznienie po NAJWEZSZYM markerze. Zapytanie o pozycje takze
@@ -281,8 +282,17 @@ def _fetch_all_stub(pozycje, symbole=(("BTCUSDC", "BTC"),), od=None):
             return pozycje
         if "min(i.lot_size)" in sql:
             return _wiersze_regul([b for _, b in symbole])
-        if "min(p.opened_at)" in sql:
-            return [{"od": od}]
+        if "LEAST(p.opened_at" in sql:
+            # KOLUMNY DOKLADNIE TAKIE, JAKIE POBIERA `kontekst_wypelnien`.
+            # Atrapa oddajaca kolumne, o ktora prawdziwy SELECT nie prosi,
+            # sprawdzalaby sama siebie — a `od` i `opened_at` to tutaj DWIE
+            # ROZNE chwile (zlozenie zlecenia kontra zapis skutku).
+            if okno is not None:
+                return list(okno)
+            # Bez wiersza w `exec.order` prawdziwy `LEAST` oddaje samo
+            # `opened_at`, bo `LEAST` pomija NULL-e.
+            return ([] if od is None
+                    else [{"opened_at": od, "closed_at": None, "od": od}])
         return [{"symbol": s, "base_ccy": b} for s, b in symbole]
     return fetch_all
 

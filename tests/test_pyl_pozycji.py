@@ -27,6 +27,8 @@ import json
 from datetime import datetime, timezone
 from decimal import Decimal as D
 
+import pytest
+
 from services.engine.egzekucja import rozlicz_prowizje
 from services.engine.gielda_exec import rozstrzygnij_plan
 from services.engine.loop import zapisz_wyjscie
@@ -169,7 +171,10 @@ def _stan_bazy(qty, avg_price=D("0.3500"), wyslano=None):
         "position": {"id": 77, "side": "long", "qty": qty,
                      "avg_price": avg_price, "engine": "crypto", "mode": "demo",
                      "instrument_id": 3, "quote_ccy": "USDC"},
-        "order": {"id": 9, "qty": qty if wyslano is None else wyslano},
+        # `submitted_at` jest w tym SELECT-cie, bo zaweza rejestr wykonan przy
+        # odczycie waluty prowizji (`gielda_exec.prowizja_z_rejestru`).
+        "order": {"id": 9, "qty": qty if wyslano is None else wyslano,
+                  "submitted_at": TERAZ},
     }
 
 
@@ -239,6 +244,86 @@ def test_bez_regul_gieldy_NIC_NIE_DOMYKAMY():
     zapisz_wyjscie(cur, pozycja, D("0.3600"), D("0.72"), TERAZ, 501,
                    ilosc=D("1996.7"), order_id=9)          # bez `filtry`
     assert cur.zapytania("UPDATE exec.position SET qty = qty -")
+
+
+# ======================= czego nie da sie sprzedac NIGDY, a czego tylko DZIS
+
+@pytest.mark.parametrize("reguly, opis", [
+    (Filtry(), "gołe Filtry() — tak `gielda_exec` podstawia instrument "
+               "nieobecny w mapie reguł (`filtry.get(id, Filtry())`)"),
+    (Filtry(krok_ilosci=D("0.1"), krok_ceny=D("0.0001"), min_wartosc=None),
+     "`min_notional` NULL w ref.instrument — kolumna jest nullowalna"),
+])
+def test_REGUL_NIEZNANYCH_nie_wolno_czytac_jako_nie_da_sie_sprzedac(reguly, opis):
+    """Kanarek, którego brakowało — i dlatego ta wada przeżyła pierwszy audyt.
+
+    Docstring `zapisz_wyjscie` nazywał to zagrożenie wprost („domyślne
+    `Filtry()` uznałoby każdą resztkę za niezamykalną"), ale warunek brzmiał
+    `filtry is not None`, a to NIE JEST ten sam strażnik: gołe `Filtry()` nie
+    jest `None` i przechodziło. Test obok sprawdzał wywołanie BEZ argumentu,
+    czyli gałąź, którą produkcja nigdy nie chodzi.
+
+    Skutek jest bez ograniczenia co do wielkości: przy nieznanych regułach
+    KAŻDE wyjście częściowe domykało pozycję i spisywało całą resztę na stratę
+    po cenie wejścia — tu 996,7 ADA (~359 USDC), `realized_pnl` -338,85
+    zamiast +10,00. Aktywo zostaje przy tym na giełdzie, poza ewidencją.
+    """
+    cur = Kursor(_stan_bazy(D("1996.7013")))
+    pozycja = {"id": 77, "side": "long", "qty": D("1996.7013"),
+               "avg_price": D("0.3500")}
+    wynik = zapisz_wyjscie(cur, pozycja, D("0.3600"), D("0.72"), TERAZ, 501,
+                           ilosc=D("1000.0"), order_id=9, filtry=reguly)
+    assert not cur.zapytania("UPDATE exec.position SET closed_at"), (
+        f"pozycja domknięta przy regułach nieznanych ({opis}) — 996,7 ADA "
+        f"spisane na stratę, choć nikt nie wie, czy da się je sprzedać")
+    assert wynik == (D("0.3600") - D("0.3500")) * D("1000.0")
+
+
+def test_resztka_ponizej_MINIMUM_WARTOSCI_ale_na_kroku_NIE_JEST_pylem():
+    """Kryterium domknięcia musi być TRWAŁE, a nie chwilowe.
+
+    `gielda_exec.zloz_plan` mówi to wprost w komentarzu: „Sama `min_notional`
+    (wartość poniżej minimum) NIE wystarcza: pozycja na kroku, która dziś jest
+    warta za mało, jutro po wzroście ceny sprzeda się normalnie, a spisanie
+    jej na stratę byłoby wyrzuceniem żywych pieniędzy". `zapisz_wyjscie`
+    pytało jednak `czy_zamykalna`, które przewraca się właśnie na wartości.
+
+    Liczby produkcyjne: ADAUSDC ma krok 0,1 i `min_notional` 5 USDC, więc przy
+    cenie 0,36 próg wartości to 13,9 ADA — czyli 139 PEŁNYCH kroków ilości.
+    """
+    ada_prod = Filtry(krok_ilosci=D("0.1"), krok_ceny=D("0.0001"),
+                      min_wartosc=D("5"))
+    resztka = D("13.8")                        # 138 kroków, ~4,97 USDC
+    assert resztka % ada_prod.krok_ilosci == 0
+    assert not czy_zamykalna(resztka, D("0.3600"), ada_prod), (
+        "kanarek atrapy: przy dzisiejszej cenie giełda TEJ resztki nie kupi")
+    assert czy_zamykalna(resztka, D("0.3700"), ada_prod), (
+        "a po wzroście ceny o 2,8% kupi — czyli kryterium jest CHWILOWE")
+
+    cur = Kursor(_stan_bazy(D("1996.7013")))
+    pozycja = {"id": 77, "side": "long", "qty": D("1996.7013"),
+               "avg_price": D("0.3500")}
+    zapisz_wyjscie(cur, pozycja, D("0.3600"), D("0.72"), TERAZ, 501,
+                   ilosc=D("1996.7013") - resztka, order_id=9, filtry=ada_prod)
+    assert not cur.zapytania("UPDATE exec.position SET closed_at"), (
+        "13,8 ADA spisane na stratę jako „nie do sprzedania”, choć to 138 "
+        "kroków ilości i wystarczy wzrost ceny o 2,8%, żeby je sprzedać")
+
+
+def test_kanarek_resztka_PONIZEJ_KROKU_nadal_domyka_pozycje():
+    """Kanarek w drugą stronę do obu powyższych.
+
+    Zawężenie kryterium nie może cofnąć poprawki, dla której ten plik powstał:
+    resztka mniejsza od kroku jest nie do sprzedania przy KAŻDEJ cenie, a
+    otwarty wiersz wyklucza instrument z handlu na stałe."""
+    ada_prod = Filtry(krok_ilosci=D("0.1"), krok_ceny=D("0.0001"),
+                      min_wartosc=D("5"))
+    cur = Kursor(_stan_bazy(D("1996.7013")))
+    pozycja = {"id": 77, "side": "long", "qty": D("1996.7013"),
+               "avg_price": D("0.3500")}
+    zapisz_wyjscie(cur, pozycja, D("0.3600"), D("0.72"), TERAZ, 501,
+                   ilosc=D("1996.7"), order_id=9, filtry=ada_prod)
+    assert cur.zapytania("UPDATE exec.position SET closed_at")
 
 
 # ============================================ przez produkcyjne rozstrzyganie

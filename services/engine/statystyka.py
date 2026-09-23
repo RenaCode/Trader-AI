@@ -85,15 +85,34 @@ T95 = {1: 12.706, 2: 4.303, 3: 3.182, 4: 2.776, 5: 2.571, 6: 2.447, 7: 2.365,
 def t95(df: int) -> float:
     """Wartosc krytyczna t dla podanej liczby stopni swobody.
 
-    Miedzy wpisami tablicy bierzemy wartosc dla NAJBLIZSZEGO WIEKSZEGO df, czyli
-    zawsze ostrozniejsza (szersza) z dwoch. Interpolacja bylaby dokladniejsza
-    i bez znaczenia: roznica miedzy 2,086 a 2,060 jest o rzad wielkosci mniejsza
-    niz rozrzut, ktory tym mierzymy.
+    Miedzy wpisami tablicy bierzemy wartosc dla NAJBLIZSZEGO MNIEJSZEGO df,
+    czyli zawsze ostrozniejsza (szersza) z dwoch. Interpolacja bylaby
+    dokladniejsza i bez znaczenia: roznica miedzy 2,086 a 2,060 jest o rzad
+    wielkosci mniejsza niz rozrzut, ktory tym mierzymy.
+
+    MNIEJSZEGO, A NIE WIEKSZEGO - to nie jest ta sama strona. Wartosc krytyczna
+    t MALEJE wraz z df, wiec siegniecie po WIEKSZY df daje wartosc MNIEJSZA,
+    czyli przedzial WEZSZY: dokladnie odwrotnie niz mowilo uzasadnienie i
+    dokladnie w strone, przed ktora ostrzega komentarz przy tablicy. Do
+    2026-09-23 petla szla `for k in sorted(T95): if df <= k`, przez co df=11
+    dostawalo 2,179 zamiast 2,201 (za wasko o 1,0%), df=13 -> 2,131 zamiast
+    2,160, df=16 -> 2,086 zamiast 2,120 (najwiekszy blad, 1,6%).
+
+    Skala bledu byla mala, kierunek nie: `poslizg.py` liczy przez
+    `przedzial_sredniej` przedzial zmierzonego poslizgu i ALARMUJE, gdy
+    zalozenie POSLIZG_TAKER wypada z przedzialu. Przy 17 wypelnieniach (df=16)
+    przedzial byl 1,6% za waski, wiec zalozenie lezace tuz wewnatrz
+    prawdziwego przedzialu wypadalo z policzonego - falszywy alarm "poslizg
+    rozjechal sie z zalozeniem" i pokusa, zeby zmienic stala kosztu na
+    podstawie szumu.
+
+    Powyzej najwiekszego wpisu (df > 120) zostaje 1,980, a nie asymptotyczne
+    1,96, z tego samego powodu: szersza z dwoch.
     """
-    for k in sorted(T95):
-        if df <= k:
+    for k in sorted(T95, reverse=True):
+        if df >= k:
             return T95[k]
-    return 1.96
+    return T95[1]
 
 
 def przedzial_sredniej(xs: list[float]) -> tuple[float, float] | None:

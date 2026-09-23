@@ -28,13 +28,17 @@ wyszło — łącznie z tym, że nie wyszło nic.
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 
 from services.engine.egzekucja import co_z_wypelnieniem, rozlicz_prowizje
-from services.engine.loop import zapisz_wejscie, zapisz_wyjscie
-from services.engine.zlecenia import Filtry, do_kroku_w_dol, sprawdz_zlecenie
+from services.engine.loop import (
+    trwale_niesprzedawalna, zapisz_wejscie, zapisz_wyjscie)
+from services.engine.zlecenia import Filtry, sprawdz_zlecenie
 from services.exchanges.base import ExchangeError
+# `recv_window` to jedyna liczba, ktora opisuje dopuszczalny rozjazd naszego
+# zegara z zegarem gieldy — ta sama, ktorej pilnuje `BybitAdapter.dryf_zegara`.
+from services.exchanges.bybit import RECV_WINDOW
 
 
 def filtry_z_bazy(cur, engine: str) -> dict[int, Filtry]:
@@ -59,6 +63,136 @@ def filtry_z_bazy(cur, engine: str) -> dict[int, Filtry]:
 def id_zlecenia(plan_id: int) -> str:
     """Nasz identyfikator zlecenia. Z PLANU, nie z czasu i nie losowy."""
     return f"tai-p{plan_id}"
+
+
+# Stany, w ktorych gielda NIE MA JUZ NIC DO ZROBIENIA z tym zleceniem.
+# `partial` swiadomie tu nie ma — patrz `gielda_juz_rozstrzygnela`.
+STANY_ROZSTRZYGNIETE = ("filled", "cancelled", "rejected")
+
+
+async def gielda_juz_rozstrzygnela(adapter, plan: dict, *, kategoria: str,
+                                   verbose: bool = False) -> bool:
+    """Czy gielda zamknela sprawe tego zlecenia, zanim doszlismy do terminu.
+
+    DLACZEGO SYMETRIA Z BACKTESTEM TU NIE OBOWIAZUJE — I CZEMU TO NIE JEST
+    ROZLUZNIENIE REGULY, TYLKO INNE PYTANIE
+
+    `termin_rozstrzygniecia` czeka na zamkniecie swiecy i ma racje, bo
+    odpowiada na pytanie „CZY LIMIT ZOSTAL DOTKNIETY". Na rachunku papierowym
+    odpowiedz da wylacznie swieca domknieta: `portfolio._wypelnione` czyta
+    `high`/`low`, a zagladanie do swiecy trwajacej byloby przeciekiem
+    przyszlosci w druga strone. Ta funkcja NIE zmienia tam niczego i nie jest
+    stamtad wolana — `loop.rozstrzygnij_plany` czeka dokladnie tak jak czekalo.
+
+    Na gieldzie tego pytania NIE ZADAJEMY. Gielda nie szacuje, czy limit
+    zostal dotkniety — ona to WYKONALA i podaje `orderStatus` oraz
+    `cumExecQty`. Czekanie z zapisem faktu, ktory juz mamy, nie jest symetria
+    z symulacja; jest trzymaniem dziennika w stanie ZNANYM-NIEPRAWDZIWYM przez
+    czas do dlugosci swiecy — do 4 h przy H4H.
+
+    Zmierzone na produkcji 2026-09-23 (`exec.order` 48, ETHUSDC sell):
+    wypelnienie na gieldzie ~13:26, `closed_at` dopisane 16:03:42, bo plan 36
+    mial `valid_until = 16:00`. Przez te 2 h 37 min zachodzilo jednoczesnie:
+
+      1. `RiskKernel._open_exposure` liczyl ekspozycje z pozycji, ktorej juz
+         nie bylo — czyli blokowal wejscia, ktorych nic nie blokowalo. To jest
+         dokladnie stan z naglowka `uzgodnienie.py`: „System stoi i nie ma
+         o tym pojecia";
+      2. uzgodnienie SLUSZNIE widzialo rozjazd i slalo `killswitch.triggered`
+         co 10 minut bez wyciszenia (`always_on`, `cooldown 0`);
+      3. CronJob czujki zywotnosci konczyl sie kodem niezerowym —
+         `trader-zywotnosc-29836320` ma status `Failed`, a ArgoCD `Degraded`.
+
+    `partial` NIE JEST STANEM ROZSTRZYGNIETYM i celowo go tu nie ma. Zlecenie
+    czesciowo wypelnione nadal lezy w arkuszu i moze sie dopelnic do konca
+    swiecy; wczesniejsze przyjecie przyjeloby to, co weszlo, i ANULOWALO
+    reszte (`egzekucja.co_z_wypelnieniem`), czyli systematycznie zmniejszalo
+    pozycje wzgledem planu. Zmieniamy chwile zapisu FAKTU DOKONANEGO, a nie
+    regule egzekucji.
+
+    BLAD ODCZYTU ZOSTAWIA DOTYCHCZASOWE ZACHOWANIE. Gdy gieldy nie da sie
+    zapytac, czekamy tak jak dotad — niewiedza nie moze rozstrzygac planu.
+    Wyjatkiem jest awaria wymagajaca czlowieka (np. zignorowany filtr po
+    `orderLinkId`): ta ma isc w gore natychmiast, bo zaden restart jej nie
+    naprawi, a wyciszenie jej na cala swiece to dokladnie ta cisza, przed
+    ktora ostrzega `stan_zlecenia`.
+    """
+    try:
+        stan = await adapter.stan_zlecenia(id_zlecenia(plan["id"]),
+                                           kategoria=kategoria)
+    except ExchangeError as e:
+        if e.wymaga_czlowieka:
+            raise
+        if verbose:
+            print(f"  [czeka] {plan['symbol']} — nie da się sprawdzić stanu "
+                  f"na giełdzie ({e}); plan czeka na swoją świecę")
+        return False
+    if stan is None:
+        return False
+    return stan.status in STANY_ROZSTRZYGNIETE
+
+
+async def prowizja_z_rejestru(adapter, *, symbol: str, id_wlasne: str,
+                              submitted_at: datetime | None, kategoria: str):
+    """Kwota i WALUTA prowizji z rejestru wykonan. Zwraca (kwota, waluta, uwaga).
+
+    DLACZEGO TO MUSI BYC DRUGIE ZAPYTANIE, A NIE ZALOZENIE
+
+    `/v5/order/realtime` i `/v5/order/history` oddaja `cumExecFee` — samą kwotę,
+    BEZ jednostki. `feeCurrency` wystawia wylacznie `/v5/execution/list`.
+    `stan_zlecenia` czyta te pierwsze, wiec `prowizja_w` wraca puste, a sciezka
+    egzekucji podstawiala za nie walute kwotowana instrumentu.
+
+    Zmierzone na produkcji 2026-09-23, WSZYSTKIE trzy kupna gieldowe w bazie:
+
+        symbol   | side |   qty    |      fee       | fee_ccy | fee/qty
+        SOLUSDC  | buy  | 12.138   | 0.012138000000 | USDC    | 0.00100000
+        BTCUSDC  | buy  | 0.015319 | 0.000015319000 | USDC    | 0.00100000
+        ETHUSDC  | buy  | 0.3395   | 0.000339500000 | USDC    | 0.00100000
+
+    `fee / qty` rowne DOKLADNIE 0,001 to stawka makera liczona od ILOSCI, czyli
+    prowizja pobrana w SOL/BTC/ETH — a zapisana jako USDC. Skutki byly trzy
+    i wszystkie ciche:
+
+      1. koszt wejscia zanizony ~2700x dla ETH (0,00034 USDC zamiast 0,93),
+         bo `exec.fill.fee` sumuje sie jako liczba w walucie kwotowanej.
+         `exec.position.fees_paid` = 0,92250977 przy prawdziwym koszcie rundy
+         ok. 1,85 USDC — czyli polowa. Ta liczba idzie do `realized_pnl`
+         i na krzywa kapitalu, na ktorej stoi kill-switch;
+      2. `rozlicz_prowizje` nie odejmowalo prowizji od ilosci, bo nie widzialo
+         waluty bazowej — `exec.position.qty` zostawala BRUTTO;
+      3. tolerancja uzgodnienia (0,5%) maskowala roznice 0,1%, wiec zaden
+         nadzor tego nie zglosil. Tolerancja przestala byc marginesem, a stala
+         sie pokrywa.
+
+    ZGADYWANIE PRZY NIEZGODNYCH WALUTACH JEST ZAKAZANE. Gdy wypelnienia jednego
+    zlecenia podaja rozne waluty prowizji, jedna liczba w `exec.fill.fee_ccy`
+    nie opisuje ich obu — oddajemy wtedy `uwaga` i zostawiamy walute nieznana,
+    zamiast wybrac jedna i nazwac wybor pomiarem.
+    """
+    od_ms = None
+    if submitted_at is not None:
+        # `startTime` porownuje gielda SWOIM zegarem. Margines to `recv_window`,
+        # czyli granica, powyzej ktorej gielda odrzuca kazde nasze podpisane
+        # zapytanie — zegar zdolny do handlu miesci sie i tutaj.
+        od_ms = int((submitted_at - timedelta(milliseconds=int(RECV_WINDOW)))
+                    .timestamp() * 1000)
+    wyp = [w for w in await adapter.wypelnienia(od_ms=od_ms, symbol=symbol)
+           if w.id_wlasne == id_wlasne]
+    if not wyp:
+        return None, None, (
+            f"rejestr wykonan nie zna wypelnien zlecenia {id_wlasne} — waluta "
+            f"prowizji pozostaje NIEZNANA")
+    waluty = {w.prowizja_w.upper() for w in wyp if w.prowizja_w}
+    if len(waluty) > 1:
+        return None, None, (
+            f"wypelnienia zlecenia {id_wlasne} podaja ROZNE waluty prowizji "
+            f"({', '.join(sorted(waluty))}) — jedna kolumna `fee_ccy` nie "
+            f"opisuje ich obu, wiec nie wybieramy zadnej")
+    if not waluty:
+        return None, None, (
+            f"rejestr wykonan tez nie podal waluty prowizji dla {id_wlasne}")
+    return sum((w.prowizja for w in wyp), Decimal(0)), waluty.pop(), None
 
 
 async def zloz_plan(cur, adapter, plan: dict, f: Filtry, *, engine: str,
@@ -180,13 +314,14 @@ async def zloz_plan(cur, adapter, plan: dict, f: Filtry, *, engine: str,
         # a spisanie jej na strate byloby wyrzuceniem zywych pieniedzy.
         # Reguly niekompletne nie domykaja niczego — braku regul nie wolno
         # czytac jako "nie da sie sprzedac".
-        if wyjscie and f.kompletne and plan["trigger"].get("position_id"):
-            trwale_nie_do_sprzedania = (
-                do_kroku_w_dol(Decimal(plan["qty"]), f.krok_ilosci) <= 0
-                or (f.min_ilosc is not None
-                    and do_kroku_w_dol(Decimal(plan["qty"]), f.krok_ilosci)
-                    < f.min_ilosc))
-            if trwale_nie_do_sprzedania:
+        #
+        # TA SAMA FUNKCJA, CO PRZY RESZTCE PO SPRZEDAZY. Reguła „czego nie da
+        # się sprzedać NIGDY" była tu i w `loop.zapisz_wyjscie` napisana dwa
+        # razy — i rozjechała się: tamta kopia pytała `czy_zamykalna`, czyli
+        # o kryterium CHWILOWE (`min_notional`), i odpowiadała „nie da się"
+        # na reguły nieznane.
+        if wyjscie and plan["trigger"].get("position_id"):
+            if trwale_niesprzedawalna(Decimal(plan["qty"]), f):
                 cur.execute(
                     "SELECT id, qty, avg_price FROM exec.position"
                     " WHERE id=%s AND closed_at IS NULL",
@@ -274,8 +409,12 @@ async def rozstrzygnij_plan(cur, adapter, plan: dict, f: Filtry, *, engine: str,
     # `zapisz_wejscie` zalozylby drugi i jeden plan mialby w exec.order dwa
     # zlecenia: tabela przestalaby znaczyc "jedno zlecenie", a czujka zdrowia
     # egzekucji widzialaby dwa razy wiecej przyjec, niz bylo.
-    cur.execute("SELECT id, qty FROM exec.order WHERE planned_order_id = %s"
-                " ORDER BY id LIMIT 1", (plan["id"],))
+    # `submitted_at` SLUZY DO ZAWEZENIA REJESTRU WYKONAN, a nie do ksiegowania.
+    # Gielda nie moze wypelnic zlecenia, zanim je do niej wyslemy, wiec to jest
+    # dokladna dolna granica okna w `prowizja_z_rejestru` — bez niej pytanie
+    # o wykonania sciagaloby caly dostepny rejestr strona po stronie.
+    cur.execute("SELECT id, qty, submitted_at FROM exec.order"
+                " WHERE planned_order_id = %s ORDER BY id LIMIT 1", (plan["id"],))
     wiersz = cur.fetchone()
     id_zlecenia_w_bazie = wiersz["id"] if wiersz else None
 
@@ -367,19 +506,66 @@ async def rozstrzygnij_plan(cur, adapter, plan: dict, f: Filtry, *, engine: str,
 
     cena = stan.srednia_cena or Decimal(plan["limit_price"])
     prowizja = stan.prowizja
-    # WALUTA PROWIZJI Z GIELDY, NIE Z ZALOZENIA. Kupno na spocie placi prowizje
-    # w kupionym aktywie, wiec wpisanie waluty kwotowanej zanizalo koszt wejscia
-    # o dwa rzedy wielkosci - a przy przewadze mierzonej w dziesiatych czesciach
-    # procenta to nie jest zaokraglenie.
-    prowizja_ccy = stan.prowizja_w or plan["quote_ccy"]
+    prowizja_w = stan.prowizja_w
+    zrodlo_waluty = "zlecenie"
+    uwaga_prowizji = None
+
+    # WALUTA PROWIZJI Z REJESTRU WYKONAN, GDY ZLECENIE JEJ NIE PODALO.
+    #
+    # To nie jest zabezpieczenie na wszelki wypadek — tak zachowuje sie Bybit
+    # ZAWSZE: `feeCurrency` jest wylacznie w `/v5/execution/list`, a
+    # `stan_zlecenia` czyta `/v5/order/*`. Na produkcji `prowizja_w` bylo puste
+    # na WSZYSTKICH trzech kupnach gieldowych, wiec podstawiana byla waluta
+    # kwotowana i `rozlicz_prowizje` nigdy nie odejmowalo prowizji od ilosci.
+    # Pelny rachunek skutkow: docstring `prowizja_z_rejestru`.
+    #
+    # Pytamy TYLKO wtedy, gdy cos weszlo i gdy zlecenie waluty nie podalo —
+    # jedno dodatkowe zapytanie na rozstrzygniecie z wypelnieniem.
+    if prowizja_w is None and stan.wypelniono > 0:
+        try:
+            kwota, waluta, uwaga_prowizji = await prowizja_z_rejestru(
+                adapter, symbol=plan["symbol"], id_wlasne=id_w,
+                submitted_at=wiersz["submitted_at"] if wiersz else None,
+                kategoria=kategoria)
+            if waluta is not None:
+                prowizja, prowizja_w = kwota, waluta
+                zrodlo_waluty = "rejestr_wykonan"
+        except ExchangeError as e:
+            # NIEUDANY ODCZYT REJESTRU NIE UNIEWAZNIA ROZSTRZYGNIECIA.
+            # Wypelnienie juz zaszlo i aktywo jest nasze niezaleznie od tego,
+            # czy poznamy jednostke prowizji. Zapisujemy to, co wiemy, i mowimy
+            # glosno, czego nie wiemy — cisza w tym miejscu wygladalaby
+            # identycznie jak poprawny odczyt.
+            uwaga_prowizji = (f"nie udalo sie odczytac waluty prowizji "
+                              f"z rejestru wykonan ({e})")
+
+    if uwaga_prowizji:
+        zrodlo_waluty = "nieznane"
+        print(f"  UWAGA: {plan['symbol']} — {uwaga_prowizji}; koszt wejścia "
+              f"zostanie zapisany w walucie kwotowanej {plan['quote_ccy']}, "
+              f"a jeśli giełda pobrała go w aktywie bazowym, jest to "
+              f"ZANIŻENIE o około dwa rzędy wielkości")
+
+    # Brak waluty po obu odczytach zostaje przy dotychczasowym domysle: waluta
+    # kwotowana. Domysl jest ZLY, ale jest jedynym, ktory pozwala zsumowac
+    # koszt — i teraz zostawia po sobie slad w `raw` oraz linie na ekranie.
+    prowizja_ccy = prowizja_w or plan["quote_ccy"]
 
     # ILE NAPRAWDE MAMY I ILE TO KOSZTOWALO. Na spocie kupno placi prowizje
     # w kupionym aktywie, wiec zlecenie na 1,0 daje nam 0,999. Zapis brutto
     # tworzy pozycje NIE DO SPRZEDANIA: wyjscie prosi o calosc, gielda odrzuca
     # za brak salda, plan wygasa i nastepna swieca powtarza to samo bez konca.
     ilosc_netto, prowizja_kwot = rozlicz_prowizje(
-        r.ilosc, cena, prowizja, stan.prowizja_w,
+        r.ilosc, cena, prowizja, prowizja_w,
         plan.get("base_ccy") or "", plan["quote_ccy"])
+    # SKAD WZIELA SIE JEDNOSTKA PROWIZJI, ZAPISANE PRZY ZLECENIU. Bez tego
+    # `fee_ccy` = USDC z odczytu i `fee_ccy` = USDC z domyslu wygladaja w bazie
+    # identycznie — a to jest roznica miedzy pomiarem a zgadnieciem, i to ona
+    # decyduje, czy `exec.position.qty` jest netto, czy brutto.
+    meta["prowizja_ccy_zrodlo"] = zrodlo_waluty
+    if uwaga_prowizji:
+        meta["prowizja_ccy_uwaga"] = uwaga_prowizji
+
     uwaga = None
     rodzaj_zwrotny, powod_zwrotny = r.rodzaj, r.powod
 
@@ -453,7 +639,12 @@ async def rozstrzygnij_plan(cur, adapter, plan: dict, f: Filtry, *, engine: str,
                        venue_order_id=stan.id_gieldy, client_order_id=id_w,
                        venue_fill_id=f"{stan.id_gieldy}",
                        order_id=id_zlecenia_w_bazie,
-                       prowizja_ccy=prowizja_ccy)
+                       prowizja_ccy=prowizja_ccy,
+                       # SUROWA KWOTA DO `exec.fill`, PRZELICZONA DO
+                       # `exec.position.fees_paid`. Wiersz wypelnienia trzyma
+                       # pare (`fee`, `fee_ccy`) i `sprzatanie` czyta ja jako
+                       # pare; kapital sumuje `fees_paid` bez jednostki.
+                       prowizja_surowa=prowizja)
 
     if anulowanie_padlo is not None:
         # RESZTA ZLECENIA ZOSTAJE ZYWA NA GIELDZIE.
@@ -628,7 +819,8 @@ async def rozstrzygnij_oczekujace(cur, adapter, *, engine: str, mode: str,
         "   AND p.status = 'pending' ORDER BY p.id", (engine, mode))
     for plan in cur.fetchall():
         _, czekamy = termin_rozstrzygniecia(plan, h, now)
-        if czekamy:
+        if czekamy and not await gielda_juz_rozstrzygnela(
+                adapter, plan, kategoria=kategoria, verbose=verbose):
             st["czekaja"] += 1
             continue
         f = filtry.get(plan["instrument_id"], Filtry())

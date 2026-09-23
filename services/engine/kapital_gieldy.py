@@ -15,9 +15,13 @@ i jeden INSERT na cykl, `ON CONFLICT DO NOTHING` na siatce minutowej.
 
 JEDNOSTKI. Bez przeplywow w `exec.cash_flow` przyjmujemy start 100 000 jako
 wplate (tak samo jak `loop.seed_equity` dla demo) - konto paper Alpaki startuje
-dokladnie z tej kwoty. `realized_cum` = equity - wplaty - unrealized, czyli to,
-co wynika z ksiag gieldy, a nie z naszego dziennika; `unrealized` = suma
-`unrealized_pl` z pozycji.
+z tej kwoty. To jest ZGADYWANIE i jest tak traktowane: saldo startowe konta
+paper ustawia sie przy zakladaniu i zmienia przy kazdym resecie konta
+(`/v2/account/configurations`), niezaleznie od tego repozytorium, wiec
+`zapisz_punkt` sprawdza zgadnieta wplate wobec ksiag gieldy i odmawia zapisu,
+gdy sie nie trzyma (patrz ZGADNIETA_ODCHYLKA_MAX). `realized_cum` = equity -
+wplaty - unrealized, czyli to, co wynika z ksiag gieldy, a nie z naszego
+dziennika; `unrealized` = suma `unrealized_pl` z pozycji.
 """
 from __future__ import annotations
 
@@ -41,18 +45,55 @@ from services.ingest import puls  # noqa: E402
 POD_RZAD_MAX = 5
 PULS = "kapital"
 
+# Jak daleko zgadnieta wplata moze sie rozjechac z ksiegami gieldy, zanim
+# przestaniemy jej wierzyc - jako ulamek samej zgadnietej wplaty.
+#
+# DLACZEGO TO ISTNIEJE. Gdy `exec.cash_flow` jest puste, bierzemy START_EQUITY
+# = 100 000, czyli kapital startowy SYMULACJI krypto, i twierdzimy, ze tyle
+# samo ma konto paper Alpaki. Nic tego nie weryfikowalo, mimo ze `stan_konta()`
+# zwraca komplet z ksiag gieldy.
+#
+# Scenariusz, ktory to wypuszczalo bez slowa: ktos resetuje konto paper na
+# 50 000 USD (typowe przy czyszczeniu po testach egzekucji). Od nastepnego
+# cyklu realized = 50 000 - 100 000 - unrealized, czyli okolo -50 000, i kafelek
+# "Zrealizowany P&L" pokazuje pol rachunku straty, ktorej nikt nie poniosl.
+# Odwrotny reset (200 000) pokazuje 100 000 fikcyjnego zysku. Zadnego bledu
+# w logu - cykl konczyl sie powodzeniem i bil puls. Ten sam wiersz zapisuje
+# `wplaty_netto`, ktore jest odniesieniem dla progu kapitalu wyrazonego
+# ulamkiem (`RiskState.wplaty_netto`), wiec podloga kapitalu liczylaby sie
+# od liczby zmyslonej.
+#
+# 20%, bo produkcja i tak nie dojedzie do takiego rozjazdu przy zdrowej
+# ksiegowosci: kill-switch stoi na `min_equity` = 95 000, czyli 5% ponizej
+# zgadnietej wplaty. Rozjazd tej skali znaczy "zgadujemy zle", a nie "handel
+# poszedl zle". Lekarstwem jest zapisanie rzeczywistego przeplywu w
+# `exec.cash_flow` - wtedy zgadywania nie ma w ogole.
+ZGADNIETA_ODCHYLKA_MAX = Decimal("0.20")
+
 
 def zapisz_punkt(cur, engine: str, mode: str, stan: dict, unrealized: Decimal,
                  as_of: datetime | None = None) -> dict:
     """Jeden punkt krzywej z odczytu konta. CZYSTA arytmetyka + INSERT."""
     as_of = (as_of or datetime.now(timezone.utc)).replace(second=0, microsecond=0)
     wplaty, units = przeplywy(cur, engine, mode)
+    zgadniete = False
     if wplaty == 0:
         if mode != "demo":
             raise RuntimeError(f"tryb {mode} bez przeplywu w exec.cash_flow - nie zgaduje")
         wplaty, units = START_EQUITY, START_EQUITY
+        zgadniete = True
     equity = Decimal(stan["equity"])
     realized = equity - wplaty - unrealized
+    # Zgadnieta wplata wobec ksiag gieldy: `realized` to dokladnie roznica
+    # miedzy tym, co konto ma, a tym, co mu przypisalismy. Przy zgadnietej
+    # wplacie duze `realized` mowi o zlym zgadnieciu, nie o wyniku handlu.
+    if zgadniete and abs(realized) > ZGADNIETA_ODCHYLKA_MAX * wplaty:
+        raise RuntimeError(
+            f"zgadnieta wplata {wplaty} nie zgadza sie z ksiegami gieldy: equity "
+            f"{equity}, niezrealizowane {unrealized}, czyli zrealizowany P&L "
+            f"{realized} - ponad {ZGADNIETA_ODCHYLKA_MAX:%} zgadnietej wplaty. "
+            f"Zarejestruj rzeczywisty przeplyw w exec.cash_flow ({engine}/{mode}) "
+            f"- punktu krzywej na zgadnietej liczbie nie zapisuje")
     nav = (equity / units) if units > 0 else Decimal(1)
     cur.execute(
         "INSERT INTO exec.equity_point (engine, mode, event_time, equity, cash, unrealized,"
@@ -66,15 +107,43 @@ def zapisz_punkt(cur, engine: str, mode: str, stan: dict, unrealized: Decimal,
             "zapisany": getattr(cur, "rowcount", 1) > 0}
 
 
+async def zmierz_unrealized(adapter) -> Decimal:
+    """Niezrealizowany P&L z ksiag gieldy. BLAD, gdy adapter go nie mierzy.
+
+    DLACZEGO BLAD, A NIE ZERO
+
+    Do 2026-09-23 stalo tu `unrealized = Decimal(0)` plus `if hasattr(...)`,
+    czyli BRAK POMIARU byl zwracany jako POMIAR ROWNY ZERU. `pozycje_szczegoly`
+    ma wylacznie `AlpacaAdapter`; `BybitAdapter` go nie ma, a `--engine`
+    przyjmuje dowolny napis bez `choices=`, wiec `--engine crypto` dawalo
+    adapter Bybita, falszywy `hasattr` i zero.
+
+    Zero w tym miejscu nie jest ostrozne, tylko klamliwe: `realized = equity -
+    wplaty - unrealized`, wiec zerowe `unrealized` ksieguje CALY zysk otwartych
+    pozycji jako ZREALIZOWANY. Przy otwartej pozycji z papierowym zyskiem
+    1200 USD kafelek "Zrealizowany P&L" (overview.py -> Overview.jsx) mowi
+    "zrealizowany 1200" - o pieniadzach, ktorych nie ma i ktore rynek moze
+    zabrac. Kolumna `unrealized` szla przy tym do bazy jako 0, wiec z samego
+    zapisu nie da sie pozniej poznac, ze pomiaru nie bylo.
+
+    To ta sama zasada, ktora trzyma `loop.Wycena.pomiar_pelny` i
+    `statystyka.przedzial_sredniej`: brak pomiaru musi wygladac inaczej niz
+    pomiar. Tutaj "inaczej" znaczy: nie zapisujemy punktu w ogole.
+    """
+    if not hasattr(adapter, "pozycje_szczegoly"):
+        raise RuntimeError(
+            f"adapter {type(adapter).__name__} nie mierzy niezrealizowanego P&L "
+            f"- punkt krzywej ksiegowalby zysk otwartych pozycji jako "
+            f"zrealizowany, wiec go nie zapisuje")
+    return sum((p["unrealized_pl"] for p in await adapter.pozycje_szczegoly()), Decimal(0))
+
+
 async def cykl(url: str, engine: str, mode: str) -> dict:
     with psycopg.connect(url, row_factory=dict_row) as conn:
         adapter = adapter_danych(conn, engine, mode)
         try:
             stan = await adapter.stan_konta()
-            unrealized = Decimal(0)
-            if hasattr(adapter, "pozycje_szczegoly"):
-                unrealized = sum((p["unrealized_pl"] for p in await adapter.pozycje_szczegoly()),
-                                 Decimal(0))
+            unrealized = await zmierz_unrealized(adapter)
         finally:
             await adapter.close()
         cur = conn.cursor(row_factory=dict_row)

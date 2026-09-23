@@ -1,11 +1,69 @@
-fastapi>=0.115
-uvicorn[standard]>=0.32
-psycopg[binary,pool]>=3.2
-python-dotenv>=1.0
-argon2-cffi>=23.1
-pyotp>=2.9
-cryptography>=43.0
-qrcode[pil]>=7.4
-httpx>=0.27
-anthropic>=0.60
-feedparser>=6.0
+# WERSJE PRZYPIETE DOKLADNIE (==), NIE PROGIEM (>=).
+#
+# DLACZEGO: tag obrazu to `sha-<commit>`, co obiecuje, ze z tego samego commita
+# powstanie ten sam obraz. Przy progach `>=` ta obietnica byla falszywa -
+# przebudowanie starszego commita instalowalo najnowsze wtedy wydania. Najjaskrawszy
+# przypadek zmierzony 23.09.2026: w pliku stalo `anthropic>=0.60`, a kod byl
+# testowany na `1.1.0` - czyli na innej wersji GLOWNEJ. Odtworzenie obrazu sprzed
+# miesiaca dawalo inna biblioteke niz ta, na ktorej commit przeszedl testy,
+# a jedynym objawem bylby blad na produkcji bez zmiany w kodzie.
+#
+# EXTRAS ZOSTAJA W NAWIASACH KWADRATOWYCH i to nie jest ozdoba:
+#   - `qrcode[pil]` ciagnie Pillow, bez ktorego `auth.py:393`
+#     (`qrcode.make(uri).save(buf, format="PNG")`) wywala sie na ImportError,
+#     czyli 2FA przestaje dawac kod do zeskanowania;
+#   - `uvicorn[standard]` ciagnie uvloop, httptools, websockets i watchfiles;
+#   - `psycopg[binary,pool]` ciagnie sterownik i pule polaczen.
+# Przypiecie samej nazwy bez extras wyglada na to samo i cicho usuwa te pakiety.
+#
+# PAKIETY Z EXTRAS PRZYPIETE OSOBNO: wersje pakietow ciagnietych przez extras
+# plywaja NIEZALEZNIE od wersji pakietu glownego, wiec `psycopg[binary,pool]==3.3.4`
+# nie przypina ani `psycopg-binary`, ani `psycopg-pool`. Stad jawne linie nizej.
+#
+# CZEGO TU NADAL NIE MA: pliku blokady (`pip-compile`/`uv lock`) obejmujacego
+# CALE drzewo zaleznosci posrednich. Przypiecie ponizej zamyka warstwe bezposrednia
+# i te zaleznosci z extras, ktore realnie decyduja o dzialaniu - pelna odtwarzalnosc
+# wymaga pliku blokady i jest osobna decyzja.
+#
+# Wersje ponizej to DOKLADNIE te, na ktorych zestaw testow jest zielony
+# (1651 passed, 25 skipped, 23.09.2026); kazda sprawdzona w PyPI pod katem kola
+# dla cp312/linux-x86_64.
+
+fastapi==0.141.1
+uvicorn[standard]==0.52.4
+psycopg[binary,pool]==3.3.4
+python-dotenv==1.2.3
+argon2-cffi==25.1.0
+pyotp==2.10.0
+cryptography==50.0.1
+qrcode[pil]==8.2
+httpx==0.28.1
+anthropic==1.1.0
+feedparser==6.0.14
+
+# Ciagniete przez extras powyzej, przypiete jawnie - patrz komentarz na gorze.
+psycopg-binary==3.3.4
+psycopg-pool==3.3.1
+
+# `argon2-cffi-bindings` zostaje NIEPRZYPIETE - ale NIE dlatego, ze nie ma kola.
+#
+# UWAGA NA PULAPKE W SPRAWDZANIU, bo sam w nia wpadlem 23.09.2026. Polecenie
+#   pip install --dry-run --only-binary=:all: --python-version 3.12 \
+#       --platform manylinux2014_x86_64 argon2-cffi-bindings==26.1.0
+# odpowiada "Could not find a version" i wyglada na dowod, ze kola nie ma.
+# To artefakt ZLE DOBRANEGO TAGU: `manylinux2014` to glibc 2.17, a pip dopasowuje
+# tagi platformy DOKLADNIE, wiec ten argument wyklucza kazde kolo `manylinux_2_28`.
+# Na PyPI lezy `argon2_cffi_bindings-26.1.0-cp310-abi3-manylinux_2_26_x86_64
+# .manylinux_2_28_x86_64.whl` - `abi3`, czyli dziala takze na cp312. Obraz bazowy
+# (przypiety digest `python:3.12-slim`) to dzis Debian 13/trixie, glibc 2.41,
+# wiec warunek spelnia z duzym zapasem.
+#
+# NIE UZYWAJ wiec `manylinux2014_x86_64` do sprawdzania tego pliku - odrzuci kazde
+# przyszle kolo `manylinux_2_28+`. Nastepny na tej liscie jest `cryptography`,
+# ktore dzis wydaje OBA warianty i przez to przechodzi taki test przypadkiem.
+#
+# Powod pozostawienia bez przypiecia jest inny i slabszy: to zaleznosc POSREDNIA
+# (ciagnie ja `argon2-cffi`), a jej wersja jest scisle zwiazana z `cffi`, ktorego
+# wymagania zmieniaja sie miedzy wersjami Pythona. Przypiecie tutaj zamrozilo by
+# jedno ogniwo tego lancucha bez pozostalych, co daje zludzenie kontroli.
+# Wlasciwym rozwiazaniem jest plik blokady na cale drzewo - patrz akapit wyzej.

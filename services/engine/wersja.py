@@ -34,6 +34,20 @@ from pathlib import Path
 
 PRZEDROSTEK_TAGU = "sha-"
 
+# Najkrotszy skrot, jaki git w ogole wystawia (`--short` daje dzis 7 znakow),
+# i pelna dlugosc sha-1. Bez DOLNEJ granicy sam alfabet szesnastkowy przepuszcza
+# nazwy galezi i tagow zlozone z tych liter: `beef`, `ada`, `decade`, `face`
+# — wszystkie przeszlyby jako SHA i trafily do `learn.model_version.git_sha`
+# jako odpowiedz na pytanie "jaki kod to policzyl".
+DLUGOSC_SHA = range(7, 41)
+
+# Znacznik doklejany, gdy drzewo robocze ma niezacommitowane zmiany. Sufiks,
+# a nie None, bo commit jest tu POLOWA prawdy i lepiej oddac polowe z etykieta
+# niz nic: `git checkout <sha>` nadal prowadzi w okolice, a `-dirty` mowi
+# wprost, ze dokladnego odtworzenia nie bedzie. Ten sam sufiks, ktorego uzywa
+# `git describe --dirty`, zeby nie wymyslac wlasnej konwencji.
+SUFIKS_BRUDNY = "-dirty"
+
 
 def _z_srodowiska() -> str | None:
     surowy = (os.environ.get("GIT_SHA") or "").strip()
@@ -42,12 +56,49 @@ def _z_srodowiska() -> str | None:
     if surowy.startswith(PRZEDROSTEK_TAGU):
         surowy = surowy[len(PRZEDROSTEK_TAGU):]
     # Tag `latest` albo nazwa galezi nie jest sha i nie ma udawac, ze jest.
-    if not surowy or any(z not in "0123456789abcdef" for z in surowy.lower()):
+    # DLUGOSC TEZ SIE LICZY, nie tylko alfabet — patrz `DLUGOSC_SHA`.
+    if (len(surowy) not in DLUGOSC_SHA
+            or any(z not in "0123456789abcdef" for z in surowy.lower())):
         return None
     return surowy.lower()
 
 
+def _czy_brudne(korzen: Path) -> bool | None:
+    """Czy drzewo robocze rozni sie od HEAD. None, gdy nie da sie stwierdzic.
+
+    `git status --porcelain` oddaje pusty napis dla drzewa czystego i po linii
+    na kazdy plik zmieniony, dodany albo nieznany. Pliki nieznane TEZ licza sie
+    tutaj jako roznica: nowy modul, ktorego nikt nie zacommitowal, jest czescia
+    kodu, ktory wlasnie policzyl wynik.
+    """
+    try:
+        wynik = subprocess.run(
+            ["git", "-C", str(korzen), "status", "--porcelain"],
+            capture_output=True, text=True, timeout=5, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if wynik.returncode != 0:
+        return None
+    return bool(wynik.stdout.strip())
+
+
 def _z_repozytorium() -> str | None:
+    """SHA z lokalnego repozytorium, z ADNOTACJA o brudnym drzewie roboczym.
+
+    `git rev-parse HEAD` opisuje OSTATNI COMMIT, a nie zawartosc drzewa
+    roboczego. Rozjazd nie jest hipotetyczny: analityk uruchamia lokalnie
+    `train.py` bez `--sucho` na niezacommitowanej zmianie w `signals.py`,
+    `train.py` wpisuje zwrocony sha do `learn.model_version.git_sha`, a ktos
+    pozniej robi `git checkout <ten sha>` i NIE ODTWARZA wyniku. Moduł istnieje
+    wylacznie po to, zeby na pytanie „jaki kod to policzyl" dalo sie odpowiedziec
+    bez zgadywania — a sha opisujacy inny kod niz uruchomiony jest gorszy niz
+    brak sha, bo wyglada na odpowiedz.
+
+    NIEPEWNOSCI CO DO CZYSTOSCI TEZ NIE UKRYWAMY. Gdy `git status` nie odpowie
+    (brak binarki, timeout, uszkodzone repozytorium), nie wiemy, czy drzewo
+    bylo czyste — i wtedy sufiks jest doklejany tak samo, bo „nie wiem, czy to
+    ten kod" nalezy po tej samej stronie co „na pewno nie ten".
+    """
     korzen = Path(__file__).resolve().parents[2]
     if not (korzen / ".git").exists():
         return None
@@ -58,9 +109,16 @@ def _z_repozytorium() -> str | None:
     except (OSError, subprocess.SubprocessError):
         return None
     sha = wynik.stdout.strip()
-    return sha if wynik.returncode == 0 and sha else None
+    if wynik.returncode != 0 or not sha:
+        return None
+    return sha if _czy_brudne(korzen) is False else sha + SUFIKS_BRUDNY
 
 
 def sha_kodu() -> str | None:
-    """Skrocony SHA commita, z ktorego pochodzi ten kod, albo None."""
+    """Skrocony SHA commita, z ktorego pochodzi ten kod, albo None.
+
+    Z uruchomienia lokalnego na brudnym drzewie wraca `<sha>-dirty`: commit
+    jest wtedy polowa prawdy i etykieta mowi to wprost. Obraz kontenerowy
+    buduje sie z commita, wiec `GIT_SHA` nigdy nie niesie tego sufiksu.
+    """
     return _z_srodowiska() or _z_repozytorium()
