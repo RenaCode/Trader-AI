@@ -33,7 +33,7 @@ from decimal import Decimal
 
 from services.engine.egzekucja import co_z_wypelnieniem, rozlicz_prowizje
 from services.engine.loop import zapisz_wejscie, zapisz_wyjscie
-from services.engine.zlecenia import Filtry, sprawdz_zlecenie
+from services.engine.zlecenia import Filtry, do_kroku_w_dol, sprawdz_zlecenie
 from services.exchanges.base import ExchangeError
 
 
@@ -91,6 +91,64 @@ async def zloz_plan(cur, adapter, plan: dict, f: Filtry, *, engine: str,
         kupno=kupno, wyjscie=wyjscie,
         cena_odniesienia=odniesienie, atr_pct=atr)
     if powod:
+        # NAJPIERW PYTAMY GIELDE, CZY TO ZLECENIE JUZ U NIEJ NIE LEZY.
+        #
+        # Odmowa przed wysłaniem zapisuje plan jako `rejected`, a wiersz
+        # zlecenia jako `rejected` — i od tej chwili nie sięga po nie NIKT:
+        # `rozstrzygnij_oczekujace` wybiera plany `pending`, a oba sprzątacze
+        # (`posprzataj_zlecenia`, `anuluj_wejscia`) wybierają wyłącznie
+        # `status IN ('new','partial','unknown')`.
+        #
+        # Scenariusz, w którym to kosztuje: cykl N wysyła plan 77 na giełdę
+        # (PostOnly leży w arkuszu), proces ginie przed wspólnym `conn.commit()`
+        # po pętli `zloz_oczekujace`, więc wiersz `exec.order` nie powstaje.
+        # Cykl N+1 widzi plan 77 nadal jako `pending` bez zlecenia i wywołuje
+        # `zloz_plan` ponownie — ale sprawdzenie wstępne biegnie PRZED zapytaniem
+        # giełdy i tym razem, przy przesuniętej cenie odniesienia albo
+        # niespełnionym `min_notional`, plan odrzuca. ŻYWE zlecenie zostaje na
+        # giełdzie i nikt po nie nie wróci. Jeśli się wypełni, mamy aktywo bez
+        # wiersza `exec.position` i bez decyzji za nim — czyli ekspozycję poza
+        # limitami, której kill-switch nie ma jak zdjąć.
+        #
+        # `zloz_zlecenie` pyta o to samo dla idempotencji (`juz_istnialo`), więc
+        # tu tylko przenosimy to pytanie przed odmowę. Nieudany odczyt NIE
+        # blokuje odmowy: o zleceniu wtedy nic nie wiemy, a zatrzymanie
+        # rozstrzygania planu byłoby gorszym lekarstwem niż choroba — wiersz
+        # `rejected` i tak zostaje z powodem.
+        istnieje = None
+        try:
+            istnieje = await adapter.stan_zlecenia(id_zlecenia(plan["id"]),
+                                                   kategoria=kategoria)
+        except ExchangeError:
+            istnieje = None
+        if istnieje is not None:
+            # ZLECENIE ZYJE (albo sie wypelnilo) MIMO ODMOWY SPRAWDZENIA.
+            #
+            # Plan zostaje `pending`, a wiersz zlecenia powstaje ze stanem
+            # z gieldy — od tej chwili widzi je i `rozstrzygnij_oczekujace`
+            # (po planie), i `posprzataj_zlecenia` (po statusie). Zapisanie
+            # odmowy byloby zapisaniem nieprawdy: sprawdzenie odmowilo
+            # WYSLANIA, a wyslane juz jest.
+            cur.execute(
+                "INSERT INTO exec.order (decision_id, planned_order_id, engine, mode,"
+                " instrument_id, venue_order_id, client_order_id, side, order_type,"
+                " qty, limit_price, status, reject_reason, submitted_at, raw)"
+                " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,'limit',%s,%s,%s,%s,now(),%s)",
+                (plan["decision_id"], plan["id"], engine, mode,
+                 plan["instrument_id"], istnieje.id_gieldy, id_zlecenia(plan["id"]),
+                 plan["side"], istnieje.ilosc, plan["limit_price"],
+                 istnieje.status,
+                 f"sprawdzenie przed wysłaniem odmówiłoby ({powod}), ale giełda"
+                 f" zna to zlecenie (status {istnieje.status}, wypełnione"
+                 f" {istnieje.wypelniono}/{istnieje.ilosc}) — plan zostaje"
+                 f" do rozstrzygnięcia, żeby zlecenie nie zostało porzucone",
+                 json.dumps({"execution": "gielda",
+                             "etap": "odmowa_a_zlecenie_u_gieldy",
+                             "powod_odmowy": powod,
+                             "status_gieldy": istnieje.status})))
+            return True, (f"giełda zna to zlecenie mimo odmowy sprawdzenia"
+                          f" ({powod}) — plan zostaje do rozstrzygnięcia")
+
         cur.execute("UPDATE journal.planned_order SET status='rejected',"
                     " resolved_at=now() WHERE id=%s", (plan["id"],))
         cur.execute(
@@ -101,6 +159,57 @@ async def zloz_plan(cur, adapter, plan: dict, f: Filtry, *, engine: str,
             (plan["decision_id"], plan["id"], engine, mode, plan["instrument_id"],
              id_zlecenia(plan["id"]), plan["side"], plan["qty"], plan["limit_price"],
              powod, json.dumps({"execution": "gielda", "etap": "przed_zlozeniem"})))
+
+        # POZYCJA, KTOREJ JUZ NIGDY NIE DA SIE SPRZEDAC, MUSI ZOSTAC DOMKNIETA.
+        #
+        # Trzecie wcielenie tej samej wady, co domykanie z resztka w
+        # `loop.zapisz_wyjscie`: tam resztka zostaje PO sprzedazy, tu cala
+        # pozycja jest mniejsza od kroku ilosci jeszcze zanim cokolwiek
+        # wyslemy — tak powstaja wejscia `nie_do_zamkniecia`
+        # (`egzekucja.co_z_wypelnieniem`). Odmowa przed wysłaniem zostawia
+        # wtedy wiersz pozycji otwarty NA ZAWSZE, a `loop.open_position`
+        # dalej go oddaje, wiec petla decyzyjna wybiera na tym instrumencie
+        # wylacznie `exit` albo `hold` — instrument wypada z handlu, a kazda
+        # swieca produkuje kolejne odrzucone zlecenie.
+        #
+        # KRYTERIUM JEST TRWALE, A NIE CHWILOWE. Domykamy wylacznie wtedy, gdy
+        # ilosc znika po zaokragleniu do kroku albo lezy ponizej minimum ilosci
+        # — tych dwoch zadna zmiana ceny nie odwroci. Sama `min_notional`
+        # (wartosc ponizej minimum) NIE wystarcza: pozycja na kroku, ktora dzis
+        # jest warta za malo, jutro po wzroscie ceny sprzeda sie normalnie,
+        # a spisanie jej na strate byloby wyrzuceniem zywych pieniedzy.
+        # Reguly niekompletne nie domykaja niczego — braku regul nie wolno
+        # czytac jako "nie da sie sprzedac".
+        if wyjscie and f.kompletne and plan["trigger"].get("position_id"):
+            trwale_nie_do_sprzedania = (
+                do_kroku_w_dol(Decimal(plan["qty"]), f.krok_ilosci) <= 0
+                or (f.min_ilosc is not None
+                    and do_kroku_w_dol(Decimal(plan["qty"]), f.krok_ilosci)
+                    < f.min_ilosc))
+            if trwale_nie_do_sprzedania:
+                cur.execute(
+                    "SELECT id, qty, avg_price FROM exec.position"
+                    " WHERE id=%s AND closed_at IS NULL",
+                    (plan["trigger"]["position_id"],))
+                poz = cur.fetchone()
+                if poz and Decimal(poz["qty"]) <= Decimal(plan["qty"]):
+                    # PYL SPISUJEMY PO CENIE WEJSCIA — tak samo jak resztke
+                    # w `loop.zapisz_wyjscie` i z tego samego powodu: samo
+                    # `closed_at` skasowaloby niezrealizowana strate z
+                    # `update_equity` i PODNIOSLO kapital w chwili, w ktorej
+                    # cos tracimy.
+                    strata = Decimal(poz["avg_price"]) * Decimal(poz["qty"])
+                    cur.execute(
+                        "UPDATE exec.position SET closed_at=now(),"
+                        " realized_pnl = COALESCE(realized_pnl,0) - %s,"
+                        " close_decision_id=%s WHERE id=%s",
+                        (strata, plan["decision_id"], poz["id"]))
+                    return False, (
+                        f"{powod}; POZYCJA DOMKNIĘTA: {poz['qty']} nie da się"
+                        f" sprzedać na tej giełdzie przy kroku {f.krok_ilosci}"
+                        f" — resztka zostaje na giełdzie i jest spisana na"
+                        f" stratę po cenie wejścia {poz['avg_price']},"
+                        f" instrument wraca do handlu")
         return False, powod
 
     try:
@@ -290,6 +399,14 @@ async def rozstrzygnij_plan(cur, adapter, plan: dict, f: Filtry, *, engine: str,
             # w KUPIONYM aktywie i musi ona zejsc z ilosci, ktora naprawde mamy.
             # Sprzedaz takiego problemu nie ma - wychodzi z niej waluta kwotowana
             # - wiec przeliczanie byloby tu zgadywaniem kursu bez potrzeby.
+            #
+            # `filtry` PRZEKAZUJEMY, ZEBY WYJSCIE MOGLO DOMKNAC POZYCJE.
+            # Sprzedajemy `r.ilosc`, czyli ilosc zaokraglona W DOL do kroku
+            # gieldy, a na pozycji stoi ilosc NETTO po prowizji pobranej
+            # w kupionym aktywie - te dwie liczby nigdy nie sa rowne. Bez regul
+            # instrumentu `zapisz_wyjscie` porownuje je wprost, `closed_at`
+            # zostaje NULL na zawsze i instrument wypada z handlu na stale
+            # (pelny opis w docstringu `zapisz_wyjscie`).
             zapisz_wyjscie(cur, poz, cena, prowizja, teraz, plan["decision_id"],
                            ilosc=r.ilosc, meta=meta,
                            order_id=id_zlecenia_w_bazie,
@@ -297,7 +414,8 @@ async def rozstrzygnij_plan(cur, adapter, plan: dict, f: Filtry, *, engine: str,
                            venue_order_id=stan.id_gieldy,
                            client_order_id=id_w,
                            venue_fill_id=f"{stan.id_gieldy}",
-                           prowizja_ccy=prowizja_ccy)
+                           prowizja_ccy=prowizja_ccy,
+                           filtry=f)
         else:
             # SPRZEDAZ SIE WYKONALA, A NIE MA CZEGO ZAMKNAC.
             #
@@ -357,12 +475,34 @@ async def rozstrzygnij_plan(cur, adapter, plan: dict, f: Filtry, *, engine: str,
 
     cur.execute("UPDATE journal.planned_order SET status='triggered',"
                 " resolved_at=%s WHERE id=%s", (teraz, plan["id"]))
+    # STATUS PO ANULOWANIU, A NIE SPRZED NIEGO.
+    #
+    # `stan.status` odczytalismy PRZED anulowaniem reszty - przy wypelnieniu
+    # czesciowym jest to `partial`. Wpisanie go z powrotem opisuje zlecenie,
+    # ktorego reszta nadal lezy w arkuszu, choc zdjelismy ja kilkadziesiat
+    # linii wyzej w tym samym wywolaniu. Kosztowalo to dwa razy:
+    #
+    #   * `RiskKernel._open_exposure` liczy ten sam kapital DWA RAZY - raz jako
+    #     otwarta pozycje (krok 1, wycena rynkowa), raz jako zlecenie zlozone
+    #     i nierozstrzygniete (krok 2, `status IN ('new','partial','unknown')`).
+    #     Ekspozycja wychodzi okolo dwukrotnie zawyzona, wiec
+    #     `max_total_exposure` blokuje wejscia, ktorych nic nie blokuje -
+    #     a w dzienniku wyglada to na poprawnie dzialajacy limit;
+    #   * `posprzataj_zlecenia` wybiera dokladnie te trzy statusy, wiec co cykl
+    #     pyta gielde o zlecenie, o ktorym sami wiemy, ze go nie ma.
+    #
+    # `anulowano` jest ustawiane WYLACZNIE po udanym `anuluj_zlecenie`. Gdy
+    # anulowanie padlo, zostaje status z gieldy - reszta naprawde zyje.
+    status_koncowy = "cancelled" if anulowano else stan.status
     # `COALESCE`, zeby zapis bez uwagi nie kasowal powodu wpisanego wczesniej
     # (np. przez kill-switch albo poprzednie nieudane anulowanie).
     cur.execute("UPDATE exec.order SET status=%s, updated_at=%s,"
                 " reject_reason = COALESCE(%s, reject_reason), raw = raw || %s"
                 " WHERE planned_order_id=%s",
-                (stan.status, teraz, uwaga, json.dumps(meta), plan["id"]))
+                (status_koncowy, teraz, uwaga,
+                 json.dumps(dict(meta, status_po_anulowaniu=status_koncowy)
+                            if anulowano else meta),
+                 plan["id"]))
 
     return rodzaj_zwrotny, powod_zwrotny
 
@@ -716,7 +856,31 @@ async def posprzataj_zlecenia(cur, adapter, *, engine: str, mode: str,
         # ILE JUZ ZAKSIEGOWALISMY z tego zlecenia. Bez tej liczby jedynym
         # sygnalem bylby status wiersza - a status mowi "bylo czesciowe",
         # nie "ile z tego trafilo do dziennika".
-        "       coalesce((SELECT sum(f.qty) FROM exec.fill f"
+        #
+        # PROWIZJA W AKTYWIE BAZOWYM WRACA DO SUMY, bo porownujemy te liczbe
+        # z `stan.wypelniono`, czyli z `cumExecQty` gieldy - a to jest BRUTTO.
+        # `exec.fill.qty` dla wejscia jest NETTO (`loop.zapisz_wejscie` dostaje
+        # ilosc po `egzekucja.rozlicz_prowizje`, bo kupno na spocie placi
+        # prowizje w kupionym aktywie). Roznica wynosi DOKLADNIE prowizje
+        # bazowa: dla ADAUSDC (`lot_size` 0.1) zlecenie na 2000 ADA daje ~2 ADA
+        # przy progu 0,05 - czyli warunek "pozycja poza dziennikiem" byl
+        # spelniony PRZY KAZDYM WEJSCIU. Czujka meldowala wtedy nieistniejaca
+        # pozycje poza dziennikiem, uzgodnienie z gielda nic nie znajdowalo
+        # (odejmuje prowizje po obu stronach), a odbiorca uczyl sie, ze te
+        # linie mozna pomijac - te sama, ktora ma wylapac prawdziwe wypelnienie
+        # po fakcie, czyli ekspozycje niepoliczona przez risk kernel.
+        #
+        # ODTWARZAMY BRUTTO, ZAMIAST ZMIENIAC ZNACZENIE KOLUMNY. Wpisywanie do
+        # `exec.fill.qty` ilosci brutto naprawiloby to samo, ale wylacznie dla
+        # wierszy NOWYCH - kilka miesiecy dotychczasowego przebiegu demo
+        # zostaloby netto i ta sama kolumna znaczylaby dwie rozne rzeczy
+        # w zaleznosci od daty. Prowizja i jej waluta sa w wierszu wypelnienia
+        # (`fee`, `fee_ccy`), wiec brutto da sie policzyc dokladnie - i dla
+        # wiersza starego, i dla nowego.
+        "       coalesce((SELECT sum(f.qty + CASE WHEN upper(f.fee_ccy)"
+        "                                         = upper(i.base_ccy)"
+        "                                    THEN f.fee ELSE 0 END)"
+        "                  FROM exec.fill f"
         "                  WHERE f.order_id = o.id), 0) AS zaksiegowane"
         "  FROM exec.order o"
         "  JOIN ref.instrument i ON i.id = o.instrument_id"

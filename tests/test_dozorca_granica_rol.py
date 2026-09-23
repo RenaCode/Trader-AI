@@ -197,9 +197,18 @@ def test_reguly_konta_NIE_CZYTAJA_ekspozycji():
     zmierzonej ekspozycji przechodzi przez `evaluate_account` bez potknięcia.
     """
     from services.engine.risk_rules import RiskState, evaluate_account
+    # `wplaty_netto` MUSI tu byc, bo `LIMITY` ma `min_equity` w jednostce
+    # `pct_wplat`. Bez tej liczby prog "90% wplat" nie ma od czego sie liczyc:
+    # przed 2026-09-23 stawal sie po cichu progiem 90 jednostek waluty, czyli
+    # podloga kapitalu przestawala istniec, a test tego nie zauwazal, bo pyta
+    # o cos innego. Teraz taki stan konczy sie werdyktem `block`. Wartosc rowna
+    # `equity` dobrana tak, zeby prog (9000) lezal ponizej kapitalu i werdykt
+    # zalezal wylacznie od tego, o co ten test pyta - od `exposure=None`.
+    # Pozostale konstrukcje `RiskState` w tym pliku podaja ja od poczatku.
     stan = RiskState(equity=Decimal("10000"), peak=Decimal("10000"),
                      day_ago=Decimal("10000"), exposure=None,
-                     per_instrument=None, orders_last_hour=0)
+                     per_instrument=None, orders_last_hour=0,
+                     wplaty_netto=Decimal("10000"))
     assert evaluate_account(stan, LIMITY).verdict == "allow"
 
 
@@ -211,9 +220,18 @@ def test_ocena_ZLECENIA_bez_zmierzonej_ekspozycji_KRZYCZY():
     jak limit działający.
     """
     from services.engine.risk_rules import RiskState, evaluate_limits
+    # `wplaty_netto` MUSI tu byc, bo `LIMITY` ma `min_equity` w jednostce
+    # `pct_wplat`. Bez tej liczby prog "90% wplat" nie ma od czego sie liczyc:
+    # przed 2026-09-23 stawal sie po cichu progiem 90 jednostek waluty, czyli
+    # podloga kapitalu przestawala istniec, a test tego nie zauwazal, bo pyta
+    # o cos innego. Teraz taki stan konczy sie werdyktem `block`. Wartosc rowna
+    # `equity` dobrana tak, zeby prog (9000) lezal ponizej kapitalu i werdykt
+    # zalezal wylacznie od tego, o co ten test pyta - od `exposure=None`.
+    # Pozostale konstrukcje `RiskState` w tym pliku podaja ja od poczatku.
     stan = RiskState(equity=Decimal("10000"), peak=Decimal("10000"),
                      day_ago=Decimal("10000"), exposure=None,
-                     per_instrument=None, orders_last_hour=0)
+                     per_instrument=None, orders_last_hour=0,
+                     wplaty_netto=Decimal("10000"))
     z_ekspozycja = LIMITY | {
         "max_total_exposure": {"id": 3, "name": "max_total_exposure",
                                "value": Decimal("15"), "unit": "pct_equity",

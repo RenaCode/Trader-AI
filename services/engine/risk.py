@@ -406,11 +406,64 @@ class RiskKernel:
         return sum(per.values(), Decimal(0)), per
 
     def _orders_last_hour(self) -> int:
+        """Ile zlecen poszlo w ostatniej godzinie - RAZEM Z BIEZACYM CYKLEM.
+
+        DLACZEGO NIE SAM `exec.order` (naprawa 2026-09-23)
+
+        Dokladnie ten sam ksztalt wady, ktory 2026-09-09 naprawiono dla
+        `max_total_exposure`, tyle ze w liczniku zlecen. Produkcja chodzi
+        z `--limit`, wiec wiersz w `exec.order` powstaje dopiero w
+        `zloz_oczekujace`, czyli na KONCU przebiegu. Wszystkie wejscia jednego
+        cyklu czytaly wiec te sama liczbe sprzed cyklu:
+
+            19 zlecen w poprzedniej godzinie, limit 20, 10 instrumentow
+            w cyklu -> kazde widzi `19 < 20` i przechodzi -> po cyklu jest ich
+            29 przy limicie 20
+
+        Limit czestotliwosci istnieje jako OCHRONA PRZED PETLA BLEDU
+        (`risk_rules.evaluate_limits`, punkt 4) - czyli przed dokladnie taka
+        seria. Nie moze byc egzekwowalny wylacznie miedzy cyklami.
+
+        Rozjazd byl przy tym jednostronny i dotyczyl kalibracji:
+        `portfolio.simulate_portfolio` inkrementuje `orders_h` w obrebie swiecy
+        (`portfolio.py`), wiec backtest mierzyl limit, ktorego produkcja nie
+        miala.
+
+        PLANY LICZYMY PRZEZ TEN SAM JOIN CO `_open_exposure`.
+        `journal.planned_order` nie ma kolumn engine/mode (migracja 0005), wiec
+        silnik i tryb bierzemy z decyzji, ktora plan zrodzila. `NOT EXISTS`
+        wyklucza podwojne liczenie planu, ktory ma juz swoj wiersz zlecenia.
+
+        OKNO Z `created_at` PLANU, a nie z `submitted_at` zlecenia, bo zlecenia
+        jeszcze nie ma - to jest caly sens tego doliczenia.
+
+        RODZAJU PLANU NIE FILTRUJEMY, w odroznieniu od `_open_exposure`.
+        Tamten liczy KAPITAL, wiec bierze same wejscia; ten liczy ZLECENIA,
+        a wyjscie jest zleceniem tak samo jak wejscie - `exec.order` po stronie
+        zrealizowanej tez ich nie rozdziela.
+
+        DWA ZAPYTANIA, A NIE JEDNO Z DWOMA PODZAPYTANIAMI. Licza dwie rozne
+        rzeczy w dwoch roznych tabelach i po dwoch roznych znacznikach czasu
+        (`submitted_at` zlecenia, `created_at` planu). Zlaczone w jeden
+        `SELECT` czytaly sie jak jedna wielkosc, a przy pierwszej zmianie okna
+        latwo bylo poprawic tylko polowe.
+        """
         cur = self.conn.cursor()
         cur.execute(
             "SELECT count(*) AS n FROM exec.order WHERE engine=%s AND mode=%s"
             " AND submitted_at > now() - interval '1 hour'", (self.engine, self.mode))
-        return (cur.fetchone() or {}).get("n", 0)
+        zlozone = (cur.fetchone() or {}).get("n", 0)
+
+        cur.execute(
+            "SELECT count(*) AS n FROM journal.planned_order p"
+            "  JOIN journal.decision d ON d.id = p.decision_id"
+            " WHERE d.engine=%s AND d.mode=%s AND p.status='pending'"
+            "   AND p.created_at > now() - interval '1 hour'"
+            "   AND NOT EXISTS (SELECT 1 FROM exec.order o"
+            "                    WHERE o.planned_order_id = p.id)",
+            (self.engine, self.mode))
+        zaplanowane = (cur.fetchone() or {}).get("n", 0)
+        return zlozone + zaplanowane
 
     def killswitch_active(self) -> dict | None:
         cur = self.conn.cursor()

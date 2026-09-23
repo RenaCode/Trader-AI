@@ -163,6 +163,16 @@ class RiskVerdict:
     trigger_limit: str | None = None
 
 
+class LimitNieobliczalny(RuntimeError):
+    """Limit zapisany procentowo, a podstawy procentu NIE ZNAMY.
+
+    Nie jest to ani zero, ani inna jednostka - jest to brak pomiaru. Limit,
+    ktorego nie da sie policzyc, nie moze zamilknac: jedyna bezpieczna reakcja
+    to wstrzymanie handlu, bo alternatywa jest handel bez dzialajacej podlogi
+    kapitalu przy zielonym statusie.
+    """
+
+
 def wartosc_limitu(lim: dict, kapital: Decimal) -> Decimal:
     """Limit w walucie, niezaleznie od tego, jak zostal zapisany.
 
@@ -201,8 +211,49 @@ def prog_min_equity(lim: dict, state: RiskState) -> Decimal:
     i zatrzymuje silnik bez powodu. `pct_wplat` przesuwa sie razem z wplatami
     netto i wyraza to, o co chodzi: "nie strac wiecej niz tyle z tego, co
     wlozylem".
+
+    BRAK PODSTAWY PROCENTU JEST BLEDEM, A NIE INNA JEDNOSTKA (naprawa
+    2026-09-23)
+
+    Bylo tu `if unit == "pct_wplat" and state.wplaty_netto is not None`, czyli
+    przy `wplaty_netto is None` limit `{"value": 95, "unit": "pct_wplat"}`
+    schodzil po cichu na ostatnia linijke i stawal sie progiem 95 JEDNOSTEK
+    WALUTY zamiast 95% wplat. Na rachunku 10 000 warunek `state.equity <= prog`
+    nie zostalby spelniony NIGDY - kill-switch chroniacy pieniadze wlasciciela
+    bylby wylaczony, przy zielonym statusie i pelnym wierszu w
+    `risk.limit_usage` z threshold 95.
+
+    Jest to ten sam blad, ktory opisuje `wartosc_limitu` kilkanascie linii
+    wyzej („`lim['value']` przy jednostce `pct_equity` to LICZBA PROCENTOWA
+    (15), a `used` jest kwota") - niepoprawiony w drugim miejscu.
+
+    `wplaty_netto` pochodzi z `SQL_NAV_BIEZ` przez `risk._wynik()` i jest
+    `None` wszedzie tam, gdzie najswiezszy punkt z niepustym `nav` ma pusta
+    kolumne `wplaty_netto` - czyli w stanach po migracji lub czyszczeniu, dla
+    ktorych 0042 swiadomie zostawia NULL-e. Ta sama sciezka obowiazuje dozorce
+    przez `stan_kapitalu.stan_ryzyka`, wiec niezalezny nadzorca milczalby
+    tak samo.
+
+    Dzis jest to latentne: produkcja ma `min_equity` jako `quote_ccy` 95000
+    (migracja 0028). Ale `pct_wplat` jest tym, co docstring wyzej zaleca dla
+    rachunku zywego, i jest juz uzywane w czterech testach - pulapka czeka
+    dokladnie na przejscie na live.
+
+    DLACZEGO WYJATEK, A NIE WARTOSC ZASTEPCZA. Kazda liczba zwrocona z tego
+    miejsca zostanie porownana z kapitalem i przesadzi o tym, czy silnik
+    handluje dalej. Nie ma liczby, ktora znaczy „nie wiem": zero wylacza
+    podloge, a kapital biezacy zatrzymalby handel natychmiast i bez powodu.
+    Wolajacy ma sie o tym dowiedziec i zdecydowac sam - robi to
+    `pomiar_konta` razem z `evaluate_account`, wstrzymujac handel.
     """
-    if lim.get("unit") == "pct_wplat" and state.wplaty_netto is not None:
+    if lim.get("unit") == "pct_wplat":
+        if state.wplaty_netto is None:
+            raise LimitNieobliczalny(
+                "min_equity jest zapisany jako procent wpłat "
+                f"({lim['value']}% pct_wplat), a wpłat netto nie znamy "
+                "(exec.equity_point.wplaty_netto jest NULL) — progu nie da się "
+                "policzyć, a zejście na jednostkę kwotową zamieniłoby go "
+                f"po cichu w próg {lim['value']} jednostek waluty")
         return Decimal(lim["value"]) / Decimal(100) * state.wplaty_netto
     return Decimal(lim["value"])
 
@@ -269,10 +320,20 @@ def pomiar_konta(state: RiskState,
 
     lim = limits.get("min_equity")
     if lim:
-        prog = prog_min_equity(lim, state)
-        surowe["min_equity"] = prog
-        usage.append({"name": "min_equity", "used": float(state.equity),
-                      "threshold": float(prog)})
+        # NIEOBLICZALNY PROG ZOSTAJE ZAPISANY JAKO BRAK POMIARU, a nie jako
+        # pomiar z podstawiona liczba. Wiersz w `risk.limit_usage` z threshold
+        # 95 przy progu, ktorego nie da sie policzyc, jest gorszy niz brak
+        # wiersza: wyglada na dzialajacy bezpiecznik. Pozostale limity mierzymy
+        # dalej - "nadzor staje sie niewidoczny w chwili, w ktorej jest
+        # najbardziej potrzebny" to wada, ktora ta funkcja juz raz naprawiala.
+        try:
+            prog = prog_min_equity(lim, state)
+        except LimitNieobliczalny as e:
+            surowe["min_equity_blad"] = str(e)
+        else:
+            surowe["min_equity"] = prog
+            usage.append({"name": "min_equity", "used": float(state.equity),
+                          "threshold": float(prog)})
 
     lim = limits.get("max_drawdown")
     if lim and state.wynik_szczyt > 0:
@@ -355,6 +416,31 @@ def evaluate_account(state: RiskState, limits: dict[str, dict]) -> RiskVerdict:
     # Ogranicza to, ILE SYSTEM ZARYZYKUJE DALEJ, a nie to, ile juz stracil.
     lim = limits.get("min_equity")
     if lim:
+        if "min_equity_blad" in surowe:
+            # HANDEL WSTRZYMANY, BO PODLOGI KAPITALU NIE MA.
+            #
+            # `block` zatrzymuje NOWE wejscia i zostawia wyjscia - dokladnie
+            # ten stan, ktorego potrzebujemy: nie wchodzimy bez dzialajacego
+            # bezpiecznika, ale nie zamykamy sie tez w pozycjach, ktore juz
+            # mamy. Kill-switcha NIE uruchamiamy: on wymaga recznego zwolnienia
+            # i jest odpowiedzia na strate, a tu nie wiemy nawet, czy strata
+            # jest - brakuje jednej kolumny w `exec.equity_point`.
+            #
+            # W `threshold` idzie LICZBA Z LIMITU, a nie prog w walucie -
+            # progu w walucie nie ma, o to wlasnie chodzi. `risk.violation`
+            # ma te kolumne NOT NULL (migracja 0007), a `detail` niesie cale
+            # `v`, wiec powod i jednostka zostaja w wierszu czytelne.
+            violations.append({"limit": "min_equity",
+                               "observed": float(state.equity),
+                               "threshold": float(lim["value"]),
+                               "jednostka": lim.get("unit"),
+                               "powod": surowe["min_equity_blad"],
+                               "action": lim["action"]})
+            return RiskVerdict(
+                "block",
+                f"Próg kapitału nieobliczalny — handel wstrzymany: "
+                f"{surowe['min_equity_blad']}",
+                violations=violations, usage=usage)
         prog = surowe["min_equity"]
         if state.equity <= prog:
             violations.append({"limit": "min_equity", "observed": float(state.equity),
