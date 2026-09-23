@@ -27,7 +27,20 @@ export default function Sources({ engine }) {
   const s = spend.data;
   // `wykorzystanie` jest nullem, gdy limit dobowy nie jest znany. `|| 0` dawalo
   // wtedy zielone "0% · w normie" w miejscu, w ktorym nie ma zadnego pomiaru.
-  const wykorzystanie = s?.dzis?.wykorzystanie != null ? Math.min(1, s.dzis.wykorzystanie) : null;
+  const wykorzystanieUsd = s?.dzis?.wykorzystanie != null ? Math.min(1, s.dzis.wykorzystanie) : null;
+  /* DRUGA BRAMKA, KTORA ZATRZYMUJE POTOK. Worker przerywa przy przekroczeniu
+     limitu kwotowego ALBO limitu LICZBY wywolan (news_worker.py:412-417).
+     Karta pokazywala tylko ten pierwszy — a to on nie zadzialal ani razu:
+     11.09.2026 analiza stanela calkowicie przy $0,114 z $5, zatrzymana
+     darmowym progiem Gemini liczonym w zapytaniach, i pisala przy tym
+     "wykorzystanie 2% · w normie".
+
+     "W normie" liczy sie wiec z MAKSIMUM obu wykorzystan: wyczerpanie
+     jednej bramki zatrzymuje analize niezaleznie od stanu drugiej. */
+  const wykorzystanieWywolan = s?.dzis?.wykorzystanie_wywolan != null
+    ? Math.min(1, s.dzis.wykorzystanie_wywolan) : null;
+  const zmierzone = [wykorzystanieUsd, wykorzystanieWywolan].filter((v) => v != null);
+  const wykorzystanie = zmierzone.length ? Math.max(...zmierzone) : null;
   const perDzien = {};
   (s?.dobowe || []).forEach((d) => {
     perDzien[d.dzien] = (perDzien[d.dzien] || 0) + d.koszt_usd;
@@ -91,7 +104,24 @@ export default function Sources({ engine }) {
               <div className="kpi">
                 <div className="kpi-label">Limit dobowy</div>
                 <div className="kpi-value">{s.limit_dobowy_usd.toFixed(2)} USD</div>
-                <div className="kpi-sub">twardy stop po przekroczeniu</div>
+                <div className="kpi-sub">
+                  {wykorzystanieUsd == null ? 'twardy stop po przekroczeniu'
+                    : `wykorzystane ${(wykorzystanieUsd * 100).toFixed(0)}%`}
+                </div>
+              </div>
+              {/* Limit LICZBY wywołań stoi tu jako osobny kafel, a nie jako
+                  dopisek: to jest bramka, która realnie zatrzymała potok,
+                  podczas gdy kwotowa nie zadziałała ani razu. */}
+              <div className="kpi">
+                <div className="kpi-label">Limit wywołań</div>
+                <div className="kpi-value">
+                  {s.limit_dobowy_wywolan == null ? '—' : s.limit_dobowy_wywolan}
+                </div>
+                <div className="kpi-sub">
+                  {wykorzystanieWywolan == null
+                    ? 'limit liczby wywołań nieznany — brak odniesienia'
+                    : `wykorzystane ${(wykorzystanieWywolan * 100).toFixed(0)}%`}
+                </div>
               </div>
               <div className="kpi">
                 <div className="kpi-label">Wykorzystanie</div>
@@ -99,8 +129,12 @@ export default function Sources({ engine }) {
                   {wykorzystanie == null ? '—' : `${(wykorzystanie * 100).toFixed(0)}%`}
                 </div>
                 <div className="kpi-sub">
-                  {wykorzystanie == null ? 'limit dobowy nieznany — brak odniesienia'
-                    : wykorzystanie >= 1 ? 'analiza wstrzymana do północy UTC' : 'w normie'}
+                  {wykorzystanie == null ? 'żaden limit dobowy nie jest znany — brak odniesienia'
+                    : wykorzystanie >= 1
+                      ? `analiza wstrzymana do północy UTC (${
+                          wykorzystanieWywolan != null && wykorzystanieWywolan >= 1
+                            ? 'limit wywołań' : 'limit kwotowy'})`
+                      : 'w normie'}
                 </div>
               </div>
             </div>

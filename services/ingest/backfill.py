@@ -36,6 +36,16 @@ BATCH = 2000
 MAX_EMPTY_PROBES = 5000
 
 
+# Ile razy POD RZAD ponawiamy jedno okno po bledzie PONAWIALNYM giełdy.
+#
+# Szesc, bo szesc prob z narastajacym odstepem (5, 10, 20, 40, 60, 60 s) to
+# okolo trzech minut - dluzej niz kazda przerwa, ktora mija sama, i krocej niz
+# limit czasu cyklu w `history_worker`. Siodma proba nie jest juz ponawianiem,
+# tylko czekaniem na koniec okna serwisowego gieldy - a na to sie czeka
+# NASTEPNYM CYKLEM, nie zawieszeniem biezacego. Patrz `_fetch_range`.
+PROBY_PONOWIEN = 6
+
+
 # Ile ostatnich swiec pobieramy ponownie przy kazdym przebiegu, zeby poprawic
 # ewentualne bledy. Trzy wystarczaja: swieca zamyka sie raz i wiecej sie nie
 # zmienia, wiec jedyne, co wymaga poprawki, to koncowka poprzedniego przebiegu.
@@ -145,15 +155,51 @@ async def _fetch_range(adapter, conn, cur, instrument_id: int, symbol: str,
                        now: datetime) -> int:
     total = 0
     empty_rounds = 0
+    proby = 0
     while start < stop:
         try:
             candles = await adapter.fetch_candles(symbol, timeframe, limit=1000, start=start)
         except ExchangeError as e:
             if not e.retryable:
                 raise
-            print(f"  {symbol:10s} {e} - ponawiam za 5 s")
-            await asyncio.sleep(5)
+            # PONAWIANIE Z LICZNIKIEM I NARASTAJACYM ODSTEPEM.
+            #
+            # Do 2026-09-23 stalo tu `sleep(5); continue` bez licznika, bez
+            # odstepu i bez wyjscia z petli. `retryable=True` ustawia miedzy
+            # innymi limit zapytan i KAZDE 5xx (services/exchanges/alpaca.py),
+            # wiec kilkugodzinne okno serwisowe gieldy oznaczalo petle co piec
+            # sekund w nieskonczonosc.
+            #
+            # To nie jest zwykle „wisi dluzej". Cykl `history` NIGDY sie wtedy
+            # nie konczy, wiec ani `puls.bij`, ani `puls.zglos_awarie` nie
+            # zostaje wywolane, licznik `pod_rzad` nie rosnie i `POD_RZAD_MAX`
+            # nie ma czego liczyc. Pod stoi „Running", swiece 1h stoja, a swiece
+            # 4h (agregat z 1h) i wszystkie cechy z nich razem z nimi. Docstring
+            # `history_worker.py` nazywa ten stan wprost - kod go dopuszczal.
+            #
+            # Szesc prob z odstepem 5, 10, 20, 40, 60, 60 s to okolo trzy minuty
+            # na jedno okno. Przerwa u gieldy krotsza niz to przechodzi
+            # niezauwazona; dluzsza konczy sie WYJATKIEM, ktory idzie do
+            # `bledy` w `history_worker.cykl`, stamtad do pulsu i do licznika
+            # awarii - czyli staje sie widoczny.
+            proby += 1
+            if proby > PROBY_PONOWIEN:
+                raise ExchangeError(
+                    f"{symbol}: {PROBY_PONOWIEN} kolejnych prób pobrania świec "
+                    f"od {start:%Y-%m-%d %H:%M} zakończonych błędem giełdy "
+                    f"({e}). Przerywam cykl — proces, który ponawia bez końca, "
+                    f"nie kończy cyklu, więc nie bije pulsu i nie podnosi "
+                    f"licznika awarii: stoi i wygląda na `Running`.",
+                    retryable=True) from e
+            czekaj = min(60.0, 5.0 * (2 ** (proby - 1)))
+            print(f"  {symbol:10s} {e} - ponawiam za {czekaj:.0f} s "
+                  f"(próba {proby}/{PROBY_PONOWIEN})")
+            await asyncio.sleep(czekaj)
             continue
+        # Udane pobranie ZERUJE licznik: limit prób dotyczy serii awarii pod
+        # rzad, a nie calego zakresu. Bez tego dlugi backfill z pojedynczymi
+        # 429 co kilkadziesiat okien wywracalby sie na koncu bez powodu.
+        proby = 0
 
         if not candles:
             # Pusta odpowiedz NIE oznacza konca historii. Oznacza ja dopiero

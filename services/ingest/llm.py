@@ -292,6 +292,36 @@ class Dostawca:
     # analiza zostala bez niego do 2026-09-10).
     _odmowy_pod_rzad: int = 0
 
+    # ZADANIA HTTP, A NIE WYWOLANIA LOGICZNE - dwie rozne wielkosci.
+    #
+    # Bramka dobowa liczyla wywolania LOGICZNE (jeden wiersz w `news.api_spend`
+    # na jeden triaz albo jedna analize), a dostawcy licza ZADANIA HTTP. Jedno
+    # logiczne wywolanie triazu to u Gemini do pieciu POST-ow (`_poslij`,
+    # `PROBY = 5`), a u Anthropica do dwoch (`max_retries=1` - SDK ponawia
+    # wewnatrz i z zewnatrz tego nie widac). Do tego wywolanie zakonczone
+    # `Przeciazony` / `Wyczerpany` / timeoutem nie niesie `usage`, wiec
+    # `news_worker.zapisz_nieudane` NIE WSTAWIA wiersza w ogole - takie zadanie
+    # nie bylo liczone nawet jako jedno.
+    #
+    # Skutek jest dokladnie ten, przed ktorym ostrzega komentarz przy
+    # `limit_wywolan_dobowy`: doba z presja limitu tempa to 500 wywolan
+    # logicznych i do 2500 zadan do Google. Bramka czytala 500/1500 i meldowala
+    # "wykorzystanie 33%", gdy darmowy prog 500/dobe byl juz przekroczony
+    # pieciokrotnie. Bramka, ktora mierzy nie te wielkosc co dostawca, nie
+    # zatrzyma niczego przed nim.
+    #
+    # Dlatego licznik siedzi TUTAJ, u dostawcy, a nie w dzienniku: podbija go
+    # KAZDE zadanie HTTP - ponowienie i odmowa bez `usage` tak samo jak sukces.
+    # Dziennik `api_spend` zostaje do rozliczenia KWOTY, bo tam liczy sie zuzycie
+    # tokenow, a nie liczba pakietow.
+    #
+    # OGRANICZENIE, KTORE TRZEBA ZNAC: licznik zyje w PAMIECI PROCESU. Restart
+    # poda gubi nadwyzke ponowien z biezacej doby (kwota i liczba wierszy wracaja
+    # z bazy, bo tam sa zapisane). Zapis nadwyzki do bazy wymaga kolumny
+    # w `news.api_spend`, czyli migracji - to jest zaleznosc poza tym plikiem.
+    _zadan_http: int = 0
+    _zadan_rozliczonych: int = 0
+
     async def zapytaj(self, *, model: str, system: str, user: str,
                       schema: dict, max_tokens: int) -> tuple[dict, dict]:
         raise NotImplementedError
@@ -342,18 +372,90 @@ class Dostawca:
         billed_in = (usage["input"] - usage["cache_read"]) + usage["cache_read"] * 0.1
         return round(billed_in / 1e6 * inp + usage["output"] / 1e6 * out, 6)
 
+    def zanotuj_zadanie(self, ile: int = 1) -> None:
+        """Jedno ZADANIE HTTP poszlo do dostawcy. Takze ponowienie i odmowa.
+
+        Wolane z miejsca, ktore naprawde wysyla pakiet - u Gemini z petli
+        ponowien w `_poslij`, u Anthropica z middleware SDK, ktore chodzi raz na
+        KAZDA probe wewnatrz jego wlasnej petli ponowien.
+        """
+        # Przypisanie (a nie `+=` na atrybucie klasy) tworzy atrybut INSTANCJI -
+        # tak samo jak `odetnij` wyzej. Inaczej dwa rownolegle zbudowane obiekty
+        # dostawcy dzielilyby jeden licznik.
+        self._zadan_http = self._zadan_http + ile
+
+    def zanotuj_rozliczenie(self, ile: int = 1) -> None:
+        """Jedno zadanie trafilo do dziennika `news.api_spend`.
+
+        Wolane przez `news_worker.Budzet.dolicz`, czyli dokladnie tam, gdzie
+        powstaje wiersz dziennika. Rozdzial jest po to, zeby `zadania_poza_
+        dziennikiem` liczylo tylko NADWYZKE i zadne zadanie nie wpadlo do bramki
+        dwa razy.
+        """
+        self._zadan_rozliczonych = self._zadan_rozliczonych + ile
+
+    def zadania_poza_dziennikiem(self) -> int:
+        """Ile zadan HTTP tego procesu NIE MA odpowiednika w `api_spend`.
+
+        To sa ponowienia i odmowy bez `usage` - czyli dokladnie ta czesc ruchu,
+        ktorej bramka dobowa nie widziala. Nigdy ujemne: wiersze moga pochodzic
+        z wczesniejszego procesu, zadania liczymy od startu tego.
+        """
+        return max(0, self._zadan_http - self._zadan_rozliczonych)
+
     async def zamknij(self) -> None:
         return None
+
+
+class _LicznikZadanHTTP:
+    """Middleware klienta Anthropica: jedno przejscie = jedno zadanie HTTP.
+
+    Zwykla funkcja asynchroniczna, a NIE podklasa `anthropic.Middleware` - i to
+    jest decyzja, nie skrot. Pakiet `anthropic` jest tylko w obrazie; klasa
+    dziedziczaca po nim wymagalaby importu w chwili WCZYTANIA modulu, czyli
+    wywracalaby `import llm` na kazdej maszynie bez tej zaleznosci - w tym przy
+    testach, ktore dostawcy Anthropica w ogole nie dotykaja. SDK przyjmuje
+    zwykly obiekt wywolywalny z asynchronicznym `__call__` i sam sprawdza,
+    ze jest asynchroniczny (`_middleware.validate_async_middleware`).
+    """
+
+    def __init__(self, dostawca: "Dostawca"):
+        self._dostawca = dostawca
+
+    async def __call__(self, request, call_next):
+        # PRZED wywolaniem, nie po nim: zadanie, ktore skonczylo sie timeoutem
+        # albo zerwanym polaczeniem, tez zjadlo prog dostawcy, a `call_next`
+        # wtedy rzuca i nic po nim juz sie nie wykona.
+        self._dostawca.zanotuj_zadanie()
+        return await call_next(request)
 
 
 class DostawcaAnthropic(Dostawca):
     nazwa = "anthropic"
 
+    # Stawki odczytane z cennika Anthropica 2026-09-23, USD za milion tokenow.
+    #
+    # `claude-sonnet-5` mial tu do 2026-09-23 wpisane (3.0, 15.0) - to sa stawki
+    # SONNETA 4.6, poprzedniej generacji. Sonnet 5 kosztuje $2/$10. Pomylka szla
+    # w strone bezpieczna (zawyzala koszt o 50%, czyli zamykala bramke kwotowa
+    # przedwczesnie), ale dziennik `news.api_spend` przez nia klamal - a na tym
+    # dzienniku stoi zarowno bramka, jak i `/api/api-spend`.
     CENNIK = {
         "claude-opus-5": (5.0, 25.0),
-        "claude-sonnet-5": (3.0, 15.0),
+        "claude-sonnet-5": (2.0, 10.0),
         "claude-haiku-4-5": (1.0, 5.0),
     }
+    # NIEZNANY MODEL WYCENIAMY NAJDROZSZA DOSTEPNA TARYFA, nie stawka opusa.
+    #
+    # Do 2026-09-23 klasa dziedziczyla `CENNIK_DOMYSLNY = (5.0, 25.0)` z `Dostawca`,
+    # czyli dokladnie stawke opusa - a u Anthropica sa modele DROZSZE (taryfa
+    # klasy Fable to $10/$50). Model spoza tablicy - a to wlasnie nowsza rodzina
+    # trafia do chartu przy zmianie - wyceenialby sie DWUKROTNIE ZA TANIO.
+    # `DostawcaGemini` robi to poprawnie od poczatku i uzasadnia to asymetria
+    # ryzyka (patrz jego `CENNIK_DOMYSLNY`): zawyzenie zatrzymuje potok na
+    # limicie, zanizenie pozwala mu wydac wielokrotnosc limitu, zanim ktokolwiek
+    # to zauwazy.
+    CENNIK_DOMYSLNY = (10.0, 50.0)
 
     def __init__(self, klucz: str):
         from anthropic import AsyncAnthropic
@@ -370,7 +472,15 @@ class DostawcaAnthropic(Dostawca):
         # 180 s z jednym ponowieniem daje najgorszy przypadek ~6 minut, co
         # miesci sie w limicie calego cyklu. Analiza z rozszerzonym myśleniem
         # bywa wolniejsza od triazu, stad wiecej niz 90 s.
-        self._c = AsyncAnthropic(api_key=klucz, timeout=180.0, max_retries=1)
+        #
+        # MIDDLEWARE LICZY ZADANIA HTTP, a nie wywolania logiczne. SDK ponawia
+        # WEWNATRZ `messages.create` (`max_retries=1`, czyli do dwoch zadan na
+        # jedno wywolanie) i z zewnatrz tego nie widac - tak samo jak nie bylo
+        # widac piatki ponowien Gemini. Lancuch middleware chodzi raz na KAZDA
+        # probe wewnatrz tej petli, wiec jest to jedyne miejsce, z ktorego da sie
+        # policzyc to, co naprawde liczy dostawca. Patrz `Dostawca._zadan_http`.
+        self._c = AsyncAnthropic(api_key=klucz, timeout=180.0, max_retries=1,
+                                 middleware=[_LicznikZadanHTTP(self)])
         self.model_analizy = os.environ.get("ANALYSIS_MODEL", "claude-opus-5")
         self.model_triazu = os.environ.get("TRIAGE_MODEL", "claude-haiku-4-5")
 
@@ -481,7 +591,46 @@ class DostawcaAnthropic(Dostawca):
         }
         if r.stop_reason == "refusal":
             raise Odmowa(usage)
-        return json.loads(next(b.text for b in r.content if b.type == "text")), usage
+        # ODPOWIEDZ UCIETA NA LIMICIE TOKENOW TO NIE JEST WYNIK.
+        #
+        # Ten warunek stal po stronie Gemini od poczatku (`finishReason ==
+        # MAX_TOKENS`), a tutaj nie bylo go W OGOLE do 2026-09-23. Skutek byl
+        # gorszy niz brak wyniku, bo wyjatek wychodzil stad BEZ `usage`:
+        #
+        #   * sama odpowiedz rozumowania i zaden blok `text` - `next(...)` bez
+        #     wartosci domyslnej podnosil `StopIteration`, ktore w funkcji
+        #     asynchronicznej zamienia sie w `RuntimeError: coroutine raised
+        #     StopIteration` - komunikat nieniosacy zadnej informacji o tym,
+        #     co sie stalo,
+        #   * ucięty JSON - `json.loads` podnosil `JSONDecodeError`.
+        #
+        # Zaden z tych wyjatkow nie niesie zuzycia tokenow, wiec `zapisz_nieudane`
+        # odpadalo na warunku `if not u or not (...)` i NIE WSTAWIALO wiersza do
+        # `news.api_spend`. Spalone ~4000 tokenow wyjscia bylo niewidoczne dla
+        # OBU bramek dobowych - dokladnie dla tego wywolania, ktore potrafi sie
+        # powtarzac (3 proby na artykul x N artykulow). Nie byl to tez
+        # `Przeciazony`, wiec `_zanotuj_odmowe` nigdy sie nie wykonywalo
+        # i bezpiecznik nie mial czego zewrzec.
+        #
+        # Tokeny ROZUMOWANIA licza sie do tego samego `max_tokens`, wiec to nie
+        # jest przypadek brzegowy: dluzszy artykul wyczerpuje limit na samym
+        # mysleniu, zanim padnie pierwsze slowo odpowiedzi.
+        if r.stop_reason == "max_tokens":
+            raise BladOdpowiedzi(
+                f"odpowiedź ucięta na limicie {max_tokens} tokenów "
+                f"(model {model} zużył {usage['output']} na wyjście razem "
+                f"z rozumowaniem)", usage)
+        tekst = next((b.text for b in r.content
+                      if getattr(b, "type", None) == "text"), None)
+        if tekst is None or not tekst.strip():
+            # Brak bloku `text` przy `stop_reason` innym niz wyzej - np. sama
+            # odpowiedz rozumowania. `next(...)` BEZ wartosci domyslnej robil
+            # z tego `RuntimeError` w miejscu oddalonym od przyczyny; tu wychodzi
+            # nazwany blad Z ZUZYCIEM, ktore da sie zapisac w dzienniku.
+            raise BladOdpowiedzi(
+                f"pusta odpowiedź modelu {model} "
+                f"(stop_reason={r.stop_reason}, bloków {len(r.content)})", usage)
+        return json.loads(tekst), usage
 
 
 class DostawcaGemini(Dostawca):
@@ -619,6 +768,11 @@ class DostawcaGemini(Dostawca):
     async def _poslij(self, model: str, body: dict) -> httpx.Response:
         for proba in range(1, self.PROBY + 1):
             await self._przepustnica()
+            # KAZDA PROBA JEST ZADANIEM, ktore Google liczy do swojego progu -
+            # a dziennik `news.api_spend` dostaje z calej tej petli najwyzej
+            # jeden wiersz. Liczymy PRZED wyslaniem, bo zadanie zakonczone
+            # timeoutem tez zjada prog, a `post` wtedy rzuca.
+            self.zanotuj_zadanie()
             r = await self._http.post(f"{self.BAZA}/{model}:generateContent",
                                       json=body,
                                       headers={"x-goog-api-key": self._klucz})
@@ -969,6 +1123,18 @@ class DostawcaMieszany(Dostawca):
                   if not d.czy_ma_czym_pytac()]
         return "; ".join(powody)
 
+    def zadania_poza_dziennikiem(self) -> int:
+        """Nadwyzka ponowien OBU dostawcow razem.
+
+        Mieszanka sama nie wysyla niczego - licza jej skladowe. Rozliczenia
+        (`zanotuj_rozliczenie`) przychodza natomiast do NIEJ, bo `Budzet` zna
+        tylko obiekt, ktorego pyta potok, i nie wie, ktory dostawca obsluzyl
+        dane wywolanie. Odejmowanie musi wiec isc na tym samym poziomie, na
+        ktorym sie dolicza - inaczej nadwyzka bylaby liczona dwa razy.
+        """
+        zadan = self._triaz._zadan_http + self._analiza._zadan_http
+        return max(0, zadan - self._zadan_rozliczonych)
+
     def przejmij_stan(self, poprzednia: "DostawcaMieszany") -> None:
         """Przenosi stan bezpiecznika z instancji z poprzedniego cyklu.
 
@@ -997,6 +1163,16 @@ class DostawcaMieszany(Dostawca):
             nowy._niedostepny_do = stary._niedostepny_do
             nowy._powod_niedostepnosci = stary._powod_niedostepnosci
             nowy._odmowy_pod_rzad = stary._odmowy_pod_rzad
+            # LICZNIK ZADAN HTTP IDZIE RAZEM Z BEZPIECZNIKIEM i z tego samego
+            # powodu: ta metoda wolno wolac WYLACZNIE przy NIEZMIENIONYCH
+            # kluczach, a niezmieniony klucz to ten sam prog dobowy u dostawcy.
+            # Zerowanie licznika przy przebudowie obiektu kasowaloby nadwyzke
+            # ponowien co cykl - czyli dokladnie to, przed czym ta bramka ma
+            # bronic. Nowy klucz nowego licznika NIE dostaje tedy: przy zmianie
+            # kluczy `dostawca_na_cykle` buduje obiekt bez `przejmij_stan`.
+            nowy._zadan_http = stary._zadan_http
+            nowy._zadan_rozliczonych = stary._zadan_rozliczonych
+        self._zadan_rozliczonych = poprzednia._zadan_rozliczonych
 
     def koszt(self, model: str, usage: dict) -> float:
         # CENNIK BIERZE TEN DOSTAWCA, KTORY WYKONAL WYWOLANIE. Wspolna tablica

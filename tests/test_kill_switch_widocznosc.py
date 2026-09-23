@@ -188,7 +188,8 @@ class AtrapaBazy:
 
     def __init__(self, zdarzenia, od_zgloszenia_min=None, odbiorcy=(1, 2),
                  pomiar_wiek_s=120, pomiar_nigdy=None,
-                 od_zgloszenia_pomiar_min=None, zgloszenia=None, teraz=TERAZ):
+                 od_zgloszenia_pomiar_min=None, zgloszenia=None, teraz=TERAZ,
+                 porzucone_proby=None):
         self.zdarzenia = zdarzenia
         self.od_zgloszenia_min = od_zgloszenia_min
         self.odbiorcy = odbiorcy
@@ -204,12 +205,19 @@ class AtrapaBazy:
         # musi ja odtworzyc, zamiast oddawac liczbe niezaleznie od parametrow.
         self.zgloszenia = zgloszenia
         self.teraz = teraz
+        # PORZUCONE PROBY POZAROWE - limity z przeszlym, niewykasowanym
+        # `proba_do` (patrz `sprawdz_porzucona_probe`). Domyslnie pusta lista,
+        # bo to stan wyjatkowy: gdyby atrapa oddawala tu cokolwiek, kazdy test
+        # nizej mierzylby przy okazji sciezke porzuconej proby.
+        self.porzucone_proby = porzucone_proby or []
         self.zapytania: list[str] = []
 
     async def fetch_all(self, sql, params=None):
         self.zapytania.append(sql)
         if "risk.killswitch_event" in sql:
             return list(self.zdarzenia)
+        if "risk.limit_def" in sql and "proba_do < now()" in " ".join(sql.split()):
+            return list(self.porzucone_proby)
         if "risk.limit_usage" in sql:
             return [{"engine": "crypto", "mode": "demo",
                      "wiek_s": self.pomiar_wiek_s, "nigdy": self.pomiar_nigdy,
@@ -470,8 +478,16 @@ def test_zwolnienie_pozostaje_RECZNE_i_nietkniete():
     cialo = cialo[:cialo.index("\n# Ile moze minac od ostatniej udanej kopii")]
     assert "WHERE k.released_at IS NULL" in cialo, \
         "czujka przestała pomijać zdarzenia zwolnione ręcznie"
+    # WYLACZNIE KOD WYKONYWALNY. Komentarze w tej funkcji opisuja historie
+    # zapisow, ktore robi gdzie indziej PROBA POZAROWA („jednym UPDATE-em"),
+    # wiec szukanie slowa w calym tekscie zapalaloby sie od samego wyjasnienia,
+    # dlaczego czujka niczego nie zapisuje. Ta sama zasada co w
+    # `test_chart_nadzor.py`, gdzie docstring endpointu opisuje SELECT-a,
+    # ktorego endpoint nie wykonuje.
+    kod = "\n".join(w for w in cialo.splitlines()
+                    if not w.lstrip().startswith("#"))
     for zakazane in ("UPDATE", "INSERT", "DELETE"):
-        assert zakazane not in cialo, \
+        assert zakazane not in kod, \
             f"czujka pisze do bazy ({zakazane}) — ma tylko patrzeć"
 
 

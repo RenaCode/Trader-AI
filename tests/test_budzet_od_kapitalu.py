@@ -153,6 +153,11 @@ def _na_sqlite(sql: str) -> str:
     s = " ".join(sql.split())
     for t in TABELE:
         s = s.replace(t, t.replace(".", "_"))
+    # OKNO GODZINNE TLUMACZYMY, A NIE OMIJAMY. `_orders_last_hour` dolicza
+    # plany `pending` z BIEZACEGO cyklu i robi to w oknie godzinnym - gdyby
+    # atrapa to okno wycinala, test przechodzilby takze dla zapytania bez
+    # niego, czyli dla wersji zliczajacej plany sprzed doby.
+    s = s.replace("now() - interval '1 hour'", "datetime('now', '-1 hour')")
     return s.replace("%s", "?")
 
 
@@ -173,7 +178,7 @@ class Baza:
             CREATE TABLE journal_decision (id INTEGER, engine TEXT, mode TEXT);
             CREATE TABLE journal_planned_order (id INTEGER, decision_id INTEGER,
                 instrument_id INTEGER, qty REAL, limit_price REAL,
-                status TEXT, "trigger" TEXT);
+                status TEXT, "trigger" TEXT, created_at TEXT);
             CREATE TABLE exec_order (id INTEGER, planned_order_id INTEGER,
                 engine TEXT, mode TEXT, instrument_id INTEGER, qty REAL,
                 limit_price REAL, status TEXT);
@@ -189,7 +194,12 @@ class Baza:
                   (did, "crypto", "demo"))
         pid = c.execute("SELECT COALESCE(max(id), 0) + 1"
                         " FROM journal_planned_order").fetchone()[0]
-        c.execute("INSERT INTO journal_planned_order VALUES (?,?,?,?,?,?,?)",
+        # `created_at` JEST W MIGRACJI 0005 i od niej zalezy okno godzinne
+        # licznika zlecen — plan bez tej kolumny wypadalby z niego zawsze,
+        # czyli atrapa mowilaby „limit nie kumuluje sie w cyklu" niezaleznie
+        # od tego, co robi kod.
+        c.execute("INSERT INTO journal_planned_order"
+                  " VALUES (?,?,?,?,?,?,?,datetime('now'))",
                   (pid, did, instrument_id, float(qty), float(cena), "pending",
                    json.dumps({"rodzaj": rodzaj})))
         self.db.commit()

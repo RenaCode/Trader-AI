@@ -158,6 +158,10 @@ def test_brak_regul_BLOKUJE_zlecenie_i_gielda_nie_jest_pytana():
     a w nocnym logu wygląda to jak brak sygnału."""
     cur, g, ok, msg = _zloz(f=BEZ_REGUL)
     assert ok is False
+    # „NIE JEST PYTANA" ZNACZY: NIC NIE SKLADAMY. Od 2026-09-23 odmowa pyta
+    # gieldę o `stan_zlecenia` naszego identyfikatora — po to, żeby nie porzucić
+    # zlecenia, które poprzedni cykl zdążył wysłać przed swoją śmiercią
+    # (znalezisko 7). To jest ODCZYT; zlecenia nadal nie powstaje żadnego.
     assert g.zlozone == []
     assert "nie podała reguł" in msg
     assert cur.zawiera("status='rejected'")

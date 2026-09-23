@@ -45,6 +45,7 @@ from services.engine.risk_rules import (
     MIN_CONFIDENCE, START_EQUITY as START_EQUITY_WSPOLNY, RiskVerdict,
     position_budget, udzial_budzetu,
 )
+from services.engine.zlecenia import Filtry, czy_zamykalna
 from services.engine.signals import (SIGNALS, classify_regime, evaluate,
                                      pokrycie_wag)
 
@@ -869,11 +870,41 @@ def zapisz_wejscie(cur, engine: str, mode: str, instrument_id: int, decision_id:
         oid = cur.fetchone()["id"]
     else:
         oid = order_id
+        # `qty` I `limit_price` ZOSTAJA NIETKNIETE - TO SA FAKTY SPRZED
+        # WYPELNIENIA.
+        #
+        # Wiersz powstal przy ZLOZENIU i trzyma to, co giełda dostała: ilosc
+        # wyslana i cene wyslana. Nadpisanie ich cena i iloscia WYKONANIA
+        # kasowalo jedyny zapis naszego zobowiazania, i kosztowalo trzy razy:
+        #
+        #   * `poslizg.cena_odniesienia` bierze w pierwszej kolejnosci
+        #     `o.limit_price` (`poslizg.py`, ZAPYTANIE: `o.limit_price AS
+        #     cena_zlecenia`), a dwie linie nizej ta sama `cena` trafia do
+        #     `exec.fill.price`. Poslizg kazdego wejscia gieldowego wychodzil
+        #     wiec dokladnie (x - x)/x = 0. Silnik sklada PostOnly, czesc wejsc
+        #     przechodzi przez spread jako taker po gorszej cenie, a modul
+        #     meldowal „mediana +0.00 pb — NIEODROZNIALNE OD ZALOZENIA", czyli
+        #     formalne potwierdzenie `POSLIZG_MAKER = 0` zbudowane z echa
+        #     wlasnego UPDATE-a. Jest to ta sama klasa wady, przed ktora
+        #     ostrzega naglowek `poslizg.py` przy rachunku papierowym:
+        #     liczba wygladajaca na pomiar egzekucji, a bedaca pomiarem nas
+        #     samych;
+        #   * `poslizg.rozjazd_ksiag` liczyl dla wejsc plan kontra cena
+        #     WYPELNIENIA zamiast plan kontra cena WYSLANA - czyli mierzyl co
+        #     innego, niz ma w nazwie;
+        #   * `RiskKernel._open_exposure` (krok 2) wycenia zlecenia
+        #     nierozstrzygniete przez `o.qty * o.limit_price`, wiec podmiana
+        #     obu liczb naraz przesuwala tez ekspozycje.
+        #
+        # Cena i ilosc wykonania maja swoje miejsce - `exec.fill.price`
+        # i `exec.fill.qty`, zakladane dwie instrukcje nizej. Rachunek papierowy
+        # zadnego zlecenia wczesniej nie sklada, wiec jego wiersz powstaje
+        # galezia wyzej i tam obie liczby sa cenami wypelnienia z zalozenia.
         cur.execute(
-            "UPDATE exec.order SET status='filled', qty=%s, limit_price=%s,"
+            "UPDATE exec.order SET status='filled',"
             " venue_order_id = COALESCE(%s, venue_order_id), updated_at=%s,"
             " raw = raw || %s WHERE id=%s",
-            (qty, cena, venue_order_id, as_of, json.dumps(meta), oid))
+            (venue_order_id, as_of, json.dumps(meta), oid))
     cur.execute(
         "INSERT INTO exec.fill (order_id, venue_fill_id, qty, price, fee, fee_ccy, event_time)"
         " VALUES (%s,%s,%s,%s,%s,%s,%s)",
@@ -900,7 +931,8 @@ def zapisz_wyjscie(cur, position: dict, cena: Decimal, prowizja: Decimal,
                    venue_order_id: str | None = None,
                    client_order_id: str | None = None,
                    venue_fill_id: str | None = None,
-                   prowizja_ccy: str | None = None) -> Decimal:
+                   prowizja_ccy: str | None = None,
+                   filtry: Filtry | None = None) -> Decimal:
     """Zamkniecie pozycji, w calosci albo w czesci. Wspolne dla obu zrodel.
 
     WYJSCIE CZESCIOWE JEST NAJGORSZYM MOMENTEM NA UPROSZCZENIE. Zlecenie
@@ -957,6 +989,61 @@ def zapisz_wyjscie(cur, position: dict, cena: Decimal, prowizja: Decimal,
     bez tego parametru jedno wyjscie zostawialoby DWA wiersze w `exec.order`.
     Rachunek papierowy zadnego zlecenia wczesniej nie sklada, wiec tam wiersz
     powstaje tutaj.
+
+    `filtry` DOMYKA POZYCJE, Z KTOREJ ZOSTAL PYL NIE DO SPRZEDANIA
+
+    Warunek `ile >= calosc` zaklada, ze da sie sprzedac DOKLADNIE tyle, ile
+    stoi na pozycji. Na spocie jest to nieprawda i to nie sporadycznie, tylko
+    ZA KAZDYM RAZEM. Kupno placi prowizje w kupionym aktywie, wiec
+    `egzekucja.rozlicz_prowizje` zapisuje na `exec.position.qty` ilosc NETTO,
+    ktora z definicji NIE lezy na kroku ilosci gieldy. Wyjscie planuje cala te
+    ilosc, a `zlecenia.sprawdz_zlecenie` zaokragla ja W DOL do kroku (w gore
+    lamaloby limit risk kernela) - czyli sprzedajemy zawsze mniej, niz mamy.
+
+    Zmierzone na produkcyjnych funkcjach, ADAUSDC, `lot_size` 0.1, maker 0,1%:
+
+        wypelnienie wejscia 1998.7  ->  exec.position.qty = 1996.7013
+        wyjscie: wysylamy 1996.7    ->  reszta na pozycji  0.0013
+        nastepna swieca: sprawdz_zlecenie(0.0013) -> "ilosc po zaokragleniu
+            do kroku 0.1 wynosi zero" -> plan odrzucony
+
+    `ile >= calosc` jest wtedy falszem, `closed_at` zostaje NULL NA ZAWSZE,
+    `open_position` dalej oddaje ten wiersz, a petla decyzyjna przy niepustej
+    pozycji wybiera wylacznie `exit` albo `hold` - NOWEGO WEJSCIA NA TYM
+    INSTRUMENCIE NIE PODEJMIE JUZ NIGDY. Po jednej rundzie uniwersum handlowe
+    jest puste, a w logu wyglada to na rynek bez sygnalow. Nadzor tego nie
+    zglosi: `uzgodnienie.progi_bezwzgledne` istnieje wlasnie po to, zeby
+    resztke ponizej `lot_size` wyciszyc - pyl jest wiec jednoczesnie
+    NIEWIDOCZNY dla nadzoru i BLOKUJACY dla silnika.
+
+    Poprzednia poprawka (zapis netto zamiast brutto) usunela pierwsze wcielenie
+    tego bledu - pozycje, ktorej gielda odmawiala sprzedazy za brak salda -
+    i stworzyla drugie, o krok dalej. Kryterium musi wiec byc NIE "czy
+    sprzedalismy wszystko", tylko "czy to, co zostalo, da sie jeszcze
+    sprzedac". Odpowiada na to `zlecenia.czy_zamykalna` - ta sama funkcja,
+    ktorej `egzekucja.co_z_wypelnieniem` uzywa do rozpoznania wypelnienia
+    `nie_do_zamkniecia`. Dwie wlasne kopie tego pytania rozjechalyby sie przy
+    pierwszej zmianie regul gieldy.
+
+    BEZ `filtry` ZACHOWANIE JEST STARE. Regul gieldy nie wolno zgadywac:
+    domyslne `Filtry()` uznaloby kazda resztke za niezamykalna i domykalo
+    pozycje, z ktorych da sie jeszcze wyjsc. Wolajacy, ktory regul nie ma
+    (rachunek papierowy sprzedaje calosc, wiec ich nie potrzebuje), dostaje
+    dokladnie to, co dostawal.
+
+    PYL JEST SPISYWANY NA STRATE, a nie znika po cichu. `update_equity` liczy
+    kapital jako `wplaty + realized - fees + unrealized`, gdzie `unrealized`
+    bierze sie WYLACZNIE z pozycji otwartych. Samo `closed_at` bez zapisu
+    wyniku skasowaloby wiec niezrealizowana strate na pyle i PODNIOSLO kapital
+    w chwili, w ktorej cos tracimy - czyli obsuniecie wyszloby mniejsze,
+    a kill-switch strzelalby pozniej. Ksiegujemy zatem pyl po cenie wejscia:
+    zaplacilismy za niego i nie dostaniemy za niego nic.
+
+    TYLKO POZYCJE DLUGIE. Resztka pozycji krotkiej to ZOBOWIAZANIE, ktorego nie
+    zdolalismy odkupic - zamkniecie wiersza zdjeloby je z ksiag, choc nadal
+    istnieje. Na spocie krotkich nie ma (`koszty(kind).krotka_pozycja`), wiec
+    to zastrzezenie nic dzis nie kosztuje, a bez niego pierwsza pozycja krotka
+    ginelaby z ewidencji.
     """
     calosc = Decimal(position["qty"])
     ile = calosc if ilosc is None else min(ilosc, calosc)
@@ -972,6 +1059,7 @@ def zapisz_wyjscie(cur, position: dict, cena: Decimal, prowizja: Decimal,
     # ZEROWEJ ILOSCI NIE KSIEGUJEMY. Wypelnienie na 0 nie jest zdarzeniem, a
     # wiersz w `exec.fill` z qty=0 zanizalby kazda srednia liczona po tej tabeli
     # i podbijal licznik wypelnien czujki zdrowia egzekucji.
+    oid = order_id
     if ile > 0:
         meta = dict(meta or {})
         cur.execute(
@@ -979,7 +1067,6 @@ def zapisz_wyjscie(cur, position: dict, cena: Decimal, prowizja: Decimal,
             " FROM exec.position p JOIN ref.instrument i ON i.id = p.instrument_id"
             " WHERE p.id=%s", (position["id"],))
         p = cur.fetchone()
-        oid = order_id
         if oid is None:
             cur.execute(
                 "INSERT INTO exec.order (decision_id, planned_order_id, engine, mode,"
@@ -1007,19 +1094,61 @@ def zapisz_wyjscie(cur, position: dict, cena: Decimal, prowizja: Decimal,
             (oid, venue_fill_id or f"paper-{oid}", ile, cena, prowizja,
              prowizja_ccy or p["quote_ccy"], as_of))
 
-    if ile >= calosc:
+    # CZY TO, CO ZOSTAJE NA POZYCJI, DA SIE JESZCZE SPRZEDAC.
+    #
+    # `pyl` jest ustawiany tylko wtedy, gdy odpowiedz brzmi NIE - i tylko wtedy
+    # domykamy wiersz mimo niepelnej sprzedazy. Warunek `ile > 0` jest tu
+    # istotny: wywolanie z iloscia zero nie jest wyjsciem, a bez niego
+    # zamkneloby zywa pozycje, ktorej nikt nie probowal sprzedac.
+    pyl = None
+    if (ile > 0 and ile < calosc and filtry is not None
+            and position["side"] == "long"
+            and not czy_zamykalna(calosc - ile, cena, filtry)):
+        pyl = calosc - ile
+
+    # PYL PO CENIE WEJSCIA IDZIE W WYNIK. Uzasadnienie w docstringu: samo
+    # `closed_at` skasowaloby niezrealizowana strate na resztce i zawyzylo
+    # kapital dokladnie w chwili, w ktorej cos tracimy.
+    wynik = pnl if pyl is None else pnl - entry * pyl
+
+    if ile >= calosc or pyl is not None:
         cur.execute(
             "UPDATE exec.position SET closed_at=%s,"
             " realized_pnl = COALESCE(realized_pnl,0) + %s,"
             " fees_paid = fees_paid + %s, close_decision_id=%s WHERE id=%s",
-            (as_of, pnl, prowizja, decision_id, position["id"]))
+            (as_of, wynik, prowizja, decision_id, position["id"]))
+        if pyl is not None and oid is not None:
+            # SLAD ZOSTAJE W WIERSZU ZLECENIA, nie tylko na ekranie.
+            #
+            # `exec.position` nie ma kolumny na uwagi (migracja 0005), a
+            # dolozenie jej to osobna decyzja - wiersz zlecenia wyjscia jest
+            # jedynym miejscem, w ktorym ten fakt da sie dzis zapisac trwale
+            # i w ktorym ktokolwiek go szuka. Bez tego zapisu domkniecie
+            # pozycji z resztka wygladaloby identycznie jak domkniecie pelne,
+            # a roznica miedzy nimi to aktywo, ktore nadal lezy na gieldzie.
+            #
+            # COALESCE na obu kolumnach, zeby nie skasowac powodu wpisanego
+            # wczesniej (kill-switch, nieudane anulowanie) ani nie wywrocic
+            # sie na `raw` bedacym NULL-em.
+            cur.execute(
+                "UPDATE exec.order SET reject_reason = COALESCE(reject_reason, %s),"
+                " raw = COALESCE(raw, '{}'::jsonb) || %s WHERE id=%s",
+                (f"pozycja domknięta z resztką {pyl} — tej ilości nie da się "
+                 f"sprzedać na tej giełdzie (krok {filtry.krok_ilosci}, minimum "
+                 f"wartości {filtry.min_wartosc}); resztka zostaje na giełdzie "
+                 f"i jest spisana na stratę po cenie wejścia {entry}",
+                 json.dumps({"resztka_nierozliczalna": str(pyl),
+                             "resztka_spisana_po": str(entry)}), oid))
     else:
         cur.execute(
             "UPDATE exec.position SET qty = qty - %s,"
             " realized_pnl = COALESCE(realized_pnl,0) + %s,"
             " fees_paid = fees_paid + %s WHERE id=%s",
             (ile, pnl, prowizja, position["id"]))
-    return pnl
+    # ZWRACAMY TO, CO NAPRAWDE ZAKSIEGOWALISMY. Przy domknieciu z pylem `wynik`
+    # jest mniejszy od `pnl` o spisana resztke; oddanie `pnl` pokazywaloby
+    # wolajacemu inna liczbe niz ta, ktora trafila do `realized_pnl`.
+    return wynik
 
 
 def execute_paper(cur, engine: str, mode: str, instrument_id: int, decision_id: int,

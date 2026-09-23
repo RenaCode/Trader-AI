@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Query
 
-from services.ingest.llm import limit_dobowy_usd
+from services.ingest.llm import limit_dobowy_usd, limit_wywolan_dobowy
 
 from ..db import fetch_all
 
@@ -92,14 +92,30 @@ async def api_spend(dni: int = Query(30, le=365)):
     # rozjechala by sie z workerem przy pierwszej zmianie nazwy zmiennej,
     # a rozjazd objawilby sie tym, ze UI pokazuje inny limit niz ten,
     # ktory faktycznie zatrzymuje wydatki.
+    #
+    # OBA LIMITY, bo worker ma OD POPRAWKI DWIE BRAMKI (`news_worker.py:412-417`
+    # przerywa przy `usd >= DAILY_LIMIT_USD` ALBO `wywolania >=
+    # DZIENNY_LIMIT_WYWOLAN`), a zakladka pokazywala wylacznie kwotowa.
+    # To nie jest szczegol: bramka kwotowa nie zadzialala ANI RAZU. 11.09.2026
+    # potok stanal calkowicie przy $0,114 z $5 - zatrzymal go DARMOWY prog
+    # Gemini, liczony w ZAPYTANIACH - a karta pokazywala przy tym
+    # "wykorzystanie 2% · w normie". Limit, ktory naprawde zatrzymal analize,
+    # nie byl na ekranie w ogole.
     limit = limit_dobowy_usd()
+    limit_wywolan = limit_wywolan_dobowy()
     wydano_dzis = float(dzis[0]["koszt"]) if dzis else 0.0
+    wywolan_dzis = dzis[0]["wywolania"] if dzis else 0
     return {
         "limit_dobowy_usd": limit,
+        "limit_dobowy_wywolan": limit_wywolan,
         "dzis": {
             "koszt_usd": round(wydano_dzis, 4),
-            "wywolania": dzis[0]["wywolania"] if dzis else 0,
+            "wywolania": wywolan_dzis,
             "wykorzystanie": round(wydano_dzis / limit, 4) if limit else None,
+            # Licznik bez mianownika nie mowi nic o tym, jak blisko progu jest
+            # potok - a to jest ta bramka, ktora zatrzymuje go naprawde.
+            "wykorzystanie_wywolan": (round(wywolan_dzis / limit_wywolan, 4)
+                                      if limit_wywolan else None),
         },
         "okres_dni": dni,
         "koszt_okresu_usd": round(float(laczne[0]["koszt"]), 4) if laczne else 0.0,

@@ -81,6 +81,36 @@ MIN_CONF = MIN_CONFIDENCE
 # i status otwierajacy droge do handlu na zywo.
 MIN_WINDOWS_FOR_VALIDATION = 20
 
+# OKNO POMIARU DRYFU CECH - WLASNY PARAMETR, NIE POCHODNA `--days`.
+#
+# Do 2026-09-23 okno liczylo sie jako `days // 3` wobec reszty `days`, czyli
+# przy produkcyjnym `--days 1400` (values.yaml) porownywalo ostatnie 466 dni
+# z poprzedzajacymi 934. Dwa sasiednie nocne odczyty dzielily wtedy ~99,8%
+# danych, a caly mechanizm trwalosci w `dozor.ocen_dryf_trwaly` stoi na
+# zalozeniu, ze kolejne odczyty sa NIEZALEZNE: „trzy kolejne przebiegi powyzej
+# progu" byly jednym dowodem policzonym trzy razy.
+#
+# TRZYDZIESCI DNI WOBEC POPRZEDZAJACYCH DZIEWIECDZIESIECIU. Trzy liczby
+# musialy sie tu zgodzic:
+#
+#   * OKNO NOWE ma byc porownywalne z RYTMEM REAKCJI. Dozor wymaga trzech
+#     kolejnych przebiegow w rozstepie co najmniej 48 h, czyli reaguje w ciagu
+#     doby-dwoch; okno, ktore w tym czasie wymienia znikoma czesc danych, nie
+#     ma szansy tego zobaczyc. Przy 30 dniach doba to 1/30 okna, czyli kolejny
+#     odczyt niesie realnie nowa informacje.
+#   * OKNO NOWE ma tez byc dosc dlugie, zeby `stddev_pop` cokolwiek znaczylo.
+#     Przy swiecy 4h trzydziesci dni to ~180 obserwacji na instrument.
+#   * OKNO STARE ma byc ODNIESIENIEM, nie drugim pomiarem biezacego stanu -
+#     stad trzykrotnosc, ta sama proporcja, ktora byla tu wczesniej. Kwartal
+#     obejmuje wiecej niz jeden rezim rynku, wiec „historyczne odchylenie"
+#     w mianowniku nie jest odchyleniem jednego nastroju.
+#
+# Swiadomie BEZ odczytu z argumentow i ze srodowiska: okno dobrane pod wynik
+# przestaje byc pomiarem. To ta sama zasada co przy `MAX_DNI_BEZ_POTWIERDZENIA`
+# w probie pozarowej.
+DRYF_OKNO_NOWE_DNI = 30
+DRYF_OKNO_STARE_DNI = 90
+
 # Klucze z `portfolio.metrics`, z ktorych sklada sie rozklad sredniej ekspozycji.
 # Kolejnosc jest kolejnoscia czynnikow w iloczynie.
 KLUCZE_ROZKLADU = ("w_rynku", "pozycji_w_rynku", "notional_na_pozycje",
@@ -1022,21 +1052,82 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
                 (mv_id, lo, lo + 0.1, round(pred, 4), round(obs, 4), len(bucket)))
 
     # --- dryf cech --------------------------------------------------------
+    #
+    # DWIE WADY NAPRAWIONE TU 2026-09-23 (znaleziska 3 i 6 audytu). Obie robily
+    # to samo: kazaly czujce w `dozor.py` wierzyc, ze mierzy cos, czego nie
+    # mierzy.
+    #
+    # 1. OKNO BYLO POCHODNA `--days`, CZYLI DLUGOSCI PANELU TRENINGOWEGO.
+    #    Produkcja chodzi z `--days 1400` (values.yaml), wiec „nowe" znaczylo
+    #    ostatnie 466 dni, a „stare" poprzedzajace 934. Cala maszyneria
+    #    trwalosci w dozorze (`DRYF_TRWALY_PRZEBIEGOW = 3`,
+    #    `DRYF_TRWALY_GODZIN = 48`) zaklada, ze kolejne nocne odczyty sa
+    #    NIEZALEZNYMI pomiarami - a okno przesuwajace sie o jeden dzien na 466
+    #    daje dwa sasiednie odczyty dzielace ~99,8% danych. „Trzy kolejne
+    #    przebiegi powyzej progu" nie bylo wiec trzema dowodami, tylko jednym
+    #    policzonym trzy razy - dokladnie tym bledem, przed ktorym ma bronic
+    #    `DRYF_TRWALY_GODZIN`.
+    #
+    #    Skutek byl obustronny. W jedna strone: zmiana rezimu, ktora przesuwa
+    #    srednia ostatnich 30 dni o cale historyczne odchylenie, rozcienczona
+    #    w oknie 466 dni daje ruch rzedu setnych i nie przekracza progu przez
+    #    miesiace. W druga: raz przekroczony prog zostaje przekroczony przez
+    #    rok, bo nic ze sredniej nie wypada - a `DRYF_PRZYPOMNIENIE_DNI = 7`
+    #    zamienia to w cotygodniowe przypomnienie o stanie, ktorego juz nie ma.
+    #
+    #    Dlatego okno jest dzis WLASNYM parametrem, dobranym do rytmu reakcji
+    #    (miesiac wobec kwartalu), a nie pochodna dlugosci panelu. Te dwie
+    #    rzeczy odpowiadaja na rozne pytania i nie maja powodu byc zwiazane:
+    #    panel ma byc dlugi, zeby walk-forward mial okna; okno dryfu ma byc
+    #    krotkie, zeby kolejny odczyt niosl NOWE dane.
+    #
+    # 2. `max_psi` LICZYL SIE PO WSZYSTKICH CECHACH. `SELECT ... WHERE active`
+    #    bralo takze cechy policzone na swiecy 1h i 5m oraz warianty
+    #    z eksperymentalnych uniwersow - a `load_panel` filtruje je scisle
+    #    (`params->>'bar'` plus odcisk uniwersum) i ma na to spisane
+    #    uzasadnienie. Przebieg dla `--bar 4h` i przebieg dla `--bar 1h`
+    #    zapisywaly wiec do `learn.learning_state_log` TE SAMA liczbe, podczas
+    #    gdy `ocen_dryf_trwaly` filtruje historie po `bar` w przekonaniu, ze
+    #    rozdziela dwa modele (dozor.py:303-306). Filtr rozdzielal dwa wiersze
+    #    o identycznej wartosci.
+    #
+    #    Poniewaz `max` po nadzbiorze jest zawsze >= `max` po podzbiorze, blad
+    #    dzialal w strone FALSZYWEGO ALARMU: przy `DRYF_TRWALY_PROG = 0.5`
+    #    wystarczyl jeden halasliwy szereg 5-minutowy, zeby czujka migala -
+    #    a czujka, ktora miga, uczy odklikiwac (uzasadnienie w dozor.py).
+    #
+    #    Ten sam filtr co w `load_panel`, slowo w slowo, i z tego samego
+    #    powodu. Dolozony jest jeszcze filtr po INSTRUMENTACH tego przebiegu:
+    #    bez niego dryf liczyl sie po cechach par, ktorych to uniwersum
+    #    w ogole nie handluje.
     max_psi = 0.0
-    cur.execute("SELECT id, name FROM feat.feature_def WHERE active")
+    id_instrumentow = [i["id"] for i in instruments]
+    granica_nowe = now - timedelta(days=DRYF_OKNO_NOWE_DNI)
+    granica_stare = granica_nowe - timedelta(days=DRYF_OKNO_STARE_DNI)
+    print(f"dryf cech: okno nowe {DRYF_OKNO_NOWE_DNI} dni wobec "
+          f"poprzedzających {DRYF_OKNO_STARE_DNI}, świeca {h.bar}, "
+          f"odcisk uniwersum {fp}")
+    cur.execute(
+        "SELECT id, name FROM feat.feature_def"
+        " WHERE active AND params->>'bar' = %s"
+        "   AND (params->>'uniwersum' IS NULL OR params->>'uniwersum' = %s)",
+        (h.bar, fp))
     for fd in cur.fetchall():
         cur.execute(
             """
             SELECT stddev_pop(value) AS sd_old, avg(value) AS m_old
             FROM feat.feature_value WHERE feature_def_id=%s
-              AND event_time BETWEEN %s AND %s
-            """, (fd["id"], now - timedelta(days=days), now - timedelta(days=days // 3)))
+              AND instrument_id = ANY(%s)
+              AND event_time >= %s AND event_time < %s
+            """, (fd["id"], id_instrumentow, granica_stare, granica_nowe))
         old = cur.fetchone()
         cur.execute(
             """
             SELECT stddev_pop(value) AS sd_new, avg(value) AS m_new
-            FROM feat.feature_value WHERE feature_def_id=%s AND event_time >= %s
-            """, (fd["id"], now - timedelta(days=days // 3)))
+            FROM feat.feature_value WHERE feature_def_id=%s
+              AND instrument_id = ANY(%s)
+              AND event_time >= %s
+            """, (fd["id"], id_instrumentow, granica_nowe))
         new = cur.fetchone()
         if not (old and new and old["sd_old"] and new["sd_new"]):
             continue

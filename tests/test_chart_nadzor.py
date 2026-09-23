@@ -313,3 +313,52 @@ def test_sonda_zabijajaca_kontener_ma_progi_WPISANE():
     sonda = _kontener_api()["livenessProbe"]
     for pole in ("timeoutSeconds", "failureThreshold"):
         assert pole in sonda, f"livenessProbe bez jawnego {pole}"
+
+
+# ------------------------------------------------------------------ zadanie 4
+#
+# Limit czasu zadania, ktory jest KROTSZY niz okno wlasnej pracy zadania.
+# Znalezisko nr 2 audytu 2026-09-23.
+
+def test_deadline_proby_dluzszy_niz_jej_wlasne_okno():
+    """`activeDeadlineSeconds` poniżej `OKNO_PROBY_S` to chart, który sam
+    zakłada, że Job bywa zabity w połowie własnej pracy.
+
+    Do 2026-09-23 stało tam 1500 przy oknie 1680 s. Kubernetes wysyła wtedy
+    SIGTERM, a w całym `services/` nie było ani jednego handlera sygnału —
+    CPython kończył więc proces BEZ rozwijania stosu, czyli bez bloku
+    `finally`, w którym wraca podniesiony `min_equity`. Próg zostawał na stałe,
+    a ma regułę `reczne` (migracja 0029), więc `wznowienie.wznow` go nie rusza:
+    silnik stał bezterminowo, a każde ręczne zwolnienie kill-switcha kończyło
+    się ponownym wystrzeleniem w następnym cyklu, bo przyczyna nadal tam była.
+
+    Handler sygnału został dołożony, ale sam w sobie jest OSTRZEŻENIEM, a nie
+    zabezpieczeniem: po okresie karencji idzie SIGKILL i nie ominie go żaden
+    kod. Limit czasu musi więc mieścić całą próbę, a nie jej część.
+
+    Porównanie idzie ze STAŁĄ W KODZIE, nie z drugą liczbą wpisaną w test —
+    podbicie `PROBA_CZEKAJ_SILNIK_S` albo `PROBA_CZEKAJ_DOZOR_S` ma zapalić ten
+    test, a nie zostawić cichy rozjazd.
+    """
+    from services.engine.proba_killswitcha import OKNO_PROBY_S
+
+    limit = jedyny_cronjob("proba-cron.yaml")["spec"]["jobTemplate"]["spec"][
+        "activeDeadlineSeconds"]
+    assert limit > OKNO_PROBY_S, (
+        f"activeDeadlineSeconds={limit} przy OKNO_PROBY_S={OKNO_PROBY_S} — "
+        f"chart sam zakłada, że próba bywa zabijana przed końcem swojego okna, "
+        f"a wtedy przywrócenie progu wisi wyłącznie na okresie karencji")
+
+
+def test_proba_ma_CZAS_na_wykonanie_finally_po_sygnale():
+    """Kanarek do poprzedniego. Limit dłuższy niż okno nie pomoże, jeśli po
+    SIGTERM-ie próba dostanie zero sekund na sprzątanie: `finally` wykonuje dwa
+    UPDATE-y — przywraca próg i zwalnia własne zdarzenie. Wartość domyślna
+    (30 s) jest dobra, ale próg, od którego zależy przywrócenie limitu ryzyka,
+    nie ma prawa być niewidoczny w pliku."""
+    pod = jedyny_cronjob("proba-cron.yaml")["spec"]["jobTemplate"]["spec"]["template"]["spec"]
+    karencja = pod.get("terminationGracePeriodSeconds")
+    assert karencja and karencja >= 15, (
+        f"terminationGracePeriodSeconds={karencja} — po tym czasie idzie "
+        f"SIGKILL, którego nie ominie żaden handler, a podniesiony `min_equity` "
+        f"zostanie na stałe")

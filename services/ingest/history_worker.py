@@ -182,6 +182,22 @@ async def main() -> int:
     ap.add_argument("--engine", default="crypto")
     ap.add_argument("--quiet", action="store_true",
                     help="wycisz rutynowy postep; OPISY BLEDOW ida zawsze")
+    # LIMIT CZASU CALEGO CYKLU - tak samo jak w `news_worker` (--limit-cyklu).
+    #
+    # Licznik `POD_RZAD_MAX` broni wylacznie przed procesem, ktory PADA. Proces,
+    # ktory STOI - zawieszony na gniezdzie, na blokadzie w bazie albo (do
+    # 2026-09-23) w petli ponowien `backfill._fetch_range` bez wyjscia - nigdy
+    # nie konczy cyklu, wiec nie dolicza sie do zadnego licznika i NIE BIJE ANI
+    # NIE ZGLASZA PULSU. Nadzor widzi „Running" i nic wiecej. Docstring tego
+    # modulu nazywa ten stan wprost, a kod go dopuszczal.
+    #
+    # 3600 s, a nie „dwa interwaly": cykl po awarii jest dluzszy od cyklu przy
+    # czystym starcie (dziura do domkniecia rosnie z czasem postoju), wiec limit
+    # liczony dla zdrowego przebiegu ucinalby wlasnie ten cykl, ktory nadrabia.
+    # Zdrowy cykl `--days 3` na swiecach 1h to sekundy - godzina jest o dwa rzedy
+    # wielkosci za duza na prace i o rzad za mala na zawieszenie.
+    ap.add_argument("--limit-cyklu", type=int, default=3600,
+                    help="twardy limit czasu jednego cyklu (s)")
     args = ap.parse_args()
 
     url = os.environ.get("DATABASE_URL")
@@ -195,10 +211,17 @@ async def main() -> int:
     while True:
         t0 = datetime.now(timezone.utc)
         try:
-            ile_swiec, ile_stawek, bledy = await cykl(
-                url, engine=args.engine, timeframe=args.timeframe,
-                days=args.days, verbose=not args.quiet,
-                interwal_s=args.interval, pod_rzad=pod_rzad)
+            # Limit obejmuje CALY cykl, nie pojedyncze zapytanie do gieldy.
+            # Timeout na kliencie HTTP chroni przed jednym zawieszonym zadaniem;
+            # ten limit chroni przed wszystkim innym, co moze stanac - takze
+            # przed kodem, ktorego jeszcze nie ma. `TimeoutError` wpada do
+            # `except` nizej i staje sie zwykla awaria cyklu: idzie do pulsu,
+            # do licznika `pod_rzad` i do logu.
+            async with asyncio.timeout(args.limit_cyklu):
+                ile_swiec, ile_stawek, bledy = await cykl(
+                    url, engine=args.engine, timeframe=args.timeframe,
+                    days=args.days, verbose=not args.quiet,
+                    interwal_s=args.interval, pod_rzad=pod_rzad)
         except Exception as e:                                # noqa: BLE001
             # Tu wpada juz tylko to, czego nie da sie przypisac do zadania -
             # przede wszystkim nieudane POLACZENIE z baza.

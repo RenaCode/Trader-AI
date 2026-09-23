@@ -50,6 +50,42 @@ async def current_user(
     return row
 
 
+async def wymagaj_wlasciciela(user: dict = Depends(current_user)) -> dict:
+    """Operacje zmieniajace stan sa dla roli `owner`, nie dla kazdej waznej sesji.
+
+    DLACZEGO TO ISTNIEJE, SKORO KONTA `viewer` DZIS NIE MA
+
+    Rola jest w schemacie od migracji 0007 (`CHECK (role IN ('owner','viewer'))`),
+    jest pobierana w `current_user`, zwracana przez `/auth/me` i pokazywana
+    w `Profile` - tak, jakby cos znaczyla. Nie znaczyla nic: `grep -rn "role"
+    services/api/` dawal same odczyty do odpowiedzi, ani jednego porownania.
+    Ochrona byla deklarowana raz, jako `Depends(current_user)` na calym
+    routerze, a `current_user` sprawdza wylacznie waznosc sesji.
+
+    Konta `viewer` faktycznie dzis nie da sie zalozyc - `scripts/create_admin.py`
+    wpisuje na sztywno `'owner'`, a zaden endpoint nie tworzy uzytkownikow.
+    Luka jest wiec UTAJONA, a nie czynna: zadziala w dniu, w ktorym ktos doda
+    drugie konto recznym SQL-em, i wtedy nic o tym nie powie. Tamtego dnia
+    `viewer` zwolnilby kill-switcha (`risk.py`), podmienil klucz Anthropica
+    (`settings.py`), usunal klucz API gieldy (`credentials.py`) i zapisal
+    przeplyw kapitalu (`kapital.py`).
+
+    ODCZYTY ZOSTAJA OTWARTE. Rola `viewer` ma znaczyc "widzi wszystko, nie
+    rusza niczego" - zalozenie jej na caly router zamienialoby ja w konto bez
+    dostepu, czyli w cos, czego nikt nie zalozy.
+
+    403, nie 401: sesja JEST wazna, odmawiamy samego dzialania. 401 poza
+    logowaniem wyrzuca uzytkownika na ekran logowania i zabiera mu komunikat
+    sprzed oczu - patrz `tests/test_401_nie_wylogowuje.py`.
+    """
+    if user["role"] != "owner":
+        raise HTTPException(
+            status_code=403,
+            detail="Ta operacja wymaga roli właściciela. Konto ma rolę "
+                   f"„{user['role']}” — może czytać, nie może zmieniać.")
+    return user
+
+
 async def require_csrf(
     request: Request,
     x_csrf_token: str | None = Header(default=None, alias=CSRF_HEADER),

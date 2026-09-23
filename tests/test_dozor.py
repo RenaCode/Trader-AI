@@ -617,9 +617,9 @@ def test_brak_danych_jest_NAZWANY_inaczej_niz_dane_stare():
     jedno to potok, który nigdy nie ruszył, drugie to potok, który stanął."""
     from services.engine.dozor import ocen_swiezosc
 
-    (tytul_brak, _), = ocen_swiezosc(
+    (_, tytul_brak, _), = ocen_swiezosc(
         [{"co": "feat.feature_value", "minut_swiecy": 240, "wiek_min": None}])
-    (tytul_stare, _), = ocen_swiezosc(
+    (_, tytul_stare, _), = ocen_swiezosc(
         [{"co": "feat.feature_value", "minut_swiecy": 240, "wiek_min": 9999}])
     assert "Brak danych" in tytul_brak
     assert "nieświeże" in tytul_stare
@@ -630,7 +630,7 @@ def test_swiezosc_mowi_WPROST_ze_petla_tego_nie_zglosi():
     na tym, co ma. Stare cechy nie wyglądają jak awaria."""
     from services.engine.dozor import ocen_swiezosc
 
-    (_, tresc), = ocen_swiezosc(
+    (_, _, tresc), = ocen_swiezosc(
         [{"co": "feat.feature_value", "minut_swiecy": 240, "wiek_min": 9999}])
     assert "NIE ZGŁASZA" in tresc
 
@@ -645,7 +645,11 @@ def test_swiezosc_sprawdza_KAZDE_zrodlo_a_nie_pierwsze_z_brzegu():
         {"co": "feat.feature_value", "minut_swiecy": 240, "wiek_min": 9999},
     ])
     assert len(powody) == 1
-    assert "feat.feature_value" in powody[0][0]
+    # Zrodlo stoi dzis w OSOBNYM polu (pole 0), a nie tylko w tytule. Wolajacy
+    # tlumi powiadomienia per zrodlo, wiec potrzebuje klucza, ktorego nie
+    # trzeba wylowic z polskiego zdania.
+    assert powody[0][0] == "feat.feature_value"
+    assert "feat.feature_value" in powody[0][1]
 
 
 def test_swiezosc_pyta_o_timeframe_ZRODLOWY_a_nie_o_swiece_docelowa():

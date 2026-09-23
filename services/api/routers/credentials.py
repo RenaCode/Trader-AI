@@ -5,6 +5,9 @@ Zasady, ktore ten modul egzekwuje:
   - API NIGDY nie zwraca odszyfrowanej wartosci, tylko podpowiedz (4 ostatnie znaki)
   - klucz z prawem WYPLATY nie moze byc aktywny (wymuszone rowniez CHECK-iem w bazie)
   - test polaczenia uzywa endpointu informacyjnego, nie sklada zlecen
+  - test polaczenia NIE wylacza klucza za nieudane polaczenie - patrz komentarz
+    przy UPDATE w `test_credential`; `active` jest bramka handlu, a nie notatka
+    o ostatniej probie
   - kazda operacja trafia do dziennika audytu
 """
 from __future__ import annotations
@@ -14,7 +17,7 @@ from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from ..auth import audit, current_user, require_csrf
+from ..auth import audit, current_user, require_csrf, wymagaj_wlasciciela
 from ..db import execute, fetch_all, fetch_one
 from ..notifications import powiadom_o_bezpieczenstwie
 from ..security import SecretBox
@@ -87,7 +90,8 @@ async def venues(user: dict = Depends(current_user)):
     return [dict(r) for r in rows]
 
 
-@router.post("", dependencies=[Depends(require_csrf)])
+@router.post("",
+             dependencies=[Depends(require_csrf), Depends(wymagaj_wlasciciela)])
 async def add_credential(body: CredentialBody, request: Request,
                          user: dict = Depends(current_user)):
     venue = await fetch_one("SELECT id, name FROM ref.venue WHERE code = %s", (body.venue_code,))
@@ -131,7 +135,8 @@ async def add_credential(body: CredentialBody, request: Request,
     return {"ok": True, "key_hint": _hint(body.api_key.strip())}
 
 
-@router.delete("/{credential_id}", dependencies=[Depends(require_csrf)])
+@router.delete("/{credential_id}",
+               dependencies=[Depends(require_csrf), Depends(wymagaj_wlasciciela)])
 async def delete_credential(credential_id: int, request: Request,
                             user: dict = Depends(current_user)):
     row = await fetch_one(
@@ -146,7 +151,8 @@ async def delete_credential(credential_id: int, request: Request,
     return {"ok": True}
 
 
-@router.post("/{credential_id}/test", dependencies=[Depends(require_csrf)])
+@router.post("/{credential_id}/test",
+             dependencies=[Depends(require_csrf), Depends(wymagaj_wlasciciela)])
 async def test_credential(credential_id: int, request: Request,
                           user: dict = Depends(current_user)):
     row = await fetch_one(
@@ -178,14 +184,41 @@ async def test_credential(credential_id: int, request: Request,
     finally:
         await adapter.close()
 
+    # NIEUDANY TEST NIE JEST POWODEM DO WYLACZENIA KLUCZA.
+    #
+    # Do 23.09.2026 stalo tu `active = (check.ok AND NOT can_withdraw)`, czyli
+    # kazde `ok = False` gasilo klucz. A `ok = False` wraca rowniez przy
+    # zwyklej awarii transportu - timeout, 5xx, zerwane polaczenie
+    # (`bybit.py:637` i `647`: "Nie udalo sie polaczyc"). Jedno klikniecie
+    # "Sprawdz polaczenie" w zlej minucie ustawialo wiec `active = false`,
+    # a `active` jest BRAMKA HANDLU: `loop.py:2173` filtruje `AND c.active`
+    # i przy braku klucza konczy `sys.exit(...)`, `fabryka.py:60` tak samo dla
+    # danych rynkowych. Interfejs nie ma przycisku aktywacji, wiec jedynym
+    # wyjsciem byl kolejny, tym razem udany, test. Przycisk opisany w naglowku
+    # tego modulu jako ODCZYT przestawial stan, od ktorego zalezy handel.
+    #
+    # Zostaja wiec dwa POWODY, oba orzekajace, a nie domniemane:
+    #   * `can_withdraw = true` - klucz z prawem wyplaty NIE MOZE byc aktywny
+    #     (to samo wymusza CHECK w bazie, migracja 0007);
+    #   * `ok = true` - udany test wlacza klucz z powrotem, bo to jedyna droga
+    #     powrotu, jaka ma interfejs.
+    # Wszystko inne zostawia `active` NIETKNIETE i zapisuje `last_error`.
+    #
+    # NIEZAMKNIETE: odroznienie "gielda odrzucila klucz" (AuthError) od "siec
+    # nie dowiozla" wymagaloby pola w `ConnectionCheck` (services/exchanges/
+    # base.py) - odrzucony klucz zostaje wiec na razie aktywny, z bledem
+    # widocznym w `last_error`.
     await execute(
         "UPDATE app.api_credential SET last_used_at = now(), last_error = %s,"
         " can_withdraw = COALESCE(%s, can_withdraw),"
-        " permissions = %s, active = (%s AND NOT COALESCE(%s, false))"
+        " permissions = %s,"
+        " active = CASE WHEN COALESCE(%s, false) THEN false"
+        "               WHEN %s THEN true"
+        "               ELSE active END"
         " WHERE id = %s",
         (None if check.ok else check.message, check.can_withdraw,
          __import__("json").dumps({"lista": check.permissions}),
-         check.ok, check.can_withdraw, credential_id),
+         check.can_withdraw, check.ok, credential_id),
     )
     await audit("credential.test", user_id=user["id"], entity="api_credential",
                 entity_id=str(credential_id),

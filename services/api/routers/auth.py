@@ -35,6 +35,12 @@ router = APIRouter(prefix="/api/auth", tags=["auth"])
 MAX_FAILED = 5
 LOCKOUT = timedelta(minutes=15)
 
+# Ile bledych kodow drugiego skladnika wytrzymuje JEDEN bilet, zanim zostanie
+# uniewazniony. Prog jest nizszy niz `MAX_FAILED` celowo: bilet jest jednym
+# podejsciem do logowania, a nie budzetem prob na konto. Kto pomylil sie trzy
+# razy, ma podac haslo jeszcze raz - i wtedy widac to w `failed_logins`.
+MAX_MFA_NA_BILET = 3
+
 
 class LoginBody(BaseModel):
     login: str = Field(min_length=1, max_length=128)
@@ -68,6 +74,55 @@ async def _start_session(user_id: int, mfa_ok: bool, request: Request,
         (user_id, token_hash, session_expiry(), mfa_ok, ip, request.headers.get("user-agent")),
     )
     set_session_cookies(response, token, csrf, int(SESSION_TTL.total_seconds()))
+
+
+async def _zeruj_licznik_prob(user_id: int) -> None:
+    """Licznik prob zeruje PELNE zalogowanie, a nie samo poprawne haslo.
+
+    Przy koncie z drugim skladnikiem haslo jest polowa drogi. Zerowanie po tej
+    polowie sprawialo, ze `failed_logins` NIGDY nie rosl u kogos, kto haslo zna:
+    kazdy nowy bilet startowal od zera, a nieudane kody i tak niczego nie
+    podbijaly. Blokada konta - jedyny ogranicznik tempa w tym API - byla wiec
+    dla atakujacego z wykradzionym haslem nieosiagalna.
+    """
+    await execute(
+        "UPDATE app.user SET failed_logins = 0, locked_until = NULL, last_login_at = now()"
+        " WHERE id = %s", (user_id,),
+    )
+
+
+async def _odnotuj_bledny_kod(session_id: int, user_id: int) -> None:
+    """Dwie niezalezne bramki po kazdym bledym kodzie drugiego skladnika.
+
+    Zadna z nich sama nie wystarcza. Blokada konta zatrzymuje ciag prob dopiero
+    po piatej i dotyczy wszystkich biletow razem; uniewaznienie biletu zamyka
+    to konkretne podejscie po trzeciej probie, takze wtedy, gdy do blokady
+    jeszcze daleko.
+
+    Oba liczniki podbijaja sie W BAZIE (`x + 1`), a nie przez odczyt i zapis
+    w Pythonie. Zgadywanie kodu to z definicji wiele rownoleglych zadan;
+    read-modify-write gubilby czesc z nich i licznik pokazywalby mniej prob,
+    niz bylo - czyli bramka rozluznialaby sie dokladnie pod tym obciazeniem,
+    na ktore zostala postawiona.
+    """
+    # Bilet. Po przekroczeniu progu ma `revoked_at`, wiec kolejne zadania
+    # odpadaja juz na `s.revoked_at IS NULL` w zapytaniu wyszukujacym bilet.
+    await execute(
+        "UPDATE app.session SET mfa_failed = mfa_failed + 1,"
+        " revoked_at = CASE WHEN mfa_failed + 1 >= %s THEN now() ELSE revoked_at END"
+        " WHERE id = %s",
+        (MAX_MFA_NA_BILET, session_id),
+    )
+    # Konto. Ten sam licznik i ta sama blokada co przy hasle - inaczej
+    # wystarczyloby brac nowy bilet co trzy proby i nic by nie rejestrowalo,
+    # ze ktos zgaduje.
+    await execute(
+        "UPDATE app.user SET failed_logins = failed_logins + 1,"
+        " locked_until = CASE WHEN failed_logins + 1 >= %s THEN now() + %s"
+        "                     ELSE locked_until END"
+        " WHERE id = %s",
+        (MAX_FAILED, LOCKOUT, user_id),
+    )
 
 
 @router.get("/me")
@@ -125,11 +180,6 @@ async def login(body: LoginBody, request: Request, response: Response):
     if rehash:
         await execute("UPDATE app.user SET password_hash = %s WHERE id = %s", (rehash, row["id"]))
 
-    await execute(
-        "UPDATE app.user SET failed_logins = 0, locked_until = NULL, last_login_at = now()"
-        " WHERE id = %s", (row["id"],),
-    )
-
     totp = await fetch_one(
         "SELECT secret_enc FROM app.totp_secret WHERE user_id = %s AND confirmed_at IS NOT NULL",
         (row["id"],),
@@ -138,6 +188,9 @@ async def login(body: LoginBody, request: Request, response: Response):
     if totp:
         # Drugi skladnik wlaczony: sesja powstaje dopiero po podaniu kodu.
         # Do tego czasu wydajemy krotkotrwaly bilet, ktory sam w sobie nic nie otwiera.
+        #
+        # LICZNIK PROB ZOSTAJE NIETKNIETY - zeruje go dopiero `/mfa`. Patrz
+        # `_zeruj_licznik_prob`: kasowanie go tutaj otwieralo droge na wylot.
         challenge, challenge_hash = new_session_token()
         await execute(
             "INSERT INTO app.session (user_id, token_hash, expires_at, mfa_satisfied)"
@@ -147,6 +200,9 @@ async def login(body: LoginBody, request: Request, response: Response):
         await audit("auth.password_ok_mfa_pending", user_id=row["id"], request=request)
         return {"mfa_required": True, "challenge": challenge}
 
+    # Konto bez drugiego skladnika: haslo JEST calym logowaniem, wiec tutaj
+    # zerowanie licznika nastepuje w tej samej chwili co dotad.
+    await _zeruj_licznik_prob(row["id"])
     await _start_session(row["id"], True, request, response)
     await audit("auth.login", user_id=row["id"], request=request)
     # CALE wykrywanie jest osłonięte, nie tylko wysylka powiadomienia.
@@ -217,13 +273,24 @@ async def mfa(body: MfaBody, request: Request, response: Response):
     from ..security import session_token_hash, SecretBox
 
     pending = await fetch_one(
-        "SELECT s.id, s.user_id, s.expires_at, t.secret_enc, t.last_step"
+        "SELECT s.id, s.user_id, s.expires_at, t.secret_enc, t.last_step, u.locked_until"
         " FROM app.session s JOIN app.totp_secret t ON t.user_id = s.user_id"
+        " JOIN app.user u ON u.id = s.user_id"
         " WHERE s.token_hash = %s AND s.revoked_at IS NULL AND s.mfa_satisfied = false",
         (session_token_hash(body.challenge),),
     )
-    if not pending or pending["expires_at"] <= datetime.now(timezone.utc):
+    now = datetime.now(timezone.utc)
+    if not pending or pending["expires_at"] <= now:
         raise HTTPException(status_code=401, detail="Bilet wygasl - zaloguj sie ponownie")
+
+    # BLOKADA KONTA OBOWIAZUJE TAKZE TUTAJ, nie tylko w `/login`. Sprawdzana
+    # wylacznie przy hasle zatrzymywalaby wydawanie NOWYCH biletow, a biletowi
+    # juz wydanemu pozwalalaby dokonczyc serie prob - czyli zaczynalaby dzialac
+    # z opoznieniem dokladnie wtedy, gdy ktos zgaduje.
+    if pending["locked_until"] and pending["locked_until"] > now:
+        left = int((pending["locked_until"] - now).total_seconds())
+        raise HTTPException(status_code=429,
+                            detail=f"Konto zablokowane po nieudanych probach. Sprobuj za {left} s.")
 
     secret = SecretBox().decrypt(bytes(pending["secret_enc"]))
     code = body.code.strip().replace(" ", "").replace("-", "")
@@ -246,6 +313,7 @@ async def mfa(body: MfaBody, request: Request, response: Response):
 
     if not accepted:
         await audit("auth.mfa_failed", user_id=pending["user_id"], request=request)
+        await _odnotuj_bledny_kod(pending["id"], pending["user_id"])
         raise HTTPException(status_code=401, detail="Nieprawidlowy kod")
 
     if step is not None:
@@ -257,6 +325,9 @@ async def mfa(body: MfaBody, request: Request, response: Response):
 
     # Bilet zuzyty. Sesja powstaje NOWA - to jest zabezpieczenie przed session fixation.
     await execute("UPDATE app.session SET revoked_at = now() WHERE id = %s", (pending["id"],))
+    # DOPIERO TERAZ logowanie jest pelne, wiec dopiero teraz licznik prob wraca
+    # do zera. Wczesniej robilo to samo haslo - patrz `_zeruj_licznik_prob`.
+    await _zeruj_licznik_prob(pending["user_id"])
     await _start_session(pending["user_id"], True, request, response)
     await audit("auth.mfa_backup_code" if used_backup else "auth.mfa",
                 user_id=pending["user_id"], request=request)

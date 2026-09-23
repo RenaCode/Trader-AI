@@ -20,6 +20,34 @@ Silnik = Literal["crypto", "equity"]
 router = APIRouter(prefix="/api/engines/{engine}/learning", tags=["learning"])
 
 
+async def _wersja_modelu(engine: str) -> int | None:
+    """Wersja modelu, ktorym silnik FAKTYCZNIE handluje - jedna regula na caly modul.
+
+    DLACZEGO TA REGULA, A NIE "najnowsza wersja" CZY "wersja aktywna"
+
+    `train.py:642` zaklada NOWA `learn.model_version` przy kazdym treningu, a od
+    migracji 0025 swiece 4h i 1h trenuja sie ROWNOLEGLE, jako osobne modele tego
+    samego silnika. "Wszystkie wersje tego silnika" to wiec po tygodniu
+    kilkanascie roznych modeli, z czego handluje jeden.
+
+    Wskazuje go `learn.learning_state` dla horyzontu domyslnego - dokladnie ten
+    sam wiersz, z ktorego `/state` bierze liczby na kafle. Kazda inna regula
+    rozjechalaby wykres z kaflami nad nim, czyli dwie liczby opisujace ten sam
+    model pochodzilyby z dwoch roznych.
+
+    Brak stanu albo stan bez wersji to BRAK DANYCH, nie dane czyjes.
+    """
+    stan = await fetch_one(
+        """
+        SELECT ls.model_version_id
+        FROM learn.learning_state ls
+        WHERE ls.engine::text = %s AND ls.bar = %s
+        """,
+        (engine, DEFAULT_BAR),
+    )
+    return stan["model_version_id"] if stan else None
+
+
 @router.get("/state")
 async def state(engine: Silnik):
     row = await fetch_one(
@@ -179,17 +207,10 @@ async def walk_forward(engine: Silnik, limit: int = Query(40, le=200)):
     Sortowanie idzie po `test_from`, nie po `idx`: to okno testowe jest osia
     czasu tego wykresu, a nie numer porzadkowy.
     """
-    stan = await fetch_one(
-        """
-        SELECT ls.model_version_id
-        FROM learn.learning_state ls
-        WHERE ls.engine::text = %s AND ls.bar = %s
-        """,
-        (engine, DEFAULT_BAR),
-    )
     # Brak stanu albo stan bez wersji modelu to BRAK OKIEN, a nie okna czyjes.
     # Poprzednio ta sciezka oddawala okna dowolnego przebiegu, jaki byl w bazie.
-    if not stan or stan["model_version_id"] is None:
+    wersja = await _wersja_modelu(engine)
+    if wersja is None:
         return []
 
     przebieg = await fetch_one(
@@ -200,7 +221,7 @@ async def walk_forward(engine: Silnik, limit: int = Query(40, le=200)):
         ORDER BY tr.started_at DESC, tr.id DESC
         LIMIT 1
         """,
-        (stan["model_version_id"],),
+        (wersja,),
     )
     if not przebieg:
         return []
@@ -249,19 +270,30 @@ async def calibration(engine: Silnik):
     od pewnosci, liczba nie niesie informacji o jakosci sytuacji - i wtedy prog
     wejscia oparty na pewnosci filtruje przypadkowo.
     """
+    # JEDNA WERSJA MODELU, TEN SAM WYBOR CO W /state I /walk-forward.
+    #
+    # Filtr szedl po samym `m.engine`, a podzapytanie przypinalo `evaluated_at`
+    # do KAZDEJ wersji z osobna - czyli do kazdej po jej wlasnej ostatniej
+    # ocenie. Po czterech nocnych treningach wynikiem bylo ~10 kubelkow razy
+    # liczba wersji: `podsumowanie.transakcji` zawyzone krotnie, a werdykt
+    # ("Pewnosc roznicuje trafnosc...") liczony z mieszanki modeli, w tym
+    # horyzontu, ktorym silnik nie handluje. `Learning.jsx` drukuje te liczbe
+    # jako jeden pomiar.
+    wersja = await _wersja_modelu(engine)
+    if wersja is None:
+        return {"kubelki": [], "podsumowanie": None}
+
     rows = await fetch_all(
         """
         SELECT cb.bin_lo, cb.bin_hi, cb.predicted_mean, cb.observed_rate, cb.n_samples
         FROM learn.calibration_bin cb
-        JOIN learn.model_version mv ON mv.id = cb.model_version_id
-        JOIN learn.model m ON m.id = mv.model_id
-        WHERE m.engine::text = %s
+        WHERE cb.model_version_id = %s
           AND cb.evaluated_at = (
               SELECT max(evaluated_at) FROM learn.calibration_bin
-              WHERE model_version_id = cb.model_version_id)
+              WHERE model_version_id = %s)
         ORDER BY cb.bin_lo
         """,
-        (engine,),
+        (wersja, wersja),
     )
     kubelki = [
         {"bin_lo": r["bin_lo"], "bin_hi": r["bin_hi"], "predicted": r["predicted_mean"],
@@ -327,21 +359,29 @@ async def drift(engine: Silnik, limit: int = Query(12, le=60)):
     tych liczb. Poprzednio mial i wlasnie stad wzial sie ten rozjazd.
     """
     from services.engine.dozor import DRYF_TRWALY_PROG, PSI_PROG
-    rows = await fetch_all(
-        """
-        SELECT fd.name || '@' || fd.version AS feature, d.psi, d.ks_stat, d.event_time
-        FROM learn.drift_metric d
-        JOIN feat.feature_def fd ON fd.id = d.feature_def_id
-        JOIN learn.model_version mv ON mv.id = d.model_version_id
-        JOIN learn.model m ON m.id = mv.model_id
-        WHERE m.engine::text = %s
-          AND d.event_time = (SELECT max(event_time) FROM learn.drift_metric
-                              WHERE model_version_id = d.model_version_id)
-        ORDER BY d.psi DESC NULLS LAST
-        LIMIT %s
-        """,
-        (engine, limit),
-    )
+
+    # JEDNA WERSJA MODELU - ta sama regula co w /state, /walk-forward
+    # i /calibration. Tu skutek pomylki byl najgorszy z calej zakladki:
+    # `ORDER BY d.psi DESC LIMIT %s` po WSZYSTKICH wersjach silnika wybieral
+    # najwieksze dryfy z dowolnego modelu, wiec czerwony pasek na dashboardzie
+    # mogl opisywac model, ktorego nie ma na produkcji - i odwrotnie, prawdziwy
+    # dryf modelu handlujacego wypadal poza `LIMIT`.
+    wersja = await _wersja_modelu(engine)
+    rows = []
+    if wersja is not None:
+        rows = await fetch_all(
+            """
+            SELECT fd.name || '@' || fd.version AS feature, d.psi, d.ks_stat, d.event_time
+            FROM learn.drift_metric d
+            JOIN feat.feature_def fd ON fd.id = d.feature_def_id
+            WHERE d.model_version_id = %s
+              AND d.event_time = (SELECT max(event_time) FROM learn.drift_metric
+                                  WHERE model_version_id = %s)
+            ORDER BY d.psi DESC NULLS LAST
+            LIMIT %s
+            """,
+            (wersja, wersja, limit),
+        )
     return {
         "miara": "wielkość efektu (d Cohena + względna zmiana rozrzutu)",
         "prog_alarmu": PSI_PROG,

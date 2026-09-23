@@ -6,7 +6,7 @@ import re
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from ..auth import audit, current_user, require_csrf
+from ..auth import audit, current_user, require_csrf, wymagaj_wlasciciela
 from ..db import execute, fetch_all, fetch_one
 from ..security import SecretBox
 
@@ -135,7 +135,8 @@ async def tryb_analizy(user: dict = Depends(current_user)):
                   f"{type(e).__name__}: {e}")
 
 
-@router.put("/secrets/{name}", dependencies=[Depends(require_csrf)])
+@router.put("/secrets/{name}",
+            dependencies=[Depends(require_csrf), Depends(wymagaj_wlasciciela)])
 async def set_secret(name: str, body: SecretBody, request: Request,
                      user: dict = Depends(current_user)):
     meta = KNOWN_SECRETS.get(name)
@@ -162,7 +163,8 @@ async def set_secret(name: str, body: SecretBody, request: Request,
     return {"ok": True, "hint": "••••" + value[-4:]}
 
 
-@router.delete("/secrets/{name}", dependencies=[Depends(require_csrf)])
+@router.delete("/secrets/{name}",
+               dependencies=[Depends(require_csrf), Depends(wymagaj_wlasciciela)])
 async def delete_secret(name: str, request: Request, user: dict = Depends(current_user)):
     if name not in KNOWN_SECRETS:
         raise HTTPException(404, f"Nieznany sekret: {name}")
@@ -196,7 +198,8 @@ async def list_wallets(user: dict = Depends(current_user)):
     ]
 
 
-@router.post("/wallets", dependencies=[Depends(require_csrf)])
+@router.post("/wallets",
+             dependencies=[Depends(require_csrf), Depends(wymagaj_wlasciciela)])
 async def add_wallet(body: WalletBody, request: Request, user: dict = Depends(current_user)):
     ident = body.identifier.strip()
 
@@ -244,7 +247,8 @@ async def add_wallet(body: WalletBody, request: Request, user: dict = Depends(cu
     return {"ok": True, "kind": "xpub" if is_xpub else "adres"}
 
 
-@router.delete("/wallets/{wallet_id}", dependencies=[Depends(require_csrf)])
+@router.delete("/wallets/{wallet_id}",
+               dependencies=[Depends(require_csrf), Depends(wymagaj_wlasciciela)])
 async def delete_wallet(wallet_id: int, request: Request, user: dict = Depends(current_user)):
     row = await fetch_one("SELECT label FROM app.wallet WHERE id = %s AND user_id = %s",
                           (wallet_id, user["id"]))
@@ -256,7 +260,8 @@ async def delete_wallet(wallet_id: int, request: Request, user: dict = Depends(c
     return {"ok": True}
 
 
-@router.post("/secrets/{name}/test", dependencies=[Depends(require_csrf)])
+@router.post("/secrets/{name}/test",
+             dependencies=[Depends(require_csrf), Depends(wymagaj_wlasciciela)])
 async def test_secret(name: str, user: dict = Depends(current_user)):
     """Sprawdza zapisany klucz PRAWDZIWYM wywolaniem API.
 
