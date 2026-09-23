@@ -891,6 +891,106 @@ async def sprawdz_cisze_pomiaru(fetch_all, notify, sucho: bool = False) -> int:
     return kod_wyjscia(zgloszone, trwale, "bezpiecznik nie raportuje")
 
 
+async def sprawdz_porzucona_probe(fetch_all, notify, sucho: bool = False) -> int:
+    """Czy proba pozarowa zginela miedzy podniesieniem progu a jego zwrotem.
+
+    CO TO JEST ZA STAN I DLACZEGO MA WLASNA CZUJKE
+
+    `proba_killswitcha.py` podnosi `min_equity` powyzej kapitalu i przywraca go
+    w bloku `finally`. Ten sam UPDATE ustawia `proba_do = now() + OKNO_PROBY_S`,
+    a `finally` kasuje znacznik razem z wartoscia. Dlatego `proba_do` PRZESZLE
+    i wciaz NIE-NULL to podpis jednego konkretnego zdarzenia: proces zginal
+    miedzy jednym a drugim.
+
+    A wtedy podniesiony prog ZOSTAJE NA STALE. `min_equity` ma regule `reczne`
+    (migracja 0029), wiec `wznowienie.wznow` go nie rusza - silnik stoi
+    bezterminowo, a kazde reczne zwolnienie kill-switcha konczy sie ponownym
+    wystrzeleniem w nastepnym cyklu, bo przyczyna nadal tam jest. Czyli
+    dokladnie ta awaria, przed ktora kill-switch ma chronic.
+
+    DLACZEGO TO NIE JEST ZBEDNE PO DOLOZENIU HANDLERA SIGTERM (2026-09-23)
+
+    Handler zalatwia SIGTERM, a `activeDeadlineSeconds` podniesiony powyzej
+    `OKNO_PROBY_S` sprawia, ze Job nie jest zabijany w polowie wlasnej pracy.
+    Zostaje SIGKILL po okresie karencji, OOMKill, zniknienie wezla i twarde
+    padniecie interpretera - zadnego z nich nie ominie kod w tamtym pliku.
+    Ta czujka jest wiec OSTATNIA warstwa i jedyna, ktora dziala, gdy proces
+    nie mial szansy niczego wykonac.
+
+    CZEGO TA CZUJKA NIE ROBI: NIE PRZYWRACA WARTOSCI. Nie da sie - nigdzie nie
+    ma zapisanego progu SPRZED proby. `risk.limit_def` trzyma jedna wartosc,
+    a historii limitow w tej bazie nie ma. Samoczynny powrot wymaga KOLUMNY
+    (np. `wartosc_przed_proba` + termin), czyli migracji i nadania dla roli
+    `trader_proba` - i to jest zaleznosc spoza tej poprawki, opisana
+    w raporcie. Do tego czasu ta czujka zamienia stan niewidoczny w stan
+    zgloszony, co jest cala roznica miedzy "silnik stoi i nikt nie wie"
+    a "mail o 05:40".
+
+    TLUMIENIE JAK WSZEDZIE W TYM PLIKU: powiadomienie wyslane PO `proba_do`
+    znaczy "ta porzucona proba jest juz zgloszona". Nastepna porzucona proba
+    ma pozniejsze `proba_do`, wiec odezwie sie na nowo - nawrot za darmo,
+    bez drugiego mechanizmu.
+    """
+    porzucone = await fetch_all(
+        "SELECT engine::text AS engine, mode::text AS mode, name, value,"
+        "       proba_do,"
+        "       round(extract(epoch from (now() - proba_do))/60) AS od_min"
+        "  FROM risk.limit_def"
+        " WHERE proba_do IS NOT NULL AND proba_do < now()"
+        " ORDER BY proba_do")
+    if not porzucone:
+        return 0
+
+    odbiorcy = await fetch_all('SELECT id FROM app."user" WHERE is_active')
+    zgloszone = trwale = 0
+    for p in porzucone:
+        print(f"  PORZUCONA PRÓBA POŻAROWA {p['engine']}/{p['mode']}: limit "
+              f"{p['name']} = {float(p['value']):.2f}, okno próby minęło "
+              f"{float(p['od_min']):.0f} min temu, a znacznik nadal stoi — "
+              f"próba zginęła między podniesieniem progu a jego przywróceniem")
+        if sucho:
+            zgloszone += 1
+            continue
+        juz = await fetch_all(
+            "SELECT 1 FROM notify.notification WHERE event_code = 'engine.down'"
+            "   AND data->>'porzucona_proba' = %(k)s AND created_at > %(od)s"
+            " LIMIT 1",
+            {"k": f"{p['engine']}/{p['mode']}/{p['name']}", "od": p["proba_do"]})
+        if juz:
+            trwale += 1
+            print("    (zgłoszone po zamknięciu tego okna próby — cisza)")
+            continue
+        zgloszone += 1
+        tytul = (f"Próba pożarowa nie posprzątała po sobie "
+                 f"({p['engine']}/{p['mode']})")
+        tresc = (
+            f"Limit `{p['name']}` ma wartość {float(p['value']):.2f} i znacznik "
+            f"okna próby z {p['proba_do']:%Y-%m-%d %H:%M}, czyli sprzed "
+            f"{float(p['od_min']):.0f} minut. Znacznik kasuje się razem "
+            f"z przywróceniem progu, więc ten stan znaczy, że proces próby "
+            f"zginął pomiędzy jednym a drugim.\n\n"
+            f"PODNIESIONY PRÓG ZATRZYMUJE SILNIK NA STAŁE: `min_equity` ma "
+            f"regułę wznowienia `reczne`, więc usługa wznowienia go nie ruszy, "
+            f"a każde ręczne zwolnienie kill-switcha kończy się ponownym "
+            f"wystrzeleniem w następnym cyklu — przyczyna nadal istnieje.\n\n"
+            f"CO ZROBIĆ: przywrócić wartość limitu sprzed próby (zakładka "
+            f"Ryzyko), a potem zwolnić kill-switcha. W tej kolejności — "
+            f"odwrotna nic nie daje.")
+        for u in odbiorcy:
+            await notify(u["id"], "engine.down", tytul, tresc,
+                         engine=p["engine"], severity="critical",
+                         data={"porzucona_proba":
+                               f"{p['engine']}/{p['mode']}/{p['name']}",
+                               "limit": p["name"], "wartosc": float(p["value"])})
+    if sucho:
+        print("Tryb suchy — powiadomienie nie wysyłane.")
+    if trwale:
+        print(f"  {trwale} × porzucona próba pożarowa: stan TRWAŁY i JUŻ "
+              f"ZGŁOSZONY, powiadomienie w tłumieniu — kod wyjścia z tego "
+              f"przebiegu tego NIE powtarza (opis stanu wyżej)")
+    return zgloszone
+
+
 async def sprawdz_ryzyko(fetch_all, notify, sucho: bool = False) -> int:
     """Czy kill-switch zadzialal i nikt sie o tym nie dowiedzial.
 
@@ -932,11 +1032,33 @@ async def sprawdz_ryzyko(fetch_all, notify, sucho: bool = False) -> int:
     # tym samym co `wiek_min`. LEFT JOIN, bo stare zdarzenia nie maja
     # `limit_name`, a limit o zasiegu instrumentu nie jest tym, ktory proba
     # podnosi - `scope = 'engine'` zawezajac do jednego wiersza na limit.
+    #
+    # DRUGI WARUNEK, `k.triggered_at >= d.updated_at`, DOLOZONY 2026-09-23.
+    # Sam `proba_do > now()` mowi wylacznie "na TYM LIMICIE trwa proba", a nie
+    # "TO KONKRETNE zdarzenie jest jej skutkiem" - a proba podnosi prog,
+    # znacznik okna i `updated_at` JEDNYM UPDATE-em (proba_killswitcha.py),
+    # wiec `d.updated_at` jest dokladnie chwila podniesienia progu. Zdarzenie
+    # STARSZE od niej nie ma prawa pochodzic z tej proby, choc miesci sie
+    # w jej oknie: to sytuacja po probie, ktora zginela miedzy podniesieniem
+    # a `finally` i zostawila termin do wygasniecia.
+    #
+    # CZEGO TO NADAL NIE ROZSTRZYGA, I TRZEBA O TYM WIEDZIEC. Prawdziwy spadek
+    # kapitalu W TRAKCIE okna proby daje zdarzenie nieodrozialne od jej skutku:
+    # ten sam limit, ten sam powod, ten sam wiersz wstawiony przez ten sam
+    # `RiskKernel` (migracja 0045 mowi to wprost i jest to CELOWE - proba
+    # mierzy prawdziwa sciezke, nie atrape). Rozstrzygnelaby dopiero kolumna
+    # w `risk.killswitch_event` z identyfikatorem zdarzenia zapisanym przez
+    # probe, czyli migracja plus nadanie. Do tego czasu skutek jest ograniczony
+    # w czasie: `proba_do` wygasa po `OKNO_PROBY_S`, wiec zdarzenie, ktore
+    # przezyje okno, wraca przy nastepnym przebiegu czujki (co 10 min) do
+    # galezi zwyklego kill-switcha razem z kodem wyjscia - a tresc
+    # powiadomienia nizej nie zapewnia juz, ze to na pewno proba.
     zdarzenia = await fetch_all(
         "SELECT k.id, k.engine::text AS engine, k.mode::text AS mode, k.reason,"
         "       k.triggered_at,"
         "       round(extract(epoch from (now() - k.triggered_at))/60) AS wiek_min,"
-        "       coalesce(d.proba_do > now(), false) AS proba_w_toku,"
+        "       coalesce(d.proba_do > now() AND k.triggered_at >= d.updated_at,"
+        "                false) AS proba_w_toku,"
         "       d.proba_do"
         " FROM risk.killswitch_event k"
         " LEFT JOIN risk.limit_def d"
@@ -955,6 +1077,13 @@ async def sprawdz_ryzyko(fetch_all, notify, sucho: bool = False) -> int:
     # stanie, w ktorym pytanie "czy bezpiecznik liczy" nie ma innego zrodla
     # odpowiedzi - uzasadnienie w docstringu `sprawdz_cisze_pomiaru`.
     zgloszone = await sprawdz_cisze_pomiaru(fetch_all, notify, sucho=sucho)
+    # PORZUCONA PROBA POZAROWA - tak samo PRZED wyjsciem po pustej liscie
+    # zdarzen i z tego samego powodu. Podniesiony prog zostawiony przez probe,
+    # ktora zginela, potrafi istniec BEZ czynnego zdarzenia: wystarczy, ze ktos
+    # zwolnil kill-switcha recznie. Silnik wystrzeli wtedy znowu w nastepnym
+    # cyklu, bo przyczyna nadal tam jest - a czujka, ktora konczy sie na
+    # `if not zdarzenia`, akurat tego stanu nigdy by nie zobaczyla.
+    zgloszone += await sprawdz_porzucona_probe(fetch_all, notify, sucho=sucho)
     trwale = 0
 
     if not zdarzenia:
@@ -1041,11 +1170,30 @@ async def sprawdz_ryzyko(fetch_all, notify, sucho: bool = False) -> int:
 
         godzin = wiek_min / 60
         if proba:
-            tytul = f"PRÓBA POŻAROWA: kill-switch zadziałał ({z['engine']})"
-            wstep = ("To PRÓBA POŻAROWA, nie strata: próg został podniesiony "
-                     "celowo, żeby sprawdzić, czy silnik się zatrzyma i czy "
-                     "to powiadomienie dojdzie. Próba sama zwolni bezpiecznik "
-                     "i przywróci próg.\n\n")
+            tytul = (f"PRÓBA POŻAROWA (prawdopodobnie): kill-switch zadziałał "
+                     f"({z['engine']})")
+            # TRESC MOWI, CZEGO TA CZUJKA NIE WIE - bo do 2026-09-23 mowila
+            # "To PRÓBA POŻAROWA, nie strata" jako pewnik. Znacznik `proba_do`
+            # swiadczy o tym, ze na tym limicie TRWA proba, a nie o tym, ze
+            # to zdarzenie jest jej skutkiem; zdarzenie proby jest z zalozenia
+            # nieodrozialne od prawdziwego (migracja 0045). Prawdziwy spadek
+            # kapitalu w tym samym oknie dostawal wiec zapewnienie, ze to tylko
+            # sprawdzian kanalu - i to o porze, o ktorej wedlug komentarza
+            # chartu prawdziwy nocny kill-switch jest najbardziej prawdopodobny.
+            wstep = (f"Na limicie trwa PRÓBA POŻAROWA (okno do "
+                     f"{z['proba_do']:%H:%M:%S}), więc to zdarzenie jest "
+                     f"NAJPEWNIEJ jej skutkiem: próg został podniesiony celowo, "
+                     f"żeby sprawdzić, czy silnik się zatrzyma i czy to "
+                     f"powiadomienie dojdzie. Próba sama zwolni bezpiecznik "
+                     f"i przywróci próg.\n\n"
+                     f"CZEGO TO NIE DOWODZI: zdarzenie próby jest "
+                     f"nieodróżnialne od prawdziwego — ten sam limit, ten sam "
+                     f"powód, ten sam wiersz. Jeśli kapitał spadł naprawdę "
+                     f"w tym samym oknie, wygląda to DOKŁADNIE tak samo. "
+                     f"Sprawdź stan rachunku, zanim uznasz sprawę za zamkniętą; "
+                     f"jeśli bezpiecznik będzie aktywny po zamknięciu okna, "
+                     f"kolejny przebieg czujki zgłosi go już jako zwykły "
+                     f"kill-switch.\n\n")
         elif werdykt["pierwsze"]:
             tytul = f"Kill-switch zadziałał ({z['engine']})"
             wstep = ""
@@ -1182,22 +1330,32 @@ SWIEC_ZWLOKI = 3
 MINUT_TIMEFRAME = {"1m": 1, "5m": 5, "15m": 15, "1h": 60, "4h": 240, "1d": 1440}
 
 
-def ocen_swiezosc(wiersze: list[dict], swiec_zwloki: int = SWIEC_ZWLOKI) -> list[tuple[str, str]]:
+def ocen_swiezosc(wiersze: list[dict], swiec_zwloki: int = SWIEC_ZWLOKI
+                  ) -> list[tuple[str, str, str]]:
     """Ktore zrodla danych sa nieswieze. CZYSTA FUNKCJA.
 
-    Zwraca listę (tytuł, treść) — pusta znaczy: wszystko świeże.
+    Zwraca listę (źródło, tytuł, treść) — pusta znaczy: wszystko świeże.
+
+    ŹRÓDŁO JAKO OSOBNE POLE, a nie do wyłuskania z tytułu. Wołający tłumi
+    powiadomienia PER ŹRÓDŁO (patrz `sprawdz_swiezosc`), więc potrzebuje
+    klucza, po którym da się je rozróżnić. Wyciąganie go z tytułu działałoby
+    do pierwszej zmiany sformułowania — ten sam błąd, przed którym ostrzega
+    migracja 0029 przy `limit_name`, i ta sama zasada, dla której
+    `ocen_egzekucje` zwraca kod zdarzenia osobno.
     """
     powody = []
     for w in wiersze:
         prog_min = w["minut_swiecy"] * swiec_zwloki
         if w["wiek_min"] is None:
             powody.append((
+                w["co"],
                 f"Brak danych: {w['co']}",
                 f"Tabela {w['co']} nie ma ANI JEDNEGO wiersza. Silnik nie ma na "
                 f"czym podejmować decyzji."))
             continue
         if w["wiek_min"] > prog_min:
             powody.append((
+                w["co"],
                 f"Dane nieświeże: {w['co']}",
                 f"Najnowszy wpis sprzed {w['wiek_min']:.0f} min, próg to "
                 f"{prog_min:.0f} min ({swiec_zwloki} świece po "
@@ -1247,11 +1405,16 @@ async def sprawdz_swiezosc(fetch_all, notify, sucho: bool = False,
     wiersze = await fetch_all(
         "SELECT 'market.candle (' || %(tf)s || ', źródło świecy ' || %(bar)s || ')' AS co,"
         "       %(min)s::numeric AS minut_swiecy,"
-        "       round(extract(epoch from (now() - max(event_time)))/60) AS wiek_min"
+        "       round(extract(epoch from (now() - max(event_time)))/60) AS wiek_min,"
+        # ZNACZNIK STANU dla tlumienia nizej - ta sama chwila, z ktorej liczy
+        # sie wiek, tyle ze surowa. Liczona w bazie, bo drugi zegar w Pythonie
+        # rozjechalby sie z `created_at` powiadomien, ktore zapisuje baza.
+        "       max(event_time) AS ostatni"
         "  FROM market.candle WHERE timeframe::text = %(tf)s"
         " UNION ALL"
         " SELECT 'feat.feature_value', %(min_bar)s::numeric,"
-        "        round(extract(epoch from (now() - max(event_time)))/60)"
+        "        round(extract(epoch from (now() - max(event_time)))/60),"
+        "        max(event_time)"
         "   FROM feat.feature_value",
         {"tf": h.source_timeframe, "bar": bar, "min": minut_zrodla,
          "min_bar": h.bar_minutes})
@@ -1265,14 +1428,58 @@ async def sprawdz_swiezosc(fetch_all, notify, sucho: bool = False,
         print("  bez zastrzeżeń")
         return 0
 
+    # TLUMIENIE - DO 2026-09-23 TEJ CZUJKI NIE MIALA W OGOLE.
+    #
+    # `engine.down` jest `always_on` (migracja 0011), wiec katalogowy cooldown
+    # 600 s NIE DZIALA na nia w ogole: `notifications.py` sprawdza cooldown
+    # tylko dla zdarzen bez tej flagi. A zadanie chodzi co 10 minut
+    # (values.yaml, `zywotnoscCron.schedule`), wiec staly w piatek wieczorem
+    # worker `market` dawal do poniedzialku okolo 430 maili o wadze `critical`
+    # i tyle samo padnietych Jobow - dokladnie ta awaria, ktora docstring
+    # modulu opisuje jako zmierzona na produkcji 2026-09-10 i ktora naprawiono
+    # w pieciu innych czujkach. Ta i `sprawdz_egzekucje` zostaly pominiete.
+    #
+    # ZNACZNIKIEM STANU JEST WIEK DANYCH, tak jak przy silniku jest nim
+    # `last_beat_at` (patrz `sprawdz_zywotnosc`). Powiadomienie wyslane PO
+    # ostatnim wpisie danego zrodla znaczy "ta awaria jest juz zgloszona".
+    # NAWROT rozpoznaje sie za darmo i bez drugiego mechanizmu: gdy potok
+    # wroci, `max(event_time)` przesunie sie do przodu, stare powiadomienie
+    # przestanie tlumic i kolejna awaria znowu zapali zadanie na czerwono.
+    #
+    # PER ZRODLO, nie zbiorczo: stojace swiece i stojace cechy to dwie rozne
+    # awarie w dwoch roznych podach. Jedno tlumienie na oba znaczyloby, ze
+    # druga z nich milknie, bo pierwsza byla wczesniej. Klucz idzie do
+    # `data->>'zrodlo'`, bo tytul jest zdaniem po polsku i zmienia sie razem
+    # z liczbami.
+    #
+    # BRAK DANYCH W OGOLE (`wiek_min IS NULL`) nie ma znacznika, bo nie ma
+    # zadnego wpisu - tam tlumimy oknem dobowym, tak samo jak
+    # `sprawdz_instrumenty` przy wycofaniu instrumentu.
+    ostatni_wpis = {w["co"]: w.get("ostatni") for w in wiersze}
+    zgloszone = trwale = 0
     odbiorcy = await fetch_all('SELECT id FROM app."user" WHERE is_active')
-    for tytul, tresc in powody:
+    for zrodlo, tytul, tresc in powody:
         print(f"  {tytul}")
         if sucho:
+            zgloszone += 1
             continue
+        juz = await fetch_all(
+            "SELECT 1 FROM notify.notification"
+            " WHERE event_code = 'engine.down' AND data->>'zrodlo' = %(z)s"
+            "   AND created_at > coalesce(%(od)s::timestamptz,"
+            "                             now() - make_interval(hours => 24))"
+            " LIMIT 1", {"z": zrodlo, "od": ostatni_wpis.get(zrodlo)})
+        if juz:
+            trwale += 1
+            print("    (zgłoszone po ostatnim wpisie tego źródła — cisza)")
+            continue
+        zgloszone += 1
         for u in odbiorcy:
-            await notify(u["id"], "engine.down", tytul, tresc, severity="critical")
-    return len(powody)
+            await notify(u["id"], "engine.down", tytul, tresc,
+                         severity="critical", data={"zrodlo": zrodlo})
+    if sucho:
+        print("Tryb suchy — powiadomienie nie wysyłane.")
+    return kod_wyjscia(zgloszone, trwale, "źródło danych nieświeże")
 
 
 def ocen_egzekucje(stan: dict) -> list[tuple[str, str, str]]:
@@ -1361,8 +1568,19 @@ async def sprawdz_egzekucje(fetch_all, notify, sucho: bool = False,
         "SELECT client_order_id FROM exec.order WHERE status = 'unknown'"
         "   AND submitted_at < now() - make_interval(hours => 4) LIMIT 10")
     zawieszone = await fetch_all(
-        "SELECT count(*) AS n FROM journal.planned_order"
+        "SELECT count(*) AS n, max(valid_until) AS ostatni"
+        "  FROM journal.planned_order"
         " WHERE status = 'pending' AND valid_until < now() - make_interval(hours => 4)")
+    # ZNACZNIKI STANU DLA TLUMIENIA (patrz nizej). Kazdy mowi "kiedy pojawil sie
+    # NAJNOWSZY dowod tej awarii" - powiadomienie mlodsze od znacznika znaczy,
+    # ze o tym dowodzie juz powiedzielismy. Oba liczy BAZA, bo porownujemy je
+    # z `created_at`, ktore tez zapisuje baza.
+    znaczniki = await fetch_all(
+        "SELECT max(submitted_at) FILTER (WHERE status IN ('rejected','unknown'))"
+        "         AS ostatnie_zlecenie"
+        "  FROM exec.order"
+        " WHERE submitted_at > now() - make_interval(hours => %(h)s)",
+        {"h": okno_h})
 
     stan = {
         "przyjete": st[0]["przyjete"] if st else 0,
@@ -1383,14 +1601,53 @@ async def sprawdz_egzekucje(fetch_all, notify, sucho: bool = False,
         print("  bez zastrzeżeń")
         return 0
 
+    # TLUMIENIE - DO 2026-09-23 TEJ CZUJKI NIE MIALA W OGOLE.
+    #
+    # Ta sama wada co w `sprawdz_swiezosc` wyzej i z tym samym skutkiem:
+    # `engine.down` (galaz `zawieszone_plany`) jest `always_on`, wiec
+    # katalogowy cooldown go NIE dotyczy, a zadanie chodzi co 10 minut. Stan
+    # trwajacy weekend dawal ~430 maili `critical` i tyle samo czerwonych
+    # Jobow. `order.rejected` ma cooldown katalogowy, wiec maili wychodzi
+    # mniej - ale KOD WYJSCIA liczyl proby, nie wyslania, wiec Job byl czerwony
+    # przy kazdym przebiegu tak samo.
+    #
+    # ZNACZNIK STANU PER GALAZ, a nie jedno okno na wszystko:
+    #
+    #   * `zawieszone_plany` -> `max(valid_until)` planow, ktore utknely.
+    #     Kazdy nowy zawieszony plan przesuwa znacznik do przodu, wiec NOWE
+    #     dowody odzywaja sie, a ten sam zastany zbior milczy.
+    #   * `order.rejected` -> `max(submitted_at)` zlecen odrzuconych albo
+    #     o nieznanym stanie. Gdy gielda zacznie przyjmowac, znacznik przestaje
+    #     rosnac; kolejna seria odrzucen go przesunie i alarm wroci.
+    #
+    # Ta sama konstrukcja co `last_beat_at` w `sprawdz_zywotnosc`: nawrot
+    # rozpoznaje sie za darmo, bez drugiego mechanizmu i bez nowej kolumny.
+    znacznik = {
+        "engine.down": (zawieszone[0]["ostatni"] if zawieszone else None),
+        "order.rejected": (znaczniki[0]["ostatnie_zlecenie"] if znaczniki else None),
+    }
     odbiorcy = await fetch_all('SELECT id FROM app."user" WHERE is_active')
+    zgloszone = trwale = 0
     for kod, tytul, tresc in powody:
         print(f"  {tytul}")
         if sucho:
+            zgloszone += 1
             continue
+        juz = await fetch_all(
+            "SELECT 1 FROM notify.notification WHERE event_code = %(kod)s"
+            "   AND created_at > coalesce(%(od)s::timestamptz,"
+            "                             now() - make_interval(hours => 24))"
+            " LIMIT 1", {"kod": kod, "od": znacznik.get(kod)})
+        if juz:
+            trwale += 1
+            print("    (zgłoszone po najnowszym dowodzie tej awarii — cisza)")
+            continue
+        zgloszone += 1
         for u in odbiorcy:
             await notify(u["id"], kod, tytul, tresc, severity="critical")
-    return len(powody)
+    if sucho:
+        print("Tryb suchy — powiadomienie nie wysyłane.")
+    return kod_wyjscia(zgloszone, trwale, "awaria ścieżki egzekucji")
 
 
 async def sprawdz_poslizg(fetch_all, *, engine: str = "crypto",

@@ -177,11 +177,30 @@ jobs:
           echo '--- api ---'; tail -50 /tmp/api.log || true
           echo '--- web ---'; tail -30 /tmp/web.log || true
 
+  # TESTY JEDNOSTKOWE JAKO BRAMKA PUBLIKACJI.
+  #
+  # Do 2026-09-23 `pytest` zyl wylacznie w osobnym workflow `testy`, ktory nie
+  # byl ani zaleznoscia, ani warunkiem zadnego joba w tym pliku. Push na `main`
+  # z czerwonym pakietem testow budowal i wypychal obraz normalnie. Jedynym
+  # hamulcem bylaby ochrona galezi skonfigurowana poza repozytorium - czyli
+  # zabezpieczenie, ktorego nie widac w przegladzie zmian.
+  #
+  # BEZ `if`, czyli takze wtedy, gdy filtr sciezek nie widzi zmian w `services/`
+  # ani w `web/`. Pakiet testow czyta w tym projekcie takze charty
+  # (`test_chart_nadzor.py`) i zrodla frontu (`test_killswitch.py` siega do
+  # `web/src/components/Risk.jsx`), wiec "nic sie nie zmienilo w kodzie" nie
+  # znaczy "nie ma czego sprawdzac". Job pominiety przez filtr nie bramkuje
+  # niczego, a wyglada w przegladzie tak samo jak job, ktory przeszedl.
+  testy:
+    name: Testy jednostkowe
+    uses: ./.github/workflows/tests.yml
+
   build:
     name: Build ${{ matrix.name }}
-    needs: [changes, verify-migrations, smoke]
+    needs: [changes, verify-migrations, smoke, testy]
     if: |
       always() &&
+      needs.testy.result == 'success' &&
       (needs.verify-migrations.result == 'success' || needs.verify-migrations.result == 'skipped') &&
       (needs.smoke.result == 'success' || needs.smoke.result == 'skipped') &&
       (needs.changes.outputs.api == 'true' || needs.changes.outputs.web == 'true' || github.event_name == 'workflow_dispatch')

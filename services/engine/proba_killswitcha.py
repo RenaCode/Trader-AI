@@ -37,6 +37,13 @@ SAM wykrył przekroczenie. Przywracana w `finally`, więc wraca także po błęd
 i po przerwaniu — zostawiony podniesiony próg zatrzymałby silnik na stałe,
 czyli spowodowałby dokładnie tę awarię, przed którą kill-switch ma chronić.
 
+„TAKŻE PO PRZERWANIU" WYMAGAŁO DO 2026-09-23 SPROSTOWANIA. Samo `finally` tego
+nie daje: CPython kończy proces na SIGTERM-ie bez rozwijania stosu, a SIGTERM
+jest JEDYNYM sposobem, w jaki ten Job bywa przerywany (`activeDeadlineSeconds`).
+Trzeba do tego handlera — patrz `zainstaluj_przerwanie` — i limitu czasu
+zadania DŁUŻSZEGO niż `OKNO_PROBY_S`, bo po okresie karencji idzie SIGKILL,
+którego nie ominie żaden kod w tym pliku.
+
 Próba używa progu kapitału, bo to jedyny z trzech limitów krytycznych z regułą
 `reczne` — usługa wznowienia go nie ruszy i nie zwolni zdarzenia w połowie
 pomiaru.
@@ -121,6 +128,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
+import signal
 import sys
 from pathlib import Path
 
@@ -183,6 +191,57 @@ KROK_S = 15
 # zostanie podniesiony przy pierwszym niewygodnym przebiegu i nikt tego nie
 # zauważy — tak samo jak nie widać wyłączonego limitu.
 MAX_DNI_BEZ_POTWIERDZENIA = 7
+
+
+# KOD WYJSCIA PO PRZERWANIU SYGNALEM. Konwencja powloki (128 + numer sygnalu),
+# celowo rozny od 1 i 2: te dwa mowia o WYNIKU POMIARU, a to mowi, ze pomiaru
+# nie dokonczono z przyczyny zewnetrznej. W logu zadania widac to bez czytania
+# tresci.
+KOD_PRZERWANA = 128 + int(signal.SIGTERM)
+
+
+def zainstaluj_przerwanie(zadanie: asyncio.Future) -> None:
+    """Zamienia SIGTERM/SIGINT w ANULOWANIE zadania, żeby `finally` zdążył.
+
+    DLACZEGO TO NIE JEST OZDOBNIK, TYLKO CZĘŚĆ BEZPIECZNIKA
+
+    Do 2026-09-23 w całym `services/` nie było ani jednego `signal.signal`
+    ani `add_signal_handler`. CPython kończy wtedy proces na SIGTERM-ie BEZ
+    rozwijania stosu, więc blok `finally` w `przeprowadz` NIE WYKONUJE SIĘ —
+    a to w nim wraca podniesiony `min_equity`. Podniesiony próg zostawał
+    wtedy NA STAŁE, a `min_equity` ma regułę `reczne` (migracja 0029), więc
+    `wznowienie.wznow` go nie rusza. Silnik stał bezterminowo, a każde ręczne
+    zwolnienie kill-switcha kończyło się ponownym wystrzeleniem w następnym
+    cyklu, bo przyczyna — czyli próg — nadal tam była. Dokładnie ta awaria,
+    przed którą kill-switch ma chronić.
+
+    SIGTERM nie jest tu przypadkiem brzegowym, tylko JEDYNYM sposobem, w jaki
+    to zadanie bywa przerywane: `activeDeadlineSeconds` w
+    `charts/trader/templates/proba-cron.yaml` wysyła właśnie jego.
+
+    ANULOWANIE, A NIE `signal.signal` RZUCAJĄCY WYJĄTEK. Handler z
+    `signal.signal` wykonuje się w głównym wątku, który w tym momencie tkwi
+    w `select()` pętli zdarzeń — wyjątek wyleciałby z wnętrza pętli, a nie
+    z korutyny, która jest zawieszona. `finally` nadal by się nie wykonał.
+    `add_signal_handler` + `Task.cancel()` dostarcza `CancelledError` dokładnie
+    w to `await`, na którym stoi próba, więc rozwijanie stosu idzie normalną
+    drogą.
+
+    CZEGO TO NIE ZAŁATWIA I TRZEBA O TYM WIEDZIEĆ: SIGKILL po okresie karencji
+    (domyślnie 30 s) omija wszystko. Dlatego to jest DRUGA warstwa, a pierwszą
+    jest `activeDeadlineSeconds` USTAWIONY POWYŻEJ `OKNO_PROBY_S` — sam handler
+    byłby ostrzeżeniem, nie zabezpieczeniem. Pilnuje tego
+    `tests/test_chart_nadzor.py::test_deadline_proby_dluzszy_niz_jej_wlasne_okno`.
+    """
+    petla = asyncio.get_running_loop()
+    for sygnal in (signal.SIGTERM, signal.SIGINT):
+        try:
+            petla.add_signal_handler(sygnal, zadanie.cancel)
+        except (NotImplementedError, RuntimeError):
+            # Windows albo wątek poboczny. Zadanie i tak chodzi na Linuksie
+            # w kontenerze; cicha zgoda jest tu lepsza niż wywrócenie próby
+            # na samym starcie, bo bez próby nie sprawdza się NIC.
+            pass
 
 
 class Niezaliczona(RuntimeError):
@@ -390,23 +449,91 @@ async def przeprowadz(fetch_all, fetch_one, execute, engine: str = "crypto",
 
         print(f"\n--- OGNIWO 1-2: czekam na cykl silnika (do {CZEKAJ_SILNIK_S}s) ---")
 
+        # ZAPYTANIE ZAWEZONE DO ZDARZENIA, KTORE MOGLO POWSTAC Z TEJ PROBY.
+        #
+        # Do 2026-09-23 stalo tu `released_at IS NULL ORDER BY triggered_at
+        # DESC LIMIT 1` bez zadnego dalszego warunku, czyli DOWOLNE czynne
+        # zdarzenie tej pary engine/mode. Sprawdzenie "aktywnych 0" wyzej
+        # dotyczy wylacznie chwili startu, a potem proba czeka tu do
+        # CZEKAJ_SILNIK_S sekund - i w tym oknie moze powstac zdarzenie
+        # PRAWDZIWE, na innym limicie.
+        #
+        # Scenariusz zmierzony w audycie 23.09: proba rusza przy czystym koncie,
+        # podnosi prog, a w ciagu tych 420 s silnik wykrywa prawdziwe obsuniecie
+        # kapitalu i wstawia `max_drawdown`. `ORDER BY triggered_at DESC`
+        # zwracalo wlasnie to zdarzenie, `moje_zdarzenie` bralo jego id, a blok
+        # `finally` ZWALNIAL PRAWDZIWY KILL-SWITCH notatka twierdzaca, ze
+        # zostal wywolany celowo przez probe. Handel wracal bez decyzji
+        # czlowieka, zdarzenie znikalo z `released_at IS NULL` (wiec `dozor
+        # --co ryzyko` nigdy wiecej o nim nie mowil), a `_dni_od_potwierdzenia`
+        # liczylo je jako zaliczona probe i odnawialo licznik ciszy.
+        #
+        # Dwa warunki zamykaja te dziure i oba sa konieczne:
+        #
+        #   * `limit_name = LIMIT_PROBY` - zdarzenie na innym limicie nigdy nie
+        #     jest skutkiem tej proby, bo proba rusza jeden limit.
+        #   * `triggered_at >= (SELECT updated_at FROM risk.limit_def ...)` -
+        #     granica dolna to CHWILA PODNIESIENIA PROGU, czytana zegarem BAZY
+        #     (ten sam UPDATE wyzej ustawia `updated_at = now()`). Bez niej
+        #     zdarzenie `min_equity` sprzed proby nadal mogloby sie podszyc.
+        #     Chwila liczona w Pythonie wymagalaby zgadywania strefy, a strefa
+        #     pomylona o dwie godziny przy oknie kilkunastominutowym daje okno
+        #     calkowicie rozminiete z proba - stad podzapytanie, tak samo jak
+        #     w ogniwie 3 i 4.
         async def zdarzenie():
             return await fetch_one(
                 "SELECT id, reason, limit_name FROM risk.killswitch_event"
                 " WHERE engine::text=%s AND mode::text=%s AND released_at IS NULL"
-                " ORDER BY triggered_at DESC LIMIT 1", (engine, mode))
+                "   AND limit_name = %s"
+                "   AND triggered_at >= (SELECT updated_at FROM risk.limit_def"
+                "                        WHERE engine::text=%s AND mode::text=%s"
+                "                          AND name=%s)"
+                " ORDER BY triggered_at DESC LIMIT 1",
+                (engine, mode, LIMIT_PROBY, engine, mode, LIMIT_PROBY))
 
         z = await _czekaj_na(zdarzenie, CZEKAJ_SILNIK_S, "zdarzenie")
         if not z:
+            # CZEGO PROBA NIE ZNALAZLA - a to sa DWIE ROZNE rzeczy i mylenie
+            # ich konczy sie albo falszywym alarmem, albo przemilczeniem awarii.
+            #
+            # Jesli w oknie proby zadzialal INNY limit, to znaczy, ze lancuch
+            # zadzialal (silnik zatrzymal handel), tylko nie z powodu, ktory
+            # proba wywolala - a przy czynnym kill-switchu RiskKernel nie
+            # wstawi juz drugiego zdarzenia, wiec wlasnego proba nie zobaczy
+            # NIGDY. To jest brak mozliwosci pomiaru, dokladnie ten sam co
+            # "kill-switch juz stal na starcie" - i tak samo nie ma prawa
+            # swiecic na czerwono. `moje_zdarzenie` zostaje None, wiec `finally`
+            # CUDZEGO zdarzenia nie dotyka.
+            obce = await fetch_one(
+                "SELECT id, limit_name FROM risk.killswitch_event"
+                " WHERE engine::text=%s AND mode::text=%s AND released_at IS NULL"
+                " ORDER BY triggered_at DESC LIMIT 1", (engine, mode))
+            if obce:
+                wypisz_ogniwa()
+                raise Nierozstrzygnieta(
+                    f"w oknie próby zadziałał PRAWDZIWY kill-switch na innym "
+                    f"limicie ({obce['limit_name']}, id={obce['id']}) — próba "
+                    f"nie ma czego wywołać ze stanu spoczynku i CUDZEGO "
+                    f"zdarzenia nie zwalnia",
+                    await _dni_od_potwierdzenia(fetch_one, engine, mode))
             wypisz_ogniwa()
             raise Niezaliczona(
                 "silnik nie uruchomił kill-switcha mimo kapitału poniżej progu")
-        moje_zdarzenie = z["id"]
         print(f"  zadziałał: id={z['id']} limit={z['limit_name']} — {z['reason']}")
+        # SPRAWDZENIE PRZED PRZYPISANIEM, nie po nim. Do 2026-09-23 bylo
+        # odwrotnie: `moje_zdarzenie` dostawalo id, a dopiero potem leciala
+        # `Niezaliczona` - i `finally` zwalnial zdarzenie, ktore wlasnie
+        # rozpoznano jako CUDZE.
+        #
+        # Warunek jest dzis nadmiarowy wobec `limit_name = %s` w zapytaniu
+        # wyzej i zostaje WLASNIE dlatego: dwa niezalezne zabezpieczenia na
+        # tej samej rzeczy, bo cena pomylki to zwolniony prawdziwy kill-switch.
+        # Gdyby ktos kiedys rozluznil zapytanie, ten warunek zatrzyma skutek.
         if z["limit_name"] != LIMIT_PROBY:
             raise Niezaliczona(
                 f"zadziałał inny limit ({z['limit_name']}) — próba mierzy nie to, "
                 f"co zakłada")
+        moje_zdarzenie = z["id"]
         ogniwa["1-2 limit -> zdarzenie"] = ZADZIALALO
 
         # OGNIWO 3, PYTANIE PIERWSZE. Bez czekania: slad zapisuje cykl, ktory
@@ -650,9 +777,26 @@ async def main() -> int:
 
     await open_pool()
     try:
-        return await uruchom(fetch_all, fetch_one, execute,
-                             engine=args.engine, mode=args.mode,
-                             sucho=args.sucho)
+        # PRÓBA JAKO OSOBNE ZADANIE, a nie zwykły `await`. Anulowane ma być
+        # to, co podniosło próg — a nie `main`, bo wtedy `CancelledError`
+        # wyleciałby też z `close_pool()` niżej i sprzątanie połączeń poszłoby
+        # tą samą drogą co próba. Tu główne zadanie żyje i spokojnie domyka
+        # pulę po tym, jak próba wykonała swój `finally`.
+        zadanie = asyncio.ensure_future(
+            uruchom(fetch_all, fetch_one, execute,
+                    engine=args.engine, mode=args.mode, sucho=args.sucho))
+        zainstaluj_przerwanie(zadanie)
+        try:
+            return await zadanie
+        except asyncio.CancelledError:
+            # Tu jesteśmy PO wykonaniu `finally` w `przeprowadz`, czyli próg
+            # i znacznik okna są już przywrócone, a własne zdarzenie zwolnione.
+            print("\nPRZERWANA sygnałem — próg i znacznik okna przywrócone, "
+                  "łańcuch NIE został w tym cyklu sprawdzony.", file=sys.stderr)
+            print("  Jeśli przerwał `activeDeadlineSeconds`, to limit zadania "
+                  "jest krótszy niż okno próby i to jest wada chartu, "
+                  "nie próby.", file=sys.stderr)
+            return KOD_PRZERWANA
     finally:
         await close_pool()
 

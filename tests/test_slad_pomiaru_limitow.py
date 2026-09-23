@@ -363,6 +363,12 @@ class AtrapaCzujki:
     async def fetch_all(self, sql, params=None):
         if "risk.killswitch_event" in sql:
             return list(self.zdarzenia)
+        # PORZUCONE PROBY POZAROWE (`sprawdz_porzucona_probe`, 2026-09-23):
+        # limity z przeszlym, niewykasowanym `proba_do`. Pusta lista, bo to
+        # stan wyjatkowy - gdyby atrapa oddawala tu cokolwiek, kazdy test
+        # w tym pliku mierzylby przy okazji tamta sciezke.
+        if "risk.limit_def" in sql and "proba_do < now()" in " ".join(sql.split()):
+            return []
         if "risk.limit_usage" in sql:
             return [{"engine": "crypto", "mode": "demo",
                      "wiek_s": self.wiek_s, "nigdy": self.nigdy,

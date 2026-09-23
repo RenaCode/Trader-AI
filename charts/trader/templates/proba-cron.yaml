@@ -8,7 +8,12 @@
 #
 # Zadanie doprowadza do PRAWDZIWEGO zadzialania - podnosi prog kapitalu powyzej
 # biezacego stanu i czeka, az silnik sam wykryje przekroczenie. Prog wraca
-# w bloku `finally`, wiec takze po bledzie i po przerwaniu.
+# w bloku `finally`, wiec takze po bledzie i po przerwaniu - ale to ostatnie
+# wymaga DWOCH rzeczy naraz i obie stoja nizej w tym pliku: handlera SIGTERM
+# (`zainstaluj_przerwanie` w module proby, inaczej CPython konczy proces bez
+# rozwijania stosu) oraz `activeDeadlineSeconds` DLUZSZEGO niz `OKNO_PROBY_S`.
+# Do 2026-09-23 nie bylo ani jednego, ani drugiego, wiec zdanie wyzej bylo
+# nieprawdziwe dokladnie dla jedynego sposobu, w jaki ten Job bywa przerywany.
 #
 # DLACZEGO NIE PLIK .sh NA SERWERZE: skrypt na dysku rozjezdza sie z kodem,
 # ktory testuje - obraz idzie przez wdrozenie, plik nie idzie nigdzie. Ten modul
@@ -55,12 +60,41 @@ spec:
       # jeszcze raz, a przy trwajacej awarii lancucha zatrzymywaloby silnik
       # w kolko - czyli samo stalo by sie ta awaria, ktorej szuka.
       backoffLimit: 0
-      # Twardy limit czasu: proba czeka na cykl silnika i na dozor, razem okolo
-      # 18 minut. Zadanie wiszace dluzej znaczy, ze cos jest nie tak z nim samym.
-      activeDeadlineSeconds: 1500
+      # TWARDY LIMIT CZASU - I MUSI BYC DLUZSZY NIZ WLASNE OKNO PROBY.
+      #
+      # Do 2026-09-23 stalo tu 1500, a `OKNO_PROBY_S` w proba_killswitcha.py to
+      # CZEKAJ_SILNIK_S (420) + CZEKAJ_DOZOR_S (660) + 600 = 1680 s. Chart sam
+      # zakladal wiec, ze Job bywa zabity PRZED koncem okna - a wtedy przychodzi
+      # SIGTERM i (do tej samej daty, bo nie bylo handlera) proces ginal bez
+      # rozwijania stosu, czyli BEZ bloku `finally`. Podniesiony `min_equity`
+      # zostawal na stale, a ma regule `reczne`, wiec `wznowienie.wznow` go nie
+      # rusza: silnik stal bezterminowo, a kazde reczne zwolnienie kill-switcha
+      # konczylo sie ponownym wystrzeleniem w nastepnym cyklu, bo przyczyna
+      # nadal tam byla.
+      #
+      # Ze deadline byl osiagalny: `_czekaj_na` liczy `minelo` wylacznie po
+      # `KROK_S`, nie doliczajac czasu samych zapytan. Przy KROK_S = 15 to 72
+      # odpytania - 1080 s uspienia PLUS 72 razy opoznienie zapytania. Przy
+      # obciazonej bazie (~6 s) daje to ponad 1500 s.
+      #
+      # 1920 = 1680 (okno) + 240 na otwarcie puli, same zapytania i sprzatanie.
+      # Zadanie wiszace dluzej znaczy, ze cos jest nie tak z nim samym.
+      # Wartosci pilnuje `tests/test_chart_nadzor.py::
+      # test_deadline_proby_dluzszy_niz_jej_wlasne_okno` - porownuje ja ze stala
+      # W KODZIE, wiec podbicie ktoregokolwiek z czekan zapali test, a nie
+      # zostawi cichego rozjazdu.
+      activeDeadlineSeconds: 1920
       template:
         spec:
           restartPolicy: Never
+          # OKRES KARENCJI WPISANY JAWNIE, mimo ze rowny domyslnemu. Po
+          # SIGTERM-ie proba ma wykonac blok `finally`: dwa UPDATE-y
+          # przywracajace prog i zwalniajace wlasne zdarzenie. Trzydziesci
+          # sekund starcza z zapasem, ale prog, od ktorego zalezy przywrocenie
+          # limitu ryzyka, nie ma prawa byc wartoscia, ktorej nie widac
+          # w pliku - tak samo jak progi sond w api.yaml. Po tym czasie idzie
+          # SIGKILL i zadnego handlera juz nie ma.
+          terminationGracePeriodSeconds: 30
           containers:
             - name: proba
               image: "{{ .Values.api.image.repository }}:{{ .Values.api.image.tag }}"

@@ -109,25 +109,38 @@ spec:
           # zabija kontener, nie ma prawa opierac sie na wartosciach, ktorych
           # nie widac w pliku.
           #
-          # 22.09.2026, PO WDROZENIU: sciezka wrocila TYMCZASOWO na
-          # `/api/health`. `/api/zywy` istnieje dopiero w kodzie z tego samego
-          # dnia, a na produkcji stal obraz `sha-0ea6f54` - ArgoCD synchronizuje
+          # HISTORIA OBEJSCIA, ZAMKNIETA 23.09.2026.
+          #
+          # 22.09.2026, tuz po wdrozeniu, sciezka wrocila TYMCZASOWO na
+          # `/api/health`: `/api/zywy` istnial juz w kodzie, ale na produkcji
+          # stal obraz `sha-0ea6f54`, ktory go nie zawieral. ArgoCD synchronizuje
           # `charts/` NATYCHMIAST po merge'u, natomiast tag obrazu podbija sie
           # recznie, po zbudowaniu na VPS-ie. Przez te roznice sonda pytala
           # o endpoint, ktorego uruchomiony proces nie znal: 404, trzy probki
           # po 20 s i kubelet zabijal kontener API co niecale poltorej minuty.
+          # Stad regula: endpoint w chartcie nie moze wyprzedzac kodu w obrazie.
           #
-          # `/api/zywy` wraca tutaj DOPIERO po podbiciu `api.image.tag` na
-          # obraz zbudowany z tego commita. Kolejnosc jest czescia tej zmiany,
-          # nie formalnoscia - endpoint w chartcie nie moze wyprzedzac kodu
-          # w obrazie.
+          # Warunek obejscia WYGASL. `charts/trader/values.yaml` ma
+          # `api.image.tag: "sha-40f41e4"`, a commit 40f41e4 zawiera
+          # `@app.get("/api/zywy")` (services/api/main.py:76) - sprawdzone
+          # przez `git show 40f41e4:services/api/main.py`. Obraz na produkcji
+          # zna wiec ten endpoint i sciezka wraca na docelowa.
           #
-          # Dopoki stoi `/api/health`, zywotnosc zalezy od bazy - ale
-          # `timeoutSeconds: 5` i `failureThreshold: 3` ZOSTAJA, wiec domyslny
-          # prog 1 s, ktory byl progiem na OBCIAZENIE (okno kopii 03:17
-          # i trenera 04:40), a nie na awarie, jest usuniety.
+          # DLACZEGO TO NIE JEST KOSMETYKA: sonda zywotnosci ZABIJA kontener,
+          # wiec nie ma prawa zalezec od niczego, czego restart nie naprawia.
+          # `/api/health` robi `SELECT count(*) FROM schema_migrations`; wolna
+          # baza w oknie kopii (03:17) albo trenera (04:40) to trzy nieudane
+          # probki, kubelet ubija poda API, a kontener startowy `migrate`
+          # wchodzi w backoff - dwuminutowa przerwa bazy robi sie kilkuminutowa
+          # niedostepnoscia jedynego miejsca, w ktorym widac stan systemu.
+          # Zaleznosc od bazy nalezy do GOTOWOSCI (wyzej), nie do zywotnosci.
+          #
+          # `timeoutSeconds: 5` i `failureThreshold: 3` ZOSTAJA mimo powrotu na
+          # endpoint, ktory nie dotyka bazy: `/api/zywy` odpowiada natychmiast,
+          # wiec jawne progi nic nie kosztuja, a chronia przed nawrotem
+          # domyslnej 1 s, gdyby sciezka kiedykolwiek znowu sie zmienila.
           livenessProbe:
-            httpGet: { path: /api/health, port: 8000 }
+            httpGet: { path: /api/zywy, port: 8000 }
             initialDelaySeconds: 25
             periodSeconds: 20
             timeoutSeconds: 5

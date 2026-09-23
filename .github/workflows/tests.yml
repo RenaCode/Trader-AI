@@ -2,6 +2,24 @@ name: testy
 on:
   push: { branches: [main] }
   pull_request:
+  # WYWOLYWALNY Z INNEGO PRZEBIEGU.
+  #
+  # Do 2026-09-23 ten workflow zyl calkiem osobno: `docker-publish.yml` nie mial
+  # go ani w `needs`, ani w zadnym warunku. Push na `main` z czerwonym `pytest`
+  # budowal i wypychal obraz normalnie - jedynym hamulcem bylaby ochrona galezi
+  # skonfigurowana POZA repozytorium, czyli zabezpieczenie, ktorego nie widac
+  # w przegladzie zmian i ktorego nie da sie sprawdzic testem.
+  #
+  # `workflow_call` zamiast przeniesienia kroku `pytest` do tamtego pliku: krok
+  # skopiowany rozjechalby sie z tym przy pierwszej zmianie wersji Pythona albo
+  # listy zaleznosci, a rozjazd bylby widoczny dopiero wtedy, gdy jedna z dwoch
+  # kopii przestanie cokolwiek sprawdzac.
+  #
+  # `push` na `main` ZOSTAJE mimo tego, ze `docker-publish.yml` wola ten sam
+  # workflow przy kazdym pushu na `main`. Podwojny przebieg kosztuje minute
+  # runnera; brak wlasnego wyzwalacza kosztowalby caly nadzor nad testami
+  # w dniu, w ktorym tamten plik zostanie wylaczony albo zepsuty.
+  workflow_call: {}
 jobs:
   pytest:
     runs-on: ubuntu-latest
