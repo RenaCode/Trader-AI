@@ -120,11 +120,18 @@ spec:
           # po 20 s i kubelet zabijal kontener API co niecale poltorej minuty.
           # Stad regula: endpoint w chartcie nie moze wyprzedzac kodu w obrazie.
           #
-          # Warunek obejscia WYGASL. `charts/trader/values.yaml` ma
-          # `api.image.tag: "sha-40f41e4"`, a commit 40f41e4 zawiera
-          # `@app.get("/api/zywy")` (services/api/main.py:76) - sprawdzone
-          # przez `git show 40f41e4:services/api/main.py`. Obraz na produkcji
-          # zna wiec ten endpoint i sciezka wraca na docelowa.
+          # Warunek obejscia WYGASL. Sprawdzone 23.09.2026 przez
+          # `git show 40f41e4:services/api/main.py`: commit 40f41e4 - obraz
+          # stojacy wtedy na produkcji - zawiera juz `@app.get("/api/zywy")`
+          # (services/api/main.py:76), wiec sciezka mogla wrocic na docelowa.
+          #
+          # Tag w `values.yaml` poszedl od tamtej pory dalej, a kazdy kolejny
+          # commit ten endpoint zawiera. CELOWO nie cytujemy tu konkretnego
+          # tagu: taki cytat starzeje sie przy KAZDYM wdrozeniu i po chwili
+          # opisuje plik, ktorego juz nie ma - czyli sam staje sie tym, przed
+          # czym ostrzega akapit wyzej. Stanu pilnuje test
+          # `tests/test_chart_nadzor.py::test_zywotnosc_API_nie_pyta_o_baze`,
+          # nie ten komentarz.
           #
           # DLACZEGO TO NIE JEST KOSMETYKA: sonda zywotnosci ZABIJA kontener,
           # wiec nie ma prawa zalezec od niczego, czego restart nie naprawia.
