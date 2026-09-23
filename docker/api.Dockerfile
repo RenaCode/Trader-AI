@@ -1,4 +1,16 @@
-FROM python:3.12-slim AS base
+# BAZA PRZYPIETA PO DIGESCIE, NIE PO TAGU.
+#
+# Obraz jest tagowany `trader-ai-api:sha-<commit>` (build-on-vps.sh), co
+# stwierdza "to jest ten commit". Przy ruchomym tagu `3.12-slim` to nieprawda:
+# dwa buildy tego samego commita, wykonane w odstepie tygodni, daja rozne
+# obrazy pod ta sama nazwa. Na tym samym zalozeniu stoi sprzatanie, ktore
+# zachowuje N ostatnich obrazow "do cofniecia sie w razie czego" - cofniecie
+# przez przebudowanie starszego commita nie przywracalo stanu przetestowanego.
+#
+# Digest odczytany z registry-1.docker.io 2026-09-23 (python:3.12-slim,
+# indeks wieloplatformowy, zawiera linux/amd64). Podbicie bazy = swiadoma
+# zmiana tej linii, a nie skutek uboczny daty builda.
+FROM python:3.12-slim@sha256:2f17fc044b579bab302c2e8054d3a686e2cb9a83de48e70534b94cd8ebbe06a9 AS base
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 WORKDIR /app
 

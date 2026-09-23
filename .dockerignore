@@ -1,0 +1,43 @@
+# Czego NIE wysylamy do demona budujacego.
+#
+# DLACZEGO TO ISTNIEJE (a nie tylko "zeby szybciej"):
+#
+# `docker/web.Dockerfile` robi `COPY web/ ./` PO `npm ci`. Bez tego pliku
+# obecny na maszynie budujacej `web/node_modules` NADPISYWAL to, co wlasnie
+# zainstalowal `npm ci` - a `git reset --hard origin/main` w
+# `scripts/build-on-vps.sh` nie usuwa plikow niesledzonych, wiec katalog
+# zostaje miedzy przebiegami. Obraz powstawal wtedy z zaleznosciami sprzed
+# nieokreslonego czasu zamiast z tych z `package-lock.json`.
+#
+# CZEGO TU NIE WOLNO WPISAC:
+#   * package-lock.json  - `npm ci` bez niego nie dziala w ogole
+#   * scripts/           - `api.Dockerfile` kopiuje je do obrazu
+# (globalny ~/.gitignore uzytkownika wyklucza oba - to jest osobny plik
+#  i osobne reguly, ale pomylka konczy sie tak samo: build pada dopiero na
+#  serwerze.)
+
+# Zaleznosci instalowane w obrazie, nie przenoszone z maszyny
+web/node_modules/
+node_modules/
+.venv/
+**/__pycache__/
+*.pyc
+
+# Historia i narzedzia pracy - w obrazie nie robia nic
+.git/
+.github/
+.claude/
+
+# Sekrety i stan lokalny. `api.Dockerfile` kopiuje tylko services/, db/
+# i scripts/, wiec dzis i tak nie wchodza - ale przy `COPY . .` dodanym
+# kiedykolwiek pozniej ta linia jest jedyna, ktora je zatrzyma.
+.env
+.env.*
+*.pem
+*.key
+
+# Wyniki testow i budowania
+web/dist/
+.pytest_cache/
+htmlcov/
+.coverage

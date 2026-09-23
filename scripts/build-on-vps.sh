@@ -134,13 +134,79 @@ echo
 echo "==> sprzatanie (zostawiam $ZOSTAW ostatnich na usluge)"
 
 CHRONIONE=$(mktemp)
-trap 'rm -f "$CHRONIONE"' EXIT
+Z_KLASTRA=$(mktemp)
+trap 'rm -f "$CHRONIONE" "$Z_KLASTRA"' EXIT
 
 # 1. Wszystko, na co wskazuje cokolwiek uruchomionego. Z KLASTRA, nie
 #    z values.yaml - liczy sie to, co faktycznie chodzi, a nie to, co powinno.
-kubectl get pods,deployments,cronjobs,jobs -A \
-  -o jsonpath='{range .items[*]}{range .spec.template.spec.containers[*]}{.image}{"\n"}{end}{range .spec.containers[*]}{.image}{"\n"}{end}{end}' \
-  2>/dev/null >> "$CHRONIONE" || true
+#
+#    TRZY SCIEZKI, BO KAZDY RODZAJ ZASOBU TRZYMA KONTENERY GDZIE INDZIEJ.
+#    Pod ma je pod `.spec.containers`, Deployment i Job pod
+#    `.spec.template.spec.containers`, a CronJob o jeden poziom glebiej:
+#    `.spec.jobTemplate.spec.template.spec.containers`. Do 2026-09-23 tej
+#    trzeciej sciezki tu nie bylo, a `kubectl -o jsonpath` pomija brakujacy
+#    klucz BEZ BLEDU - wiec `cronjobs` bylo na liscie zasobow, a zaden jego
+#    obraz nie trafial do $CHRONIONE. Nie bolalo tylko dlatego, ze wszystkie
+#    szesc CronJobow (instrumenty/proba/kurs/trainer/zywotnosc/backup) chodzi
+#    na `{{ .Values.api.image.tag }}`, czyli tym samym tagu co Deployment
+#    trader-api. Ochrona byla wiec PRZYPADKOWA: przypiecie jednego CronJoba do
+#    wlasnego tagu (np. trainer na czas eksperymentu) wystarczalo, zeby ten
+#    obraz zostal skasowany - i wyszloby to dopiero przy nastepnym
+#    uruchomieniu z harmonogramu, jako ImagePullBackOff godziny pozniej.
+SCIEZKI_OBRAZOW='{range .items[*]}'\
+'{range .spec.containers[*]}{.image}{"\n"}{end}'\
+'{range .spec.template.spec.containers[*]}{.image}{"\n"}{end}'\
+'{range .spec.jobTemplate.spec.template.spec.containers[*]}{.image}{"\n"}{end}'\
+'{end}'
+
+# BRAK ODPOWIEDZI OD KLASTRA TO NIE JEST PUSTA LISTA.
+#
+# Do 2026-09-23 stalo tutaj `2>/dev/null ... || true`: blad kubectl byl
+# wyciszony, a jego niepowodzenie zignorowane. Caly mechanizm "czego nie wolno
+# skasowac" stal wiec na jednym poleceniu, ktoremu wolno bylo milczkiem nie
+# zadzialac. Gdy serwer API k3s sie restartuje, trwa aktualizacja albo wygasl
+# certyfikat klienta, $CHRONIONE zostawalo z samymi tagami z krokow 2 i 3,
+# a cala reszta - z obrazem produkcji wlacznie - szla do `k3s ctr images rm`.
+# `k3s ctr` rozmawia z containerd WPROST i dziala, gdy serwer API nie
+# odpowiada, wiec stan "containerd zyje, API nie" jest w pelni osiagalny.
+#
+# Skutek zmierzony na stendzie: produkcja na sha-1298b23, main 8 commitow dalej
+# (czyli poza $ZOSTAW ostatnich z historii), kubectl milczy - obraz produkcji
+# skasowany, skrypt konczy sie slowem "gotowe" i kodem 0. Biegnace pody
+# przezyja, ale pierwszy restart, przeniesienie poda albo skalowanie konczy sie
+# ImagePullBackOff: repozytorium jest prywatne, pullPolicy: IfNotPresent,
+# nie ma skad pobrac. Produkcja nie wstaje do czasu recznego przebudowania.
+#
+# Dlatego niepewnosc PRZERYWA sprzatanie zamiast je przeprowadzac. Pusta
+# odpowiedz tez, bo "klaster nie uzywa niczego" jest nieodroznialne od "nie
+# wiem, czego klaster uzywa" - a dzialajacy klaster ma zawsze co najmniej pody
+# kube-system, wiec zero obrazow oznacza w praktyce to drugie.
+POWOD_NIEPEWNOSCI=""
+if ! kubectl get pods,deployments,cronjobs,jobs -A -o jsonpath="$SCIEZKI_OBRAZOW" \
+     > "$Z_KLASTRA"; then
+  POWOD_NIEPEWNOSCI="kubectl nie odczytal zasobow klastra"
+elif ! grep -q '[^[:space:]]' "$Z_KLASTRA"; then
+  POWOD_NIEPEWNOSCI="kubectl odpowiedzial, ale nie wskazal ANI JEDNEGO obrazu"
+fi
+
+if [ -n "$POWOD_NIEPEWNOSCI" ]; then
+  {
+    echo "BLAD: $POWOD_NIEPEWNOSCI."
+    echo "      Nie wiem, ktorych obrazow uzywa klaster, wiec NIE KASUJE ZADNEGO."
+    echo "      Sprzatanie pominiete w calosci - dysku nie ubylo, ale i nie"
+    echo "      przybylo ImagePullBackOff."
+    echo
+    echo "      BUDOWANIE SIE UDALO. Obrazy sa w containerd i mozna wdrazac:"
+    echo "        api.image.tag: \"sha-$SHA\""
+    echo "        web.image.tag: \"sha-$SHA\""
+    echo
+    echo "      Sprzatanie powtorz osobnym przebiegiem, gdy"
+    echo "      'kubectl get pods -A' znowu odpowiada."
+  } >&2
+  exit 1
+fi
+
+grep -v '^[[:space:]]*$' "$Z_KLASTRA" >> "$CHRONIONE"
 
 # 2. Wlasnie zbudowane - ArgoCD jeszcze o nich nie wie, wiec w punkcie 1 ich nie ma.
 for svc in api web; do echo "$REGISTRY/trader-ai-$svc:sha-$SHA" >> "$CHRONIONE"; done
@@ -168,6 +234,15 @@ for svc in api web; do
     n=$((n + 1))
   done
 
+  # `grep -vxF -f` z PUSTYM plikiem wzorcow nie dopasowuje niczego, czyli
+  # przepuszcza WSZYSTKO - pusta lista chronionych znaczylaby "skasuj komplet".
+  # Tu jest niepusta z definicji (krok 2 dopisuje dwa swiezo zbudowane tagi),
+  # ale to jedno polecenie dzieli obrazy na zostawione i nieodwracalnie
+  # skasowane, wiec nie opiera sie na "z definicji".
+  if [ ! -s "$CHRONIONE" ]; then
+    echo "BLAD: lista chronionych obrazow jest pusta - nie kasuje niczego." >&2
+    exit 1
+  fi
   DO_USUNIECIA=$(printf '%s\n' "$POSIADANE" | grep -vxF -f "$CHRONIONE" || true)
   for obraz in $DO_USUNIECIA; do
     k3s ctr -n k8s.io images rm "$obraz" > /dev/null 2>&1 || true
