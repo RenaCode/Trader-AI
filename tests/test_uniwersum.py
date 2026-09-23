@@ -99,3 +99,86 @@ def test_prog_MIN_UNIVERSE_dotyczy_zbioru_rankingu():
     zrodlo = Path("services/ingest/features.py").read_text(encoding="utf-8")
     assert "if len(uniwersum) < MIN_UNIVERSE:" in zrodlo
     assert "if len(instruments) < MIN_UNIVERSE:" not in zrodlo
+
+
+# ============ jeden WARUNEK dla wszystkich czytelnikow uniwersum decyzyjnego
+
+# Pliki, ktore pytaja bazy o uniwersum decyzyjne WLASNYM zapytaniem, bo
+# potrzebuja innych kolumn niz pozostali. Warunek ma byc w nich identyczny
+# z `uniwersum.WARUNEK_UNIWERSUM_DECYZYJNEGO` — to on wyznacza zbior, z ktorego
+# liczy sie `odcisk()`.
+CZYTELNICY_UNIWERSUM = (
+    "services/engine/train.py",
+    "services/ingest/features.py",
+)
+
+
+def _warunki_uniwersum(zrodlo: str) -> list[str]:
+    """Warunki zapytan o uniwersum decyzyjne, sprowadzone do postaci porownywalnej.
+
+    Czytamy DRZEWO SKLADNI, a nie tekst pliku: Python sam sklada sasiadujace
+    literaly napisowe, wiec zapytanie rozbite na trzy linie dochodzi tu jako
+    jeden napis, a apostrofy w `'perp'` niczego nie urywaja.
+
+    Bialych znakow NIE porownujemy — `engine=%s` i `engine = %s` to ten sam
+    warunek, a ten test ma lapac rozjazd ZBIORU, nie formatowania.
+    """
+    import ast
+
+    out = []
+    for w in ast.walk(ast.parse(zrodlo)):
+        if not (isinstance(w, ast.Constant) and isinstance(w.value, str)):
+            continue
+        sql = w.value
+        if "FROM ref.instrument" not in sql or "tradeable" not in sql:
+            continue
+        out.append("".join(sql[sql.index(" WHERE"):].split()))
+    return out
+
+
+def test_KAZDY_czytelnik_uniwersum_ma_TEN_SAM_warunek():
+    """Kanarek na rozjazd, którego nie widać jako awarii.
+
+    `odcisk()` liczy się ze zbioru, który zwraca ten warunek, a
+    `loop.horizon_feature_ids` filtruje po odcisku ŚCIŚLE. Wystarczy, żeby
+    kolejna zmiana definicji uniwersum (np. warunek na delisting) trafiła do
+    `loop.py`, a nie do `features.py`, żeby produkcja szukała
+    `rel_strength#<nowy>` pod nazwą, której nikt nie zapisał.
+    `signals.cross_section` zwraca wtedy None, sygnał znika BEZ ŚLADU,
+    a w tabeli IC wygląda to jak sygnał, którego nikt nie policzył.
+
+    Dwa osierocone odciski w `feat.feature_def` (`77c96da1`, `d446b80c`, oba
+    z wartościami do 2026-09-07) pokazują, że zmiany uniwersum tu zachodzą.
+
+    TEN TEST PATRZY NA ŹRÓDŁO, bo pliki te są poza zasięgiem jednego importu:
+    każdy potrzebuje innych kolumn, więc dzielą WARUNEK, a nie całe zapytanie.
+    Gdyby kiedyś dało się je sprowadzić do wspólnego wywołania, ten test ma
+    zniknąć razem z kopiami — nie odwrotnie.
+    """
+    from services.engine.uniwersum import WARUNEK_UNIWERSUM_DECYZYJNEGO
+
+    wzorzec = "".join(WARUNEK_UNIWERSUM_DECYZYJNEGO.split())
+    for plik in CZYTELNICY_UNIWERSUM:
+        warunki = _warunki_uniwersum(Path(plik).read_text(encoding="utf-8"))
+        assert warunki, (
+            f"{plik}: nie znaleziono zapytania o uniwersum decyzyjne — jeśli "
+            f"plik przestał go czytać, usuń go z CZYTELNICY_UNIWERSUM")
+        for w in warunki:
+            assert w == wzorzec, (
+                f"{plik} pyta o uniwersum decyzyjne innym warunkiem niż "
+                f"`uniwersum.WARUNEK_UNIWERSUM_DECYZYJNEGO`:\n"
+                f"  plik:    {w}\n  wzorzec: {wzorzec}\n"
+                f"Odcisk policzony z innego zbioru nie pasuje do żadnej "
+                f"definicji w `feat.feature_def`, a sygnał znika bez śladu.")
+
+
+def test_silnik_NIE_MA_juz_wlasnej_kopii_warunku():
+    """`loop.py` przepisywało ten warunek dwa razy — w pętli decyzyjnej i w
+    kontroli `--sprawdz`. Oba wołają teraz `sql_uniwersum_decyzyjnego`, więc
+    zmiana definicji uniwersum nie ma jak ominąć jednego z nich."""
+    zrodlo = Path("services/engine/loop.py").read_text(encoding="utf-8")
+    assert not _warunki_uniwersum(zrodlo), (
+        "w `loop.py` znowu stoi własna kopia warunku uniwersum decyzyjnego")
+    assert zrodlo.count("sql_uniwersum_decyzyjnego(") == 2, (
+        "liczba wywołań się zmieniła — sprawdź, czy nie przybyło trzeciego "
+        "miejsca czytającego uniwersum")

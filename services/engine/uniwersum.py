@@ -68,7 +68,7 @@ def nazwa_przekrojowa(nazwa_bazowa: str, symbole: Iterable[str]) -> str:
     return f"{nazwa_bazowa}#{odcisk(symbole)}"
 
 
-# UNIWERSUM DECYZYJNE — JEDNO ZAPYTANIE DLA WSZYSTKICH, KTÓRZY JE CZYTAJĄ.
+# UNIWERSUM DECYZYJNE — JEDEN WARUNEK DLA WSZYSTKICH, KTÓRZY JE CZYTAJĄ.
 #
 # Pętla decyzyjna (loop.py), trener (train.py) i potok cech (features.py) pytały
 # o ten zbiór trzema osobnymi, przepisanymi zapytaniami. Czwarte — w
@@ -82,10 +82,39 @@ def nazwa_przekrojowa(nazwa_bazowa: str, symbole: Iterable[str]) -> str:
 # `tradeable`, nie `active`: historię zbieramy szerzej, niż handlujemy (0020).
 # Od migracji 0023 ten sam aktyw jest w bazie DWA RAZY — jako *USDT i jako
 # *USDC — więc „wszystkie aktywne" to zbiór, w którym BTC liczy się podwójnie.
-SQL_UNIWERSUM_DECYZYJNE = (
-    "SELECT id, symbol FROM ref.instrument"
+#
+# WSPÓLNY JEST WARUNEK, A NIE CAŁE ZAPYTANIE — i to nie jest ustępstwo, tylko
+# odpowiedź na to, co naprawdę grozi. Czytelnicy potrzebują RÓŻNYCH kolumn
+# (pętla `kind` i `quote_ccy`, trener `quote_ccy`, potok cech samego `symbol`),
+# więc jedna sztywna lista kolumn nie dałaby się użyć i każdy przepisałby
+# zapytanie od nowa — dokładnie tak, jak było do 2026-09-23, gdy `uniwersum.py`
+# obiecywało „jedno zapytanie dla wszystkich", a jego jedynymi importerami byli
+# `diagnose_signals.py` i `diagnose_timing.py`. Rozjechać się może wyłącznie
+# WARUNEK, bo to on wyznacza zbiór, z którego liczy się `odcisk()`.
+#
+# Czym to grozi: `loop.horizon_feature_ids` filtruje po odcisku ŚCIŚLE.
+# Wystarczy, żeby kolejna zmiana definicji uniwersum trafiła do `loop.py`,
+# a nie do `features.py`, żeby produkcja szukała `rel_strength#<nowy>` pod
+# nazwą, której nikt nie zapisał. `signals.cross_section` zwraca wtedy None
+# i sygnał znika BEZ ŚLADU. Że zmiany uniwersum w tym projekcie zachodzą,
+# widać po dwóch osieroconych odciskach w `feat.feature_def` (`77c96da1`,
+# `d446b80c`, oba z wartościami do 2026-09-07).
+WARUNEK_UNIWERSUM_DECYZYJNEGO = (
     " WHERE engine = %s AND active AND tradeable AND kind <> 'perp'"
     " ORDER BY symbol")
+
+
+def sql_uniwersum_decyzyjnego(kolumny: str = "id, symbol") -> str:
+    """Zapytanie o uniwersum decyzyjne z WŁASNĄ listą kolumn.
+
+    Warunek jest wspólny i niezmienny; wybór kolumn należy do wołającego, bo
+    każdy czytelnik potrzebuje innych. `%s` w warunku oczekuje jednego
+    parametru: `engine`.
+    """
+    return f"SELECT {kolumny} FROM ref.instrument{WARUNEK_UNIWERSUM_DECYZYJNEGO}"
+
+
+SQL_UNIWERSUM_DECYZYJNE = sql_uniwersum_decyzyjnego()
 
 
 def uniwersum_decyzyjne(cur, engine: str) -> list[dict]:

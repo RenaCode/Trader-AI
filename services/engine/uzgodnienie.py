@@ -60,6 +60,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from services.engine.koszty import CENNIK, koszty  # noqa: E402
 from services.exchanges.base import ExchangeError  # noqa: E402
+# `recv_window` gieldy jest tu jedyna liczba opisujaca dopuszczalny rozjazd
+# zegarow. Wlasna kopia bylaby druga - i pierwsza, ktora by sie rozjechala.
+from services.exchanges.bybit import RECV_WINDOW  # noqa: E402
 
 # Rodzaj instrumentu, którym chodzi silnik — decyduje o wierszu CENNIKA.
 # Ten sam argument co przy `mozliwosci.py --stawki --kind spot_eu`: podmiot
@@ -268,19 +271,56 @@ def pozycje_z_wypelnien(wypelnienia, baza_symbolu: dict[str, str]) -> dict[str, 
     pod warunkiem ze nikt go nie przedstawi jako uzgodnienia sald.
 
     PROWIZJA POBRANA W KUPIONYM AKTYWIE JEST ODEJMOWANA. Na spocie Bybit
-    potrafi pobrac ja wlasnie tak; pominiecie tego zanizyloby odtworzona
-    pozycje dokladnie o wartosc prowizji przy kazdym kupnie.
+    potrafi pobrac ja wlasnie tak; pominiecie tego ZAWYZYLOBY odtworzona
+    pozycje dokladnie o wartosc prowizji przy kazdym kupnie — `execQty` gieldy
+    jest BRUTTO, a na rachunku ladujemy netto.
 
-    WARTOSC UJEMNA ZOSTAJE W WYNIKU I JEST W TYM CELOWA. Na spocie nie da sie
-    miec ujemnej ilosci, wiec ujemny wynik odtworzenia znaczy jedno: okno
-    rejestru urwalo kupno i zostawilo sprzedaz. Odfiltrowanie takiej wartosci
-    (`v > 0` zamiast `v != 0`) zamienialoby BLAD POMIARU w cichy brak wpisu,
-    czyli w „aktywa nie mamy" — a to jest zdanie prawdziwie brzmiace i falszywe.
-    `pokrycie_wypelnien` lapie ten przypadek tylko wtedy, gdy mamy otwarta
-    pozycje; przy pustym dzienniku strazy nie ma zadnej. Ujemna wartosc musi
-    wiec dojsc do `rozjazdy`, ktore nazywa ja `ilosc-ujemna`.
+    TRZY STANY, NIE DWA — I TO JEST SEDNO TEJ FUNKCJI
+
+    Do 2026-09-23 funkcja liczyla jedna liczbe `znak*ilosc - prowizja` i miala
+    na nia dwie odpowiedzi: dodatnia znaczyla „tyle trzymamy", ujemna —
+    „rejestr urwany". Stan trzeci nie mial jak sie wypowiedziec, bo zero bylo
+    odfiltrowane, a przy domknietej rundzie jedyna pozostala liczba jest ujemna:
+    czlony ilosciowe kupna i sprzedazy znosza sie do zera i zostaje sam czlon
+    prowizyjny. Zmierzone na produkcji 2026-09-23: ETHUSDC 0,3395 kupione
+    i sprzedane w tym samym oknie, prowizja makera 0,3395 x 0,1% = 0,0003395
+    pobrana w ETH -> odtworzenie oddawalo -0,0003395, `rozjazdy` nazywalo to
+    `ilosc-ujemna`, a komunikat kazal szukac brakujacej polowy rejestru, ktora
+    BYLA NA MIEJSCU. Poszlo 18 powiadomien `critical` w 2 h 40 min.
+
+    Rozdzielamy wiec ILOSC od PROWIZJI i rozstrzygamy ZNAKIEM SAMEJ ILOSCI, bo
+    to dwa rozne pytania i tylko pierwsze mowi cokolwiek o rejestrze:
+
+      * `q < 0`  — w oknie jest sprzedaz bez swojego kupna. Zdanie O REJESTRZE:
+                   okno naprawde jest urwane. Znak ZOSTAJE i dochodzi do
+                   `rozjazdy` jako `ilosc-ujemna` — przy KAZDEJ ilosci, takze
+                   ponizej `lot_size`. Zadnego progu tu nie ma i byc nie moze:
+                   prog mierzy WIELKOSC roznicy, a tu zla jest sama liczba.
+      * `q > 0`  — trzymamy `q` pomniejszone o prowizje bazowa. Pomiar.
+      * `q == 0` — runda w oknie sie domknela. ZMIERZONE ZERO, nie brak pomiaru
+                   — dlatego aktywo ZOSTAJE w wyniku z wartoscia 0, tak samo
+                   jak `rozjazd_z_ulamkow` oddaje None zamiast zera przy braku
+                   obserwacji. Klucz obecny z zerem znaczy „rejestr mowi, ze
+                   nie mamy nic"; klucz NIEOBECNY znaczy „aktywa w oknie nie
+                   bylo i rejestr nie mowi o nim nic". Obie odpowiedzi daja
+                   w `rozjazdy` te sama liczbe, ale to nie sa te same zdania
+                   i `uzgodnij` wypisuje pierwsze z nich osobno.
+
+    DLACZEGO `max(q - f, 0)`, A NIE `q - f`. Przy `q >= 0` prowizja pomniejsza
+    to, CO TRZYMAMY, i nie moze zabrac wiecej, niz w ogole bylo. Obciecie bladzi
+    przy tym WYLACZNIE w strone alarmu: podnosi strone gieldy, wiec gdy cokolwiek
+    trzymamy, roznica idzie w kierunku `pozycja-widmo`. Cisza zapada tylko wtedy,
+    gdy obie strony mowia „nie mamy nic".
+
+    CZEGO TU CELOWO NIE MA: progu bezwzglednego na resztce ujemnej. Prog
+    `lot_size` nie wyciszylby nawet dzisiejszego alarmu (0,0003395 > 0,00001),
+    a prog `min_notional/cena` wyciszylby razem z nim urwane okno przy ilosci
+    0,0005 ETH — czyli BLAD POMIARU. To jest ta sama pomylka, ktora w pierwszej
+    rundzie audytu ukryla pyl pozycji przed nadzorem, tylko postawiona odwrotna
+    strona.
     """
-    stan: dict[str, Decimal] = {}
+    ilosci: dict[str, Decimal] = {}
+    prowizje: dict[str, Decimal] = {}
     for w in wypelnienia:
         baza = baza_symbolu.get(w.symbol)
         if baza is None:
@@ -289,10 +329,64 @@ def pozycje_z_wypelnien(wypelnienia, baza_symbolu: dict[str, str]) -> dict[str, 
             # nie wiemy. Pomijamy, a rozjazd i tak wyjdzie po stronie „u nas".
             continue
         znak = Decimal(1) if w.strona.lower() == "buy" else Decimal(-1)
-        stan[baza] = stan.get(baza, Decimal(0)) + znak * w.ilosc
+        ilosci[baza] = ilosci.get(baza, Decimal(0)) + znak * w.ilosc
         if w.prowizja_w and w.prowizja_w.upper() == baza.upper():
-            stan[baza] -= w.prowizja
-    return {k: v for k, v in stan.items() if v != 0}
+            prowizje[baza] = prowizje.get(baza, Decimal(0)) + w.prowizja
+
+    stan: dict[str, Decimal] = {}
+    for baza, q in ilosci.items():
+        f = prowizje.get(baza, Decimal(0))
+        stan[baza] = (q - f) if q < 0 else max(q - f, Decimal(0))
+    return stan
+
+
+def zakres_wypelnien(pozycje) -> tuple[object | None, object | None]:
+    """Od kiedy pytac gielde o wypelnienia i wzgledem czego mierzyc pokrycie.
+
+    CZYSTA FUNKCJA — bez bazy i bez sieci. `pozycje` to wiersze `exec.position`
+    z kluczami `od` (chwila ZLOZENIA zlecenia otwierajacego), `opened_at`
+    i `closed_at`. Zwraca `(poczatek_okna, najstarsze_otwarcie_w_oknie)`.
+
+    OKNO MUSI OBEJMOWAC OBIE NOGI KAZDEJ RUNDY, KTOREJ SPRZEDAZ W NIM LEZY
+
+    Do 2026-09-23 okno zaczynalo sie od `min(opened_at)` po pozycjach WYLACZNIE
+    OTWARTYCH, a odtworzenie sumowalo KAZDE wypelnienie w oknie — takze
+    nalezace do pozycji dawno zamknietych. Pozycja otwarta PRZED oknem
+    i zamknieta WEWNATRZ niego wnosila wiec do sumy gola sprzedaz, czyli
+    prawdziwa polowe rejestru, a straznik o niej nie wiedzial, bo nie mial jej
+    w swoim zapytaniu. Na produkcji taki ksztalt istnieje: ETHUSDC 0,604367
+    otwarte 2026-09-15, zamkniete 2026-09-17.
+
+    Zbior pozycji „w oknie" zalezy od poczatku okna, a poczatek okna od tego
+    zbioru, wiec jest to PUNKT STALY i liczymy go wprost. Kazdy obrot moze
+    okno tylko COFNAC, a zbior pozycji jest skonczony — iteracja konczy sie
+    zawsze. Bledy ida przy tym w strone BEZPIECZNA: okno za szerokie wciaga
+    wylacznie rundy domkniete, ktore po rozdzieleniu ilosci od prowizji
+    (`pozycje_z_wypelnien`) sumuja sie do zera i nie wnosza znaku ujemnego.
+    Okno za waskie urwaloby kupno i dalo falszywy `ilosc-ujemna`.
+
+    BRAK POZYCJI OTWARTYCH TO NIE JEST STAN PUSTY, tylko najgorszy z mozliwych,
+    i dlatego nie oddajemy tu None. `od_ms = None` kaze adapterowi pobrac CALY
+    dostepny rejestr, a wtedy kazda historyczna runda dokladala swoja resztke,
+    natomiast `pokrycie_wypelnien` milczalo w pierwszej linii — straznika nie
+    bylo zadnego. Zamiast tego siegamy do ostatniej rundy, o ktorej wiemy:
+    okno zostaje ograniczone, a obie jej nogi sa w srodku.
+    """
+    pozycje = list(pozycje)
+    if not pozycje:
+        return None, None
+    otwarte = [p for p in pozycje if p["closed_at"] is None]
+    zaczep = otwarte or [max(pozycje, key=lambda p: p["od"])]
+    od = min(p["od"] for p in zaczep)
+    while True:
+        # Pozycja bez `closed_at` jest w oknie zawsze; zamknieta — gdy jej
+        # sprzedaz wpada do okna, bo wtedy odtworzenie i tak ja zsumuje.
+        w_oknie = [p for p in pozycje
+                   if p["closed_at"] is None or p["closed_at"] >= od]
+        nowe = min(p["od"] for p in w_oknie)
+        if nowe >= od:
+            return od, min(p["opened_at"] for p in w_oknie)
+        od = nowe
 
 
 def pokrycie_wypelnien(wypelnienia, najstarsze_otwarcie) -> str | None:
@@ -303,6 +397,18 @@ def pokrycie_wypelnien(wypelnienia, najstarsze_otwarcie) -> str | None:
     milczaco samo okno retencji. Odtworzenie z takiego okna pomija wszystko,
     co bylo wczesniej — czyli zaniza pozycje i produkuje falszywy alarm
     „pozycja-widmo" o pozycji, ktora naprawde istnieje.
+
+    ODNIESIENIEM JEST `opened_at` NAJSTARSZEJ POZYCJI W OKNIE, a nie najstarszej
+    OTWARTEJ — ten sam zbior, ktory `zakres_wypelnien` uznalo za sumowany przez
+    odtworzenie. Straznik mierzy pokrycie tego, co naprawde wchodzi do sumy;
+    mierzenie go wzgledem wezszego zbioru zostawialo strukturalna slepa plamke
+    dokladnie na przypadku, dla ktorego straznik powstal.
+
+    MIERZYMY WZGLEDEM `opened_at`, NIE WZGLEDEM POCZATKU OKNA. Okno zaczyna sie
+    od chwili ZLOZENIA zlecenia, a wypelnienie jest z definicji pozniejsze —
+    porownanie z poczatkiem okna alarmowaloby przy kazdym przebiegu. `opened_at`
+    jest natomiast chwila, w ktorej zapisalismy skutek wypelnienia, wiec
+    wypelnienie tworzace te pozycje musi byc od niej WCZESNIEJSZE albo rowne.
 
     Zwraca powod, gdy pokrycia brak; None, gdy jest.
     """
@@ -315,7 +421,7 @@ def pokrycie_wypelnien(wypelnienia, najstarsze_otwarcie) -> str | None:
     najstarsze_u_gieldy = min(w.czas for w in wypelnienia)
     if najstarsze_u_gieldy > najstarsze_otwarcie:
         return (f"rejestr gieldy zaczyna sie {najstarsze_u_gieldy:%Y-%m-%d %H:%M}, "
-                f"a nasza najstarsza otwarta pozycja pochodzi z "
+                f"a nasza najstarsza pozycja w oknie pochodzi z "
                 f"{najstarsze_otwarcie:%Y-%m-%d %H:%M} — okno retencji nie "
                 "pokrywa naszej historii, wiec odtworzona pozycja bylaby zanizona")
     return None
@@ -355,15 +461,48 @@ async def nasze_pozycje(fetch_all, engine: str, mode: str) -> dict[str, Decimal]
 
 
 async def kontekst_wypelnien(fetch_all, engine: str, mode: str):
-    """Mapa symbol->aktywo bazowe i data najstarszego otwarcia. Z bazy, nie z gieldy."""
+    """Mapa symbol->aktywo bazowe i wiersze pozycji dla `zakres_wypelnien`.
+
+    `od` TO CHWILA ZLOZENIA ZLECENIA, NIE `opened_at` — I TO USUWA STALA
+
+    Do 2026-09-23 okno liczylo sie jako `min(opened_at) - timedelta(days=1)`,
+    gdzie doba byla stala wpisana wprost w ten plik. Naglowek modulu zabrania
+    tego wprost („Zaden z nich nie jest stala wpisana w ten plik. Stala bylaby
+    trzecim miejscem, w ktorym trzyma sie reguly gieldy"), a liczba i tak byla
+    zla w obie strony: bufor mial pokryc opoznienie miedzy wypelnieniem
+    a zapisem `opened_at`, ktore przy swiecy H4H wynosi do dlugosci swiecy
+    (zmierzone na zleceniu 47: 13:20:51 -> 16:00:35, czyli 2 h 40 min), wiec
+    doba byla o rzad wielkosci za szeroka — a przy swiecy dobowej byla by za
+    waska i wycinala kupno tworzace pozycje.
+
+    Zadnej stalej nie trzeba, bo dokladna odpowiedz jest w naszych wlasnych
+    zapisach: gielda nie moze wypelnic zlecenia, zanim je do niej wyslemy,
+    a `exec.order.submitted_at` trzyma chwile wyslania. `LEAST` z `opened_at`
+    zabezpiecza wiersze bez zlecenia (rachunek papierowy, dane historyczne):
+    `LEAST` pomija NULL-e, wiec brak zlecenia zostawia samo `opened_at`, czyli
+    zachowanie sprzed tej zmiany.
+
+    BIERZEMY `min(submitted_at)`, A NIE ZLECENIE WYBRANE PO STRONIE. Zlecenie
+    odrzucone albo ponowione na tej samej decyzji ma czas WCZESNIEJSZY, czyli
+    przesuwa okno wstecz — a to jest kierunek bezpieczny (patrz
+    `zakres_wypelnien`: szersze okno wciaga tylko rundy domkniete).
+    """
     rows = await fetch_all(
         "SELECT i.symbol, i.base_ccy FROM ref.instrument i WHERE i.active")
     baza = {r["symbol"]: r["base_ccy"] for r in rows}
-    r = await fetch_all(
-        "SELECT min(p.opened_at) AS od FROM exec.position p"
-        " WHERE p.engine::text = %s AND p.mode::text = %s AND p.closed_at IS NULL",
-        (engine, mode))
-    return baza, (r[0]["od"] if r else None)
+    # WSZYSTKIE pozycje trybu, nie tylko otwarte — punkt staly w
+    # `zakres_wypelnien` potrzebuje takze zamknietych, zeby zobaczyc rundy,
+    # ktorych sprzedaz wpada w okno. Wiersz na pozycje, a pozycji jest
+    # kilkadziesiat na miesiac handlu, wiec odczyt calosci jest tanszy niz
+    # iterowanie punktu stalego zapytaniami.
+    pozycje = await fetch_all(
+        "SELECT p.opened_at, p.closed_at,"
+        "       LEAST(p.opened_at, min(o.submitted_at)) AS od"
+        "  FROM exec.position p"
+        "  LEFT JOIN exec.order o ON o.decision_id = p.open_decision_id"
+        " WHERE p.engine::text = %s AND p.mode::text = %s"
+        " GROUP BY p.id, p.opened_at, p.closed_at", (engine, mode))
+    return baza, pozycje
 
 
 async def uzgodnij(fetch_all, notify, adapter, engine: str = "crypto",
@@ -393,13 +532,19 @@ async def uzgodnij(fetch_all, notify, adapter, engine: str = "crypto",
         if e.code != "404":
             raise Nieuzgadnialne(
                 f"odczyt sald nie powiodl sie ({e}); uzgodnienie NIEWYKONALNE") from e
-        baza, najstarsze = await kontekst_wypelnien(fetch_all, engine, mode)
+        baza, pozycje = await kontekst_wypelnien(fetch_all, engine, mode)
+        od, najstarsze = zakres_wypelnien(pozycje)
         try:
-            # Rejestracja otwarcia pozycji w DB wpisuje p.opened_at z chwilowym
-            # przesunięciem względem pierwszych wypełnień giełdy. Dajemy bufor
-            # 1 dnia przed `najstarsze`, aby zapytanie o wykonania objęło
-            # transakcje tworzące tę pozycję.
-            od_ms = int((najstarsze - timedelta(days=1)).timestamp() * 1000) if najstarsze else None
+            # MARGINES TO ROZJAZD ZEGAROW, A NIE BUFOR NA OPOZNIENIE ZAPISU.
+            # Opoznienie zapisu zniklo razem ze stala - okno zaczyna sie od
+            # `submitted_at` (patrz `kontekst_wypelnien`). Zostaje jedno:
+            # `startTime` porownuje gielda swoim zegarem, a nasz moze byc
+            # rozjechany. O ile - mowi sama gielda: `recv_window` to granica,
+            # powyzej ktorej odrzuca KAZDE podpisane zapytanie, wiec zegar
+            # mieszczacy sie w handlu miesci sie i tutaj. Ta sama liczba, ktora
+            # mierzy `BybitAdapter.dryf_zegara`, a nie druga jej kopia.
+            margines = timedelta(milliseconds=int(RECV_WINDOW))
+            od_ms = int((od - margines).timestamp() * 1000) if od else None
             wyp = await adapter.wypelnienia(od_ms=od_ms)
         except ExchangeError as e2:
             raise Nieuzgadnialne(
@@ -428,7 +573,24 @@ async def uzgodnij(fetch_all, notify, adapter, engine: str = "crypto",
     # zostalo czysta funkcja dwoch slownikow.
     progi = await progi_bezwzgledne(fetch_all, engine)
     r = rozjazdy(nasze, salda, tolerancja_wzgledna(kind), progi)
-    if not r and not nasze and not salda:
+
+    # ZMIERZONE ZERO MA WLASNE ZDANIE NA EKRANIE, bo inaczej trzeci stan
+    # odtworzenia (`pozycje_z_wypelnien`) zamienialby sie w cisze — a zamiana
+    # falszywego alarmu na cisze bylaby gorsza od samego falszywego alarmu.
+    # Czytelnik musi widziec roznice miedzy „rejestr mowi, ze rundy sie
+    # domknely" a „rejestru o tym aktywie w ogole nie pytalismy".
+    domkniete = sorted(k for k, v in salda.items() if v == 0)
+    if domkniete and zrodlo == "wypelnienia":
+        print(f"uzgodnienie {engine}/{mode}: rundy domknięte w oknie rejestru "
+              f"({', '.join(domkniete)}) — giełda potwierdza, że nie trzymamy "
+              f"tych aktywów; to jest ZMIERZONE ZERO, a nie brak pomiaru")
+
+    # PUSTO liczymy po wartosciach ZYWYCH. Zmierzone zero jest odpowiedzia
+    # rejestru, ale nie jest pozycja — komunikat „nic nie porownano" ma
+    # opisywac stan, w ktorym zadna z dwoch stron nie wniosla do porownania
+    # niczego, co mozna by trzymac.
+    zywe = {k: v for k, v in salda.items() if v != 0}
+    if not r and not nasze and not zywe:
         # PUSTO PO OBU STRONACH TO NIE JEST UZGODNIENIE. Zgadzaja sie dwa puste
         # zbiory, czyli nie porownano niczego. Komunikat "zgodne" powiedzialby
         # o tym stanie dokladnie tyle samo, co o stanie faktycznie sprawdzonym -

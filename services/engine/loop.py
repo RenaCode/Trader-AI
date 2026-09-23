@@ -38,14 +38,14 @@ from psycopg.rows import dict_row
 
 from services.engine.horizons import DEFAULT_BAR, HORIZONS, Horizon, get as get_horizon
 from services.engine.risk import RiskKernel
-from services.engine.uniwersum import odcisk
+from services.engine.uniwersum import odcisk, sql_uniwersum_decyzyjnego
 from services.engine.koszty import POSLIZG_MAKER, POSLIZG_TAKER, koszty
 from services.engine.portfolio import _wypelnione
 from services.engine.risk_rules import (
     MIN_CONFIDENCE, START_EQUITY as START_EQUITY_WSPOLNY, RiskVerdict,
     position_budget, udzial_budzetu,
 )
-from services.engine.zlecenia import Filtry, czy_zamykalna
+from services.engine.zlecenia import Filtry, do_kroku_w_dol
 from services.engine.signals import (SIGNALS, classify_regime, evaluate,
                                      pokrycie_wag)
 
@@ -835,8 +835,32 @@ def zapisz_wejscie(cur, engine: str, mode: str, instrument_id: int, decision_id:
                    client_order_id: str | None = None,
                    venue_fill_id: str | None = None,
                    order_id: int | None = None,
-                   prowizja_ccy: str | None = None) -> int:
+                   prowizja_ccy: str | None = None,
+                   prowizja_surowa: Decimal | None = None) -> int:
     """Zapis wejscia w pozycje. JEDEN ZAPIS DLA OBU ZRODEL.
+
+    DWIE LICZBY PROWIZJI, BO DWIE KOLUMNY ODPOWIADAJA NA DWA ROZNE PYTANIA
+
+    `prowizja` idzie do `exec.position.fees_paid` i MUSI byc w walucie
+    kwotowanej: `update_equity` sumuje `fees_paid` jako liczby bez jednostki,
+    wiec 0,0003395 wpisane wprost odejmowaloby od kapitalu 0,00034 zamiast
+    0,93 — zanizenie ~2700x, i to w strone, ktora ZAWYZA kapital, wiec
+    obsuniecie wychodzi mniejsze, a kill-switch strzela pozniej.
+
+    `prowizja_surowa` idzie do `exec.fill.fee` i MUSI byc w tej walucie, ktora
+    stoi obok w `exec.fill.fee_ccy`. Ta para jest czytana jako para:
+    `gielda_exec.sprzatanie` odtwarza z niej ilosc BRUTTO wzorem
+    `f.qty + f.fee WHEN upper(f.fee_ccy) = upper(i.base_ccy)`. Wpisanie tam
+    kwoty przeliczonej na walute kwotowana obok `fee_ccy` = ETH dalo by dla
+    produkcyjnego wejscia ETHUSDC brutto 0,3392 + 0,9308 = 1,27 ETH przeciwko
+    `cumExecQty` 0,3395 — czyli ogromna, nieistniejaca „pozycje poza
+    dziennikiem" z czujki, ktora istnieje po to, zeby lapac prawdziwe.
+
+    Do 2026-09-23 obie kolumny dostawaly te sama liczbe i nic sie nie dzialo,
+    bo `fee_ccy` bylo ZAWSZE walutą kwotowaną — przez wade, ktora wlasnie
+    zniknela (`gielda_exec.prowizja_z_rejestru`). Rachunek papierowy nalicza
+    prowizje w walucie kwotowanej i dla niego obie liczby sa rowne, dlatego
+    `prowizja_surowa=None` zostawia zachowanie dokladnie takie jak dotad.
 
     DLACZEGO TO JEST WSPOLNE, A NIE SKOPIOWANE
 
@@ -912,7 +936,10 @@ def zapisz_wejscie(cur, engine: str, mode: str, instrument_id: int, decision_id:
         # prowizje w walucie kwotowanej i tak zostaje; produkcja na spocie placi
         # ja czesto w kupionym aktywie i wpisanie tam quote_ccy zanizaloby koszt
         # wejscia o dwa rzedy wielkosci.
-        (oid, venue_fill_id or f"paper-{oid}", qty, cena, prowizja,
+        #
+        # KWOTA I WALUTA MUSZA POCHODZIC Z TEGO SAMEGO ODCZYTU - patrz docstring.
+        (oid, venue_fill_id or f"paper-{oid}", qty, cena,
+         prowizja if prowizja_surowa is None else prowizja_surowa,
          prowizja_ccy or quote_ccy, as_of))
     cur.execute(
         "INSERT INTO exec.position (engine, mode, instrument_id, side, qty, avg_price,"
@@ -920,6 +947,55 @@ def zapisz_wejscie(cur, engine: str, mode: str, instrument_id: int, decision_id:
         (engine, mode, instrument_id, "long" if side == "buy" else "short",
          qty, cena, as_of, prowizja, decision_id))
     return oid
+
+
+def trwale_niesprzedawalna(ilosc: Decimal, f: Filtry) -> bool:
+    """Czy tej ilosci nie da sie sprzedac przy ZADNEJ cenie. CZYSTA FUNKCJA.
+
+    KRYTERIUM MUSI BYC TRWALE, A NIE CHWILOWE — i to jest cala tresc tej funkcji
+
+    Odpowiedz „nie da sie sprzedac" kosztuje pozycje: wolajacy domyka na jej
+    podstawie wiersz i spisuje resztke na strate po cenie wejscia. Wolno wiec
+    odpowiedziec TAK tylko wtedy, gdy zadna zmiana rynku tego nie odwroci:
+
+      * ilosc znika po zaokragleniu do kroku (`lot_size`) — krok jest regula
+        instrumentu i cena go nie rusza,
+      * ilosc lezy ponizej minimum ILOSCI gieldy — tak samo.
+
+    `min_notional` (minimum WARTOSCI) tu NIE WCHODZI, choc `sprawdz_zlecenie`
+    go sprawdza i choc odrzuci dzis takie zlecenie. Resztka lezaca na kroku,
+    dzis warta za malo, jutro po wzroscie ceny sprzeda sie normalnie —
+    a spisanie jej na strate byloby wyrzuceniem zywych pieniedzy. Przy regulach
+    produkcyjnych nie jest to drobiazg: ADAUSDC ma krok 0,1 i `min_notional`
+    5 USDC, wiec przy cenie 0,36 prog wartosci to 13,9 ADA, czyli 139 PELNYCH
+    krokow. Kryterium wartosciowe spisywaloby na strate resztki do ~5 USDC przy
+    KAZDYM wyjsciu czesciowym, a aktywo zostawaloby na gieldzie poza ewidencja
+    — czyli pozycja-widmo stworzona wlasna reka (naglowek `uzgodnienie.py`).
+    Nadzor by tego nie zglosil: prog `uzgodnienie.progi_bezwzgledne` to
+    `max(lot_size, min_notional/cena)`, czyli DOKLADNIE ten sam prog, ktory
+    resztke spisal.
+
+    BRAK REGUL TO NIE JEST ODPOWIEDZ „NIE DA SIE". Niekompletne `Filtry`
+    (gole `Filtry()`, ktore `gielda_exec` podstawia za instrument nieobecny
+    w mapie regul, albo `min_notional` NULL w `ref.instrument`) sprawia, ze
+    `sprawdz_zlecenie` odmawia KAZDEJ ilosci — a przez to kazde wyjscie
+    czesciowe domykaloby pozycje i spisywalo na strate CALA reszte, bez
+    ograniczenia co do wielkosci. Zmierzone na funkcjach produkcyjnych:
+    pozycja 1996,7013 ADA, wyjscie czesciowe 1000,0, reguly nieznane ->
+    `realized_pnl` += -338,85 zamiast +10,00, a 996,7 ADA (~359 USDC) znika
+    z ksiag i zostaje na gieldzie.
+
+    JEDNA FUNKCJA DLA DWOCH WOLAJACYCH. `gielda_exec.zloz_plan` zadaje to samo
+    pytanie o CALA pozycje przed wyslaniem, a `zapisz_wyjscie` o resztke po
+    sprzedazy. Dwie wlasne kopie rozjechalyby sie przy pierwszej zmianie regul
+    gieldy — i wlasnie tak bylo: kopia w `gielda_exec` pytala o kryterium
+    trwale, a `zapisz_wyjscie` wolalo `czy_zamykalna`, czyli kryterium
+    chwilowe, bez straznika na niekompletne reguly.
+    """
+    if f is None or not f.kompletne:
+        return False
+    i = do_kroku_w_dol(ilosc, f.krok_ilosci)
+    return i <= 0 or (f.min_ilosc is not None and i < f.min_ilosc)
 
 
 def zapisz_wyjscie(cur, position: dict, cena: Decimal, prowizja: Decimal,
@@ -1100,10 +1176,16 @@ def zapisz_wyjscie(cur, position: dict, cena: Decimal, prowizja: Decimal,
     # domykamy wiersz mimo niepelnej sprzedazy. Warunek `ile > 0` jest tu
     # istotny: wywolanie z iloscia zero nie jest wyjsciem, a bez niego
     # zamkneloby zywa pozycje, ktorej nikt nie probowal sprzedac.
+    #
+    # KRYTERIUM Z `trwale_niesprzedawalna`, A NIE Z `czy_zamykalna`. To drugie
+    # przewraca sie takze na `min_notional`, czyli na CENIE — a resztka warta
+    # dzis za malo jutro sprzeda sie normalnie. Odpowiada tez „nie da sie" na
+    # reguly NIEZNANE, wiec gole `Filtry()` domykalo pozycje z dowolnie duza
+    # reszta. Pelny rachunek obu skutkow: docstring `trwale_niesprzedawalna`.
     pyl = None
-    if (ile > 0 and ile < calosc and filtry is not None
+    if (ile > 0 and ile < calosc
             and position["side"] == "long"
-            and not czy_zamykalna(calosc - ile, cena, filtry)):
+            and trwale_niesprzedawalna(calosc - ile, filtry)):
         pyl = calosc - ile
 
     # PYL PO CENIE WEJSCIA IDZIE W WYNIK. Uzasadnienie w docstringu: samo
@@ -1574,8 +1656,9 @@ async def sprawdz(conn, engine: str = "crypto", h: Horizon | None = None) -> int
     ids = probuj("identyfikatory cech horyzontu", lambda: horizon_feature_ids(cur, h))
     model = probuj("aktywna wersja modelu", lambda: active_model(cur, engine, h))
 
-    cur.execute("SELECT id, symbol FROM ref.instrument WHERE engine=%s AND active"
-                " AND tradeable AND kind <> 'perp' ORDER BY symbol LIMIT 3", (engine,))
+    # WARUNEK Z `uniwersum.py`, nie przepisany tutaj. Kontrola ma ogladac TEN
+    # SAM zbior, ktory obstawia petla — inaczej „sprawdz" sprawdzaloby co innego.
+    cur.execute(sql_uniwersum_decyzyjnego() + " LIMIT 3", (engine,))
     for inst in cur.fetchall():
         iid, sym = inst["id"], inst["symbol"]
         probuj(f"{sym}: decyzja w tej świecy?",
@@ -1756,8 +1839,12 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
     # `tradeable`, nie `active`: historię zbieramy szerzej, niż handlujemy.
     # Obstawianie instrumentu, którego giełda z kontem nie oferuje, to decyzja
     # niewykonalna - a trener kalibruje wagi na tym samym zbiorze (0020).
-    cur.execute("SELECT id, symbol, kind, quote_ccy FROM ref.instrument WHERE engine=%s"
-                " AND active AND tradeable AND kind <> 'perp' ORDER BY symbol", (engine,))
+    # WARUNEK Z `uniwersum.py`, bo to on wyznacza zbior, z ktorego liczy sie
+    # `odcisk()` — a `horizon_feature_ids` filtruje po odcisku SCISLE. Wlasna
+    # kopia warunku tutaj rozjechalaby sie z `features.py` przy pierwszej
+    # zmianie definicji uniwersum, a sygnal `rel_strength` zniknalby BEZ SLADU.
+    cur.execute(sql_uniwersum_decyzyjnego("id, symbol, kind, quote_ccy"),
+                (engine,))
     instrumenty = cur.fetchall()
 
     # BUDZET NA POZYCJE LICZY SIE Z KAPITALU, NIE ZE STALEJ.

@@ -110,7 +110,9 @@ class Kursor:
 
 class Gielda:
     def __init__(self, *, zlozenie=None, stan=None, blad_zlozenia=None,
-                 blad_anulowania=None, odniesienie=None):
+                 blad_anulowania=None, odniesienie=None, rejestr=()):
+        self._rejestr = rejestr
+        self.pytano_o_wypelnienia = []
         self._odniesienie = odniesienie
         self._zlozenie = zlozenie
         self._stan = stan
@@ -127,6 +129,14 @@ class Gielda:
 
     async def stan_zlecenia(self, id_wlasne, kategoria="spot"):
         return self._stan
+
+    async def wypelnienia(self, *, od_ms=None, symbol=None):
+        """Rejestr wykonan (`/v5/execution/list`) — JEDYNE miejsce, w ktorym
+        Bybit podaje `feeCurrency`. Domyslnie pusty, czyli waluta prowizji
+        pozostaje nieznana i zapis spada na walute kwotowana: dokladnie
+        zachowanie sprzed poprawki."""
+        self.pytano_o_wypelnienia.append({"od_ms": od_ms, "symbol": symbol})
+        return list(self._rejestr)
 
     async def cena_odniesienia(self, symbol, kategoria=None):
         """Cena z ksiegi PODMIOTU. None znaczy „nie da sie odczytac"."""
@@ -214,12 +224,23 @@ def _stan(wypelniono, ilosc=D("10"), status="filled"):
                         srednia_cena=D("100"), prowizja=D("0.25"))
 
 
+SUBMITTED = __import__("datetime").datetime(
+    2026, 9, 7, 8, 0, tzinfo=__import__("datetime").timezone.utc)
+
+
+def _wiersz_zlecenia(oid, qty, submitted_at=SUBMITTED):
+    """Wiersz `exec.order` w KSZTALCIE PRAWDZIWEGO SELECT-a: id, qty,
+    submitted_at. `qty` to ilosc WYSLANA (podstawa ulamka wypelnienia),
+    a `submitted_at` zaweza rejestr wykonan przy odczycie waluty prowizji."""
+    return {"id": oid, "qty": qty, "submitted_at": submitted_at}
+
+
 def _rozstrzygnij(stan, plan=PLAN, gielda=None, wiersze=None):
     # Pierwszy wiersz to ZLECENIE ZLOZONE WCZESNIEJ: jego `qty` jest podstawa
     # ulamka wypelnienia, bo to ona poszla na gielde. Ilosc z planu jest sprzed
     # zaokraglenia do kroku i uzycie jej robi z kazdego pelnego wypelnienia
     # czesciowe.
-    cur = Kursor(wiersze or [{"id": 1, "qty": D("10")}, {"id": 1}])
+    cur = Kursor(wiersze or [_wiersz_zlecenia(1, D("10")), {"id": 1}])
     g = gielda or Gielda(stan=stan)
     rodzaj, msg = asyncio.run(rozstrzygnij_plan(
         cur, g, plan, F, engine="crypto", mode="demo", kategoria="spot",
@@ -438,7 +459,7 @@ def test_jeden_plan_daje_JEDEN_wiersz_zlecenia():
     zdrowia egzekucji widzi dwa razy więcej przyjęć, niż było — czyli myli się
     dokładnie w tę stronę, w którą nie wolno.
     """
-    cur = Kursor([{"id": 501, "qty": D("10")}, {"id": 1}])
+    cur = Kursor([_wiersz_zlecenia(501, D("10")), {"id": 1}])
     g = Gielda(stan=_stan(D("10")))
     asyncio.run(rozstrzygnij_plan(cur, g, PLAN, F, engine="crypto", mode="demo",
                                   kategoria="spot",
@@ -487,7 +508,7 @@ def test_pelne_wypelnienie_NIE_jest_zapisywane_jako_czesciowe():
                         ilosc=wyslano, wypelniono=wyslano,
                         srednia_cena=D("100"), prowizja=D("0.1"))
     cur, g, rodzaj, _ = _rozstrzygnij(
-        stan, plan=plan, wiersze=[{"id": 1, "qty": wyslano}, {"id": 1}])
+        stan, plan=plan, wiersze=[_wiersz_zlecenia(1, wyslano), {"id": 1}])
     assert rodzaj == "pelne"
     assert g.anulowane == []                    # nie ma czego anulować
 
@@ -576,7 +597,7 @@ def test_wyjscie_bez_pozycji_NIE_jest_cicho_pomijane():
     wyjscie = dict(PLAN, id=44, side="sell",
                    trigger={"rodzaj": "wyjscie", "bar": "x", "position_id": 1})
     # Drugi wiersz to odczyt pozycji: None znaczy „nie ma czego zamykać".
-    cur = Kursor([{"id": 1, "qty": D("10")}, None])
+    cur = Kursor([_wiersz_zlecenia(1, D("10")), None])
     g = Gielda(stan=_stan(D("10")))
     rodzaj, powod = asyncio.run(rozstrzygnij_plan(
         cur, g, wyjscie, F, engine="crypto", mode="demo", kategoria="spot",
@@ -682,7 +703,7 @@ def test_PELEN_OBIEG_planu_nie_lamie_unikalnosci_zlecenia():
     g = Gielda(odniesienie=D("100"), stan=_stan(D("10")))
 
     # Kursor jeden na oba kroki — to on pilnuje unikalności.
-    cur = Kursor([{"id": 1, "qty": D("10")}, {"id": 1}])
+    cur = Kursor([_wiersz_zlecenia(1, D("10")), {"id": 1}])
 
     ok, _ = asyncio.run(zloz_plan(cur, g, plan, F, engine="crypto",
                                   mode="demo", kategoria="spot"))
@@ -809,7 +830,10 @@ def test_prowizja_ksiegowana_w_WALUCIE_Z_GIELDY_a_nie_kwotowanej():
 
 def test_brak_waluty_prowizji_spada_na_kwotowana():
     """Giełda nie zawsze poda to pole. Brak odczytu nie może zatrzymać zapisu —
-    ale nie może też udawać, że wiemy więcej, niż wiemy."""
+    ale nie może też udawać, że wiemy więcej, niż wiemy.
+
+    Tu ANI zlecenie, ANI rejestr wykonań nie podają waluty, więc zostaje
+    dotychczasowy domysł — i zostawia po sobie ślad (test niżej)."""
     stan = StanZlecenia(id_wlasne="tai-p42", id_gieldy="G1", status="filled",
                         ilosc=D("10"), wypelniono=D("10"),
                         srednia_cena=D("100"), prowizja=D("0.25"),
@@ -817,6 +841,152 @@ def test_brak_waluty_prowizji_spada_na_kwotowana():
     cur, _, _, _ = _rozstrzygnij(stan)
     (_, params), = [(s, p) for s, p in cur.sql if "INSERT INTO exec.fill" in s]
     assert "USDC" in params
+
+
+# ============================== Z5: waluta prowizji z REJESTRU WYKONAN
+
+# Wejście ETHUSDC z produkcji (`exec.order` 47, `exec.fill` z 2026-09-22).
+# Prowizja makera 0,1% pobrana W ETH: 0,3395 x 0,001 = 0,0003395.
+PLAN_ETH = {"id": 42, "decision_id": 7, "instrument_id": 3, "side": "buy",
+            "qty": D("0.3395"), "limit_price": D("2741.57"),
+            "symbol": "ETHUSDC", "quote_ccy": "USDC", "base_ccy": "ETH",
+            "trigger": {"rodzaj": "wejscie", "bar": "x"}}
+
+
+def _stan_eth(prowizja_w=None):
+    """Tak, jak NAPRAWDĘ odpowiada `/v5/order/*`: kwota bez jednostki.
+
+    `cumExecFee` jest w odpowiedzi, `feeCurrency` NIE — to pole wystawia
+    wyłącznie `/v5/execution/list`. Atrapa podająca `prowizja_w` opisywałaby
+    endpoint, którego `stan_zlecenia` nie czyta.
+    """
+    return StanZlecenia(id_wlasne="tai-p42", id_gieldy="G1", status="filled",
+                        ilosc=D("0.3395"), wypelniono=D("0.3395"),
+                        srednia_cena=D("2741.57"), prowizja=D("0.0003395"),
+                        prowizja_w=prowizja_w)
+
+
+def _wykonanie(prowizja="0.0003395", prowizja_w="ETH", id_wlasne="tai-p42"):
+    from services.exchanges.base import Wypelnienie
+    return Wypelnienie(id_gieldy="E1", id_wlasne=id_wlasne, symbol="ETHUSDC",
+                       strona="Buy", ilosc=D("0.3395"), cena=D("2741.57"),
+                       prowizja=D(prowizja), prowizja_w=prowizja_w,
+                       czas=SUBMITTED)
+
+
+def _wejscie_eth(rejestr):
+    g = Gielda(stan=_stan_eth(), rejestr=rejestr)
+    cur = Kursor([_wiersz_zlecenia(1, D("0.3395")), {"id": 1}])
+    asyncio.run(rozstrzygnij_plan(
+        cur, g, PLAN_ETH, Filtry(krok_ilosci=D("0.0001"), krok_ceny=D("0.01"),
+                                 min_wartosc=D("5")),
+        engine="crypto", mode="demo", kategoria="spot",
+        teraz=SUBMITTED, kind="spot_eu"))
+    (_, fill), = [(s, p) for s, p in cur.sql if "INSERT INTO exec.fill" in s]
+    (_, poz), = [(s, p) for s, p in cur.sql if "INSERT INTO exec.position" in s]
+    return cur, g, fill, poz
+
+
+def test_waluta_prowizji_DOCZYTANA_z_rejestru_wykonan():
+    """Sedno Z5, na liczbach z produkcji.
+
+    `/v5/order/*` oddaje `cumExecFee` BEZ `feeCurrency`, więc `prowizja_w`
+    wracało puste i egzekucja podstawiała walutę kwotowaną — na WSZYSTKICH
+    trzech giełdowych kupnach w bazie (`fee / qty` = dokładnie 0,001, czyli
+    stawka makera liczona od ILOŚCI). Skutkiem było `exec.position.qty`
+    zapisane BRUTTO, bo `rozlicz_prowizje` nie widziało waluty bazowej.
+    """
+    _, g, fill, poz = _wejscie_eth([_wykonanie()])
+    assert "ETH" in fill and "USDC" not in fill, (
+        f"waluta prowizji nadal zgadywana zamiast doczytana: {fill}")
+    # ILOŚĆ NETTO: 0,3395 - 0,0003395. To jest ta liczba, której brak sprawiał,
+    # że gałąź pyłu w `loop.zapisz_wyjscie` była nieosiągalna.
+    assert D("0.3391605") in poz, f"pozycja zapisana BRUTTO: {poz}"
+    assert g.pytano_o_wypelnienia, "rejestr wykonań nie został w ogóle zapytany"
+
+
+def test_exec_fill_trzyma_prowizje_SUROWA_a_pozycja_PRZELICZONA():
+    """Dwie kolumny, dwa pytania — i tę różnicę widać dopiero po Z5.
+
+    `exec.fill.fee` czyta się PARĄ z `exec.fill.fee_ccy`: `sprzatanie` odtwarza
+    z niej ilość brutto wzorem `f.qty + f.fee WHEN fee_ccy = base_ccy`.
+    Wpisanie tam kwoty przeliczonej na USDC obok `fee_ccy` = ETH dałoby brutto
+    0,3392 + 0,9308 = 1,27 ETH przeciwko `cumExecQty` 0,3395, czyli ogromną
+    nieistniejącą „pozycję poza dziennikiem".
+
+    `exec.position.fees_paid` odwrotnie: `update_equity` sumuje je jako liczby
+    BEZ jednostki, więc 0,0003395 wpisane wprost zaniżyłoby koszt 2700x — i to
+    w stronę, która ZAWYŻA kapitał, więc kill-switch strzela później.
+    """
+    _, _, fill, poz = _wejscie_eth([_wykonanie()])
+    assert D("0.0003395") in fill, f"`exec.fill.fee` nie jest surowe: {fill}"
+    assert D("0.0003395") * D("2741.57") in poz, (
+        f"`fees_paid` nie jest przeliczone na walutę kwotowaną: {poz}")
+
+
+def test_kanarek_ROZNE_waluty_prowizji_NIE_SA_zgadywane():
+    """Gdy wypełnienia jednego zlecenia podają różne waluty, jedna kolumna
+    `fee_ccy` nie opisuje ich obu. Wybranie jednej byłoby nazwaniem zgadnięcia
+    pomiarem — zostaje dotychczasowy domysł i głośna uwaga."""
+    cur, _, fill, _ = _wejscie_eth(
+        [_wykonanie(prowizja_w="ETH"), _wykonanie(prowizja_w="USDC")])
+    assert "USDC" in fill and "ETH" not in fill
+    slad = [p for s, p in cur.sql if "INSERT INTO exec.order" in s or "raw" in s]
+    assert any("ROZNE waluty" in str(p) for p in slad), (
+        "niezgodność walut przeszła bez śladu w wierszu zlecenia")
+
+
+def test_kanarek_CUDZE_wypelnienie_nie_jest_brane_za_nasze():
+    """Rejestr wykonań oddaje wypełnienia całego symbolu w oknie, nie tylko
+    naszego zlecenia. Dopasowanie po `orderLinkId` jest tu warunkiem
+    poprawności — inaczej przypisalibyśmy sobie cudzą walutę prowizji."""
+    _, _, fill, poz = _wejscie_eth([_wykonanie(id_wlasne="tai-p999")])
+    assert "USDC" in fill, "waluta wzięta z CUDZEGO wypełnienia"
+    assert D("0.3395") in poz, "ilość policzona z cudzej prowizji"
+
+
+def test_zrodlo_waluty_prowizji_ZOSTAJE_w_wierszu_zlecenia():
+    """`fee_ccy` = USDC z odczytu i `fee_ccy` = USDC z domysłu wyglądają
+    w bazie identycznie, a to jest różnica między pomiarem a zgadnięciem —
+    i to ona decyduje, czy `exec.position.qty` jest netto, czy brutto."""
+    cur, _, _, _ = _wejscie_eth([_wykonanie()])
+    assert any("rejestr_wykonan" in str(p) for _, p in cur.sql if p)
+
+    cur_bez, _, _, _ = _wejscie_eth([])          # rejestr milczy
+    assert any("nieznane" in str(p) for _, p in cur_bez.sql if p)
+
+
+def test_rejestr_NIEOSIAGALNY_nie_wywraca_rozstrzygniecia():
+    """Wypełnienie już zaszło i aktywo jest nasze niezależnie od tego, czy
+    poznamy jednostkę prowizji. Wywrócenie się tutaj zgubiłoby pozycję, którą
+    naprawdę mamy — czyli stworzyłoby pozycję-widmo własną ręką."""
+    class GieldaBezRejestru(Gielda):
+        async def wypelnienia(self, **kw):
+            raise ExchangeError("execution/list niedostepne", code="500")
+
+    g = GieldaBezRejestru(stan=_stan_eth())
+    cur = Kursor([_wiersz_zlecenia(1, D("0.3395")), {"id": 1}])
+    rodzaj, _ = asyncio.run(rozstrzygnij_plan(
+        cur, g, PLAN_ETH, Filtry(krok_ilosci=D("0.0001"), krok_ceny=D("0.01"),
+                                 min_wartosc=D("5")),
+        engine="crypto", mode="demo", kategoria="spot",
+        teraz=SUBMITTED, kind="spot_eu"))
+    assert rodzaj == "pelne"
+    assert any("INSERT INTO exec.position" in s for s, _ in cur.sql)
+
+
+def test_zlecenie_ktore_PODALO_walute_nie_pyta_rejestru():
+    """Kanarek na koszt. Drugie zapytanie ma iść WYŁĄCZNIE wtedy, gdy pierwsze
+    nie odpowiedziało — inaczej każde rozstrzygnięcie płaci za odczyt, którego
+    nie potrzebuje."""
+    g = Gielda(stan=_stan_eth(prowizja_w="ETH"), rejestr=[_wykonanie()])
+    cur = Kursor([_wiersz_zlecenia(1, D("0.3395")), {"id": 1}])
+    asyncio.run(rozstrzygnij_plan(
+        cur, g, PLAN_ETH, Filtry(krok_ilosci=D("0.0001"), krok_ceny=D("0.01"),
+                                 min_wartosc=D("5")),
+        engine="crypto", mode="demo", kategoria="spot",
+        teraz=SUBMITTED, kind="spot_eu"))
+    assert not g.pytano_o_wypelnienia
 
 
 def test_sprzatanie_ZGLASZA_reszte_wypelniona_na_wierszu_CZESCIOWYM():

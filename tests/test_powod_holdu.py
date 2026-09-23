@@ -214,6 +214,83 @@ def test_sha_kodu_nie_udaje_odpowiedzi(monkeypatch, tag):
     assert wersja.sha_kodu() is None
 
 
+@pytest.mark.parametrize("tag", ["beef", "ada", "decade", "face", "dad"])
+def test_sha_kodu_odrzuca_nazwy_z_SAMYCH_LITER_SZESNASTKOWYCH(monkeypatch, tag):
+    """Sprawdzenie alfabetu bez DŁUGOŚCI przepuszcza nazwy gałęzi i tagów.
+
+    `beef`, `ada`, `decade` składają się wyłącznie z cyfr szesnastkowych, więc
+    przechodziły jako SHA i trafiłyby do `learn.model_version.git_sha` jako
+    odpowiedź na pytanie „jaki kod to policzył". Dziś `GIT_SHA` pochodzi
+    z `sha-<short>` z workflow `docker-publish`, więc to była luka, a nie
+    awaria — ale luka w jedynym miejscu, które ma nie zgadywać.
+    """
+    from services.engine import wersja
+
+    monkeypatch.setenv("GIT_SHA", tag)
+    monkeypatch.setattr(wersja, "_z_repozytorium", lambda: None)
+    assert wersja.sha_kodu() is None
+
+
+def test_sha_kodu_PRZEPUSZCZA_prawdziwe_dlugosci(monkeypatch):
+    """Kanarek do poprzedniego: granica nie może odciąć prawdziwych skrótów.
+
+    `git rev-parse --short` daje dziś 7 znaków, pełny sha-1 ma 40, a repozytoria
+    wydłużają skrót, gdy rośnie liczba obiektów."""
+    from services.engine import wersja
+
+    monkeypatch.setattr(wersja, "_z_repozytorium", lambda: None)
+    for sha in ("1298b23", "40f41e4ab", "a" * 40):
+        monkeypatch.setenv("GIT_SHA", f"sha-{sha}")
+        assert wersja.sha_kodu() == sha
+
+
+def test_BRUDNE_drzewo_robocze_jest_NAZWANE_w_sha(monkeypatch, tmp_path):
+    """`git rev-parse HEAD` opisuje ostatni COMMIT, nie drzewo robocze.
+
+    Scenariusz, dla którego to istnieje: analityk uruchamia lokalnie `train.py`
+    bez `--sucho` na niezacommitowanej zmianie w `signals.py`. `train.py:682`
+    wpisuje zwrócony sha do `learn.model_version.git_sha`, ktoś później robi
+    `git checkout <ten sha>` i NIE ODTWARZA wyniku — a moduł istnieje wyłącznie
+    po to, żeby dało się odpowiedzieć bez zgadywania. Sha opisujący inny kod
+    niż uruchomiony jest GORSZY niż brak sha, bo wygląda na odpowiedź.
+    """
+    from services.engine import wersja
+
+    monkeypatch.delenv("GIT_SHA", raising=False)
+    monkeypatch.setattr(wersja, "_czy_brudne", lambda korzen: True)
+    sha = wersja.sha_kodu()
+    assert sha is not None and sha.endswith(wersja.SUFIKS_BRUDNY), (
+        f"sha z brudnego drzewa podany jako czysty: {sha!r}")
+
+    monkeypatch.setattr(wersja, "_czy_brudne", lambda korzen: False)
+    czysty = wersja.sha_kodu()
+    assert czysty is not None and not czysty.endswith(wersja.SUFIKS_BRUDNY)
+    assert sha == czysty + wersja.SUFIKS_BRUDNY
+
+
+def test_NIEPEWNOSC_co_do_czystosci_liczy_sie_jak_brud(monkeypatch):
+    """Gdy `git status` nie odpowie, nie wiemy, czy drzewo było czyste — a
+    „nie wiem, czy to ten kod" należy po tej samej stronie co „na pewno nie
+    ten". Milcząca odpowiedź bez sufiksu byłaby zapewnieniem, którego nikt
+    nie sprawdził."""
+    from services.engine import wersja
+
+    monkeypatch.delenv("GIT_SHA", raising=False)
+    monkeypatch.setattr(wersja, "_czy_brudne", lambda korzen: None)
+    sha = wersja.sha_kodu()
+    assert sha is not None and sha.endswith(wersja.SUFIKS_BRUDNY)
+
+
+def test_sha_Z_OBRAZU_nigdy_nie_dostaje_sufiksu(monkeypatch):
+    """Obraz buduje się z commita, więc drzewa roboczego tam nie ma. Sufiks
+    doklejany również tej ścieżce zanieczyściłby każdy wiersz z produkcji."""
+    from services.engine import wersja
+
+    monkeypatch.setenv("GIT_SHA", "sha-1298b23")
+    monkeypatch.setattr(wersja, "_czy_brudne", lambda korzen: True)
+    assert wersja.sha_kodu() == "1298b23"
+
+
 def test_trener_zapisuje_sha_i_sklad_sygnalow():
     """Sam commit nie wystarcza: SYGNALY_EKSPERYMENTALNE zmienia skład sygnałów.
 

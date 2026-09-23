@@ -34,6 +34,8 @@ REGULY = {
     "LINK": (D("0.01"), D("5"), D("12.02")),
     "ADA": (D("0.1"), D("5"), D("0.74")),
     "SOL": (D("0.001"), D("5"), D("116.06")),
+    # ETHUSDC, `ref.instrument` na 2026-09-23; cena z wypełnienia sprzedaży 48.
+    "ETH": (D("0.0001"), D("5"), D("2716.26")),
 }
 
 # aktywo -> (ilosc z bazy, pyl zostajacy po sprzedazy zaokraglonej w dol).
@@ -51,7 +53,7 @@ def _progi(aktywa=("LINK", "ADA", "SOL")) -> dict[str, D]:
     return asyncio.run(progi_bezwzgledne(_fetch(aktywa), "crypto"))
 
 
-def _fetch(aktywa, pozycje=(), od=None, cena_swieza=True):
+def _fetch(aktywa, pozycje=(), od=None, cena_swieza=True, okno=None):
     async def fetch_all(sql, params=None):
         if "sum(p.qty)" in sql:
             return list(pozycje)
@@ -64,8 +66,18 @@ def _fetch(aktywa, pozycje=(), od=None, cena_swieza=True):
                     for a in aktywa]
         if "DISTINCT base_ccy" in sql:
             return [{"base_ccy": a} for a in aktywa]
-        if "min(p.opened_at)" in sql:
-            return [{"od": od}]
+        if "LEAST(p.opened_at" in sql:
+            # KOLUMNY DOKLADNIE TAKIE, JAKIE POBIERA `kontekst_wypelnien` —
+            # `opened_at`, `closed_at` i `od`. Atrapa oddajaca kolumne spoza
+            # SELECT-a mierzylaby sama siebie, a `od` (chwila ZLOZENIA
+            # zlecenia) i `opened_at` (chwila ZAPISU skutku) to dwie rozne
+            # liczby; na produkcji dzielilo je 2 h 40 min.
+            if okno is not None:
+                return list(okno)
+            # Bez wiersza w `exec.order` prawdziwy `LEAST` oddaje samo
+            # `opened_at`, bo `LEAST` pomija NULL-e.
+            return ([] if od is None
+                    else [{"opened_at": od, "closed_at": None, "od": od}])
         if 'app."user"' in sql:
             return [{"id": 1}]
         return [{"symbol": f"{a}USDC", "base_ccy": a} for a in aktywa]
@@ -365,7 +377,136 @@ def test_urwane_okno_rejestru_dochodzi_do_rozjazdow_jako_blad():
         "szukać aktywa zamiast brakującej połowy rejestru")
 
 
+# ------------------------------------------------- runda domknieta w oknie
+
+# Runda ETHUSDC z produkcji, 2026-09-22/23 (`exec.order` 47 i 48). Prowizja
+# kupna jest w ETH: 0,3395 x 0,1% = 0,0003395, czyli stawka makera liczona od
+# ILOŚCI. Prowizja sprzedaży jest w USDC, bo sprzedaż wydaje aktywo, a nie je
+# dostaje. To NIE są liczby ułożone pod tezę — to dwa wiersze `exec.fill`.
+RUNDA_ETH = [
+    _wypelnienie("0.3395", "Buy", "ETHUSDC",
+                 czas=datetime(2026, 9, 22, 13, 20, 51, tzinfo=timezone.utc),
+                 prowizja="0.0003395", prowizja_w="ETH"),
+    _wypelnienie("0.3395", "Sell", "ETHUSDC",
+                 czas=datetime(2026, 9, 23, 13, 26, 39, tzinfo=timezone.utc),
+                 prowizja="0.92217027", prowizja_w="USDC"),
+]
+BAZA_ETH = {"ETHUSDC": "ETH"}
+
+
+def test_runda_domknieta_z_prowizja_bazowa_daje_ZMIERZONE_ZERO():
+    """Sedno Z1. Dla rundy kupno→sprzedaż na tę samą ilość człony ilościowe
+    znoszą się do zera i zostaje sam człon prowizyjny — ujemny.
+
+    Odtworzenie nie miało wtedy ŻADNEGO sposobu, żeby powiedzieć „pozycji nie
+    ma": zero było odfiltrowane, a jedyna pozostała liczba była ujemna, więc
+    `rozjazdy` nazywało ją `ilosc-ujemna` i komunikat kazał szukać brakującej
+    połowy rejestru — która leżała na miejscu, w tym samym oknie.
+    """
+    stan = pozycje_z_wypelnien(RUNDA_ETH, BAZA_ETH)
+    assert stan == {"ETH": D("0")}, (
+        f"domknięta runda odtworzona jako {stan} — to nie jest stan rachunku, "
+        f"tylko sama prowizja makera podana jako ilość")
+    assert rozjazdy({}, stan, progi=_progi(("ETH",))) == []
+
+
+def test_ZMIERZONE_ZERO_to_nie_to_samo_co_brak_aktywa_w_oknie():
+    """Trzeci stan musi być NAZWANY, a nie wyciszony.
+
+    Klucz obecny z zerem znaczy „rejestr mówi, że nie trzymamy nic"; klucz
+    nieobecny znaczy „rejestr o tym aktywie nie mówi nic". Obie odpowiedzi
+    dają w `rozjazdy` tę samą liczbę, ale prowadzą do innej decyzji: pierwsza
+    jest pomiarem, druga jego brakiem. To ta sama zasada, dla której
+    `rozjazd_z_ulamkow` oddaje None zamiast zera przy zerze obserwacji.
+    """
+    assert "ETH" in pozycje_z_wypelnien(RUNDA_ETH, BAZA_ETH)
+    assert pozycje_z_wypelnien([], BAZA_ETH) == {}
+
+
+def test_runda_domknieta_przy_OTWARTEJ_pozycji_to_POZYCJA_WIDMO():
+    """Ten sam rejestr, ale dziennik trzyma pozycję jeszcze otwartą — czyli
+    stan z produkcji między 13:26 a 16:03:42.
+
+    To JEST rozjazd i ma nim zostać: przez 2 h 37 min risk kernel liczył
+    ekspozycję z pozycji, której na giełdzie już nie było. Zmienić ma się
+    wyłącznie NAZWA — `pozycja-widmo` wysyła człowieka do dziennika,
+    `ilosc-ujemna` wysyłała go do okna retencji, które było w porządku.
+    """
+    stan = pozycje_z_wypelnien(RUNDA_ETH, BAZA_ETH)
+    # `exec.position.qty` po odjęciu prowizji pobranej w ETH.
+    nasze = {"ETH": D("0.3395") - D("0.0003395")}
+    r = rozjazdy(nasze, stan, tolerancja_wzgledna("spot_eu"), _progi(("ETH",)))
+    assert len(r) == 1 and r[0]["rodzaj"] == "pozycja-widmo", (
+        f"pozycja-widmo nazwana {r[0]['rodzaj']!r} — komunikat kazałby szukać "
+        f"brakującej połowy rejestru zamiast spóźnionego zapisu `closed_at`")
+
+
+def test_kanarek_sprzedaz_bez_kupna_PONIZEJ_lot_size_nadal_ILOSC_UJEMNA():
+    """Kanarek na próg wprowadzony tylnymi drzwiami.
+
+    Rozstrzyga ZNAK ilości, nie jej wielkość: sprzedaż bez kupna jest błędem
+    pomiaru przy 0,6 ETH i przy 0,00001 ETH tak samo. Każdy próg na tej gałęzi
+    byłby powtórzeniem błędu z pierwszego audytu — tam `progi_bezwzgledne`
+    zrobiło swoją robotę tak dobrze, że pył pozycji stał się niewidoczny dla
+    nadzoru i zablokował handel na tygodnie.
+    """
+    ponizej_kroku = D("0.00001")             # lot_size ETH to 0,0001
+    assert ponizej_kroku < REGULY["ETH"][0]
+    stan = pozycje_z_wypelnien(
+        [_wypelnienie(str(ponizej_kroku), "Sell", "ETHUSDC")], BAZA_ETH)
+    assert stan == {"ETH": -ponizej_kroku}
+    r = rozjazdy({}, stan, progi=_progi(("ETH",)))
+    assert len(r) == 1 and r[0]["rodzaj"] == "ilosc-ujemna"
+
+
+def test_kanarek_reczna_sprzedaz_polprocenta_NADAL_jest_POZYCJA_WIDMO():
+    """Kanarek na „nie odejmujmy prowizji w odtworzeniu" — wariant, który
+    przechodzi KAŻDY pozostały test w tym pliku i jest mimo to zły.
+
+    Pominięcie prowizji wprowadza stałe, jednokierunkowe przesunięcie o jedną
+    stawkę w stronę „giełda ma więcej", czyli dokładnie przeciw rozpoznaniu
+    pozycji-widma. Przy makerze 0,1% zjada 20% budżetu tolerancji na stałe,
+    przy takerze 0,25% — 50%. Tutaj ręczna sprzedaż 0,0185 ETH (~50 USDC,
+    czyli DZIESIĘCIOKROTNIE powyżej progu bezwzględnego) ginęłaby w ciszy.
+    """
+    wyp = [_wypelnienie("3.395", "Buy", "ETHUSDC",
+                        prowizja="0.003395", prowizja_w="ETH"),
+           # Sprzedaż poza naszym dziennikiem — ktoś w panelu giełdy.
+           _wypelnienie("0.0185", "Sell", "ETHUSDC",
+                        prowizja="50.25", prowizja_w="USDC")]
+    stan = pozycje_z_wypelnien(wyp, BAZA_ETH)
+    assert stan == {"ETH": D("3.373105")}
+    nasze = {"ETH": D("3.395") - D("0.003395")}
+    r = rozjazdy(nasze, stan, tolerancja_wzgledna("spot_eu"), _progi(("ETH",)))
+    assert len(r) == 1 and r[0]["rodzaj"] == "pozycja-widmo", (
+        "ręczne zamknięcie części pozycji w panelu giełdy przeszło bez alarmu "
+        "— a to jest jeden z czterech przypadków z nagłówka modułu")
+
+
 # ---------------------------------------------------------- pelna sciezka
+
+def test_alarm_produkcyjny_z_23_09_MILKNIE_PO_DOMKNIECIU_RUNDY():
+    """Z2 na całej ścieżce, na stanie z produkcji o 16:10:30.
+
+    Pozycja 34 ma już `closed_at`, więc `nasze` nie zawiera ETH, ale rejestr
+    giełdy nadal trzyma obie nogi rundy. Sprawdzenie znaku szło PRZED progami,
+    więc żaden próg tego nie wyciszał, a `killswitch.triggered` ma
+    `always_on = true` i `default_cooldown_s = 0` przy uzgodnieniu chodzącym
+    co 10 minut: od 13:30 do 16:10 poszło 18 powiadomień `critical` o resztce
+    wartej 0,90 USDC. To jest ZAGŁUSZENIE prawdziwego kill-switcha.
+    """
+    okno = [{"od": datetime(2026, 9, 22, 13, 20, 51, tzinfo=timezone.utc),
+             "opened_at": datetime(2026, 9, 22, 16, 0, 35, tzinfo=timezone.utc),
+             "closed_at": datetime(2026, 9, 23, 16, 3, 42, tzinfo=timezone.utc)}]
+
+    async def notify(*a, **k):
+        raise AssertionError(
+            "domknięta runda nadal wysyła powiadomienie krytyczne")
+
+    n = asyncio.run(uzgodnij(_fetch(("ETH",), okno=okno), notify,
+                             _BezSald(RUNDA_ETH), kind="spot_eu"))
+    assert n == 0
+
 
 def test_pyl_na_calej_sciezce_nie_wysyla_powiadomienia():
     """To jest ten stan, który miał dawać 144 krytyczne powiadomienia dziennie:
