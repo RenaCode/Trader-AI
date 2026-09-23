@@ -391,6 +391,29 @@ def compute_news(cur, instrument_id: int, h: Horizon, feat_id: int,
     Wartosc w chwili T bierze pod uwage wylacznie artykuly, ktorych analiza byla
     GOTOWA przed T (an.ingested_at <= T). Bez tego warunku model uczylby sie
     z newsow, ktorych wtedy jeszcze nie znal.
+
+    BRAK DANYCH NIE JEST POMIAREM ROWNYM ZERU - i to jest poprawka z 2026-09-23.
+
+    Zapytanie idzie `FROM generate_series(...)` z samymi `LEFT JOIN`-ami, wiec
+    KAZDA swieca okna dostaje wiersz. `COALESCE(..., 0)` zamienial przy tym brak
+    danych w twarde zero, nierozroznialne od „wiadomosci wywazone".
+
+    Kosztowalo to 13 dni szeregu. Od 09.09 do 22.09.2026 analiza stala (pusty
+    limit u dostawcy), artykuly byly zapisywane, a `news.article_analysis`
+    pozostawalo puste. `compute_news` wypisalo `news_sent__4h = 0.0` dla kazdej
+    swiecy i kazdego instrumentu, trener zobaczyl pelny, nie-NULL szereg
+    wygladajacy jak „rynek bez newsow" i skalibrowal na nim wage cechy.
+
+    Gdyby wiersza nie bylo, cecha wypadlaby z decyzji JAWNIE - dokladnie tak
+    zachowal sie `funding_z` i to bylo WIDOCZNE (patrz `compute_funding_z`
+    nizej). Ta sama wada zostala zamknieta po stronie API commitem `01d9bf1`
+    („brak pomiaru przestaje byc zwracany jako pomiar rowny zeru"); tutaj
+    zostawala otwarta.
+
+    PROG JEST JEDNA ANALIZA, nie wiecej. Pytanie brzmi „czy w oknie 24 h bylo
+    cokolwiek, co ta cecha mierzy", a nie „czy probka jest duza". Jedna analiza
+    o kierunku `neutral` daje uczciwe zero - to JEST pomiar. Zero z zera analiz
+    nim nie jest.
     """
     since = na_siatce(since, h)
     # `until` cofamy o jedna swiece: ostatnia swieca jest jeszcze otwarta.
@@ -401,7 +424,8 @@ def compute_news(cur, instrument_id: int, h: Horizon, feat_id: int,
                COALESCE(sum(
                    CASE an.direction WHEN 'bullish' THEN 1 WHEN 'bearish' THEN -1 ELSE 0 END
                    * an.magnitude * an.confidence * an.novelty * ai.relevance
-               ), 0) AS score
+               ), 0) AS score,
+               count(an.id) AS analiz
         FROM generate_series(%s, %s, %s::interval) AS b(t)
         LEFT JOIN news.article_instrument ai ON ai.instrument_id = %s
         LEFT JOIN news.article a  ON a.id  = ai.article_id
@@ -413,8 +437,12 @@ def compute_news(cur, instrument_id: int, h: Horizon, feat_id: int,
         """,
         (since, until, f"{h.bar_minutes} minutes", instrument_id),
     )
+    # Swieca bez ani jednej analizy w oknie NIE DOSTAJE WIERSZA. Decyzja pytajaca
+    # o te ceche dostanie wtedy `None` i cecha wypadnie z niej jawnie - tak jak
+    # wypadala przy martwym `funding_z`. Cisza, ktora widac, jest jedyna cisza,
+    # o ktorej ktokolwiek sie dowie.
     rows = [(feat_id, instrument_id, r["t"], float(r["score"]), znane_od(r["t"], h))
-            for r in cur.fetchall()]
+            for r in cur.fetchall() if r["analiz"]]
     return insert_values(cur, rows)
 
 

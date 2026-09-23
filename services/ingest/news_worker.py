@@ -289,6 +289,82 @@ UA_FALLBACK = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.
                "(KHTML, like Gecko) Chrome/120.0 Safari/537.36")
 
 
+# Parametry, ktore opisuja SKAD przyszedl czytelnik, a nie CO czyta. Ten sam
+# artykul przychodzi z nimi w roznych postaciach z roznych kanalow.
+#
+# NAZWY DOKLADNE, nie przedrostki - poza rodzina `utm_`, ktora przedrostkiem
+# JEST. Dopasowanie po przedrostku sciagneloby przy okazji `ref` z `refresh`
+# i `source` z `source_id`, czyli parametry, ktore u kogos moga byc czescia
+# adresu artykulu. Blad w te strone sklejalby rozne teksty w jeden - a to jest
+# gorsze niz duplikat, bo KASUJE material zamiast go zawyzac.
+PRZEDROSTKI_SLEDZACE = ("utm_",)
+PARAMETRY_SLEDZACE = frozenset((
+    "fbclid", "gclid", "mc_cid", "mc_eid", "ref_src", "__twitter_impression",
+    "igshid", "cmpid", "ncid", "at_medium", "at_campaign"))
+
+# Jak daleko wstecz szukamy tego samego adresu. Nie „od zawsze" z dwoch powodow:
+# zapytanie trafia wtedy w indeks `article_ingested_at_idx` zamiast przegladac
+# cala tabele, a redakcyjna poprawka tytulu przychodzi w minutach albo godzinach
+# od pierwszej publikacji - nie po tygodniach. Adres wracajacy po miesiacu to
+# najczesciej nowy material pod starym slugiem, wiec zaslanianie go byloby gorsze
+# niz jego przepuszczenie.
+OKNO_DEDUP_URL_H = 48
+
+
+def normalizuj_url(url: str) -> str:
+    """Adres w postaci, w ktorej DWIE KOPIE TEGO SAMEGO ARTYKULU sa rowne.
+
+    DLACZEGO SAM `content_hash` NIE WYSTARCZA
+
+    `content_hash` to sha256(tytul + zajawka), wiec KAZDA zmiana tekstu tworzy
+    nowy artykul. Wydawca po dwudziestu minutach zdejmuje prefiks „BREAKING:"
+    i przeredagowuje lead - ten sam URL, nowy hash. Artykul wchodzi jako nowy,
+    placi drugi triaz i druga analize, a `features.compute_news` SUMUJE po
+    `news.article_instrument`, wiec jedno zdarzenie wchodzi do cechy DWA RAZY
+    z pelna waga. Kanaly regenerujace zajawke przy kazdym odpytaniu robia to
+    przy KAZDYM cyklu - dokladnie ten ksztalt wypalil 11.09.2026 dobowy limit
+    Gemini w kilkanascie minut.
+
+    CO TU ODPADA I DLACZEGO AKURAT TO
+
+      * schemat i „www." - `http` vs `https` oraz `www.` to ten sam zasob,
+      * fragment (`#czesc-2`) - nie dociera nawet do serwera,
+      * parametry sledzace - opisuja czytelnika, nie tresc (`PARAMETRY_SLEDZACE`),
+      * koncowy ukosnik i wielkosc liter w hoscie.
+
+    CZEGO TU NIE MA, SWIADOMIE: reszta parametrow zapytania zostaje. `?id=4471`
+    i `?page=2` potrafia byc calym adresem artykulu, a obciecie ich skleiloby
+    ze soba teksty, ktore nie maja ze soba nic wspolnego. Blad w te strone jest
+    gorszy niz duplikat: duplikat tylko zawyza cechę, sklejenie KASUJE material.
+
+    Pusty napis znaczy „nie ma czego porownywac" - i wolajacy MA to sprawdzic
+    przed uzyciem (patrz `run_cycle`).
+    """
+    from urllib.parse import parse_qsl, urlsplit, urlunsplit, urlencode
+
+    url = (url or "").strip()
+    if not url:
+        return ""
+    try:
+        czesci = urlsplit(url)
+    except ValueError:
+        # Adres nie do rozebrania nie jest powodem do przewrocenia cyklu -
+        # po prostu nie bierze udzialu w deduplikacji po URL.
+        return ""
+    if not czesci.netloc:
+        # Adres wzgledny albo smiec. Porownywanie go miedzy kanalami skleiloby
+        # artykuly z roznych serwisow.
+        return ""
+    host = czesci.netloc.lower()
+    if host.startswith("www."):
+        host = host[4:]
+    pytania = [(k, v) for k, v in parse_qsl(czesci.query, keep_blank_values=True)
+               if k.lower() not in PARAMETRY_SLEDZACE
+               and not k.lower().startswith(PRZEDROSTKI_SLEDZACE)]
+    sciezka = czesci.path.rstrip("/")
+    return urlunsplit(("https", host, sciezka, urlencode(pytania), ""))
+
+
 async def fetch_feed(client: httpx.AsyncClient, url: str) -> tuple[list, str]:
     """Zwraca (wpisy, status). Blad kanalu nie moze zatrzymac calego cyklu."""
     try:
@@ -353,7 +429,20 @@ async def analyze(ai: Dostawca, title: str, summary: str,
               f"Tytuł: {title}\n\n{summary[:3000]}"),
         schema=ANALYSIS_SCHEMA,
         # Jak przy triazu: limit musi pomiescic rozumowanie razem z odpowiedzia.
-        max_tokens=4000,
+        #
+        # 16000, a nie 4000, od 2026-09-23. Analiza chodzi z rozszerzonym
+        # myśleniem (`thinking={"type": "adaptive"}` w `DostawcaAnthropic.
+        # zapytaj`), a tokeny rozumowania licza sie do TEGO SAMEGO limitu co
+        # odpowiedz - dluzszy artykul wyczerpywal wiec 4000 na samym mysleniu,
+        # zanim padlo pierwsze slowo wyniku. Ucieta odpowiedz nie jest wynikiem,
+        # ale JEST platna i wraca przy kazdym nadrabianiu zaleglosci: ten sam
+        # artykul kupowal sobie trzy takie wywolania (PROBY_PO_AWARII_MAX),
+        # a zaden nie mogl sie udac. 16000 to zdrowy domysl dla wywolania BEZ
+        # strumieniowania - miesci sie pod limitem czasu klienta HTTP (180 s),
+        # wiec nie zamienia jednej awarii w druga. Realne zuzycie zostaje
+        # niezmienione: model konczy tam, gdzie ma co powiedziec, a limit jest
+        # sufitem, nie zamowieniem.
+        max_tokens=16000,
     )
 
 
@@ -392,11 +481,31 @@ class Budzet:
     Stan poczatkowy czytamy z `news.api_spend`, a nie z licznika w pamieci:
     proces restartuje sie w srodku doby i licznik od zera znaczylby limit
     liczony od zera.
+
+    DZIENNIK TO JEDNAK NIE WSZYSTKO, CO WIDZI DOSTAWCA.
+
+    Wiersz w `api_spend` powstaje raz na WYWOLANIE LOGICZNE (jeden triaz, jedna
+    analiza), a dostawca liczy ZADANIA HTTP. Jedno wywolanie triazu to u Gemini
+    do pieciu POST-ow, a wywolanie zakonczone `Przeciazony`/`Wyczerpany`/
+    timeoutem nie niesie `usage`, wiec `zapisz_nieudane` nie wstawia wiersza
+    w ogole. Doba z presja limitu tempa: 500 wywolan logicznych, do 2500 zadan
+    do Google - bramka czytala 500/1500 i meldowala "wykorzystanie 33%", gdy
+    darmowy prog 500/dobe byl juz przekroczony pieciokrotnie.
+
+    Dlatego od 2026-09-23 budzet pyta DOSTAWCE o nadwyzke zadan, ktorych
+    dziennik nie widzi (`Dostawca.zadania_poza_dziennikiem`). Kwota dalej idzie
+    z dziennika - tam liczy sie zuzycie tokenow, a nie liczba pakietow.
+
+    `dostawca` jest opcjonalny wylacznie po to, zeby testy nie musialy budowac
+    atrapy dostawcy dla sprawdzenia samej bramki kwotowej. Potok podaje go
+    zawsze (`run_cycle`), a bez niego bramka wraca do starego, zanizonego
+    pomiaru - czyli jest to domysl BEZPIECZNY DLA TESTU, nie dla produkcji.
     """
 
-    def __init__(self, usd: float, wywolania: int):
+    def __init__(self, usd: float, wywolania: int, dostawca=None):
         self.usd = usd
         self.wywolania = wywolania
+        self._dostawca = dostawca
 
     def dolicz(self, usd: float) -> None:
         """Jedno wywolanie u dostawcy. Wolane RAZEM z `record_spend`.
@@ -406,15 +515,36 @@ class Budzet:
         """
         self.usd += usd
         self.wywolania += 1
+        if self._dostawca is not None:
+            # Meldunek w druga strone: to zadanie MA juz swoj wiersz w dzienniku,
+            # wiec nie nalezy do nadwyzki. Bez tego kazde udane wywolanie
+            # liczyloby sie bramce dwa razy.
+            self._dostawca.zanotuj_rozliczenie()
+
+    def zadania(self) -> int:
+        """Ile zadan dostawca policzyl sobie dzis - z dziennika I z nadwyzki.
+
+        To jest wielkosc, ktora porownuje sie z progiem dostawcy. `self.wywolania`
+        pokrywa to, co jest w `api_spend` (takze z wczesniejszych procesow),
+        a nadwyzka - ponowienia i odmowy bez `usage` z tego procesu.
+        """
+        nadwyzka = (self._dostawca.zadania_poza_dziennikiem()
+                    if self._dostawca is not None else 0)
+        return self.wywolania + nadwyzka
 
     def wyczerpany(self) -> str:
         """Pusty napis znaczy 'wolno pytac dalej'. Inaczej - powod do logu."""
         if self.usd >= DAILY_LIMIT_USD:
             return (f"limit dobowy ${DAILY_LIMIT_USD:.2f} osiągnięty "
                     f"(wydano ${self.usd:.4f})")
-        if self.wywolania >= DZIENNY_LIMIT_WYWOLAN:
-            return (f"limit dobowy {DZIENNY_LIMIT_WYWOLAN} wywołań osiągnięty "
-                    f"({self.wywolania})")
+        zadan = self.zadania()
+        if zadan >= DZIENNY_LIMIT_WYWOLAN:
+            # Komunikat rozroznia OBIE liczby, bo one sie rozjezdzaja i to
+            # wlasnie rozjazd jest tu informacja: "1512 żądań (wierszy w
+            # dzienniku 604)" mowi wprost, ze potok pali prog dostawcy na
+            # ponowieniach, a nie na pracy.
+            return (f"limit dobowy {DZIENNY_LIMIT_WYWOLAN} żądań do dostawcy "
+                    f"osiągnięty ({zadan}; wywołań w dzienniku {self.wywolania})")
         return ""
 
 
@@ -495,6 +625,13 @@ def puste_stats(limit: bool = False) -> dict:
             # Artykuly ZAPISANE, ale nieocenione: budzet albo odciety dostawca.
             # Wroca w `nadrob_zaleglosci` z nietknietym licznikiem prob.
             "pominiete": 0,
+            # Wiersze odrzucone przez ograniczenie bazy MIMO ze oba pytania
+            # dedupu uznaly je za nowe. Osobny licznik, a nie `bledy`: `bledy`
+            # liczy kanaly, ktore nie odpowiedzialy, i idzie do `bledy_kanalow`
+            # w pulsie. Zlanie tych dwoch rzeczy w jedna liczbe zamieniloby
+            # „baza odrzucila zapis" w „kanal RSS nie odpowiedzial" - dwie rozne
+            # awarie i dwa rozne miejsca, do ktorych trzeba pojsc.
+            "kolizje_zapisu": 0,
             "czekaja": 0, "porzucone": 0, "od_ostatniej_analizy_h": None,
             "limit": limit}
 
@@ -551,8 +688,21 @@ def diagnoza_potoku(cur) -> dict:
 def opis_ciszy(s: dict, analizuj: bool) -> str:
     """DLACZEGO w tym cyklu nie powstala ani jedna analiza. Pusty, gdy powstala.
 
-    NIEPUSTY ZAWSZE, gdy `analizuj` i `przeanalizowane == 0`. To jest warunek
-    twardy, nie uprzejmosc wobec czytajacego.
+    NIEPUSTY ZAWSZE, gdy `analizuj` i potok NIE WYPRODUKOWAL ANI JEDNEJ ANALIZY.
+    To jest warunek twardy, nie uprzejmosc wobec czytajacego.
+
+    „Ani jednej analizy" znaczy `przeanalizowane == 0` I `zaleglosci == 0` -
+    a do 2026-09-23 znaczylo tylko to pierwsze. `nadrob_zaleglosci` zlicza swoje
+    analizy WYLACZNIE w `stats["zaleglosci"]` (patrz tam), wiec cykl, w ktorym
+    kanaly nie dały nic nowego, ale nadrabianie przeanalizowalo 12 zaleglych
+    artykulow, konczyl sie linia:
+
+        ⚠ BEZ ANALIZ (brak artykułów do analizy); ostatnia 0 h temu
+
+    Zdanie wewnetrznie sprzeczne i nieprawdziwe - analizy powstaly, a „ostatnia
+    0 h temu" bylo tego dowodem w tej samej linii. Ostrzezenie pojawiajace sie
+    przy ZDROWEJ pracy uczy czytac je nieuwaznie akurat wtedy, gdy dotyczy
+    prawdziwej ciszy. Falszywy alarm psuje czujke skuteczniej niz jej brak.
 
     Linia z produkcji, powtarzana co piec minut przez dwie i pol doby:
 
@@ -565,7 +715,7 @@ def opis_ciszy(s: dict, analizuj: bool) -> str:
     bo cisza potoku wyglada w licznikach przebiegu tak samo jak spokojna doba
     bez newsow. Cisza ma byc odroznialna od pracy Z SAMEJ LINII LOGU.
     """
-    if not analizuj or s.get("przeanalizowane"):
+    if not analizuj or s.get("przeanalizowane") or s.get("zaleglosci"):
         return ""
     powody = []
     if s.get("odciety"):
@@ -582,6 +732,58 @@ def opis_ciszy(s: dict, analizuj: bool) -> str:
     wiek = s.get("od_ostatniej_analizy_h")
     kiedy = "NIGDY" if wiek is None else f"{wiek:.0f} h temu"
     return f"  ⚠ BEZ ANALIZ ({'; '.join(powody)}); ostatnia {kiedy}"
+
+
+def cisza_zamiast_pracy(s: dict, analizuj: bool) -> str:
+    """Czy ten cykl to CISZA POTOKU, a nie spokojna doba. Pusty napis = praca.
+
+    DLACZEGO TO NIE JEST TO SAMO CO `opis_ciszy`
+
+    `opis_ciszy` pisze do LOGU i odzywa sie takze wtedy, gdy nie bylo czego
+    analizowac - bo czytajacy log ma prawo wiedziec, ze cykl nic nie wyprodukowal.
+    Ta funkcja odpowiada na wezsze pytanie: czy stan potoku ma zatrzymac PULS.
+    Alarm o „braku analiz" w dobie, w ktorej kanaly nie dały nic nowego, byłby
+    falszywy - a falszywy alarm psuje czujke skuteczniej niz jej brak.
+
+    DLACZEGO PULS W OGOLE MA SIE O TO POTYKAC
+
+    `puls.bij` bezwarunkowo ustawia `last_beat_at = now()`, a
+    `dozor.ocen_puls_workerow` alarmuje WYLACZNIE wiekiem tego znacznika (mowi to
+    wprost jego wlasny docstring). Cykl, w ktorym obaj dostawcy byli odcieci albo
+    limit dobowy byl wyczerpany, konczyl sie bez wyjatku: artykuly zapisane,
+    `przeanalizowane = 0`, `odciety` wypelniony - i bil zdrowy puls co piec minut.
+    `kubectl get pods` pokazywal `Running`, czujka milczala, a
+    `news.article_analysis` nie dostawalo ani jednego wiersza.
+
+    To jest DOKLADNIE mechanizm ciszy 09.09-22.09.2026. Jedynym sladem byla
+    linia `⚠ BEZ ANALIZ` na stdout poda, ktorego nikt nie czyta. Trzynascie dni.
+
+    WARUNEK JEST WASKI CELOWO. Alarmujemy tylko wtedy, gdy potok MIAL CO ROBIC
+    i nie zrobil nic: `czekaja > 0` (sa artykuly bez analizy w oknie 24 h),
+    a `przeanalizowane + zaleglosci == 0`. Doba bez newsow nie jest awaria;
+    doba, w ktorej 40 artykulow czeka, a zaden nie przeszedl, jest.
+    """
+    if not analizuj:
+        # Bez klucza dostawcy brak analiz jest stanem ZADANYM, nie awaria.
+        # Ta sciezka ma wlasna widocznosc: „Tryb: wylacznie pobieranie".
+        return ""
+    if s.get("przeanalizowane") or s.get("zaleglosci"):
+        return ""
+    if not s.get("czekaja"):
+        return ""
+    powody = []
+    if s.get("odciety"):
+        powody.append(f"dostawca odcięty — {s['odciety']}")
+    if s.get("limit_powod"):
+        powody.append(s["limit_powod"])
+    if s.get("porzucone"):
+        powody.append(f"porzuconych po wyczerpaniu prób: {s['porzucone']}")
+    if not powody:
+        powody.append("żaden nie doszedł do analizy")
+    wiek = s.get("od_ostatniej_analizy_h")
+    kiedy = "NIGDY" if wiek is None else f"{wiek:.0f} h temu"
+    return (f"BEZ ANALIZ: czeka {s['czekaja']}, przeanalizowanych 0 "
+            f"({'; '.join(powody)}); ostatnia analiza {kiedy}")
 
 
 # Ile razy artykul moze wrocic na ocene PO AWARII DOSTAWCY.
@@ -954,7 +1156,9 @@ async def run_cycle(conn, ai: Dostawca | None, http: httpx.AsyncClient,
     """
     cur = conn.cursor(row_factory=dict_row)
 
-    budzet = Budzet(spent_today(cur), wywolania_dzis(cur))
+    # DOSTAWCA IDZIE DO BUDZETU, bo tylko on wie, ile ZADAN HTTP naprawde
+    # poszlo - dziennik zna wylacznie wywolania logiczne. Patrz `Budzet`.
+    budzet = Budzet(spent_today(cur), wywolania_dzis(cur), ai)
     powod_limitu = budzet.wyczerpany() if analizuj else ""
     if powod_limitu:
         # WYCZERPANY BUDZET SCHODZI DO TRYBU BEZ ANALIZY, A NIE POMIJA CYKLU.
@@ -1025,6 +1229,56 @@ async def run_cycle(conn, ai: Dostawca | None, http: httpx.AsyncClient,
             cur.execute("SELECT 1 FROM news.article WHERE content_hash = %s", (h,))
             if cur.fetchone():
                 continue
+
+            # DRUGA DEDUPLIKACJA - PO ADRESIE, nie po tresci.
+            #
+            # `content_hash` lapie tylko IDENTYCZNY tekst. Redakcyjna poprawka
+            # tytulu („BREAKING:" zdjete po dwudziestu minutach) daje ten sam URL
+            # i nowy hash, wiec artykul wchodzil jako nowy: drugi platny triaz,
+            # druga platna analiza, a `features.compute_news` SUMUJE po
+            # `news.article_instrument` - jedno zdarzenie wchodzilo do cechy dwa
+            # razy z pelna waga. Kanal regenerujacy zajawke przy kazdym odpytaniu
+            # robil to co cykl; ten ksztalt wypalil 11.09.2026 limit Gemini
+            # w kilkanascie minut.
+            #
+            # ADRES BIERZEMY Z WPISU, NIGDY Z KANALU. `link` bywa pusty i nizej
+            # podstawia sie wtedy `feed["url"]` - gdyby ta wartosc szla do
+            # porownania, WSZYSTKIE artykuly takiego kanalu mialyby jeden adres
+            # i kanal oddawalby w calym swoim zyciu jeden artykul. Pusty
+            # `url_dedup` znaczy wiec „ten wpis nie bierze udzialu w dedupie po
+            # URL" i tak ma byc.
+            link = (getattr(entry, "link", "") or "").strip()
+            url_dedup = normalizuj_url(link)
+
+            # CO WPISUJEMY W KOLUMNE `url`, GDY WPIS NIE MA WLASNEGO ADRESU.
+            #
+            # Do 2026-09-23 stalo tu `getattr(entry, "link", "") or feed["url"]`,
+            # czyli przy braku `link` szedl do bazy ADRES KANALU. Dwa wpisy bez
+            # `link` w jednej partii dawaly wiec dwa wiersze o identycznym `url`.
+            # Dzis `news.article` nie ma na tej kolumnie zadnego ograniczenia
+            # (jedyne to `UNIQUE (content_hash)`), wiec konczylo sie to samym
+            # powielonym adresem. Ale byl to zapis NIEPRAWDZIWY niezaleznie od
+            # ograniczen: odnosnik w interfejsie prowadzil do kanalu RSS zamiast
+            # do artykulu, o ktorym byl wiersz.
+            #
+            # Kolumna jest `NOT NULL`, wiec „nic" nie da sie zapisac. Zostaje
+            # pusty napis - i to jest wybor swiadomy: pusty `url` MOWI, ze wpis
+            # nie mial adresu, a adres kanalu KLAMIE, ze mial. Interfejs
+            # pokazujacy pusty odnosnik jest poprawialny; pokazujacy zly odnosnik
+            # wyglada na dzialajacy.
+            #
+            # Przy okazji znika bomba z opoznionym zaplonem: gdyby ktos dolozyl
+            # kiedys unikalny indeks na `url`, powtorzony adres kanalu byl
+            # pierwszym, ktory by w niego uderzyl.
+            url_wpisu = url_dedup or ""
+
+            if url_dedup:
+                cur.execute(
+                    "SELECT 1 FROM news.article WHERE url = %s"
+                    "   AND ingested_at > now() - make_interval(hours => %s)",
+                    (url_dedup, OKNO_DEDUP_URL_H))
+                if cur.fetchone():
+                    continue
             stats["nowe"] += 1
 
             published = entry_time(entry)
@@ -1032,19 +1286,60 @@ async def run_cycle(conn, ai: Dostawca | None, http: httpx.AsyncClient,
             # ZAPIS PRZED KAZDA DECYZJA. To jest miejsce, w ktorym zamykala sie
             # petla: dopoki wiersza nie ma, deduplikacja po `content_hash` nie ma
             # o co zahaczyc i ten sam tekst wraca jako "nowy" co pieciu minut.
+            #
+            # ZAPISUJEMY ADRES ZNORMALIZOWANY, bo to on jest porownywany wyzej.
+            # Zapis surowego przy porownywaniu znormalizowanego dawalby dedup,
+            # ktory nigdy nie trafia - czyli kod wygladajacy na dzialajacy
+            # i niedzialajacy. Adres znormalizowany prowadzi do tego samego
+            # zasobu, wiec odnosnik w interfejsie dalej dziala.
+            #
+            # `ON CONFLICT DO NOTHING` BEZ WSKAZANIA OGRANICZENIA - i to nie jest
+            # niedbalstwo, tylko jedyna bezpieczna forma w TYM miejscu.
+            #
+            # Wersja z `(content_hash)` obsluguje DOKLADNIE JEDNO ograniczenie.
+            # Kazde inne - dzis `news.article` nie ma zadnego, ale unikalny indeks
+            # na `url` jest pierwsza rzecza, ktora ktos tu dolozy - wracaloby jako
+            # `IntegrityError`. Ten `cur.execute` NIE LEZY W ZADNYM `try` wewnatrz
+            # `run_cycle`, wiec wyjatek przewraca caly cykl: transakcja przechodzi
+            # w stan `aborted`, wszystkie pozostale artykuly tej partii i wszystkie
+            # kolejne kanaly przepadaja, a RSS ich JUTRO NIE ODDA. To jest ta sama
+            # kategoria straty, co limit dobowy osiagniety o 14:00, tylko wywolana
+            # duplikatem - czyli awaria GORSZA od tej, przed ktora dedup broni.
+            #
+            # Bez wskazania ograniczenia klauzula obejmuje wszystkie naraz, wiec
+            # duplikat zostaje tym, czym ma byc: brakiem wiersza w `RETURNING`,
+            # obsluzonym nizej przez `if not row: continue`.
             cur.execute(
                 "INSERT INTO news.article (feed_id, url, title, summary, content_hash,"
                 " event_time, ingested_at) VALUES (%s,%s,%s,%s,%s,%s, now())"
-                " ON CONFLICT (content_hash) DO NOTHING RETURNING id",
-                (feed["id"], getattr(entry, "link", "") or feed["url"], title,
-                 summary[:4000], h, published),
+                " ON CONFLICT DO NOTHING RETURNING id",
+                (feed["id"], url_wpisu, title, summary[:4000], h, published),
             )
             row = cur.fetchone()
             conn.commit()
-            # Brak wiersza znaczy, ze ten sam tekst przyszedl drugi raz w tej
-            # samej partii (albo rownolegle z innego kanalu). Deduplikacja
-            # zadzialala; nie ma czego oceniac.
+            # BRAK WIERSZA MA TU DWA ROZNE ZNACZENIA i nie wolno ich zlac
+            # w jedno ciche `continue`.
+            #
+            # 1. Ten sam tekst przyszedl drugi raz rownolegle z innego kanalu -
+            #    deduplikacja zadzialala, nie ma czego oceniac, cisza jest
+            #    wlasciwa.
+            # 2. Wiersz odrzucilo ograniczenie, ktorego NIE przewidzielismy.
+            #    Oba pytania wyzej (`content_hash` i `url`) powiedzialy „nowy",
+            #    wiec konflikt oznacza albo wyscig, albo ograniczenie dolozone
+            #    migracja, o ktorej ten kod nie wie. Drugie znaczy, ze dedup po
+            #    URL nie zadzialal w oknie - i to jest informacja, nie szczegol.
+            #
+            # Rozroznienie jest tanie, bo odpowiedzi na oba pytania juz mamy.
+            # Bez niego ograniczenie dolozone w przyszlosci objawialoby sie jako
+            # artykuly znikajace bez sladu - czyli awaria wygladajaca jak spokojna
+            # doba, dokladnie ten ksztalt, ktory ten plik naprawia w innych
+            # miejscach.
             if not row:
+                stats["kolizje_zapisu"] += 1
+                stats["opisy_bledow"].append(
+                    f"kanał {feed['name']}: zapis artykułu odrzucony przez "
+                    f"ograniczenie bazy mimo że dedup uznał go za nowy "
+                    f"(adres {url_wpisu[:120]!r})")
                 continue
             article_id = row["id"]
             stats["zapisane"] += 1
@@ -1259,6 +1554,13 @@ async def main() -> int:
         # dalej w nieskonczonosc - potok byl martwy i wygladal na zywy.
         POD_RZAD_MAX = 5
         pod_rzad = 0
+        # OSOBNY licznik cykli BEZ ANI JEDNEJ ANALIZY. Nie miesza sie z
+        # `pod_rzad`, bo to dwie rozne awarie i maja rozne skutki: awaria cyklu
+        # po piatej z rzedu KONCZY proces, cisza potoku - nie (restart nie
+        # przywroci limitu dobowego, a straciłby artykuly, ktorych kanał już nie
+        # odda). Idzie do `awarii_pod_rzad` w pulsie, zeby czujka widziala nie
+        # tylko „cicho", ale i „od ilu cykli".
+        cisz_pod_rzad = 0
         poprzedni_tryb: str | None = None
         # DOSTAWCA ZYJE DLUZEJ NIZ CYKL - inaczej niz polaczenie wyzej.
         #
@@ -1339,12 +1641,39 @@ async def main() -> int:
                         # `puls.bij`): policzy sie jako awaria cyklu, bo worker,
                         # ktorego czujka nie widzi, jest dla nadzoru nieodrozninalny
                         # od workera, ktorego nie ma.
-                        puls.bij(conn, PULS, args.interval,
-                                 {"analiza": analizuj, "kanaly": s["kanaly"],
-                                  "zapisane": s["zapisane"],
-                                  "przeanalizowane": s["przeanalizowane"],
-                                  "bledy_kanalow": s["bledy"],
-                                  "silniki": silniki or []})
+                        #
+                        # CYKL BEZ ANI JEDNEJ ANALIZY NIE JEST UDANY - i to jest
+                        # poprawka z 2026-09-23. Do niej warunek brzmial „cykl bez
+                        # wyjatku" i nic wiecej, wiec potok, w ktorym obaj dostawcy
+                        # byli odcieci, bil zdrowy puls co piec minut przez 13 dni.
+                        # `dozor.ocen_puls_workerow` alarmuje WYLACZNIE wiekiem
+                        # `last_beat_at`, wiec swiezy puls jest dla nadzoru
+                        # rownoznaczny ze zdrowiem - a `news.article_analysis` nie
+                        # dostawalo ani jednego wiersza. Szczegoly warunku
+                        # (dlaczego waski) stoja w `cisza_zamiast_pracy`.
+                        #
+                        # ZGLOSZENIE, A NIE WYJATEK. Cisza nie konczy procesu:
+                        # licznik `pod_rzad` zostaje przy awariach CYKLU, bo cykl
+                        # sie udal - zapisal artykuly, ktorych kanal RSS nie odda
+                        # jutro. Restart potoku nie przywroci wyczerpanego limitu
+                        # ani nie doladuje konta, wiec CrashLoopBackOff bylby tu
+                        # lekarstwem gorszym od choroby: traciłby material.
+                        # Osobny licznik `cisz_pod_rzad` idzie do `awarii_pod_rzad`,
+                        # zeby czujka widziala, jak dlugo to trwa.
+                        cisza = cisza_zamiast_pracy(s, analizuj)
+                        if cisza:
+                            cisz_pod_rzad += 1
+                            puls.zglos_awarie(conn, PULS, args.interval,
+                                              cisz_pod_rzad, cisza)
+                        else:
+                            cisz_pod_rzad = 0
+                            puls.bij(conn, PULS, args.interval,
+                                     {"analiza": analizuj, "kanaly": s["kanaly"],
+                                      "zapisane": s["zapisane"],
+                                      "przeanalizowane": s["przeanalizowane"],
+                                      "zaleglosci": s["zaleglosci"],
+                                      "bledy_kanalow": s["bledy"],
+                                      "silniki": silniki or []})
                     took = (datetime.now(timezone.utc) - started).total_seconds()
                     # Podsumowanie musi rozrozniac ZAPISANE od PRZEANALIZOWANYCH.
                     # Pierwsza wersja liczyla zapisane jako przeanalizowane, wiec
