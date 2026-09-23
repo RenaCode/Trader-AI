@@ -50,6 +50,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from datetime import timedelta
 import os
 import sys
 from decimal import Decimal
@@ -394,8 +395,12 @@ async def uzgodnij(fetch_all, notify, adapter, engine: str = "crypto",
                 f"odczyt sald nie powiodl sie ({e}); uzgodnienie NIEWYKONALNE") from e
         baza, najstarsze = await kontekst_wypelnien(fetch_all, engine, mode)
         try:
-            wyp = await adapter.wypelnienia(
-                od_ms=int(najstarsze.timestamp() * 1000) if najstarsze else None)
+            # Rejestracja otwarcia pozycji w DB wpisuje p.opened_at z chwilowym
+            # przesunięciem względem pierwszych wypełnień giełdy. Dajemy bufor
+            # 1 dnia przed `najstarsze`, aby zapytanie o wykonania objęło
+            # transakcje tworzące tę pozycję.
+            od_ms = int((najstarsze - timedelta(days=1)).timestamp() * 1000) if najstarsze else None
+            wyp = await adapter.wypelnienia(od_ms=od_ms)
         except ExchangeError as e2:
             raise Nieuzgadnialne(
                 f"ten host nie wystawia sald ({e}), a rejestru wypelnien nie da "
