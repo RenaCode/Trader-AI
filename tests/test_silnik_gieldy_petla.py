@@ -262,3 +262,49 @@ def test_pomiar_ryzyka_dzieje_sie_PRZED_bramkami():
         assert ciało.index(bramka) > pomiar, (
             f"{bramka} stoi przed pomiarem limitów konta — poza sesją podłoga "
             f"kapitału przestaje być liczona i nikt tego nie ocenia")
+
+
+def test_trening_bez_instrumentow_NIE_MELDUJE_SUKCESU():
+    """ZMIERZONE NA PRODUKCJI 2026-09-24.
+
+    Tor equity w `trader-trainer` wypisał „brak instrumentow", `train()` zrobiło
+    `return`, a `main()` i tak kończyło `return 0`. Zadanie świeciło na ZIELONO.
+
+    Objawy rozeszły się wtedy na trzy miejsca, z których żadne nie wskazywało
+    przyczyny: Job zielony, w panelu nie przybywało wersji modelu, a pętla
+    decyzyjna equity odmawiała handlu „bo brak zwalidowanego modelu". Przyczynę
+    (`tradeable = false` na wszystkich 21 instrumentach, ustawione świadomie
+    w migracji 0047) widać było wyłącznie w logu zadania meldującego sukces.
+
+    Trening, który nie policzył NICZEGO, nie ma prawa wyglądać jak trening,
+    który się udał — tak samo jak przebieg na zbyt krótkim panelu, który kończy
+    się `SystemExit(2)` od dawna.
+    """
+    zrodlo = (KORZEN / "services/engine/train.py").read_text()
+    blok = zrodlo.split("if not instruments:")[1].split("\n    if tylko:")[0]
+    # BEZ KOMENTARZY. Pierwsza wersja tego testu szukała słowa `SystemExit`
+    # w całym bloku i znajdowała je w KOMENTARZU wyjaśniającym, dlaczego ten
+    # kod wyjścia jest właściwy — więc przechodziła także wtedy, gdy kod
+    # naprawdę robił `return`. Sprawdzone mutacją: test zielony na wadzie,
+    # której miał bronić.
+    kod = "\n".join(l for l in blok.splitlines()
+                    if not l.strip().startswith("#"))
+    assert "raise SystemExit" in kod, (
+        "puste uniwersum kończy trening kodem zero — zadanie zamelduje sukces, "
+        "nie policzywszy ani jednego okna")
+    assert not re.search(r"^\s+return\s*$", kod, re.M), (
+        "ścieżka wychodzi `return`, więc `main()` i tak zwróci zero")
+
+
+def test_oba_stany_bez_wyniku_koncza_sie_tym_samym_kodem():
+    """Puste uniwersum i za krótki panel znaczą to samo: nie policzono niczego.
+
+    Dwa różne kody wyjścia dla jednego znaczenia uczą czytać kod wyjścia jako
+    przypadek, a nie jako informację.
+    """
+    import re
+
+    zrodlo = (KORZEN / "services/engine/train.py").read_text()
+    kody = set(re.findall(r"raise SystemExit\((\d+)\)", zrodlo))
+    assert kody == {"2"}, (
+        f"trener kończy przebieg bez wyniku różnymi kodami: {sorted(kody)}")

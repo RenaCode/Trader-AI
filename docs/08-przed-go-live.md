@@ -190,9 +190,55 @@ i nie wolno ich z tymi mieszac.
 - [ ] Decyzja wlasciciela, nie inzynierska: na bybit.eu perpetualow nie ma
       (spot 127, linear 0, inverse 0). Konto globalne, inna gielda, albo
       zostajemy na spocie
-- [ ] Rozstrzygnac los equity: 23,1% okien dodatnich przy koszcie Bybita,
-      32,7% przy polowie, 42,3% przy zerze — mediana OOS Sharpe wciaz ujemna.
-      Koszt nie jest tu waskim gardlem, bo nie ma przewagi, ktora koszt by zjadl
+- [x] **Rozstrzygnac los equity — ROZSTRZYGNIETE 2026-09-24: PRZEWAGI NIE MA.**
+      Pelny walk-forward na 59 oknach, uniwersum 20 spolek, cennik Alpaki.
+      Szczegoly nizej.
+
+### Los equity — pomiar zamiast szacunku (2026-09-24)
+
+Wczesniejsze liczby w tym punkcie (23,1% / 32,7% / 42,3% okien dodatnich) byly
+szacunkiem przy CENNIKU BYBITA, bo innego wtedy nie bylo. Teraz jest pomiar
+wlasnym cennikiem, na pelnej historii:
+
+```
+Sharpe/transakcje ze zlaczonej proby (2303 transakcje):  -0,0782
+srednia po 59 oknach:                                    -0,1044
+mediana okna:                                            -0,0942   [-0,2617; +0,0571]
+okien ujemnych:                                          42/59 (71,2%)
+profit factor zbiorczy:                                  0,7194
+sredni zwrot z transakcji:                               -0,2237%, trafnych 43,6%
+Stan: degraded — dodatnie 17/59 okien (29%), przedzial ufnosci 19%-41%
+```
+
+**KOSZT PROGOWY: -22,37 pb na runde, czyli UJEMNY.** To jest tu jedyna liczba,
+ktora naprawde rozstrzyga. Prowizja Alpaki wynosi ZERO, a strategia i tak traci
+22 pb na rundzie - equity nie przegrywa wiec z kosztami, tylko samo ze soba.
+Skladniki nienaliczone (spread, niewypelnienie, oplaty regulacyjne) moga to
+wylacznie poglebic. Obnizanie kosztu nie ma czego uratowac.
+
+DECYZJA: `tradeable` dla equity ZOSTAJE `false`. Migracja 0047 ustawila te flage
+swiadomie i postawila warunek: "wlaczenie do uniwersum decyzyjnego to osobna,
+swiadoma migracja PO pierwszym walk-forwardzie". Walk-forward sie odbyl,
+odpowiedz brzmi "nie", wiec migracji nie ma. Petla `engine-equity` chodzi dalej
+i odmawia handlu przez `--wymagaj-modelu` - od teraz jest to odmowa oparta na
+POMIARZE, a nie na braku modelu.
+
+CO ZOSTAJE WLACZONE I DLACZEGO: potok danych equity (swiece, cechy, kapital,
+puls). Kosztuje tyle co nic, a 2,5 roku historii godzinowej z policzonymi
+cechami jest warunkiem KAZDEJ przyszlej hipotezy o tym rynku. Wylaczenie potoku
+oznaczaloby, ze nastepne pytanie o equity znowu zaczyna sie od czekania.
+
+### Trzy wady odslonete przy okazji tego pomiaru
+
+| co | objaw | dlaczego bylo niewidoczne |
+| --- | --- | --- |
+| trener meldowal sukces na pustym uniwersum | Job ZIELONY, w panelu nie przybywa wersji modelu | `train()` robilo `return`, `main()` konczylo `return 0`; przyczyne widac bylo tylko w logu zadania, ktore meldowalo sukces |
+| `tradeable = false` na wszystkich 21 spolkach | uniwersum decyzyjne equity = 0 | ustawione swiadomie w 0047; brakowalo kroku, ktory tamta migracja zapowiedziala |
+| cechy equity liczone za 7 dni, nie za historie | 35-41 punktow panelu przy wymaganych 500 | swiec bylo 94 625 od 2024-04; `features-equity` ma okno 7 dni, co jest poprawne w biegu, ale nie po dolozeniu instrumentow |
+
+Pierwsza jest naprawiona (`SystemExit(2)`, ten sam kod co przy zbyt krotkim
+panelu - oba znacza "nie policzono niczego"). Trzecia domknieta jednorazowym
+przeliczeniem wstecz: 723 147 wartosci cech, 0 bledow.
 
 ## Brama 1 — uczciwosc pomiaru
 

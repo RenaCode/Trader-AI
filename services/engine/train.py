@@ -911,8 +911,30 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
             print(f"  pominięte, brak w bazie: {', '.join(brakujace)}")
         instruments = [i for i in instruments if i["symbol"] in tylko]
     if not instruments:
-        print("brak instrumentow")
-        return
+        # PUSTE UNIWERSUM TO AWARIA PRZEBIEGU, NIE JEGO WYNIK.
+        #
+        # ZMIERZONE NA PRODUKCJI 2026-09-24: tor equity w `trader-trainer`
+        # wypisal "brak instrumentow", `train()` zrobilo `return`, a `main()`
+        # i tak konczylo `return 0`. Zadanie swiecilo na ZIELONO, w panelu nie
+        # przybywalo wersji modelu, a petla decyzyjna equity odmawiala handlu
+        # z powodu "brak zwalidowanego modelu" - trzy objawy, z ktorych zaden
+        # nie wskazywal na przyczyne. Widac ja bylo wylacznie w logu zadania,
+        # ktore meldowalo sukces.
+        #
+        # `SystemExit(2)` - ten sam kod, co przy zbyt krotkim panelu nizej.
+        # Oba znacza to samo: NIE POLICZONO NICZEGO. Trening, ktory nie policzyl
+        # niczego, nie ma prawa wygladac jak trening, ktory sie udal.
+        #
+        # Dla equity przyczyna byla `tradeable = false` na wszystkich 21
+        # instrumentach - ustawione swiadomie w migracji 0047, z adnotacja, ze
+        # wlaczenie do uniwersum to osobna migracja PO pierwszym walk-forwardzie.
+        print("PRZERWANO: puste uniwersum decyzyjne — nie ma czego trenować")
+        print(f"  sprawdź: SELECT count(*) FROM ref.instrument WHERE engine="
+              f"'{engine}' AND active AND tradeable AND kind <> 'perp'")
+        print("  (flagę `tradeable` ustawia services/ingest/instrumenty.py "
+              "oraz migracje; `--instrumenty` z `--sucho` pozwala zmierzyć "
+              "uniwersum kandydujące bez wpisywania go do produkcji)")
+        raise SystemExit(2)
     if tylko:
         print(f"  uniwersum zawężone do {len(instruments)}: "
               f"{', '.join(i['symbol'] for i in instruments)}")
