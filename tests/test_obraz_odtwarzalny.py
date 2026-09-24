@@ -2,15 +2,16 @@
 
 DLACZEGO TEN PLIK ISTNIEJE
 
-`scripts/build-on-vps.sh` taguje obrazy `trader-ai-<usluga>:sha-<commit>`, co
-stwierdza, ze zawartosc wynika z commita. Przy ruchomym tagu bazy
-(`FROM python:3.12-slim`) to nieprawda: dwa buildy tego samego commita,
-wykonane w odstepie tygodni, daja rozne obrazy pod ta sama nazwa.
+CI taguje obrazy `trader-ai-<usluga>:sha-<commit>`, co stwierdza, ze zawartosc
+wynika z commita. Przy ruchomym tagu bazy (`FROM python:3.12-slim`) to
+nieprawda: dwa buildy tego samego commita, wykonane w odstepie tygodni, daja
+rozne obrazy pod ta sama nazwa.
 
-Na tym samym zalozeniu stoi sprzatanie w tym samym skrypcie: zachowuje N
-ostatnich obrazow "do cofniecia sie w razie czego". Cofniecie przez
-przebudowanie starszego commita nie przywracalo stanu przetestowanego, a awaria
-po cofnieciu wygladala na awarie starego kodu.
+Od 2026-09-24 waga tego zalozenia ROSNIE, a nie maleje. Wczesniej obraz
+produkcji powstawal na VPS i tam zostawal; dzis `update-git` wskazuje produkcje
+na tag z rejestru, a cofniecie sie do starszego commita znaczy pobranie obrazu
+zbudowanego wtedy. Jesli tag nie wynika z commita, cofniecie nie przywraca
+stanu przetestowanego - a awaria po cofnieciu wyglada na awarie starego kodu.
 
 CZEGO TEN PLIK NIE SPRAWDZA, A CO ZOSTAJE OTWARTE: `services/api/requirements.txt`
 ma zaleznosci z `>=` i bez pliku blokady, wiec ta sama luka istnieje po stronie

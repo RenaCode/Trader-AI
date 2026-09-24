@@ -28,14 +28,21 @@ wynik z jednego okna, odsyłasz go po test odporności.
 
 ## Zasady wdrożenia
 
-Wdrożenie tego projektu to GitOps z ręcznym budowaniem obrazów:
+Wdrożenie tego projektu to pełny GitOps — od 2026-09-24 bez kroku ręcznego:
 
 ```bash
-git push                                                 # CI: testy + obrazy
-ssh root@185.201.112.104 'bash -s' < scripts/build-on-vps.sh
-# podbij api.image.tag i web.image.tag w charts/trader/values.yaml
-git push                                                 # ArgoCD synchronizuje
+git push        # CI: testy -> obrazy do ghcr -> commit z podbitym tagiem
+                # ArgoCD synchronizuje ten commit; klaster pobiera obraz
+                # sekretem `ghcr-pull`
 ```
+
+Nie wchodź na serwer, żeby wdrożyć. Jeśli obraz nie wstaje, przyczyna jest
+w CI albo w sekrecie `ghcr-pull`, a nie w braku budowania.
+
+UWAGA NA ZMIANY W CHARCIE, KTÓRE WYMAGAJĄ NOWEGO KODU. ArgoCD stosuje szablony
+natychmiast, a podbicie tagu przychodzi osobnym commitem — więc wpis w charcie
+używający flagi z tego samego pusha wystartuje na STARYM obrazie. Takie wpisy
+wchodzą z `enabled: false` i włącza się je dopiero po wdrożeniu obrazu.
 
 Migracje idą jako `initContainer` przy API i **są niemutowalne** — runner
 porównuje sumy kontrolne. Migracja, która padła, nie trafia do rejestru, więc

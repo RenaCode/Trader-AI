@@ -76,30 +76,14 @@ def test_proxy_api_dziala_takze_w_preview():
         "proxy zdefiniowane dwa razy — kopie się rozjadą"
 
 
-# --- podbijanie tagow nie moze wskazac produkcji na obraz bez poswiadczen ---
-def test_podbijanie_tagow_wylaczone_dopoki_brak_poswiadczen_do_rejestru():
-    """Krok `update-git` podbija tag obrazu w charts/trader/values.yaml, a ArgoCD
-    to synchronizuje — wskazywałby więc produkcję na obraz z prywatnego ghcr.io.
-
-    Klaster nie ma do niego poświadczeń: `imagePullSecrets: []`. Obrazy powstają
-    na VPS i są importowane wprost do containerd; `pullPolicy: IfNotPresent`
-    sprawia, że kubelet nie szuka ich w rejestrze.
-
-    Ten test wiąże jedno z drugim: dopóki chart nie ma `imagePullSecrets`,
-    podbijanie tagów przez CI musi zostać wyłączone. Zdjęcie warunku bez
-    dodania sekretu zatrzyma produkcję na ImagePullBackOff.
-    """
-    import yaml
-
-    wf = yaml.safe_load((KORZEN / ".github/workflows/docker-publish.yml").read_text())
-    warunek = wf["jobs"]["update-git"]["if"]
-    values = (KORZEN / "charts/trader/values.yaml").read_text()
-
-    ma_sekrety = re.search(r"^imagePullSecrets:\s*\[\s*\]\s*$", values, re.M) is None
-    if not ma_sekrety:
-        assert warunek is False, (
-            "CI podbija tagi obrazów, a klaster nie ma poświadczeń do ghcr.io — "
-            "pierwszy push kodu skończy się ImagePullBackOff")
+# PODBIJANIE TAGOW KONTRA POSWIADCZENIA DO REJESTRU: patrz tests/test_cicd.py.
+#
+# Tamten plik pilnuje tego samego warunku od strony, ktora obowiazuje od
+# 2026-09-24 ("CD wlaczone => sekret `ghcr-pull` musi byc w charcie"); tutejsza
+# wersja opisywala go przez kontrapozycje ("brak sekretu => CD wylaczone")
+# i sprawdzala `if: false`, czyli klucz, ktorego po wlaczeniu CD juz nie ma.
+# Dwie kopie jednego warunku rozjechalyby sie przy pierwszej zmianie, a rozjazd
+# nie objawilby sie awaria - tylko jednym testem, ktory nagle niczego nie pilnuje.
 
 
 def test_zmiana_workflow_uruchamia_workflow():

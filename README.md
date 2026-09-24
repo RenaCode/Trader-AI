@@ -387,10 +387,24 @@ kubectl create secret generic trader-secret \
 TLS: cert-manager (`letsencrypt-prod`) + Traefik, tak jak reszta usług na VPS.
 Kontener nginx serwuje czysty HTTP — certyfikat żyje wyłącznie na krawędzi.
 
-> **Obrazy budowane są obecnie na VPS**, nie pobierane z ghcr.io — repozytorium
-> jest prywatne, więc pakiety też, a klaster nie ma tokenu z `read:packages`.
-> Patrz `scripts/build-on-vps.sh`; ścieżka powrotu do pełnego GitOps-a jest
-> opisana w `charts/trader/values.yaml`.
+> **Obrazy buduje CI i pobiera je klaster z ghcr.io.** Push do `main` uruchamia
+> testy, build obu obrazów i — po ich powodzeniu — commit podbijający
+> `api.image.tag` / `web.image.tag`, który ArgoCD synchronizuje. Żaden krok nie
+> wymaga wejścia na serwer.
+>
+> Repozytorium jest prywatne, więc pakiety też. Klaster uwierzytelnia się
+> sekretem `ghcr-pull`, który powstaje POZA repozytorium — token potrzebuje
+> wyłącznie `read:packages`:
+>
+> ```bash
+> kubectl create secret docker-registry ghcr-pull \
+>   --docker-server=ghcr.io \
+>   --docker-username=<login-github> \
+>   --docker-password=<token-z-read:packages>
+> ```
+>
+> Bez tego sekretu każde wdrożenie nowego commita kończy się
+> `ImagePullBackOff` — obraz istnieje wtedy wyłącznie w rejestrze.
 
 ## Uwierzytelnianie
 

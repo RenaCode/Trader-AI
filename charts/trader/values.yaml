@@ -3,16 +3,28 @@ replicaCount: 1
 # Ile starych ReplicaSetow trzymac po rolloucie. Domyslne k8s to 10, co przy
 # deployu z kazdego pusha uzbieralo 115 pustych RS w ~2.5 miesiaca.
 revisionHistoryLimit: 3
-# Repo jest prywatne, wiec pakiety w ghcr.io tez - a k3s nie ma PAT-a z read:packages.
-# Do czasu jego dodania obrazy sa budowane NA VPS i importowane do containerd
-# (scripts/build-on-vps.sh), dlatego pullPolicy ponizej to IfNotPresent, a lista
-# sekretow jest pusta - nie ma zadnego pobierania z rejestru.
+# POBIERANIE OBRAZOW Z REJESTRU (2026-09-24).
 #
-# Po utworzeniu sekretu `ghcr-pull` wystarczy odkomentowac wpis i przywrocic
-# pullPolicy: Always, zeby wrocic do czystego GitOps-a z rejestru.
-imagePullSecrets: []
-#  - name: ghcr-pull
+# Do tej daty obrazy powstawaly NA VPS (`scripts/build-on-vps.sh`) i byly
+# importowane wprost do containerd, bo repo jest prywatne, wiec pakiety w ghcr
+# tez - a klaster nie mial czym sie do nich uwierzytelnic. CI przez caly ten
+# czas budowalo i wypychalo te same obrazy do ghcr, z ktorego nikt nie korzystal:
+# kazdy commit byl budowany DWA RAZY, a wdrozenie wymagalo recznego kroku na
+# serwerze. Skrypt zostal usuniety razem z ta zmiana.
+#
+# Sekret `ghcr-pull` (docker-registry, token z `read:packages`) tworzy sie POZA
+# repozytorium - patrz README. Bez niego kazde wdrozenie nowego commita konczy
+# sie `ImagePullBackOff`, bo obraz istnieje wylacznie w rejestrze.
+imagePullSecrets:
+  - name: ghcr-pull
 
+# `pullPolicy: IfNotPresent` ZOSTAJE, mimo powrotu do rejestru - i nie jest to
+# pozostalosc po imporcie do containerd. Tag `sha-<commit>` jest NIEZMIENNY:
+# ten sam tag zawsze znaczy ten sam obraz, wiec ponowne pytanie rejestru przy
+# kazdym restarcie poda nie moze przyniesc nic nowego. `Always` ma sens dla
+# tagow ruchomych (`latest`), ktorych tu nie uzywamy, a kosztuje odpytanie
+# rejestru przy kazdym starcie kontenera - takze wtedy, gdy rejestr nie
+# odpowiada, czyli dokladnie w chwili, gdy pod ma wstac najszybciej.
 api:
   image:
     repository: ghcr.io/renacode/trader-ai-api
