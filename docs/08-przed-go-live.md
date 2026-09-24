@@ -121,8 +121,63 @@ dla rynku o 0,1% wolumenu.** Jeden odczyt arkusza z hosta unijnego zamyka sprawe
 
 ### Co jeszcze musi sie wydarzyc w tej bramie
 
-- [ ] Zmierzyc spread na bybit.eu, nie na ksiedze globalnej — jedyny pomiar
-      mogacy samodzielnie uniewaznic projekt
+- [x] **Zmierzyc spread na bybit.eu, nie na ksiedze globalnej** — ZROBIONE
+      2026-09-24, ale wynik NIE jest jeszcze rozstrzygnieciem; patrz nizej.
+
+### Spread na ksiedze unijnej — pierwszy odczyt (2026-09-24)
+
+PRZYCZYNA BYLA W KODZIE, NIE W BRAKU NARZEDZIA. `BybitAdapter` bral arkusz
+z `PUBLIC_HOST` (`api.bybit.com`) razem ze swiecami, bo "to on ma ksiege, na
+ktorej model byl trenowany". Dla swiec jest to sluszne; dla arkusza bylo
+odwrotne — jego jedyni odbiorcy to cecha `book_spread_bps` (ktorej nie czyta
+zaden sygnal) i skladnik "spread" w `karta_rundy`, czyli RACHUNEK KOSZTU.
+Od tej daty arkusz idzie z `self._host`, czyli z `ref.venue` — tej samej gieldy,
+na ktora ida zlecenia, i automatycznie za trybem (demo/live).
+
+Odczyt porownawczy, 12 probek w odstepie 2 s, mediana na symbol:
+
+| symbol | ksiega globalna | ksiega unijna | krotnosc |
+| --- | --- | --- | --- |
+| BTCUSDC | 0,012 pb | 0,395 pb | 33,0x |
+| ETHUSDC | 0,038 pb | 0,586 pb | 15,5x |
+| SOLUSDC | 0,882 pb | 2,204 pb | 2,5x |
+| DOGEUSDC | 8,643 pb | 18,892 pb | 2,2x |
+| XRPUSDC | 2,378 pb | 4,419 pb | 1,9x |
+| SUIUSDC | 2,097 pb | 2,621 pb | 1,3x |
+| ADAUSDC | 8,478 pb | 4,238 pb | 0,5x |
+| NEARUSDC | 79,954 pb | 20,438 pb | 0,3x |
+| ARBUSDC | 5,413 pb | 0,471 pb | 0,1x |
+| LINKUSDC | 26,067 pb | 2,851 pb | 0,1x |
+
+**KROTNOSC MYLI I NIE JEST TU WLASCIWA MIARA.** Mediana krotnosci to 1,6x, ale
+BTC ma 33x przy spreadzie 0,395 pb — czyli mnoznik ogromny na wielkosci, ktora
+i tak jest bliska zeru. Znaczenie ma wartosc BEZWZGLEDNA wobec progu 13,76 pb.
+
+Co z tego wynika, ostroznie:
+
+  * mediana spreadu unijnego to **2,736 pb** na runde — przy przewadze
+    13,76 pb zostaje okolo 11 pb zapasu, wiec obawa "5–17x szerzej, przewaga
+    znika" NIE POTWIERDZILA SIE jako regula;
+  * ale **DOGEUSDC (18,9 pb) i NEARUSDC (20,4 pb) same przekraczaja cala
+    przewage** — na tych dwoch instrumentach strategia jest ujemna z samego
+    spreadu, niezaleznie od sygnalu;
+  * ksiega unijna bywa **wezsza** od globalnej (ARB, LINK, NEAR, ADA), co samo
+    w sobie podwaza zalozenie "mniej plynny rynek = szerszy spread" i kaze
+    podejrzewac, ze odczyty globalne dla malo plynnych par byly zaszumione.
+
+CZEGO TEN ODCZYT NIE ROZSTRZYGA, i dlatego brama zostaje otwarta:
+
+  * to 12 probek z JEDNEJ chwili, nie rozklad w czasie — nie ma p90 ani
+    zachowania w godzinach, w ktorych naprawde skladamy zlecenia;
+  * spread liczony przy pierwszym poziomie (`limit=1`) ignoruje GLEBOKOSC:
+    przy naszej wielkosci zlecenia mozemy nie trafic w dotkniecie;
+  * pomiar zrobiony z laptopa, nie z wezla produkcyjnego.
+
+**Wlasciwy pomiar zbiera sie teraz sam**: `market_worker` zapisuje
+`market.book_snapshot` z ksiegi unijnej, wiec za kilka dni `book_spread_bps`
+da rozklad, mediane i p90 na tej ksiedze, na ktorej handlujemy — i dopiero
+to domyka te brame. Wartosci sprzed 2026-09-24 pochodza z ksiegi globalnej
+i nie wolno ich z tymi mieszac.
 - [ ] Zmierzyc poslizg — dzis ZERO obserwacji, nie piec: z 49 wypelnien 31 ma
       cene zlecenia, a `limit_price != fill_price` nie zachodzi ani razu. Trzy
       wejscia maja kolumne zniszczona przez `zapisz_wejscie` sprzed poprawki;

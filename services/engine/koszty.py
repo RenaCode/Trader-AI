@@ -285,8 +285,17 @@ def karta_rundy(kind: str, maker: bool = False, *,
         nogi. Zrodlo: `market.book_snapshot` / cecha `book_spread_bps`.
       * `spread_nasza_ksiega` - czy ta liczba pochodzi z ksiegi, NA KTOREJ
         SKLADAMY ZLECENIA. False zamienia ja z pomiaru w podloge: wchodzi do
-        sumy, ale nie domyka karty. Dzis jest to False i tak ma byc - arkusz
-        czytamy z hosta globalnego, a handlujemy na bybit.eu (migracja 0018).
+        sumy, ale nie domyka karty.
+
+        OD 2026-09-24 DOMYSLNE `True` JEST PRAWDA, a nie zalozeniem.
+        `BybitAdapter.fetch_order_book` bierze arkusz z `self._host`, czyli
+        z `ref.venue` - tej samej gieldy, na ktora ida zlecenia. Wczesniej
+        czytal go z hosta globalnego i wtedy `False` bylo jedyna uczciwa
+        odpowiedzia.
+
+        UWAGA NA HISTORIE: wartosci `book_spread_bps` sprzed tej daty pochodza
+        z ksiegi globalnej. Pomiar liczony na dlugim oknie miesza wiec dwa
+        zrodla i dla niego `False` nadal jest wlasciwe.
       * `niewypelnienie` - koszt zlecen, ktore nie weszly, jako ulamek ceny na
         runde. Zrodlo: `poslizg.wypelnialnosc` zestawione z rozkladem ruchu,
         ktory przez to przepadl.
@@ -333,10 +342,10 @@ def karta_rundy(kind: str, maker: bool = False, *,
     else:
         s.append(Skladnik(
             "spread", spread_bps / 1e4, INNY_RYNEK,
-            "zmierzone na ksiedze GLOBALNEJ (`PUBLIC_HOST`), a zlecenia ida "
-            "na bybit.eu - podmiot o rzedu 0,1% tamtego wolumenu (migracja "
-            "0018). Rynek mniej plynny nie ma wezszego spreadu, wiec to jest "
-            "PODLOGA naszego kosztu, nie jego pomiar",
+            "zmierzone na ksiedze INNEJ niz ta, na ktorej skladamy zlecenia "
+            "(do 2026-09-24 arkusz szedl z hosta globalnego, a zlecenia na "
+            "bybit.eu - migracja 0018). Rynek o innej plynnosci ma inny spread, "
+            "wiec to jest OSZACOWANIE, nie pomiar naszego kosztu",
             wiarygodny=False))
 
     # OPLATY REGULACYJNE - TYLKO AKCJE I ETF-Y, I TYLKO NOGA SPRZEDAZY.

@@ -1808,11 +1808,13 @@ def main() -> int:
     ap.add_argument("--spread-obca-ksiega", action="store_true",
                     dest="spread_obca_ksiega",
                     help="podany --spread-bps pochodzi z ksiegi, na ktorej NIE "
-                         "skladamy zlecen (arkusz czytamy z hosta globalnego, "
-                         "zlecenia ida na bybit.eu - migracja 0018). Liczba "
-                         "wchodzi wtedy do rachunku jako PODLOGA, karta zostaje "
-                         "niepelna, a raport podaje krotnosc spreadu, przy "
-                         "ktorej przewaga schodzi do zera")
+                         "skladamy zlecen. Liczba wchodzi wtedy do rachunku "
+                         "jako OSZACOWANIE, karta zostaje niepelna, a raport "
+                         "podaje krotnosc spreadu, przy ktorej przewaga schodzi "
+                         "do zera. OD 2026-09-24 arkusz idzie juz z gieldy, na "
+                         "ktorej handlujemy (BybitAdapter.fetch_order_book -> "
+                         "self._host), wiec ta flaga jest potrzebna WYLACZNIE "
+                         "dla okien siegajacych przed te date")
     ap.add_argument("--spread-bps", type=float, default=None, dest="spread_bps",
                     help="ZMIERZONA polowa spreadu na noge razy dwie nogi, "
                          "w punktach bazowych na runde. Zrodlo: "

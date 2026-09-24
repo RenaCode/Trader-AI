@@ -63,9 +63,33 @@ from .base import (
     ZlozoneZlecenie,
 )
 
-# Dane publiczne bierzemy z podmiotu GLOBALNEGO niezaleznie od tego, gdzie stoi
-# konto - to on ma ksiege, na ktorej model byl trenowany.
+# SWIECE I CECHY bierzemy z podmiotu GLOBALNEGO niezaleznie od tego, gdzie stoi
+# konto - to on ma ksiege, na ktorej model byl trenowany. Przepiecie tego zrodla
+# wstawiloby w szereg uskok, ktorego kalibracja wag nie zaklada.
 PUBLIC_HOST = "https://api.bybit.com"
+
+# ARKUSZ JEST WYJATKIEM OD POWYZSZEGO, I TO NIE Z WYGODY (2026-09-24).
+#
+# `fetch_order_book` zasila WYLACZNIE rachunek kosztow: ceche `book_spread_bps`
+# (ktora jest w `diagnose_signals.CECHY_BEZ_SYGNALU` - zaden sygnal jej nie
+# czyta) oraz skladnik "spread" w `koszty.karta_rundy`. Kosztu nie opisuje
+# ksiega, na ktorej model sie uczyl - opisuje go ksiega, NA KTOREJ SKLADAMY
+# ZLECENIA.
+#
+# Do tej daty bylo odwrotnie i docs/08 nazywa to najdrozszym otwartym pytaniem
+# projektu: spready zmierzono na ksiedze globalnej, a zlecenia ida na bybit.eu
+# o okolo 0,1% tamtego wolumenu. `karta_rundy` oznaczala te liczbe jako
+# INNY_RYNEK i traktowala jako PODLOGE kosztu, nie jego pomiar.
+#
+# Host bierze sie teraz z `self._host`, czyli z `ref.venue` - dzieki temu idzie
+# ZA TRYBEM: w demo pytamy ksiegi demo (tej, ktora naprawde wypelnia nasze
+# zlecenia), a po przejsciu na live - ksiegi live. Obie sprawdzone 2026-09-24:
+# `api.bybit.eu` i `api-demo.bybit.eu` wystawiaja `/v5/market/orderbook`
+# publicznie, bez klucza.
+#
+# CZEGO TA ZMIANA NIE ROBI: nie rusza szeregu `book_spread_bps` wstecz. Wartosci
+# sprzed tej daty pochodza z ksiegi globalnej i opisuja co innego niz wartosci
+# po niej. Przy czytaniu historii tej cechy trzeba o tym pamietac.
 
 # Hosty PRYWATNE (podpisane zapytania). Domyslne wartosci sluza wylacznie
 # adapterom czytajacym dane publiczne; wlasciwy host przychodzi z ref.venue,
@@ -471,7 +495,7 @@ class BybitAdapter:
         res = await self._get(
             "/v5/market/orderbook",
             {"category": self._category, "symbol": symbol, "limit": min(depth, 200)},
-            private=False, host=PUBLIC_HOST,
+            private=False, host=self._host,
         )
         bids = [BookLevel(Decimal(p), Decimal(q)) for p, q in res.get("b", [])]
         asks = [BookLevel(Decimal(p), Decimal(q)) for p, q in res.get("a", [])]
