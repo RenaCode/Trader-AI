@@ -2316,6 +2316,97 @@ async def sprawdz_puls_workerow(fetch_all, notify, sucho: bool = False,
     return kod_wyjscia(zgloszone, trwale, "worker bez pulsu")
 
 
+# KANAL ALARMOWY NIE MOZE BYC JEDYNYM MIEJSCEM, W KTORE NIKT NIE PATRZY
+#
+# `inapp` to powiadomienie W PANELU. Dla zdarzenia `always_on` o wadze
+# `critical` - kill-switch, martwy silnik, brak kopii zapasowej - znaczy to
+# tyle, ze alarm dotrze do czlowieka dopiero wtedy, gdy ten sam z siebie
+# otworzy dashboard. O trzeciej w nocy nie otworzy.
+#
+# ZMIERZONE NA PRODUKCJI 2026-09-24: `notify.delivery` mialo 89 dostarczen
+# i WSZYSTKIE rodzaju `inapp`, przy 39 powiadomieniach `critical` w ostatniej
+# dobie. Kanal wychodzacy (whatsapp, webhook) nie byl skonfigurowany ani razu
+# w calej historii tabeli.
+#
+# DLACZEGO TA CZUJKA NIE MOZE WYSYLAC POWIADOMIENIA
+#
+# Bo sprawdza dokladnie ten mechanizm, ktorym musialaby je wyslac. Alarm
+# o braku kanalu wyslany kanalem, ktorego brakuje, jest ta sama wada, ktora
+# opisuje `nadzor ginie razem z nadzorowanym`: adres alarmu w tym samym
+# sekrecie, o ktorego braku ma donosic.
+#
+# Dlatego jedynym sygnalem jest KOD WYJSCIA i linia w logu - czyli czerwony Job
+# widoczny w `kubectl get jobs` i w ArgoCD. To jest slad, ktory nie przechodzi
+# przez sprawdzany mechanizm.
+RODZAJ_TYLKO_PANEL = "inapp"
+
+
+def ocen_kanaly(wiersze: list[dict]) -> list[tuple[str, str]]:
+    """Ktore krytyczne zdarzenia nie maja drogi poza panel. CZYSTA FUNKCJA.
+
+    Wiersz opisuje PARE odbiorca-zdarzenie, bo preferencje sa per odbiorca:
+    jeden uzytkownik z WhatsAppem nie zalatwia drugiego, ktory ma sam panel.
+
+    Zwraca (klucz, opis). Klucz jest stabilny (kod zdarzenia + id odbiorcy),
+    zeby wolajacy mogl po nim tlumic - tak samo jak przy pozostalych czujkach.
+    """
+    braki = []
+    for w in wiersze:
+        kanaly = [k for k in (w["kanaly"] or []) if k != RODZAJ_TYLKO_PANEL]
+        if kanaly:
+            continue
+        braki.append((
+            f"{w['event_code']}:{w['user_id']}",
+            f"{w['event_code']} ({w['severity']}) dla {w['login']}: "
+            f"wylacznie panel"))
+    return braki
+
+
+async def sprawdz_kanaly(fetch_all, notify, sucho: bool = False) -> int:
+    """Czy alarm krytyczny ma jak opuscic dashboard.
+
+    `notify` jest w sygnaturze dla zgodnosci z pozostalymi czujkami i NIE JEST
+    WOLANY - patrz naglowek wyzej. Ta czujka mowi wylacznie kodem wyjscia.
+    """
+    wiersze = await fetch_all(
+        "SELECT et.code AS event_code, et.default_severity AS severity,"
+        "       u.id AS user_id, u.login,"
+        "       coalesce(p.channels::text[], ARRAY[]::text[]) AS kanaly"
+        "  FROM notify.event_type et"
+        "  CROSS JOIN app.\"user\" u"
+        "  LEFT JOIN notify.preference p"
+        "         ON p.event_code = et.code AND p.user_id = u.id AND p.enabled"
+        " WHERE u.is_active AND et.always_on AND et.default_severity = 'critical'"
+        " ORDER BY et.code, u.login")
+    if not wiersze:
+        print("kanaly: brak krytycznych zdarzen always_on albo brak aktywnych "
+              "odbiorcow — nie ma czego sprawdzac")
+        return 0
+
+    braki = ocen_kanaly(wiersze)
+    for w in wiersze:
+        kanaly = ", ".join(w["kanaly"]) if w["kanaly"] else "ZADNEGO"
+        znacznik = "TYLKO PANEL" if any(k.startswith(f"{w['event_code']}:{w['user_id']}")
+                                        for k, _ in braki) else "ok         "
+        print(f"  {znacznik} {w['event_code']} -> {w['login']}: {kanaly}")
+
+    if not braki:
+        print("  każde krytyczne zdarzenie ma drogę poza panel")
+        return 0
+
+    print(f"\n  {len(braki)} × ALARM KRYTYCZNY WYLACZNIE W PANELU.")
+    print("  Kill-switch, martwy silnik i brak kopii dotra do czlowieka dopiero,")
+    print("  gdy ten sam otworzy dashboard. Skonfiguruj kanal `whatsapp` albo")
+    print("  `webhook` w Ustawieniach i wlacz go dla tych zdarzen.")
+    if sucho:
+        print("  Tryb suchy — kod wyjścia i tak niezerowy, bo to STAN, nie zdarzenie.")
+    # BEZ TLUMIENIA I BEZ `kod_wyjscia`. Pozostale czujki tlumia powtorzenia,
+    # bo kazde z nich wysyla POWIADOMIENIE, a powtarzane powiadomienie uczy je
+    # wyciszac. Tu sygnalem jest czerwony Job - stan trwaly ma swiecic na
+    # czerwono tak dlugo, jak trwa, bo nic innego o nim nie mowi.
+    return len(braki)
+
+
 async def sprawdz_dryf(fetch_all, notify, sucho: bool = False, *,
                        engine: str = "crypto", bar: str = "4h",
                        teraz: datetime | None = None) -> int:
@@ -2458,7 +2549,7 @@ async def main() -> int:
     ap.add_argument("--co", default="stan-nauki",
                     choices=("stan-nauki", "zywotnosc", "ryzyko", "kopie",
                              "swiezosc", "egzekucja", "poslizg", "instrumenty",
-                             "workery", "dryf"),
+                             "workery", "dryf", "kanaly"),
                     help="stan-nauki: czy wynik treningu sie zmienil; "
                          "dryf: czy rozklad cech odjechal od treningowego I TAK "
                          "ZOSTAL - stan trwaly, ktorego 'stan-nauki' z definicji "
@@ -2521,6 +2612,8 @@ async def main() -> int:
             return await sprawdz_ryzyko(fetch_all, notify, sucho=args.sucho)
         if args.co == "kopie":
             return await sprawdz_kopie(fetch_all, notify, sucho=args.sucho)
+        if args.co == "kanaly":
+            return await sprawdz_kanaly(fetch_all, notify, sucho=args.sucho)
         if args.co == "swiezosc":
             return await sprawdz_swiezosc(fetch_all, notify, sucho=args.sucho,
                                           engine=args.engine,

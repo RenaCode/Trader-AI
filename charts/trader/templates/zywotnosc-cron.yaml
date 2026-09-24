@@ -104,6 +104,17 @@ spec:
                   # niego samego (market 60 s, history 1200 s), wiec nie ma tu
                   # drugiej kopii tej liczby do rozjechania.
                   python services/engine/dozor.py --co workery   || RC=$?
+                  # CZY ALARM MA JAK OPUSCIC PANEL.
+                  #
+                  # Wszystkie czujki wyzej koncza sie powiadomieniem. Ta sprawdza
+                  # mechanizm, ktorym one to robia - i dlatego sama go NIE UZYWA:
+                  # alarm o braku kanalu wyslany brakujacym kanalem bylby ta sama
+                  # wada, ktora opisuje "nadzor ginie razem z nadzorowanym".
+                  # Jej jedynym sygnalem jest kod wyjscia, czyli czerwony Job.
+                  #
+                  # Zmierzone 2026-09-24: `notify.delivery` mialo 89 dostarczen,
+                  # wszystkie `inapp`, przy 39 powiadomieniach `critical` w dobie.
+                  python services/engine/dozor.py --co kanaly    || RC=$?
                   # ZDROWIE EGZEKUCJI. exec.order ma kolumne reject_reason od
                   # migracji 0005, a typ zdarzenia order.rejected istnieje
                   # w notify.event_type rownie dlugo - z etykieta, opisem

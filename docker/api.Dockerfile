@@ -14,8 +14,13 @@ FROM python:3.12-slim@sha256:2f17fc044b579bab302c2e8054d3a686e2cb9a83de48e70534b
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 WORKDIR /app
 
+# OBA PLIKI, I OBA W JEDNEJ WARSTWIE. `constraints.txt` nie instaluje niczego -
+# wyznacza wersje zaleznosci POSREDNICH, ktorych `requirements.txt` nie wymienia
+# z nazwy (29 z 42 pakietow). Bez niego przebudowanie tego samego commita za
+# miesiac daje inny obraz pod tym samym tagiem `sha-<commit>`.
 COPY services/api/requirements.txt ./requirements.txt
-RUN pip install --no-cache-dir -r requirements.txt
+COPY services/api/constraints.txt ./constraints.txt
+RUN pip install --no-cache-dir -r requirements.txt -c constraints.txt
 
 COPY services/ ./services/
 COPY db/ ./db/

@@ -91,3 +91,54 @@ def test_copy_w_web_dockerfile_nadal_idzie_po_npm_ci():
     # skutek.
     tresc = DOCKERFILE["web.Dockerfile"]
     assert tresc.index("npm ci") < tresc.index("COPY web/ ./")
+
+
+# ------------------------------------------------- plik blokady drzewa zaleznosci
+def _piny(tekst: str) -> dict[str, str]:
+    """nazwa -> wersja z linii `pakiet[extras]==X`. Komentarze i puste pomijamy."""
+    out = {}
+    for linia in tekst.splitlines():
+        linia = linia.split("#")[0].strip()
+        if "==" not in linia:
+            continue
+        nazwa, wersja = linia.split("==", 1)
+        nazwa = nazwa.split("[")[0].strip().lower().replace("_", "-")
+        out[nazwa] = wersja.strip()
+    return out
+
+
+def test_constraints_zgadza_sie_z_requirements():
+    """Dwa pliki z ta sama wersja to rozjazd przy pierwszej zmianie.
+
+    `requirements.txt` przypina warstwe bezposrednia, `constraints.txt` cale
+    drzewo. Gdyby podniesc wersje w jednym i zapomniec o drugim, pip przerwie
+    build konfliktem - ale dopiero w CI, po pelnym przebiegu testow. Ten test
+    mowi to samo w sekunde i w miejscu, w ktorym zmiana powstaje.
+    """
+    req = _piny((KORZEN / "services/api/requirements.txt").read_text(encoding="utf-8"))
+    con = _piny((KORZEN / "services/api/constraints.txt").read_text(encoding="utf-8"))
+    assert req, "requirements.txt nie ma ani jednego przypiecia =="
+    for nazwa, wersja in req.items():
+        assert nazwa in con, (
+            f"{nazwa} jest w requirements.txt, a nie ma go w constraints.txt — "
+            f"plik blokady przestal obejmowac warstwe bezposrednia")
+        assert con[nazwa] == wersja, (
+            f"{nazwa}: requirements.txt mowi {wersja}, constraints.txt {con[nazwa]}")
+
+
+def test_constraints_nie_ma_extras():
+    """Skladnia plikow ograniczen ich nie dopuszcza - pip odrzuca caly plik."""
+    tresc = (KORZEN / "services/api/constraints.txt").read_text(encoding="utf-8")
+    for nr, linia in enumerate(tresc.splitlines(), 1):
+        linia = linia.split("#")[0].strip()
+        assert "[" not in linia, (
+            f"constraints.txt:{nr} zawiera extras — pip odrzuci cały plik: {linia}")
+
+
+def test_obraz_instaluje_Z_plikiem_blokady():
+    """Plik blokady niewpiety w budowanie jest dokumentacja, nie blokada."""
+    dockerfile = (KORZEN / "docker/api.Dockerfile").read_text(encoding="utf-8")
+    assert "constraints.txt" in dockerfile, "obraz nie kopiuje pliku blokady"
+    assert re.search(r"pip install[^\n]*-c\s+constraints\.txt", dockerfile), (
+        "pip instaluje bez `-c constraints.txt` — zaleznosci posrednie nadal "
+        "plywaja, mimo ze plik istnieje")

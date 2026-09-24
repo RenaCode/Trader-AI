@@ -1,0 +1,83 @@
+# PLIK BLOKADY DRZEWA ZALEZNOSCI - domkniecie luki opisanej w requirements.txt.
+#
+# CO TEN PLIK DOMYKA
+#
+# `requirements.txt` przypina warstwe BEZPOSREDNIA i te pakiety z extras, ktore
+# realnie decyduja o dzialaniu - i sam zapisuje, czego mu brakuje: "pliku blokady
+# obejmujacego CALE drzewo zaleznosci posrednich". Bez niego przebudowanie tego
+# samego commita za miesiac instaluje najnowsze wtedy wydania 29 pakietow, ktorych
+# nikt nie wymienil z nazwy, a tag `sha-<commit>` nadal obiecuje ten sam obraz.
+#
+# Od 2026-09-24 waga tej obietnicy wzrosla: obraz produkcji buduje CI i pobiera
+# go klaster z rejestru, a cofniecie sie do starszego commita znaczy pobranie
+# obrazu zbudowanego WTEDY. Jesli tag nie wynika z commita, cofniecie nie
+# przywraca stanu przetestowanego - a awaria po cofnieciu wyglada na awarie
+# starego kodu.
+#
+# SKAD TE WERSJE - I DLACZEGO AKURAT STAD
+#
+# Z `pip freeze` w PODZIE PRODUKCYJNYM, nie z najnowszych wydan w PyPI. To jest
+# roznica miedzy "przypinamy to, co dziala i przeszlo testy" a "przypinamy to,
+# co akurat jest najnowsze". Drugie zamienia plik blokady w jednorazowa
+# aktualizacje wszystkiego naraz, wykonana bez powodu i bez pomiaru.
+# Zrzut z obrazu sha-24443ed, 2026-09-24, 42 pakiety.
+#
+# JAK TO DZIALA W BUDOWANIU
+#
+# `pip install -r requirements.txt -c constraints.txt`. Plik ograniczen NIE
+# INSTALUJE niczego - wyznacza tylko dopuszczalne wersje. Pakiet, ktory zniknie
+# z drzewa, przestaje byc instalowany bez bledu; pakiet, ktory wejdzie nowy,
+# zatrzyma build W CI - czyli w jedynym miejscu, gdzie taka zmiana ma byc
+# zauwazona, zanim dojedzie na produkcje.
+#
+# JAK TO AKTUALIZOWAC
+#
+# Po swiadomej zmianie wersji w `requirements.txt`: zbudowac obraz, uruchomic
+# testy, i dopiero z DZIALAJACEGO obrazu zrzucic `pip freeze` tutaj. Recznie
+# podniesiona wersja w tym pliku nie jest pomiarem - jest zyczeniem.
+#
+# EXTRAS TU NIE MA I MIEC NIE MOZE: skladnia plikow ograniczen ich nie dopuszcza.
+# Zostaja w `requirements.txt` i to tam sa opisane.
+
+annotated-doc==0.0.5
+annotated-types==0.8.0
+anthropic==1.1.0
+anyio==4.15.1
+argon2-cffi-bindings==26.1.0
+argon2-cffi==25.1.0
+certifi==2026.7.22
+cffi==2.1.1
+click==8.5.0
+cryptography==50.0.1
+docstring_parser==0.18.0
+fastapi==0.141.1
+feedparser-sgmllib==2.1.0
+feedparser==6.0.14
+h11==0.16.0
+httpcore==1.0.9
+httpcore2==2.13.1
+httptools==0.8.0
+httpx==0.28.1
+httpx2==2.13.1
+idna==3.20
+jiter==0.17.0
+pillow==12.3.0
+psycopg-binary==3.3.4
+psycopg-pool==3.3.1
+psycopg==3.3.4
+pycparser==3.0
+pydantic_core==2.46.5
+pydantic==2.13.5
+PyOTP==2.10.0
+python-dotenv==1.2.3
+PyYAML==6.0.3
+qrcode==8.2
+sniffio==1.3.1
+starlette==1.7.0
+truststore==0.10.4
+typing_extensions==4.16.0
+typing-inspection==0.4.4
+uvicorn==0.52.4
+uvloop==0.22.1
+watchfiles==1.3.0
+websockets==17.1

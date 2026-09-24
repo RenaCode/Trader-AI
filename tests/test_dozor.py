@@ -783,3 +783,79 @@ def test_zawieszone_plany_zglaszane_jako_awaria_silnika():
 
     (kod, _, _), = ocen_egzekucje(_stan_egz(przyjete=5, zawieszone_plany=3))
     assert kod == "engine.down"
+
+
+# ------------------------------------------------- czy alarm ma jak opuscic panel
+def _wiersz_kanalu(kod, kanaly, login="wlasciciel", sev="critical", uid=1):
+    return {"event_code": kod, "severity": sev, "user_id": uid,
+            "login": login, "kanaly": kanaly}
+
+
+def test_sam_inapp_to_brak_drogi_dla_alarmu():
+    """ZMIERZONE 2026-09-24: `notify.delivery` mialo 89 dostarczen, WSZYSTKIE
+    `inapp`, przy 39 powiadomieniach `critical` w dobie. Kill-switch dociera
+    wtedy do czlowieka dopiero, gdy ten sam otworzy dashboard."""
+    from services.engine.dozor import ocen_kanaly
+
+    braki = ocen_kanaly([_wiersz_kanalu("killswitch.triggered", ["inapp"])])
+    assert len(braki) == 1
+    assert "wylacznie panel" in braki[0][1]
+
+
+def test_brak_preferencji_tez_jest_brakiem_drogi():
+    """Pusta lista kanalow znaczy to samo co sam panel: alarm nie wychodzi."""
+    from services.engine.dozor import ocen_kanaly
+
+    assert len(ocen_kanaly([_wiersz_kanalu("engine.down", [])])) == 1
+    assert len(ocen_kanaly([_wiersz_kanalu("engine.down", None)])) == 1
+
+
+def test_kanal_wychodzacy_zamyka_sprawe():
+    from services.engine.dozor import ocen_kanaly
+
+    assert ocen_kanaly([_wiersz_kanalu("engine.down", ["inapp", "whatsapp"])]) == []
+    assert ocen_kanaly([_wiersz_kanalu("engine.down", ["webhook"])]) == []
+
+
+def test_brak_liczy_sie_PER_ODBIORCA():
+    """Jeden uzytkownik z WhatsAppem nie zalatwia drugiego, ktory ma sam panel —
+    preferencje sa per odbiorca, wiec i brak drogi jest per odbiorca."""
+    from services.engine.dozor import ocen_kanaly
+
+    braki = ocen_kanaly([
+        _wiersz_kanalu("engine.down", ["whatsapp"], login="a", uid=1),
+        _wiersz_kanalu("engine.down", ["inapp"], login="b", uid=2),
+    ])
+    assert [k for k, _ in braki] == ["engine.down:2"]
+
+
+def test_czujka_kanalow_NIE_WOLA_powiadomienia():
+    """Alarm o braku kanalu wyslany brakujacym kanalem to ta sama wada, ktora
+    opisuje „nadzor ginie razem z nadzorowanym". Jedynym sygnalem jest kod
+    wyjscia — czyli czerwony Job, slad nieprzechodzacy przez sprawdzany mechanizm.
+    """
+    import asyncio
+
+    from services.engine.dozor import sprawdz_kanaly
+
+    async def fetch_all(sql, params=None):
+        return [_wiersz_kanalu("killswitch.triggered", ["inapp"])]
+
+    async def notify(*a, **k):
+        raise AssertionError("czujka kanalu nie ma prawa uzywac kanalu")
+
+    assert asyncio.run(sprawdz_kanaly(fetch_all, notify, sucho=True)) == 1
+    # Takze przy `--sucho`: to jest STAN, nie zdarzenie, wiec ma swiecic na
+    # czerwono tak dlugo, jak trwa.
+    assert asyncio.run(sprawdz_kanaly(fetch_all, notify, sucho=False)) == 1
+
+
+def test_czujka_kanalow_jest_wpieta_w_zadanie_cykliczne():
+    """Czujka niewolana przez nic jest dokumentacja, nie nadzorem."""
+    from pathlib import Path
+
+    cron = (Path(__file__).resolve().parents[1]
+            / "charts/trader/templates/zywotnosc-cron.yaml").read_text(encoding="utf-8")
+    assert "--co kanaly" in cron
+    assert "|| RC=$?" in cron.split("--co kanaly")[1].split("\n")[0], \
+        "kod wyjscia czujki kanalow nie idzie do RC — Job byl by zielony"

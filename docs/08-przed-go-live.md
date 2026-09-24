@@ -7,10 +7,42 @@ Horyzont: rok. Decyzja wlasciciela z 2026-09-24: "lepiej zeby bylo dobrze niz sz
 
 ## Stan na dzis
 
-Produkcja stoi na `sha-c758da2`, wszystkie workery `1/1`, drzewo czyste.
-Pelny zestaw testow: 1861 przeszlo, 25 pominietych, 0 bledow.
+Produkcja stoi na `sha-24443ed`, wszystkie pody `1/1`, drzewo czyste.
+Pelny zestaw testow: 1912 przeszlo, 25 pominietych, 0 bledow.
 
-Dwie rzeczy naprawione w tej turze byly awariami produkcji, nie hipotezami:
+### Co doszlo 2026-09-24 po poludniu
+
+| co | stan |
+| --- | --- |
+| **Petla decyzyjna equity** (`workers.engine-equity`) | chodzi, `--bar 1h --kind stock --limit --egzekucja gielda --mode demo --wymagaj-modelu` |
+| Bramka sesji (`services/engine/sesja.py`) | stan z `/v2/clock` Alpaki; „nie wiem" NIE jest otwarciem i konczy cykl bledem |
+| **Dziennik jakosciowy** (`services/engine/postmortem.py`) | CronJob `50 5 * * * Etc/UTC`, wlasna waska rola `trader_postmortem` (0054) |
+| **Atrybucja newsow** (`decision_contribution kind='news'`) | zapisywana; jedna stala SQL wspolna z cecha `news_sent` |
+| **Pelne CD** | push -> CI -> obraz w ghcr -> `update-git` podbija tag -> ArgoCD; `scripts/build-on-vps.sh` usuniety |
+| **Plik blokady** (`services/api/constraints.txt`) | 42 pakiety przypiete ze zrzutu produkcji; `-c` wpiete w obraz |
+
+EQUITY JESZCZE NIE HANDLUJE, I TO JEST ZAMIERZONE. `--wymagaj-modelu` wstrzymuje
+zlecenia do czasu, az trener wystawi aktywna wersje `equity_signal_weighting_1h`
+(cron 04:40 UTC, tor dodany w `trainerCron.equity`). Przy medianie OOS Sharpe
+ponizej zera ten model moze nigdy nie przejsc walidacji — i wtedy petla bedzie
+POPRAWNIE odmawiac handlu bez konca. To pomiar do przyjecia, nie usterka do naprawienia.
+
+### Trzy wady znalezione tego dnia przez wlasny nadzor
+
+| co | objaw | przyczyna |
+| --- | --- | --- |
+| `main` niespojny | 8 modulow testowych nie zbiera sie na czystym checkoucie | `ab71f7d` dodalo import `MINUT_TIMEFRAME` do `dozor.py`, ale mapa nigdy nie wyszla z czyjegos drzewa roboczego |
+| `features-equity` w CrashLoopie | `unrecognized arguments: --okno-dni 7` | wpis w charcie uzywal flagi istniejacej tylko w niezacommitowanym kodzie; ArgoCD wdraza szablony natychmiast, bez podbicia tagu |
+| **bezpiecznik equity bez ani jednego pomiaru** | `--co ryzyko`: „ANI JEDNEGO zapisanego pomiaru limitow konta w calej historii" | bramka sesji stala PRZED `RiskKernel`, wiec `check_account()` nie wykonal sie ani razu; podloga kapitalu nie byla liczona poza sesja, a pozycje zostaja otwarte przez noc i weekend |
+
+Trzecia zostala zlapana przez czujke przy PIERWSZYM cyklu silnika equity
+i naprawiona tego samego dnia (`24443ed`): bramki stoja teraz za pomiarem, bo
+pomiar nie jest handlem.
+
+Dwie pierwsze dzialaly po cichu przez kilka dni: **czujka zywotnosci rzucala
+16 wyjatkow na przebieg i mimo to konczyla raportem**. Kazdy przebieg testow
+przechodzil, bo kazdy szedl po drzewie roboczym, ktore akurat trzymalo
+brakujacy plik.
 
 | co | objaw | przyczyna |
 | --- | --- | --- |
@@ -25,6 +57,27 @@ brakujacy plik.
 Po naprawie `features-equity` liczy 6 849 wartosci cech na cykl, 0 bledow;
 czujka zywotnosci ma 0 tracebackow; worker newsow na nowej, odcietej od kluczy
 gieldy roli produkuje 36 analiz na dobe przy zerowej zaleglosci.
+
+## Brama -1 — czy ktokolwiek uslyszy alarm
+
+**ZMIERZONE 2026-09-24:** `notify.delivery` ma 89 dostarczen i WSZYSTKIE rodzaju
+`inapp`, przy 39 powiadomieniach `critical` w ostatniej dobie. Kanal wychodzacy
+(`whatsapp`, `webhook`) nie byl skonfigurowany ANI RAZU w calej historii tabeli.
+
+Znaczy to, ze `killswitch.triggered`, `engine.down` i `backup.missing` dotra do
+czlowieka dopiero wtedy, gdy ten sam z siebie otworzy dashboard. O trzeciej
+w nocy nie otworzy.
+
+Ta brama stoi PRZED brama 0, bo dotyczy warunku wczesniejszego niz przewaga:
+caly nadzor opisany w tym dokumencie jest wart tyle, ile droga, ktora jego
+wynik pokonuje do odbiorcy. Bez niej pozostale czujki mierza poprawnie i mowia
+do pustego pokoju.
+
+- [ ] Skonfigurowac kanal `whatsapp` albo `webhook` w Ustawieniach i wlaczyc go
+      dla zdarzen `always_on` o wadze `critical`
+- [x] Czujka `dozor.py --co kanaly` (w `zywotnosc-cron`, co 10 min) zglasza brak
+      takiego kanalu KODEM WYJSCIA, a nie powiadomieniem — bo powiadomienie
+      szloby kanalem, ktorego brak wlasnie opisuje
 
 ## Brama 0 — czy jest po co isc
 
