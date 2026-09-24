@@ -28,7 +28,7 @@ imagePullSecrets:
 api:
   image:
     repository: ghcr.io/renacode/trader-ai-api
-    tag: "sha-9f647b0"
+    tag: "sha-ab75b0d"
     pullPolicy: IfNotPresent
   resources:
     limits:   { cpu: 1000m, memory: 1Gi }
