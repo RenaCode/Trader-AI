@@ -829,22 +829,48 @@ def test_brak_liczy_sie_PER_ODBIORCA():
     assert [k for k, _ in braki] == ["engine.down:2"]
 
 
-def _stend_kanalow(*, powiadomiono_w_dobie: bool):
-    """Atrapa rozroznia TRZY zapytania czujki; oddaje tylko to, o co pytano."""
-    wyslane = []
+def _stend_kanalow(*, luk: int = 5, juz_w_bazie: bool = False):
+    """Stend, ktory MODELUJE COOLDOWN KATALOGOWY `notify()`.
+
+    Poprzednia wersja tej atrapy oddawala te sama odpowiedz na kazde pytanie
+    o tlumienie i przyjmowala kazde `notify()`. Przez to NIE ZLAPALA wady, ktora
+    produkcja pokazala przy pierwszym przebiegu (zadanie 29837520): `notify()`
+    ma wlasny cooldown per (odbiorca, kod zdarzenia), wiec z pieciu wywolan
+    zapisywal JEDNO, a czujka liczyla pozostale cztery jako nowe przy kazdym
+    przebiegu — Job swiecil na czerwono bez konca.
+
+    Dlatego ta atrapa odrzuca drugie powiadomienie tego samego typu dla tego
+    samego odbiorcy, a zapytanie o `notify.notification` odpowiada Z TEGO, CO
+    NAPRAWDE POWSTALO. Test moze wtedy sprawdzic ZBIEZNOSC do zielonego Joba,
+    a nie tylko pierwszy przebieg.
+    """
+    baza = [("notify.no_channel", 1)] if juz_w_bazie else []
+    wolania = []
 
     async def fetch_all(sql, params=None):
         p = " ".join(sql.split())
+        # KOLEJNOSC GALEZI JEST ISTOTNA: zapytanie o kanaly TEZ zawiera
+        # `app."user"` (CROSS JOIN), wiec rozroznia je dopiero `notify.event_type`.
+        # Atrapa, ktora tego nie rozroznia, oddaje liste odbiorcow na pytanie
+        # o kanaly — i test pada na `KeyError`, zamiast sprawdzic cokolwiek.
+        if "notify.event_type" in p:
+            return [_wiersz_kanalu(f"zdarzenie{i}.krytyczne", ["inapp"], uid=1)
+                    for i in range(luk)]
         if "notify.notification" in p:
-            return [{"?column?": 1}] if powiadomiono_w_dobie else []
-        if 'app."user"' in p and "is_active" in p and "event_type" not in p:
+            return [{"?column?": 1}] if baza else []
+        if 'app."user"' in p:
             return [{"id": 1}]
-        return [_wiersz_kanalu("killswitch.triggered", ["inapp"])]
+        raise AssertionError(f"atrapa nie zna tego zapytania: {p[:80]}")
 
     async def notify(user_id, event_code, tytul, tresc, **kw):
-        wyslane.append((event_code, kw.get("data", {}).get("klucz")))
+        wolania.append((event_code, tytul))
+        # COOLDOWN KATALOGOWY - tak jak `services/api/notifications.py`.
+        if any(e == event_code and u == user_id for e, u in baza):
+            return None
+        baza.append((event_code, user_id))
+        return len(baza)
 
-    return fetch_all, notify, wyslane
+    return fetch_all, notify, wolania
 
 
 def test_czujka_kanalow_ZGLASZA_luke_pierwszy_raz():
@@ -853,27 +879,48 @@ def test_czujka_kanalow_ZGLASZA_luke_pierwszy_raz():
 
     from services.engine.dozor import sprawdz_kanaly
 
-    fetch_all, notify, wyslane = _stend_kanalow(powiadomiono_w_dobie=False)
-    assert asyncio.run(sprawdz_kanaly(fetch_all, notify)) == 1
-    assert wyslane == [("notify.no_channel", "killswitch.triggered:1")]
+    fetch_all, notify, wolania = _stend_kanalow(luk=5)
+    assert asyncio.run(sprawdz_kanaly(fetch_all, notify)) == 5
+    assert len(wolania) == 1, (
+        "jedno powiadomienie na przebieg, nie jedno na luke — kolejne i tak "
+        "odrzuci cooldown katalogowy, a czujka policzy je jako niezgloszone")
 
 
-def test_czujka_kanalow_NIE_SWIECI_NA_CZERWONO_BEZ_KONCA():
-    """KOREKTA z 2026-09-24. Brak kanalu jest luka konfiguracyjna i nie mija sam.
+def test_czujka_kanalow_ZBIEGA_do_zielonego_Joba():
+    """WADA ZMIERZONA NA PRODUKCJI 2026-09-24 (zadanie 29837520).
 
-    Czujka bez tlumienia swiecilaby co 10 minut bez konca, a `trader-zywotnosc`
-    uruchamia w tym samym zadaniu osiem innych sprawdzen — trwale czerwony Job
-    uczy przewijac czerwone Joby, czyli psuje sygnal dla WSZYSTKICH czujek.
+    Stan trwaly ma dac czerwony Job RAZ. Jesli kolejny przebieg nadal jest
+    czerwony, czerwony przestaje cokolwiek znaczyc — a `trader-zywotnosc`
+    uruchamia w tym samym zadaniu osiem innych sprawdzen.
     """
     import asyncio
 
     from services.engine.dozor import sprawdz_kanaly
 
-    fetch_all, notify, wyslane = _stend_kanalow(powiadomiono_w_dobie=True)
-    assert asyncio.run(sprawdz_kanaly(fetch_all, notify)) == 0, (
-        "stan juz zgloszony nadal podnosi kod wyjscia — Job bedzie czerwony "
-        "bez konca i przestanie cokolwiek znaczyc")
-    assert wyslane == [], "powtorzenie nie ma prawa wysylac drugiego powiadomienia"
+    fetch_all, notify, wolania = _stend_kanalow(luk=5)
+    pierwszy = asyncio.run(sprawdz_kanaly(fetch_all, notify))
+    drugi = asyncio.run(sprawdz_kanaly(fetch_all, notify))
+    trzeci = asyncio.run(sprawdz_kanaly(fetch_all, notify))
+    assert pierwszy == 5
+    assert (drugi, trzeci) == (0, 0), (
+        f"czujka nie zbiega do zera ({drugi}, {trzeci}) — Job bedzie czerwony "
+        f"przy kazdym przebiegu, mimo ze stan zostal juz zgloszony")
+    assert len(wolania) == 1, "powtorzenia nie maja prawa wysylac nic wiecej"
+
+
+def test_tlumienie_nie_zalezy_od_LICZBY_luk():
+    """Wada z produkcji brala sie z tego, ze tlumienie liczylo per luke,
+    a `notify()` per odbiorce i typ. Dwa warunki mierzace co innego zawsze
+    sie rozjada — ten test pilnuje, ze mierza to samo."""
+    import asyncio
+
+    from services.engine.dozor import sprawdz_kanaly
+
+    for luk in (1, 3, 12):
+        fetch_all, notify, _ = _stend_kanalow(luk=luk)
+        assert asyncio.run(sprawdz_kanaly(fetch_all, notify)) == luk
+        assert asyncio.run(sprawdz_kanaly(fetch_all, notify)) == 0, (
+            f"przy {luk} lukach czujka nie zbiega do zera")
 
 
 def test_tryb_suchy_nie_wysyla_ale_liczy():
@@ -881,9 +928,9 @@ def test_tryb_suchy_nie_wysyla_ale_liczy():
 
     from services.engine.dozor import sprawdz_kanaly
 
-    fetch_all, notify, wyslane = _stend_kanalow(powiadomiono_w_dobie=False)
-    assert asyncio.run(sprawdz_kanaly(fetch_all, notify, sucho=True)) == 1
-    assert wyslane == []
+    fetch_all, notify, wolania = _stend_kanalow(luk=3)
+    assert asyncio.run(sprawdz_kanaly(fetch_all, notify, sucho=True)) == 3
+    assert wolania == []
 
 
 def test_czujka_kanalow_jest_wpieta_w_zadanie_cykliczne():

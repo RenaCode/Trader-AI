@@ -2414,26 +2414,45 @@ async def sprawdz_kanaly(fetch_all, notify, sucho: bool = False) -> int:
         print("  Tryb suchy — powiadomienie nie wysyłane.")
         return len(braki)
 
-    # TLUMIENIE OKNEM DOBOWYM, tak jak przy wycofaniu instrumentu. Stan nie ma
-    # wlasnego znacznika w bazie (nie ma tu `last_beat_at`, od ktorego liczyc
-    # nawrot), wiec powtorzenie rozpoznajemy po tym, czy powiadomienie o TEJ
-    # SAMEJ luce poszlo w ostatniej dobie. Klucz jest stabilny (kod zdarzenia
-    # + id odbiorcy), wiec dolozenie szostej luki zglasza sie jako nowa.
+    # JEDNO POWIADOMIENIE NA PRZEBIEG, NIE JEDNO NA LUKE - i tlumienie liczone
+    # DOKLADNIE TYM SAMYM WARUNKIEM, ktorego uzywa `notify()`.
+    #
+    # ZMIERZONE NA PRODUKCJI 2026-09-24, zadanie trader-zywotnosc-29837520.
+    # Pierwsza wersja wolala `notify()` osobno dla kazdej z pieciu luk i tlumila
+    # po kluczu `zdarzenie:odbiorca`. Powstal JEDEN wiersz w `notify.notification`:
+    # `notify.no_channel` nie jest `always_on`, wiec `notify()` zastosowal wlasny
+    # cooldown katalogowy (86400 s, per odbiorca i kod zdarzenia) i odrzucil
+    # cztery kolejne wywolania - po cichu, bo odrzucenie przez cooldown nie jest
+    # bledem.
+    #
+    # Skutek: przy kazdym nastepnym przebiegu moje tlumienie znajdowalo wiersz
+    # dla JEDNEJ luki i liczylo pozostale cztery jako nowe. `kod_wyjscia` wracalo
+    # 4, Job swiecil na czerwono bez konca - czyli dokladnie ta wada, ktorej ta
+    # poprawka mial zapobiec, tyle ze piętro nizej.
+    #
+    # DWA WARUNKI TLUMIENIA, KTORE MIERZA CO INNEGO, ZAWSZE SIE ROZJADA. Dlatego
+    # pytamy teraz o to samo, co `notify()`: czy powiadomienie tego typu poszlo
+    # do tego odbiorcy w oknie cooldownu. Nie o konkretna luke - tresc i tak
+    # wymienia wszystkie z nazwy, wiec jedno powiadomienie niesie pelny stan.
+    #
+    # CO TRACIMY: luka, ktora dojdzie w srodku doby, nie wywola osobnego
+    # powiadomienia. Zostaje w linii logu przy KAZDYM przebiegu i wejdzie do
+    # dobowego przypomnienia. Przy stanie, ktory nie mija sam, to jest wlasciwy
+    # rytm - a zbieznosc do zielonego Joba jest warunkiem, zeby czerwony cokolwiek
+    # znaczyl.
     odbiorcy = await fetch_all('SELECT id FROM app."user" WHERE is_active')
-    zgloszone = trwale = 0
-    for klucz, opis in braki:
-        juz = await fetch_all(
-            "SELECT 1 FROM notify.notification"
-            " WHERE event_code = 'notify.no_channel' AND data->>'klucz' = %s"
-            "   AND created_at > now() - interval '24 hours' LIMIT 1", (klucz,))
-        if juz:
-            trwale += 1
-            continue
-        zgloszone += 1
-        for u in odbiorcy:
-            await notify(u["id"], "notify.no_channel", tytul, tresc,
-                         severity="critical", data={"klucz": klucz, "opis": opis})
-    return kod_wyjscia(zgloszone, trwale, "alarm krytyczny tylko w panelu")
+    juz = await fetch_all(
+        "SELECT 1 FROM notify.notification"
+        " WHERE event_code = 'notify.no_channel'"
+        "   AND created_at > now() - interval '24 hours' LIMIT 1")
+    if juz:
+        return kod_wyjscia(0, len(braki), "alarm krytyczny tylko w panelu")
+
+    klucze = "+".join(sorted(k for k, _ in braki))
+    for u in odbiorcy:
+        await notify(u["id"], "notify.no_channel", tytul, tresc,
+                     severity="critical", data={"klucze": klucze, "ile": len(braki)})
+    return kod_wyjscia(len(braki), 0, "alarm krytyczny tylko w panelu")
 
 
 async def sprawdz_dryf(fetch_all, notify, sucho: bool = False, *,
