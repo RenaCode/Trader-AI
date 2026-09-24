@@ -115,6 +115,112 @@ def t95(df: int) -> float:
     return T95[1]
 
 
+# Ponizej tego rozrzutu proba nie niesie informacji o zmiennosci i iloraz
+# przestaje byc miara czegokolwiek. Nie jest to podloga PODSTAWIANA pod
+# mianownik - to prog, ponizej ktorego oddajemy None.
+#
+# ROZNICA WOBEC `portfolio.MIN_SD` JEST CALA RZECZA. Tam 1e-4 wchodzi do
+# mianownika przez `max(pstdev(rets), MIN_SD)`, wiec osiem identycznych zwrotow
+# po 1% daje Sharpe 100 - i ta setka jest liczba wpisana, zeby nie bylo
+# dzielenia przez zero, a nie przewaga stukrotna. Tutaj taka proba oddaje None.
+MIN_ROZRZUT = 1e-12
+
+
+def sharpe(zwroty: list[float]) -> float | None:
+    """Sredni zwrot podzielony przez jego odchylenie. NA TRANSAKCJE, nie rocznie.
+
+    NAZWA JEST MYLACA I TRZEBA TO POWIEDZIEC WPROST. „Sharpe" bez przymiotnika
+    znaczy w finansach miare ANUALIZOWANA. Ta nie jest anualizowana i nie da sie
+    jej porownac z zadna liczba z literatury: roznica to czynnik rzedu
+    pierwiastka z liczby transakcji w roku, czyli kilkanascie razy. Prog
+    produkcyjny 0,05 jest dobrany do TEJ miary - patrz komentarz w `train.py`.
+
+    ODCHYLENIE PROBKOWE, NIE POPULACYJNE. `portfolio.metrics` liczy `pstdev`,
+    czyli dzieli przez n zamiast przez n-1. Przy osmiu transakcjach zaniza
+    mianownik o 6,5%, czyli zawyza Sharpe o tyle samo - w kazdym oknie i zawsze
+    w te sama strone. Probka nie jest populacja; okno testowe jest wycinkiem.
+
+    None, a nie liczba, gdy proba jest jednoelementowa albo stala. Jedna
+    transakcja nie ma rozrzutu, a proba stala ma rozrzut zero - w obu wypadkach
+    iloraz albo nie istnieje, albo powstaje wylacznie z tego, czym zatkano
+    mianownik. To ta sama zasada, co w `przedzial_sredniej`: brak pomiaru musi
+    wygladac inaczej niz pomiar.
+    """
+    if len(zwroty) < 2:
+        return None
+    sd = statistics.stdev(zwroty)
+    if sd < MIN_ROZRZUT:
+        return None
+    return statistics.fmean(zwroty) / sd
+
+
+def profit_factor(zwroty: list[float]) -> float | None:
+    """Suma zyskow podzielona przez sume strat. None, gdy strat NIE BYLO.
+
+    DLACZEGO None, A NIE ZERO. `portfolio.metrics` zwraca w tym miejscu 0.0,
+    czyli okno bez ani jednej straty - najlepsze mozliwe - dostaje najgorsza
+    mozliwa wartosc. Wchodzi potem do sredniej po oknach i ciagnie ja w dol,
+    podczas gdy okno o wartosci 129 ciagnie ja w gore. Zaden z tych dwoch
+    wplywow nie jest zamierzony i oba sa niewidoczne w wyniku.
+
+    Zero oddajemy wylacznie wtedy, gdy zyskow nie bylo wcale - to jest
+    prawdziwe zero, nie brak wartosci.
+    """
+    if not zwroty:
+        return None
+    zyski = sum(r for r in zwroty if r > 0)
+    straty = -sum(r for r in zwroty if r < 0)
+    if straty <= 0:
+        return None
+    return zyski / straty
+
+
+def _kwantyl(posortowane: list[float], p: float) -> float | None:
+    """Kwantyl z interpolacja liniowa. None, gdy proba za mala."""
+    n = len(posortowane)
+    if n < 4:
+        return None
+    poz = p * (n - 1)
+    dol = int(poz)
+    gora = min(dol + 1, n - 1)
+    return posortowane[dol] + (posortowane[gora] - posortowane[dol]) * (poz - dol)
+
+
+def rozklad(xs: list[float]) -> dict:
+    """Opis rozkladu, a nie jedna liczba. CZYSTA FUNKCJA.
+
+    DLACZEGO TO ISTNIEJE JAKO OSOBNA FUNKCJA
+
+    Zeby nie dalo sie podac sredniej bez mediany i bez odsetka ujemnych.
+    Raport walk-forward podawal `profit_factor 1,6419 (0 .. 129,2275)`: srednia
+    z wielkosci nieograniczonej z gory, przy ktorej jedno okno na czterdziesci
+    decyduje o calej liczbie. Mediana odpowiada na pytanie, ktore naprawde
+    zadajemy - jak wyglada TYPOWE okno - a odsetek ujemnych na drugie:
+    jak czesto jest zle.
+
+    Kwartyle, a nie sam zakres. Zakres opisuje dwie skrajne obserwacje;
+    przy rozkladzie skosnym to akurat te dwie, ktorych nie chcemy uogolniac.
+    """
+    n = len(xs)
+    if n == 0:
+        return {"n": 0, "srednia": None, "mediana": None, "q1": None, "q3": None,
+                "najmniejszy": None, "najwiekszy": None,
+                "ujemnych": 0, "udzial_ujemnych": None}
+    s = sorted(xs)
+    ujemnych = sum(1 for x in xs if x < 0)
+    return {
+        "n": n,
+        "srednia": statistics.fmean(xs),
+        "mediana": statistics.median(s),
+        "q1": _kwantyl(s, 0.25),
+        "q3": _kwantyl(s, 0.75),
+        "najmniejszy": s[0],
+        "najwiekszy": s[-1],
+        "ujemnych": ujemnych,
+        "udzial_ujemnych": ujemnych / n,
+    }
+
+
 def przedzial_sredniej(xs: list[float]) -> tuple[float, float] | None:
     """Przedzial ufnosci 95% dla SREDNIEJ z proby. None, gdy nie ma czego liczyc.
 

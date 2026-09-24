@@ -35,6 +35,7 @@ from services.engine.koszty import POSLIZG_MAKER
 from services.engine.poslizg import (
     NIEODROZNIALNE,
     ROZBIEZNE,
+    TOZSAMOSC,
     ZAPYTANIE,
     cena_odniesienia,
     opis,
@@ -138,7 +139,19 @@ def test_trzy_IDEALNE_wyjscia_NIE_zadaja_podniesienia_stalej():
     assert s["maker"]["n"] == 3
     assert s["maker"]["werdykt"] != ROZBIEZNE, (
         "moduł żąda podniesienia stałej na podstawie własnego błędu pomiaru")
-    assert s["maker"]["werdykt"] == NIEODROZNIALNE
+    # WERDYKT ZAOSTRZONY 2026-09-24, wcześniej stało tu `== NIEODROZNIALNE`.
+    #
+    # Trzy wypełnienia co do grosza po cenie zlecenia to trzy zera policzone
+    # jako (x − x)/x — przedział ufności ma zerową szerokość i obejmuje
+    # założenie, więc `nieodróżnialne od założenia` wychodziło stąd zawsze,
+    # niezależnie od tego, jaka była prawdziwa egzekucja. Czytało się to jako
+    # „zmierzone i zgadza się", a było arytmetyką. To nie jest złagodzenie
+    # dawnego warunku: `!= ROZBIEZNE` obowiązuje dalej, a do rodziny werdyktów
+    # potwierdzających ta próba już nie należy. Patrz test_poslizg_tozsamosc.py.
+    assert s["maker"]["werdykt"] == TOZSAMOSC
+    assert s["maker"]["tozsamosciowych"] == 3
+    # Przedzial nadal sie liczy i nadal obejmuje zalozenie - zmienil sie
+    # WERDYKT, czyli to, co z tego przedzialu wolno wyczytac.
     lo, hi = s["maker"]["przedzial"]
     assert lo <= POSLIZG_MAKER <= hi
 

@@ -629,10 +629,56 @@ class RiskKernel:
             nav=nav, nav_peak=nav_szczyt, nav_day_ago=nav_doba,
             wplaty_netto=wplaty, nav_od_poczatku=nav_od_poczatku,
         )
-        verdict = evaluate_limits(state, self._limits, instrument_id, notional, qty)
+        rodzaj = self._rodzaj(instrument_id)
+        if rodzaj is None:
+            # NIE WIEMY, CZYM HANDLUJEMY - a to nie jest to samo co "handlujemy
+            # spotem". Od rodzaju zalezy, czy limit dzwigni jest konieczny
+            # (`evaluate_limits`, punkt 7), wiec zejscie na domysl bylo by
+            # wylaczeniem tego zabezpieczenia przez BRAK DANEJ. Ta sama zasada
+            # co przy `prog_min_equity`: limitu, ktorego nie da sie policzyc,
+            # nie wolno zamienic po cichu w limit o innym znaczeniu.
+            #
+            # `block`, a nie wyjatek: to jeden instrument, nie caly silnik.
+            return RiskVerdict(
+                "block",
+                f"Instrument {instrument_id} nie ma wiersza w ref.instrument — "
+                "nie wiadomo, czy pozwala na pozycję krótką, więc nie wiadomo, "
+                "czy limit dźwigni jest konieczny")
+        verdict = evaluate_limits(state, self._limits, instrument_id, notional, qty,
+                                  kind=rodzaj)
         if verdict.trigger_killswitch:
             self._trigger_killswitch(verdict.trigger_killswitch, verdict.trigger_limit)
         return verdict
+
+    def _rodzaj(self, instrument_id: int) -> str | None:
+        """`ref.instrument.kind` instrumentu. Z BAZY, nie od wolajacego.
+
+        DLACZEGO KERNEL PYTA SAM, ZAMIAST PRZYJAC PARAMETR
+
+        Od tej wartosci zalezy, czy limit dzwigni jest KONIECZNY
+        (`risk_rules.evaluate_limits`, punkt 7). Gdyby przychodzila z zewnatrz,
+        pominiecie jej w jednym wywolaniu - albo podanie `--kind` z wiersza
+        polecen zamiast rodzaju instrumentu - wylaczaloby to zabezpieczenie
+        CICHO, bo werdykt wygladalby wtedy dokladnie tak samo jak na spocie.
+        W `loop.py` te dwie rzeczy juz zyja obok siebie pod mylaco podobnymi
+        nazwami: `--kind` jest cennikiem rachunku papierowego, a rodzajem
+        instrumentu jest `ocena["kind"]` z `ref.instrument`.
+
+        `None` ZNACZY "WIERSZA NIE MA" i nie jest tym samym co "spot". Co z tym
+        zrobic, rozstrzyga `check()` - bo odpowiedzia na niewiedze jest WERDYKT,
+        a nie wyjatek. `instrument_id` pochodzi z zapytania o samo
+        `ref.instrument`, wiec pusta odpowiedz znaczy, ze baza zmienila sie pod
+        nami w trakcie cyklu: ma z tego wyjsc jeden instrument mniej, a nie
+        przerwany cykl calego silnika.
+
+        Bez pamieci podrecznej: cykl pyta raz na instrument (dziesiec zapytan
+        po kluczu glownym na 300 s), a slownik trzymany przez zycie procesu
+        przezylby zmiane `kind` w bazie i podawal ja nieaktualna dowolnie dlugo.
+        """
+        cur = self.conn.cursor()
+        cur.execute("SELECT kind FROM ref.instrument WHERE id = %s", (instrument_id,))
+        r = cur.fetchone()
+        return (r or {}).get("kind")
 
     def _trigger_killswitch(self, reason: str, limit_name: str | None = None) -> None:
         """Zapis zatrzymania. Tu nie ma zadnego wygasania ani licznika.

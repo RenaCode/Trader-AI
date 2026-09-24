@@ -29,7 +29,10 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 
 from services.engine.horizons import Horizon
-from services.engine.koszty import POSLIZG_MAKER, POSLIZG_TAKER, koszty
+from services.engine.koszty import (
+    GODZINY_FINANSOWANIA, POSLIZG_MAKER, POSLIZG_TAKER, koszty,
+    stawka_finansowania_na_ulamek,
+)
 from services.engine.risk_rules import (
     START_EQUITY, udzial_budzetu,
     DEFAULT_LIMITS, RiskState, evaluate_account, evaluate_limits, position_budget,
@@ -55,6 +58,25 @@ class Position:
     entry: float
     conf: float
     opened_at: datetime
+    # Finansowanie zaplacone (dodatnie) albo zainkasowane (ujemne) przez TE
+    # pozycje, w walucie. Trzymane per pozycja, a nie tylko w sumie globalnej,
+    # bo musi wejsc do `ret` TEJ transakcji - Sharpe liczy sie ze zwrotow, wiec
+    # koszt widoczny wylacznie w krzywej kapitalu zostawia werdykt okna liczony
+    # przed kosztem. Prowizja przerabiala dokladnie te droge.
+    finansowanie: float = 0.0
+
+    @property
+    def finansowanie_w_zwrocie(self) -> float:
+        """Finansowanie przeliczone na UŁAMEK notionalu wejscia.
+
+        ZEROWY NOTIONAL JEST MOZLIWY I NIE JEST BLEDEM: przy progu wejscia 0
+        sygnal o sile 0 daje `udzial_budzetu(0) == 0`, wiec pozycja powstaje
+        pusta (tak robi `test_zwrot_z_transakcji_jest_po_prowizji_a_nie_przed`).
+        Finansowanie od zerowej pozycji tez wynosi zero - ale samo dzielenie
+        wywracaloby caly przebieg.
+        """
+        baza = self.qty * self.entry
+        return self.finansowanie / baza if baza else 0.0
 
 
 @dataclass
@@ -121,6 +143,24 @@ class PortfolioResult:
     # policzyla te koszty, ktore deklaruje.
     prowizja: float = 0.0
     poslizg: float = 0.0
+    # FINANSOWANIE, W WALUCIE, ZE ZNAKIEM. Dodatnie = zaplacone, ujemne =
+    # zainkasowane (krotka noga przy dodatniej stawce). Osobno od `fees_paid`,
+    # choc wchodzi do tej samej krzywej: prowizja zalezy od liczby zlecen,
+    # finansowanie od czasu trzymania. Zsumowane w jednej liczbie przestaloby
+    # sie dac rozdzielic, a to wlasnie ten rozdzial rozstrzyga, czy strona
+    # krotka na perpetualu ma sens.
+    finansowanie_zaplacone: float = 0.0
+    # Ile wyplat finansowania przeszlo przez otwarte pozycje w calym oknie.
+    # Kanarek na ciche zero: koszt 0,00 przy 0 wyplatach znaczy "nie bylo za
+    # co placic", a przy 240 wyplatach - "stawka byla zerowa". To sa dwie
+    # rozne rzeczy i jedna liczba ich nie rozroznia.
+    wyplat_finansowania: int = 0
+    # Wyplaty, ktore przeszly przez otwarta pozycje, a stawki dla nich NIE
+    # ZNAMY - dziura w `market.funding_rate` w srodku okna. Nie doliczamy ich
+    # (nie ma czego), ale nie wolno ich tez zgubic: koszt policzony na oknie
+    # z dziura jest ZANIZONY o nieznana wielkosc, a bez tego licznika wyglada
+    # tak samo jak koszt policzony na komplecie danych.
+    wyplat_bez_stawki: int = 0
 
 
 def precompute_panels(panels: dict[str, list[dict]],
@@ -144,6 +184,34 @@ def precompute_panels(panels: dict[str, list[dict]],
             for r in rows
         ]
     return cache
+
+
+def wyplaty_finansowania(od: datetime, do: datetime) -> int:
+    """Ile razy gielda nalicza finansowanie w przedziale (od, do].
+
+    PRZEDZIAL OTWARTY Z LEWEJ. Wyplata dokladnie w chwili wejscia w pozycje
+    nas nie dotyczy - placa ja ci, ktorzy pozycje juz mieli. Gdyby przedzial
+    byl domkniety, kazda pozycja otwarta o pelnej godzinie finansowania placila
+    by raz wiecej, niz zaplaci na gieldzie.
+
+    Liczymy GODZINY ZEGAROWE UTC z `GODZINY_FINANSOWANIA`, a nie krok stalej
+    dlugosci od `od`. Chwile wyplaty sa wlasnoscia gieldy i nie przesuwaja sie
+    razem z tym, kiedy my weszlismy.
+    """
+    if do <= od:
+        return 0
+    # Ruszamy od poczatku doby wejscia i idziemy po kolejnych chwilach wyplaty.
+    # Doba to trzy punkty, wiec nawet okno wieloletnie to pojedyncze tysiace
+    # krokow na pozycje - a pozycje w tej symulacji zyja godzinami.
+    dzien = od.replace(hour=0, minute=0, second=0, microsecond=0)
+    n = 0
+    while dzien <= do:
+        for g in GODZINY_FINANSOWANIA:
+            chwila = dzien.replace(hour=g)
+            if od < chwila <= do:
+                n += 1
+        dzien += timedelta(days=1)
+    return n
 
 
 def _wypelnione(limit: float, swieca: dict, kupno: bool) -> bool:
@@ -178,7 +246,8 @@ def simulate_portfolio(panels: dict[str, list[dict]],
                        cache: dict[str, list[tuple]] | None = None,
                        kind: str = "spot",
                        egzekucja: Egzekucja | None = None,
-                       zakladane_pozycje: int | None = None) -> PortfolioResult:
+                       zakladane_pozycje: int | None = None,
+                       poslizg: float | None = None) -> PortfolioResult:
     """Jedno konto, wszystkie instrumenty, wspolne limity.
 
     Wejscie i wyjscie po cenie NASTEPNEJ swiecy - decyzja z zamkniecia swiecy T
@@ -188,7 +257,23 @@ def simulate_portfolio(panels: dict[str, list[dict]],
     egz = egzekucja or Egzekucja()
     k = koszty(kind)
     fee = k.maker if egz.limit else k.taker
-    slip = POSLIZG_MAKER if egz.limit else POSLIZG_TAKER
+    # POSLIZG: ZALOZENIE, KTOREGO DA SIE DOTKNAC Z ZEWNATRZ.
+    #
+    # `POSLIZG_MAKER` i `POSLIZG_TAKER` sa ZALOZENIAMI, nie pomiarami, i trzeba
+    # to powiedziec wprost: na 2026-09-24 poslizg ma ZERO mierzalnych obserwacji.
+    # Wszystkie piec wypelnien gieldowych na produkcji ma `exec.order.limit_price`
+    # rowne cenie wypelnienia co do grosza - nie dlatego, ze poslizgu nie bylo,
+    # tylko dlatego, ze do wdrozenia z 2026-09-23 17:58 kolumna "cena wysłana"
+    # byla nadpisywana cena wykonania. Pieciu obserwacji poslizgu nie ma; jest
+    # ich zero.
+    #
+    # Wynik policzony na jednej wartosci takiego zalozenia wyglada jak pomiar
+    # i nie da sie go obronic - to ta sama wada co dzisiejsze Sharpe 0,0452.
+    # Ten parametr istnieje po to, zeby wolajacy mogl PRZEJECHAC zakres i pokazac,
+    # jak wynik od niego zalezy, zamiast wybrac jedna liczbe i o niej zamilczec.
+    # `None` zostawia zalozenie z `koszty.py`, czyli zachowanie dotychczasowe.
+    slip = (POSLIZG_MAKER if egz.limit else POSLIZG_TAKER) if poslizg is None \
+        else poslizg
     # Na instrumencie, ktorego nie da sie shortowac (spot bez pozyczki marzowej),
     # symulacja NIE MOZE otwierac krotkich pozycji - inaczej mierzy strategie,
     # ktorej nie da sie wykonac. W dzienniku produkcyjnym 8 z 12 pozycji to byly
@@ -238,6 +323,28 @@ def simulate_portfolio(panels: dict[str, list[dict]],
     if len(timeline) < 3:
         return PortfolioResult()
 
+    # FINANSOWANIE JEST TRZECIA POZYCJA RACHUNKU, obok prowizji i poslizgu -
+    # i jedyna, ktora zalezy od CZASU TRZYMANIA. Naliczamy je wylacznie tam,
+    # gdzie gielda je pobiera (`koszty.Koszty.finansowanie`), z cechy, ktora
+    # potok juz liczy.
+    #
+    # BRAK CECHY PRZERYWA, a nie znaczy zero - sprawdzone raz, przed petla,
+    # zeby blad pokazal sie w pierwszej sekundzie, a nie po godzinie liczenia.
+    # `compute_funding` nie zapisuje ANI JEDNEGO wiersza dla instrumentu bez
+    # `meta.funding_from` albo bez historii w `market.funding_rate`, wiec panel
+    # bez tej cechy wyglada identycznie jak panel ze stawka zerowa. Wariant
+    # perp policzony na takim panelu mial by zerowy koszt finansowania
+    # i wygladal na zmierzony.
+    if k.finansowanie:
+        for sym, rows in panels.items():
+            if not any("funding_rate" in r["f"] for r in rows):
+                raise ValueError(
+                    f"panel {sym} nie ma ani jednej stawki finansowania "
+                    f"(cecha `funding_rate`), a rodzaj instrumentu '{kind}' "
+                    "je płaci — symulacja bez tego kosztu zaniżyłaby koszt "
+                    "strony długiej i zawyżyła wynik; uzupełnij "
+                    "market.funding_rate i przelicz cechy")
+
     positions: dict[str, Position] = {}
     max_exposure = 0.0
     suma_ekspozycji = 0.0
@@ -246,14 +353,67 @@ def simulate_portfolio(panels: dict[str, list[dict]],
     swiec_z_pozycja = 0
     realized = 0.0
     fees_paid = 0.0
+    finansowanie_razem = 0.0
+    wyplat_razem = 0
     res = PortfolioResult()
     order_times: list[datetime] = []
     killswitch: dict | None = None
     peak = START_EQUITY
     equity_hist: list[tuple[datetime, float]] = []
 
+    # Ostatnia ZNANA stawka finansowania per instrument. Osobno od panelu, bo
+    # instrument moze nie miec swiecy w danej chwili (rozne pokrycie szeregow),
+    # a pozycja i tak wtedy placi - gielda nie pyta, czy mamy dane.
+    ostatnia_stawka: dict[str, float] = {}
+
     for ti, t in enumerate(timeline[:-1]):
         present = by_time[t]
+
+        # --- finansowanie za przedzial (poprzednia swieca, t] ---------------
+        #
+        # PRZED wycena, bo obniza kapital, ktorym mierzy sie limity tej swiecy.
+        # Naliczone po stronie: dodatnia stawka znaczy "dlugie placa krotkim",
+        # wiec koszt to `+side * stawka * notional` - krotka noga INKASUJE.
+        # Ten znak jest cala trescia porownania spot/perp: gdyby obie strony
+        # placily jednakowo, wariant perp wygladalby gorzej, niz jest.
+        #
+        # Stawke bierzemy z BIEZACEJ swiecy. Cecha w punkcie `t` to ostatnia
+        # stawka ogloszona przed `t` (`features.compute_funding`), a wyplata
+        # o godzinie `t` idzie wlasnie po niej - wiec nie zagladamy w przyszlosc.
+        for sym, cur in present.items():
+            stawka = cur["row"]["f"].get("funding_rate")
+            if stawka is not None:
+                ostatnia_stawka[sym] = stawka
+        if k.finansowanie and ti > 0 and positions:
+            n_wyplat = wyplaty_finansowania(timeline[ti - 1], t)
+            if n_wyplat:
+                for sym, pos in positions.items():
+                    stawka = ostatnia_stawka.get(sym)
+                    if stawka is None:
+                        res.wyplat_bez_stawki += n_wyplat
+                        continue
+                    cur = present.get(sym)
+                    px = cur["row"]["price"] if cur else pos.entry
+                    # Od NOTIONALU BIEZACEGO, nie od ceny wejscia: gielda
+                    # nalicza finansowanie od wartosci pozycji teraz. Ta sama
+                    # regula co przy ekspozycji kilka linii nizej.
+                    koszt = (pos.side * stawka_finansowania_na_ulamek(stawka)
+                             * pos.qty * px * n_wyplat)
+                    pos.finansowanie += koszt
+                    finansowanie_razem += koszt
+                    wyplat_razem += n_wyplat
+                    # DO `fees_paid`, A NIE JAKO OSOBNY SKLADNIK KRZYWEJ.
+                    #
+                    # Wzor na kapital (`START_EQUITY + realized - fees_paid +
+                    # unreal`) wystepuje w tej funkcji w trzech miejscach.
+                    # Czwarty skladnik trzeba by dopisac do kazdego z nich,
+                    # a pominiety w jednym dawalby kapital rozny od sumy
+                    # transakcji - cicho i tylko na czesci sciezek. Ten projekt
+                    # ma juz jedna taka historie (prowizja odejmowana od krzywej,
+                    # ale nie od `ret`). `finansowanie_razem` zostaje WYLACZNIE
+                    # do raportowania, bo rozdzial prowizji od finansowania jest
+                    # tym, co rozstrzyga o stronie krotkiej.
+                    fees_paid += koszt
 
         # --- wycena biezaca -------------------------------------------------
         unreal = 0.0
@@ -312,10 +472,30 @@ def simulate_portfolio(panels: dict[str, list[dict]],
                 # okno jest dodatnie; poprzednia wersja odejmowala prowizje
                 # wylacznie od krzywej, wiec miara, na ktorej opiera sie caly
                 # werdykt, byla liczona PRZED kosztami.
+                # FINANSOWANIE TAK SAMO JAK PROWIZJA - w zwrocie, nie tylko
+                # w krzywej. Powod jest ten sam co akapit wyzej i dotyczy tej
+                # samej miary: Sharpe liczy sie z `ret`. Zamiana waluty na
+                # ulamek idzie po notionalu WEJSCIA, bo w tej samej bazie
+                # wyrazona jest cala reszta tego wyrazenia.
                 "ret": (pos.side * (exit_px / pos.entry - 1)
-                        - fee * (1 + exit_px / pos.entry)),
+                        - fee * (1 + exit_px / pos.entry)
+                        - pos.finansowanie_w_zwrocie),
                 "conf": pos.conf, "symbol": sym,
                 "opened_at": pos.opened_at, "closed_at": rows[nxt_idx]["t"],
+                # STRONA I FINANSOWANIE PRZY KAZDEJ TRANSAKCJI.
+                #
+                # Bez `side` wyniku strony krotkiej nie da sie oddzielic od
+                # dlugiej NICZYM - a to jest jedyne pytanie, dla ktorego wariant
+                # perp w ogole istnieje: audyt zmierzyl, ze 135 ze 180 sygnalow
+                # ponad progiem to sygnaly krotkie, i nikt nie wie, ile byly
+                # warte. Odtwarzanie strony po znaku zwrotu jest niemozliwe
+                # (stratny long i stratny short wygladaja tak samo).
+                #
+                # `finansowanie` osobno od `ret`, choc juz w nim siedzi: bez tego
+                # nie da sie odpowiedziec, czy krotka noga zarabia na ruchu ceny,
+                # czy na inkasowaniu stawki - a to sa dwie rozne strategie
+                # i dwa rozne ryzyka.
+                "side": pos.side, "finansowanie": pos.finansowanie,
             })
             del positions[sym]
             order_times.append(t)
@@ -401,8 +581,15 @@ def simulate_portfolio(panels: dict[str, list[dict]],
                 per_instrument=per_inst, orders_last_hour=orders_h,
                 killswitch=killswitch,
             )
+            # RODZAJ INSTRUMENTU IDZIE DO REGUL, tak samo jak w produkcji
+            # (`risk.RiskKernel.check` czyta go z `ref.instrument`). Bez tego
+            # symulacja wariantu perp nie zobaczylaby wymogu limitu dzwigni,
+            # ktory produkcje zatrzyma - czyli mierzylaby strategie luzniejsza
+            # niz ta, ktora system wykona. Dokladnie ta roznica kazala
+            # przeniesc limity do `risk_rules` (patrz docstring modulu).
             v = evaluate_limits(state, limits, ids[sym],
-                                Decimal(str(notional)), Decimal(str(qty)))
+                                Decimal(str(notional)), Decimal(str(qty)),
+                                kind=kind)
 
             if v.trigger_killswitch and killswitch is None:
                 # Kill-switch wymaga RECZNEGO odblokowania, wiec do konca okna
@@ -451,9 +638,11 @@ def simulate_portfolio(panels: dict[str, list[dict]],
         # Domkniecie na koncu okna idzie po cenie rynkowej, wiec wyjscie placi
         # stawke TAKER niezaleznie od trybu egzekucji - tak jak w krzywej kapitalu.
         res.trades.append({"ret": (pos.side * (exit_px / pos.entry - 1)
-                                   - fee - k.taker * exit_px / pos.entry),
+                                   - fee - k.taker * exit_px / pos.entry
+                                   - pos.finansowanie_w_zwrocie),
                            "conf": pos.conf,
-                           "symbol": sym, "opened_at": pos.opened_at, "closed_at": last_t})
+                           "symbol": sym, "opened_at": pos.opened_at, "closed_at": last_t,
+                           "side": pos.side, "finansowanie": pos.finansowanie})
     res.equity_curve.append((last_t, START_EQUITY + realized - fees_paid))
     res.max_exposure = max_exposure
     res.avg_exposure = (suma_ekspozycji / swiec_ekspozycji) if swiec_ekspozycji else 0.0
@@ -467,6 +656,8 @@ def simulate_portfolio(panels: dict[str, list[dict]],
     res.base_notional = baza
     res.prowizja = fee
     res.poslizg = slip
+    res.finansowanie_zaplacone = finansowanie_razem
+    res.wyplat_finansowania = wyplat_razem
     return res
 
 

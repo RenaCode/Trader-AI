@@ -59,6 +59,19 @@ LIMITY_LUZNE = {
     "max_orders_per_hour":   {"value": Decimal("1000"),   "action": "block"},
     "max_position_notional": {"value": Decimal("5000"),   "action": "downsize"},
     "max_total_exposure":    {"value": Decimal("999999"), "action": "block"},
+    # DZWIGNIA MUSI TU BYC, MIMO ZE TEN PLIK JEJ NIE MIERZY.
+    #
+    # Od 2026-09-24 `evaluate_limits` odmawia handlu instrumentem pozwalajacym
+    # na pozycje krotka, gdy limitu dzwigni NIE MA (`risk_rules`, punkt 6):
+    # strata na shorcie nie ma gornego konca, wiec brak limitu nie moze znaczyc
+    # "dzwignia dowolna". Polowa testow w tym pliku chodzi na `kind="perp"`
+    # i bez tego wpisu dostawalaby `block` z powodu, ktory nie ma nic wspolnego
+    # z modelem wypelnien, ktory mierza.
+    #
+    # Wartosc astronomiczna CELOWO - tak jak pozostale limity tutaj. Ten zestaw
+    # istnieje po to, zeby zaden limit nie wiazal; za sam limit dzwigni
+    # odpowiada tests/test_dzwignia.py.
+    "max_leverage":          {"value": Decimal("9999"),   "action": "block"},
 }
 
 

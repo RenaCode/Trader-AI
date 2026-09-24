@@ -257,6 +257,18 @@ class Kursor:
                 {k: (Decimal(str(v)) if isinstance(v, float) else v)
                  for k, v in dict(r).items()}
                 for r in wiersze]
+        elif "SELECT kind FROM ref.instrument" in s:
+            # RODZAJ INSTRUMENTU. `RiskKernel.check` pyta o niego od 2026-09-24,
+            # bo od niego zalezy, czy limit dzwigni jest KONIECZNY
+            # (`risk_rules.evaluate_limits`, punkt 7) - a brak wiersza znaczy
+            # "nie wiadomo, czym handlujemy" i daje werdykt `block`.
+            #
+            # Atrapa oddaje 'spot' dla kazdego id, bo swiat tego pliku jest
+            # spotowy: chodzi w nim o budzet i ekspozycje na rachunku 10 000,
+            # a nie o dzwignie. Gdyby milczala, kazde `check()` tutaj
+            # blokowaloby sie na braku instrumentu i testy budzetu mierzylyby
+            # cos zupelnie innego, niz deklaruja.
+            self._odp = [{"kind": "spot"}]
         elif "risk.limit_def" in s:
             self._odp = [dict(v, id=i, name=k)
                          for i, (k, v) in enumerate(b.limity.items(), start=1)]

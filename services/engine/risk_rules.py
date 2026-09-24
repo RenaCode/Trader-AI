@@ -471,8 +471,19 @@ def evaluate_account(state: RiskState, limits: dict[str, dict]) -> RiskVerdict:
 
 def evaluate_limits(state: RiskState, limits: dict[str, dict],
                     instrument_id: int, notional: Decimal,
-                    qty: Decimal) -> RiskVerdict:
-    """Pelna ocena zlecenia: najpierw limity konta, potem limity zlecenia."""
+                    qty: Decimal, kind: str | None = None) -> RiskVerdict:
+    """Pelna ocena zlecenia: najpierw limity konta, potem limity zlecenia.
+
+    `kind` to `ref.instrument.kind` instrumentu, ktorego zlecenie dotyczy.
+    Rozstrzyga JEDNA rzecz: czy limit dzwigni jest KONIECZNY (patrz punkt 7).
+    Sam limit, gdy jest ustawiony, obowiazuje niezaleznie od rodzaju.
+
+    DOMYSL `None` ZNACZY "WOLAJACY NIE POWIEDZIAL", a nie "spot". Zachowuje sie
+    jak spot, bo tym jest dzis cale uniwersum decyzyjne - ale nie wolno, zeby
+    przemilczenie rodzaju bylo sposobem na ominiecie limitu. Dlatego
+    `RiskKernel.check` rodzaju NIE PRZYJMUJE od wolajacego, tylko czyta go
+    z `ref.instrument` sam.
+    """
     konto = evaluate_account(state, limits)
     if konto.verdict != "allow":
         return konto
@@ -529,7 +540,87 @@ def evaluate_limits(state: RiskState, limits: dict[str, dict],
                 f"Ekspozycja po wejściu wyniosłaby {after:.0f} przy limicie {cap:.0f}",
                 violations=violations, usage=usage)
 
-    # 6. Wielkosc pojedynczej pozycji - tutaj obcinamy zamiast blokowac.
+    # 6. DZWIGNIA - ile razy kapital jest zaangazowany po tym wejsciu.
+    #
+    # DLACZEGO OSOBNO OD `max_total_exposure`, SKORO OBA PATRZA NA EKSPOZYCJE
+    #
+    # Bo mierza dwie rozne rzeczy i na spocie sa nieodrozniane wylacznie
+    # PRZYPADKIEM. `max_total_exposure` zapisany jako `pct_equity` jest dzis
+    # krotnoscia kapitalu i owszem ogranicza dzwignie - ale jest to limit
+    # ALOKACJI, wyrazalny takze kwotowo (`quote_ccy`), i wtedy o krotnosci
+    # przestaje mowic cokolwiek. Ten projekt mial juz trzy limity zapisane
+    # kwotowo dla rachunku 100 000 (patrz `wartosc_limitu`), ktore na rachunku
+    # 10 000 znaczyly 50%, 150% i 15%. Ekspozycja 150% na spocie jest
+    # nieosiagalna i dlatego nikogo to nie zabilo; na kontrakcie wieczystym
+    # 150% to dzwignia 1,5x, calkiem wykonalna.
+    #
+    # Uzasadnienie `wartosc_limitu` mowi to wprost i opiera sie na tym:
+    # "na spocie BEZ DZWIGNI nie da sie przekroczyc 100% rachunku". Zalozenie
+    # wpisane w uzasadnienie, a nie w warunek, przestaje obowiazywac po cichu
+    # w dniu, w ktorym do uniwersum wejdzie pierwszy instrument z dzwignia.
+    #
+    # KROTNOSC, NIE KWOTA. `value` jest tu mnoznikiem (2 = dwa razy kapital),
+    # a nie procentem i nie kwota - stad `unit: "x"` i wlasny rachunek zamiast
+    # `wartosc_limitu`.
+    lim = limits.get("max_leverage")
+    if lim is None:
+        # BRAK LIMITU ZATRZYMUJE, GDY INSTRUMENT MA STRONE KROTKA.
+        #
+        # Strata na pozycji dlugiej ma gorny koniec: cena nie zejdzie ponizej
+        # zera. Strata na krotkiej nie ma zadnego - rosnie razem z cena, bez
+        # granicy. Jedyne, co ja ogranicza, to wielkosc pozycji wzgledem
+        # kapitalu, czyli dokladnie ta liczba. Rachunek, ktory shortuje bez
+        # limitu dzwigni, nie ma na strate ZADNEJ granicy: ani w regule, ani
+        # w arytmetyce instrumentu.
+        #
+        # Ta sama odpowiedz, ktora `position_budget` daje na brak limitu
+        # lacznej ekspozycji ("nie znaczy budzet dowolny") i `prog_min_equity`
+        # na nieobliczalny prog kapitalu. Ostrzezenie w tym miejscu nie byloby
+        # zabezpieczeniem.
+        #
+        # NA SPOCIE NIC SIE NIE ZMIENIA i to jest celowe: cale dzisiejsze
+        # uniwersum decyzyjne to `kind='spot'` (`uniwersum.py` odfiltrowuje
+        # `perp`), wiec ta galaz nie zapali sie na produkcji ani razu - zapali
+        # sie w chwili, w ktorej ktos wprowadzi tam instrument z dzwignia.
+        from services.engine.koszty import koszty
+        if kind is not None and koszty(kind).krotka_pozycja:
+            violations.append({"limit": "max_leverage", "observed": 0.0,
+                               "threshold": 0.0, "action": "block"})
+            return RiskVerdict(
+                "block",
+                f"Instrument rodzaju '{kind}' pozwala na pozycję krótką, "
+                "a limitu dźwigni (max_leverage) nie ma — strata na shorcie "
+                "nie ma górnego końca, więc handel bez tego limitu jest "
+                "handlem bez granicy straty",
+                violations=violations, usage=usage)
+    else:
+        if state.equity <= 0:
+            # KROTNOSC KAPITALU, KTOREGO NIE MA, NIE ISTNIEJE. Przepuszczenie
+            # znaczyloby dzwignie nieskonczona, a dzielenie przez zero wywroci
+            # cykl w miejscu, ktore ma go ZATRZYMAC, a nie zepsuc.
+            violations.append({"limit": "max_leverage",
+                               "observed": float(state.exposure + notional),
+                               "threshold": float(lim["value"]),
+                               "action": "block"})
+            return RiskVerdict(
+                "block",
+                f"Kapitał {state.equity} nie pozwala policzyć dźwigni — "
+                "zlecenie wstrzymane",
+                violations=violations, usage=usage)
+        dzwignia = (state.exposure + notional) / state.equity
+        cap = Decimal(lim["value"])
+        usage.append({"name": "max_leverage", "used": float(dzwignia),
+                      "threshold": float(cap)})
+        if dzwignia > cap:
+            violations.append({"limit": "max_leverage", "observed": float(dzwignia),
+                               "threshold": float(cap), "action": lim["action"]})
+            return RiskVerdict(
+                "block",
+                f"Dźwignia po wejściu wyniosłaby {dzwignia:.2f}x "
+                f"przy limicie {cap:.2f}x",
+                violations=violations, usage=usage)
+
+    # 7. Wielkosc pojedynczej pozycji - tutaj obcinamy zamiast blokowac.
     lim = limits.get("max_position_notional")
     if lim:
         cap = wartosc_limitu(lim, state.equity)
@@ -585,6 +676,26 @@ DEFAULT_LIMITS = {
     # na czym wolno oprzec limit ryzyka.
     "min_equity":            {"value": Decimal("95000"),
                               "unit": "quote_ccy", "action": "killswitch"},
+    # DZWIGNIA - KROTNOSC kapitalu, nie procent i nie kwota (stad `unit: "x"`).
+    #
+    # 1x znaczy "nie angazuj wiecej, niz masz". Na spocie jest to i tak
+    # nieprzekraczalne, wiec na dzisiejszym uniwersum limit nic nie zmienia -
+    # i o to chodzi: ma byc gotowy i zmierzony, ZANIM wejdzie tu pierwszy
+    # instrument z dzwignia, a nie dobierany wtedy pod wynik.
+    #
+    # DLACZEGO NIE WIECEJ NIZ 1x NA START. `max_total_exposure` wpuszcza 15%
+    # kapitalu, wiec 1x jest dzis o rzad wielkosci luzniejsze niz limit, ktory
+    # faktycznie wiaze - ta liczba nie jest wiec ograniczeniem strategii, tylko
+    # SUFITEM na wypadek, gdyby limit alokacji zostal kiedys zapisany kwotowo
+    # albo podniesiony. Podniesienie jej jest decyzja, ktora ma zostac podjeta
+    # jawnie i po pomiarze, a nie odziedziczona po domysle.
+    #
+    # `action: block`, nie `killswitch`: przekroczona dzwignia jest wlasnoscia
+    # ZLECENIA, ktorego jeszcze nie zlozylismy, a nie stanem rachunku. Odmowa
+    # wejscia wystarcza; zatrzymywanie calego silnika wymagaloby recznego
+    # zwolnienia za cos, co sie nie wydarzylo.
+    "max_leverage":          {"value": Decimal("1"), "unit": "x",
+                              "action": "block"},
 }
 
 

@@ -37,8 +37,21 @@ miarach.
 
 Krotka noga sygnalu traci wiec wiecej, niz wynosi oszczednosc na prowizji.
 Prawdziwy perpetual, placacy finansowanie, wypadlby jeszcze gorzej - a tego
-kosztu symulacja NIE NALICZA (fees_paid zbiera wylacznie prowizje). To luka
-do domkniecia, zanim ktokolwiek wroci do tematu; stawki sa w schemacie `market`.
+kosztu symulacja NIE NALICZALA (fees_paid zbieralo wylacznie prowizje).
+
+LUKA FINANSOWANIA ZAMKNIETA (2026-09-24)
+
+Zdanie wyzej stalo tu od 2026-09-04 jako "luka do domkniecia" i przez ten czas
+KAZDY pomiar wariantu perp byl liczony bez trzeciej pozycji rachunku. Od tej
+zmiany `portfolio.simulate_portfolio` nalicza finansowanie z cechy
+`funding_rate`, po stronie i po chwilach wyplaty gieldy - patrz
+`stawka_finansowania_na_ulamek` i `GODZINY_FINANSOWANIA` nizej.
+
+Czego to NIE zmienia: zdania o pomiarze z czterech przesuniec. Tamten wynik
+byl liczony bez finansowania, wiec wariant perp mogl wtedy wyjsc tylko LEPIEJ,
+niz wyjdzie teraz - przegrana ze spotem w 3 przesunieciach na 4 zostaje
+w mocy tym bardziej. Domkniecie luki jest warunkiem PONOWNEGO pomiaru, nie
+jego wynikiem.
 
 Praktyczny skutek: brak perpetualow na podmiocie unijnym nie jest wada, ktora
 trzeba obchodzic zmiana gieldy. Pomiar w docs/03.
@@ -53,6 +66,11 @@ class Koszty:
     maker: float          # ulamek, nie procent
     taker: float
     krotka_pozycja: bool  # czy da sie grac na spadek bez pozyczki
+    # Czy instrument placi FINANSOWANIE. Trzecia pozycja rachunku obok prowizji
+    # i poslizgu - i jedyna, ktora zalezy od CZASU TRZYMANIA, a nie od liczby
+    # zlecen. Pozycja trzymana dobe placi trzy razy, niezaleznie od tego, czy
+    # zarabia. Naliczanie: `portfolio.simulate_portfolio`.
+    finansowanie: bool = False
 
 
 # Klucz: ref.instrument.kind
@@ -70,12 +88,29 @@ CENNIK = {
     # na tym podmiocie nie maja sensu w ogole - zostaje wylacznie egzekucja
     # z limitem, gdzie stawka maker jest identyczna jak globalnie (0,100%).
     "spot_eu": Koszty(maker=0.0010, taker=0.0025, krotka_pozycja=False),
-    "perp": Koszty(maker=0.0002, taker=0.00055, krotka_pozycja=True),
+    "perp": Koszty(maker=0.0002, taker=0.00055, krotka_pozycja=True,
+                   finansowanie=True),
     # Akcje i ETF-y przez IBKR - stawki prowizyjne, nie procentowe; zaslepka
-    # do czasu wdrozenia silnika equity.
+    # do czasu wdrozenia silnika equity. FINANSOWANIA NIE MA: krotka sprzedaz
+    # akcji kosztuje odsetki od pozyczki papieru, ale to inna wielkosc, z innego
+    # zrodla i naliczana inaczej - podpiecie jej pod stawke perpetuala byloby
+    # nazwaniem dwoch roznych rzeczy jedna nazwa.
     "stock": Koszty(maker=0.0005, taker=0.0005, krotka_pozycja=True),
     "etf": Koszty(maker=0.0005, taker=0.0005, krotka_pozycja=True),
 }
+
+# Chwile wyplaty finansowania na Bybicie: co osiem godzin, o pelnych 00:00,
+# 08:00 i 16:00 UTC. Potwierdzone na zywo 2026-09-24 na
+# /v5/market/funding/history (BTCUSDT): kolejne `fundingRateTimestamp`
+# roznia sie o 28 800 000 ms i dziela sie bez reszty przez dobe.
+#
+# LICZYMY WYPLATY, A NIE ULAMEK STAWKI NA SWIECE. Koszt wyznacza gielda, nie
+# nasza siatka: "stawka razy godziny_swiecy/8" dalaby dla tego samego okresu
+# inna liczbe przy horyzoncie 1 h i przy 4 h, choc zaplacone zostaloby tyle
+# samo. Zalezenie kosztu od czestotliwosci naszego patrzenia jest dokladnie ta
+# wada, ktora `uniwersum.py` opisuje przy cechach przekrojowych.
+GODZINY_FINANSOWANIA = (0, 8, 16)
+INTERWAL_FINANSOWANIA_H = 8
 
 DOMYSLNE = CENNIK["spot"]
 
@@ -89,9 +124,236 @@ def koszty(kind: str) -> Koszty:
     return CENNIK.get(kind, DOMYSLNE)
 
 
+def stawka_finansowania_na_ulamek(stawka_pct: float) -> float:
+    """Cecha `funding_rate` z panelu -> ulamek notionalu na JEDNA wyplate.
+
+    DLACZEGO TO JEST OSOBNA FUNKCJA, A NIE `/ 100` W MIEJSCU UZYCIA
+
+    Jednostka tej liczby zmienia sie po drodze i nigdzie nie jest zapisana
+    w typie:
+
+        Bybit `/v5/market/funding/history` -> `fundingRate` jako ULAMEK
+            (zmierzone 2026-09-24 na BTCUSDT: -0.00001295, 0.00000678)
+        `services/ingest/funding.py`       -> zapisuje ten ulamek bez zmian
+            do `market.funding_rate.rate`
+        `services/ingest/features.py`      -> zapisuje do cechy `last * 100`,
+            czyli PROCENTY
+        `services/engine/signals.py`       -> czyta jako `stawka_pct`
+
+    Pomylka jest wiec stukrotna w obie strony i CICHA: przy wzieciu procentow
+    za ulamek kazdy wariant perp wychodzi gleboko ujemny, przy odwrotnej -
+    koszt finansowania praktycznie znika. Zadna z tych wersji nie wyglada na
+    awarie, obie wygladaja na wynik.
+
+    Nazwa parametru mowi jednostke wejscia, nazwa funkcji - jednostke wyjscia.
+    To jedyne miejsce, w ktorym ta stala 100 ma prawo wystapic.
+    """
+    return stawka_pct / 100.0
+
+
 def runda(kind: str, maker: bool = False) -> float:
-    """Laczny koszt wejscia i wyjscia, w ulamku ceny."""
+    """Laczny koszt wejscia i wyjscia, w ulamku ceny - CZESC POLICZALNA.
+
+    TO NIE JEST CALY KOSZT RUNDY i nie wolno tak tej liczby podpisywac. Brakuje
+    w niej spreadu, niewypelnienia i finansowania - patrz `karta_rundy`, ktora
+    te braki wymienia z nazwy zamiast wliczac je jako zera. Funkcja zostaje,
+    bo petla decyzyjna i symulacja naliczaja dokladnie to, co ona liczy;
+    zmiana jej wyniku rozjechalaby rachunek z tym, co naprawde jest pobierane.
+    """
     k = koszty(kind)
     prowizja = k.maker if maker else k.taker
     poslizg = POSLIZG_MAKER if maker else POSLIZG_TAKER
     return 2 * (prowizja + poslizg)
+
+
+# ----------------------------------------------------- karta kosztu rundy
+#
+# DLACZEGO KAZDA LICZBA MUSI PRZYJSC ZE SWOIM POCHODZENIEM
+#
+# `runda()` oddaje jedna liczbe i po jej obejrzeniu nie da sie powiedziec, czy
+# jakis skladnik wyszedl zero, bo go zmierzono, czy dlatego, ze go nie ma
+# w rachunku. Te dwa stany prowadza do przeciwnych decyzji, a wygladaja
+# identycznie - i dokladnie tak zniknal z rachunku spread, finansowanie
+# i niewypelnienie naraz.
+#
+# Skladnik bez wartosci NIE JEST ZEREM. Wliczony jako zero daje liczbe tym
+# mniejsza, im wiecej rzeczy nie policzylismy - czyli im gorzej rozumiemy wlasny
+# koszt, tym tanszy on wyglada.
+
+POMIAR = "pomiar"          # policzone z prawdziwych danych TEGO rynku
+TARYFA = "taryfa gieldy"   # stawka odczytana z gieldy - fakt, nie zalozenie
+ZALOZENIE = "zalozenie"    # liczba, ktora ktos wybral
+NIEZMIERZONE = "nie zmierzono"   # wartosci NIE MA
+# CZWARTY STAN: liczba prawdziwa, tylko o czym innym.
+#
+# `db/migrations/0018_bybit_eu.sql`: dane publiczne - swiece i arkusz - ida
+# z hosta GLOBALNEGO, a zlecenia podpisane na `bybit.eu`. Powod podany w samej
+# migracji: podmiot unijny ma dla BTCUSDT rzedu 0,1% globalnego wolumenu, wiec
+# "jego swiece opisywalyby inny rynek". Spread policzony z `market.book_snapshot`
+# jest wiec spreadem ksiegi, w ktorej nasze zlecenie nigdy nie stanie.
+#
+# Taka liczba wchodzi do rachunku jako PODLOGA - rynek mniej plynny nie ma
+# wezszego spreadu niz bardziej plynny - ale NIE domyka pytania. Karta zostaje
+# niepelna, bo wartosc dla naszej ksiegi nadal jest nieznana.
+INNY_RYNEK = "pomiar innej ksiegi"
+# PIATY STAN: skladnik, ktorego NIE DA SIE podac jako stala rundy, bo zalezy od
+# CZASU TRZYMANIA - a mimo to jest naliczany. Finansowanie perpetuala: od
+# 2026-09-24 `portfolio.simulate_portfolio` liczy je z cechy `funding_rate`,
+# po chwilach wyplaty gieldy. Wypisane jako NIE ZMIERZONO sugerowaloby luke,
+# ktorej juz nie ma; wypisane jako liczba - stala, ktorej nigdy nie bylo.
+W_SYMULACJI = "naliczane w symulacji, per pozycja"
+
+
+@dataclass(frozen=True)
+class Skladnik:
+    """Jedna pozycja rachunku razem z tym, skad sie wziela.
+
+    `wartosc` to ulamek ceny za CALA RUNDE (obie nogi), albo None, gdy liczby
+    nie ma. None jest wartoscia pierwszoklasowa, nie brakiem danych do
+    uzupelnienia zerem.
+    """
+    nazwa: str
+    wartosc: float | None
+    zrodlo: str
+    uwaga: str = ""
+    # Czy ta wartosc ODPOWIADA NA PYTANIE, czy jest tylko podloga. False znaczy:
+    # liczba jest, ale dotyczy czegos innego niz rynek, na ktorym handlujemy
+    # (patrz INNY_RYNEK). Skladnik wchodzi wtedy do sumy, ale karta zostaje
+    # niepelna - inaczej cudza ksiega ogloszilaby rachunek zamknietym.
+    wiarygodny: bool = True
+
+
+@dataclass(frozen=True)
+class Karta:
+    """Rachunek kosztu rundy rozbity na skladniki z pochodzeniem."""
+    skladniki: tuple[Skladnik, ...]
+
+    @property
+    def policzone(self) -> float:
+        """Suma skladnikow, ktore MAJA wartosc. Dolne oszacowanie kosztu."""
+        return sum(s.wartosc for s in self.skladniki if s.wartosc is not None)
+
+    @property
+    def nieznane(self) -> tuple[str, ...]:
+        """Nazwy skladnikow, ktore NIE SA ROZSTRZYGNIETE.
+
+        Dwa powody, jeden skutek: albo wartosci nie ma wcale, albo jest, ale
+        pochodzi z innego rynku i jest wylacznie podloga. W obu wypadkach
+        prawdziwy koszt zostaje nieznany, wiec karta nie moze ogłosic sie pelna.
+        """
+        return tuple(s.nazwa for s in self.skladniki
+                     if s.zrodlo == NIEZMIERZONE or not s.wiarygodny)
+
+    @property
+    def pelna(self) -> bool:
+        return not self.nieznane
+
+
+def karta_rundy(kind: str, maker: bool = False, *,
+                spread_bps: float | None = None,
+                spread_nasza_ksiega: bool = True,
+                niewypelnienie: float | None = None,
+                finansowanie: float | None = None) -> Karta:
+    """Koszt rundy rozbity na skladniki. Kazdy ze swoim pochodzeniem.
+
+    ARGUMENTY OPCJONALNE SA POMIARAMI, KTORYCH JESZCZE NIE MA. Podanie ich
+    zamienia skladnik z „nie zmierzono" na „pomiar"; pominiecie zostawia go bez
+    wartosci - i wtedy `policzone` jest jawnie niepelne, zamiast udawac calosc.
+
+      * `spread_bps` - polowa spreadu na noge, w punktach bazowych, razy dwie
+        nogi. Zrodlo: `market.book_snapshot` / cecha `book_spread_bps`.
+      * `spread_nasza_ksiega` - czy ta liczba pochodzi z ksiegi, NA KTOREJ
+        SKLADAMY ZLECENIA. False zamienia ja z pomiaru w podloge: wchodzi do
+        sumy, ale nie domyka karty. Dzis jest to False i tak ma byc - arkusz
+        czytamy z hosta globalnego, a handlujemy na bybit.eu (migracja 0018).
+      * `niewypelnienie` - koszt zlecen, ktore nie weszly, jako ulamek ceny na
+        runde. Zrodlo: `poslizg.wypelnialnosc` zestawione z rozkladem ruchu,
+        ktory przez to przepadl.
+      * `finansowanie` - laczna oplata za czas trzymania pozycji, jako ulamek
+        ceny. Zrodlo: `market.funding_rate`.
+
+    DLACZEGO PRZY LIMICIE NIE MA POZYCJI „POSLIZG"
+
+    Bo bylaby zerem z definicji, a nie z pomiaru: zlecenie z limitem wypelnia
+    sie po cenie limitu albo lepiej. Wpisana do karty wygladalaby jak zmierzony
+    skladnik o wartosci zero i zamykala pytanie, ktore jest tu wlasciwe.
+    Kosztem strony makerskiej sa zlecenia, KTORE NIE WESZLY - i ta pozycja
+    w karcie jest, bez wartosci, bo nikt jej dotad nie policzyl.
+    """
+    k = koszty(kind)
+    s: list[Skladnik] = [Skladnik(
+        "prowizja", 2 * (k.maker if maker else k.taker), TARYFA,
+        "stawka odczytana z gieldy; cztery produkcyjne wypelnienia daja "
+        "fee/qty rowne stawce makera co do cyfry")]
+
+    if maker:
+        s.append(Skladnik(
+            "niewypelnienie", niewypelnienie,
+            POMIAR if niewypelnienie is not None else NIEZMIERZONE,
+            "symulacja przyjmuje, ze limit wchodzi ZAWSZE, gdy swieca dotknela "
+            "ceny; `exec.fill` nie zawiera zlecen, ktore nie weszly"))
+    else:
+        s.append(Skladnik(
+            "poslizg", 2 * POSLIZG_TAKER, ZALOZENIE,
+            "stala 4 pb; zmierzona na n=0 wypelnieniach zleceniem rynkowym"))
+
+    if spread_bps is None:
+        # Flaga opisuje liczbe, ktorej nie ma - nie ma wiec czego opisywac
+        # i stan zostaje trzeci, a nie czwarty.
+        s.append(Skladnik(
+            "spread", None, NIEZMIERZONE,
+            "symulacja wchodzi i wychodzi po `close` swiecy, czyli po cenie "
+            "ostatniej transakcji - polowa spreadu na noge nie jest naliczana"))
+    elif spread_nasza_ksiega:
+        s.append(Skladnik(
+            "spread", spread_bps / 1e4, POMIAR,
+            "polowa spreadu na noge razy dwie nogi, z ksiegi, na ktorej "
+            "skladamy zlecenia"))
+    else:
+        s.append(Skladnik(
+            "spread", spread_bps / 1e4, INNY_RYNEK,
+            "zmierzone na ksiedze GLOBALNEJ (`PUBLIC_HOST`), a zlecenia ida "
+            "na bybit.eu - podmiot o rzedu 0,1% tamtego wolumenu (migracja "
+            "0018). Rynek mniej plynny nie ma wezszego spreadu, wiec to jest "
+            "PODLOGA naszego kosztu, nie jego pomiar",
+            wiarygodny=False))
+
+    if k.finansowanie:
+        s.append(Skladnik(
+            "finansowanie", finansowanie,
+            POMIAR if finansowanie is not None else W_SYMULACJI,
+            f"placone co {INTERWAL_FINANSOWANIA_H} h niezaleznie od wyniku "
+            f"pozycji, wiec zalezy od CZASU TRZYMANIA, a nie od liczby zlecen - "
+            f"stala rundy nie istnieje. Naliczane od 2026-09-24 w "
+            f"`portfolio.simulate_portfolio` z cechy `funding_rate`"))
+    return Karta(tuple(s))
+
+
+def opis_karty(k: Karta) -> list[str]:
+    """Karta zamieniona na wiersze do wypisania.
+
+    SKLADNIK BEZ WARTOSCI WYPISUJE SIE SLOWAMI, NIGDY LICZBA. Zero w tym
+    miejscu czyta sie jako „policzone i wyszlo zero" - czyli dokladnie
+    odwrotnie niz stan faktyczny.
+    """
+    linie = []
+    for s in k.skladniki:
+        if s.wartosc is None and s.zrodlo == W_SYMULACJI:
+            linie.append(f"  {s.nazwa}: {s.zrodlo} — {s.uwaga}")
+        elif s.wartosc is None:
+            linie.append(f"  {s.nazwa}: NIE ZMIERZONO — {s.uwaga}")
+        elif not s.wiarygodny:
+            # CO NAJMNIEJ, nie „rowne". Liczba jest prawdziwa i dotyczy czego
+            # innego; wypisana jak pomiar zamykalaby pytanie, ktore zostaje.
+            linie.append(f"  {s.nazwa}: CO NAJMNIEJ {s.wartosc * 100:.4f}% "
+                         f"({s.zrodlo}) — {s.uwaga}")
+        else:
+            linie.append(f"  {s.nazwa}: {s.wartosc * 100:.3f}% ({s.zrodlo})")
+    if k.pelna:
+        linie.append(f"  razem: {k.policzone * 100:.3f}% rundy")
+    else:
+        linie.append(
+            f"  razem CO NAJMNIEJ {k.policzone * 100:.3f}% rundy — bez "
+            f"{', '.join(k.nieznane)}. Prawdziwy koszt jest WIEKSZY o "
+            f"nieznana wartosc; ta liczba jest dolnym oszacowaniem, nie kosztem.")
+    return linie

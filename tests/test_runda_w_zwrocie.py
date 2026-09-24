@@ -47,6 +47,13 @@ LIMITY_LUZNE = {
     "max_orders_per_hour":   {"value": Decimal("1000"),   "action": "block"},
     "max_position_notional": {"value": Decimal("5000"),   "action": "downsize"},
     "max_total_exposure":    {"value": Decimal("999999"), "action": "block"},
+    # Wariant `perp` w parametryzacji nizej nie wejdzie w zadna pozycje bez
+    # limitu dzwigni: od 2026-09-24 `evaluate_limits` odmawia handlu
+    # instrumentem pozwalajacym na pozycje krotka, gdy tego limitu nie ma
+    # (`risk_rules`, punkt 6 — strata na shorcie nie ma gornego konca).
+    # Wartosc astronomiczna jak reszta zestawu: tu nie mierzymy dzwigni, tylko
+    # runde kosztowa, i zaden limit nie ma prawa wiazac.
+    "max_leverage":          {"value": Decimal("9999"),   "action": "block"},
 }
 
 

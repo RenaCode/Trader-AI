@@ -144,6 +144,77 @@ def ocena(wynik: dict[str, dict]) -> tuple[bool, list[str]]:
 SPRAWDZANE_OPIS = {n: d for n, _, _, d in SPRAWDZANE}
 
 
+# Kategorie instrumentow Bybita V5. `linear` to kontrakty wieczyste kwotowane
+# w stablecoinie - jedyna kategoria, w ktorej da sie zajac pozycje KROTKA.
+KATEGORIE = ("spot", "linear", "inverse", "option")
+
+
+async def oferta_kategorii(adapter, kategorie: tuple[str, ...] = KATEGORIE,
+                           host: str | None = None) -> dict[str, int]:
+    """Ile instrumentow host wystawia w kazdej kategorii. PYTAMY, NIE ZAKLADAMY.
+
+    DLACZEGO TO TU JEST
+
+    Caly plan "odblokujmy krotka strone kontraktami perpetual na Bybicie, ta
+    sama gielda, te same klucze" stoi albo upada na jednej liczbie: ile
+    perpetuali wystawia host, na ktorym stoi konto. Odpowiedz byla w projekcie
+    zapisana w trzech miejscach naraz (docstring `bybit.py`, `mozliwosci.py`,
+    migracja 0018) jako "bybit.eu: 0 kontraktow wieczystych" - z pomiaru
+    z 2026-09-04. Komentarz sprzed trzech tygodni nie jest pomiarem dzisiejszej
+    oferty gieldy, a akurat ta liczba jest jedyna, od ktorej zalezy, czy caly
+    kierunek prac jest wykonalny.
+
+    Modul istnieje dokladnie po to: "Obie rzeczy byly do sprawdzenia w minute,
+    gdyby ktokolwiek zapytal hosta wprost. Ten modul pyta wprost".
+
+    PUSTA LISTA TO WYNIK, NIE BLAD. Host unijny odpowiada na `category=linear`
+    kodem 0 i pusta lista (zmierzone 2026-09-24: `{"category": "", "list": []}`)
+    - nie odmawia, tylko nie ma czego oddac. Zero w tym slowniku znaczy wiec
+    "zapytalismy i nie ma", a brak klucza - "zapytanie sie nie udalo". Te dwie
+    rzeczy musza byc rozroznialne, bo prowadza do zupelnie innych wnioskow.
+
+    LICZBA JEST DOLNYM OGRANICZENIEM, NIE PELNYM SPISEM. `filtry_instrumentow`
+    nie chodzi po stronach, a Bybit oddaje najwyzej 500 pozycji na zapytanie -
+    zmierzone 2026-09-24: api.bybit.com odpowiada `linear: 500` i `option: 500`,
+    choc kontraktow wieczystych jest tam 859. Dla pytania, ktore ta funkcja ma
+    rozstrzygnac ("zero czy niezero"), nie ma to znaczenia; dla kazdego innego
+    ma i dlatego jest tu napisane.
+
+    Endpoint jest PUBLICZNY, wiec nie zuzywa limitu zapytan klucza i nie dotyka
+    konta.
+    """
+    wynik: dict[str, int] = {}
+    for kat in kategorie:
+        try:
+            wynik[kat] = len(await adapter.filtry_instrumentow(kat, host=host))
+        except ExchangeError as e:
+            # Brak wpisu = "nie wiadomo". Zapisanie tu zera zrownaloby odmowe
+            # hosta z oferta pusta, a to sa dwa rozne stany swiata.
+            print(f"  {kat}: zapytanie nieudane ({e})")
+    return wynik
+
+
+def ocena_perpetuali(oferta: dict[str, int]) -> tuple[bool, str]:
+    """Czy na tym hoscie da sie w ogole zajac pozycje krotka. CZYSTA FUNKCJA.
+
+    `linear` i `inverse` to kontrakty wieczyste; `spot` i `option` nie daja
+    krotkiej nogi tej strategii (opcja to inny instrument, nie inna strona).
+    """
+    perpy = sum(oferta.get(k, 0) for k in ("linear", "inverse"))
+    if perpy:
+        # "CO NAJMNIEJ", bo zapytanie nie chodzi po stronach (patrz
+        # `oferta_kategorii`). Dla werdyktu nie ma to znaczenia, dla liczby ma.
+        return True, (f"host wystawia co najmniej {perpy} kontraktów "
+                      "wieczystych — krótka strona jest na nim wykonalna")
+    if "linear" not in oferta and "inverse" not in oferta:
+        return False, ("nie udało się zapytać o żadną kategorię kontraktów — "
+                       "to NIE znaczy, że ich nie ma; pomiaru po prostu nie ma")
+    return False, (
+        "host nie wystawia ANI JEDNEGO kontraktu wieczystego — strategia "
+        "dwustronna jest na nim niewykonalna niezależnie od tego, co potrafi "
+        "nasz kod; potrzebny jest inny podmiot giełdy albo inna giełda")
+
+
 async def sprawdz_cennik(adapter, fetch_one,
                          kind: str) -> tuple[str | None, dict, list[str]]:
     """Porównuje stawki naliczane przez giełdę z tablicą CENNIK. Bez wypisywania.
@@ -193,6 +264,16 @@ async def main() -> int:
     # z wierszem CENNIKA, którego nikt nie używa — czyli meldowałby zgodność,
     # nie sprawdzając niczego, co wchodzi do wyniku.
     ap.add_argument("--kind", default="spot_eu")
+    # SAMA OFERTA HOSTA, BEZ KLUCZA I BEZ RESZTY BADANIA.
+    #
+    # Odpowiada na jedno pytanie: czy na tym hoscie w ogole SA kontrakty
+    # wieczyste, czyli czy strona krotka jest na nim wykonalna. Od tej liczby
+    # zalezy sens calego kierunku "odblokujmy shorty perpetualami"; do
+    # 2026-09-24 byla w projekcie wylacznie jako komentarz z pomiaru
+    # sprzed trzech tygodni.
+    ap.add_argument("--kategorie", action="store_true",
+                    help="policz instrumenty w każdej kategorii (spot, linear, "
+                         "inverse, option) — endpoint publiczny, bez klucza")
     args = ap.parse_args()
 
     if not os.environ.get("DATABASE_URL"):
@@ -227,6 +308,20 @@ async def main() -> int:
                                api_secret=box.decrypt(bytes(cred["secret_enc"])),
                                mode=args.mode, host=host)
         try:
+            if args.kategorie:
+                oferta = await oferta_kategorii(adapter, host=host)
+                print(f"oferta hosta {host} (tryb {args.mode})")
+                for kat in KATEGORIE:
+                    if kat in oferta:
+                        print(f"  {kat:8s} {oferta[kat]:5d} instrumentów")
+                    else:
+                        print(f"  {kat:8s}   NIE WIADOMO (zapytanie nieudane)")
+                mozna_short, powod = ocena_perpetuali(oferta)
+                print(f"\nkrótka strona: "
+                      f"{'WYKONALNA' if mozna_short else 'NIEWYKONALNA'}")
+                print(f"  {powod}")
+                return 0 if mozna_short else 1
+
             if args.stawki:
                 symbol, zmierzone, rozjazdy_stawek = await sprawdz_cennik(
                     adapter, fetch_one, args.kind)

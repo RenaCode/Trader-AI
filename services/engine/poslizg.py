@@ -122,6 +122,38 @@ NIE_ZMIERZONO = "nie zmierzono"
 ZA_MALO = "za malo obserwacji"
 NIEODROZNIALNE = "nieodroznialne od zalozenia"
 ROZBIEZNE = "zalozenie poza przedzialem"
+# PIATY STAN: proba jest niepusta, ma rozrzut ZERO i to zero nie pochodzi
+# z egzekucji, tylko z arytmetyki - patrz `werdykt` i `tozsamosciowy`.
+TOZSAMOSC = "odniesienie rowne cenie wykonania"
+
+
+def tozsamosciowy(w: dict) -> bool:
+    """Czy cena odniesienia jest DOKLADNIE cena wykonania. CZYSTA FUNKCJA.
+
+    Taki wiersz ma poslizg zero i to zero nie niesie zadnej informacji
+    o egzekucji. Sa dwie drogi, ktorymi powstaje, i obie wystepuja:
+
+      * zlecenie z limitem wypelnia sie PO CENIE LIMITU albo lepiej,
+        a odniesieniem jest wlasnie `exec.order.limit_price`. Pytanie brzmi
+        wtedy "czy limit wypelnil sie po cenie limitu" i odpowiedz jest znana
+        przed pomiarem,
+      * `loop.zapisz_wejscie` przy rozstrzyganiu NADPISUJE
+        `exec.order.limit_price` cena WYKONANIA. Wtedy zero wychodzi takze
+        wtedy, gdy zlecenie przeszlo przez spread jako taker po gorszej cenie.
+
+    Porownujemy DZIESIETNIE, nie po przeliczeniu na float: `Decimal("100") ==
+    Decimal("100.00")` jest prawda i o to chodzi, a `float` dorzucilby do tego
+    pary rozne o ulamek ostatniego bitu i nazwal je rownymi.
+    """
+    surowa = w.get("cena_wykonania")
+    if surowa is None:
+        return False
+    try:
+        wykonana = Decimal(str(surowa))
+    except (InvalidOperation, ValueError):
+        return False
+    odniesienie, _ = cena_odniesienia(w)
+    return odniesienie is not None and odniesienie == wykonana
 
 
 def rodzaj_zlecenia(order_type: str | None) -> str:
@@ -216,7 +248,7 @@ def poslizg_wiersza(w: dict) -> tuple[float | None, str]:
     return float(znak * (wykonana - odniesienie) / odniesienie), skad
 
 
-def _proba(rodzaj: str, xs: list[float]) -> dict:
+def _proba(rodzaj: str, xs: list[float], tozsamosci: int = 0) -> dict:
     """Statystyki jednej próby razem z werdyktem wobec założenia."""
     zalozenie = ZALOZENIE[rodzaj]
     if not xs:
@@ -224,13 +256,17 @@ def _proba(rodzaj: str, xs: list[float]) -> dict:
         # Zero w tym miejscu czytaloby sie jako „poslizgu nie ma", czyli jako
         # potwierdzenie zalozenia makera - z zera obserwacji.
         return {"rodzaj": rodzaj, "n": 0, "srednia": None, "mediana": None,
-                "odchylenie": None, "przedzial": None,
+                "odchylenie": None, "przedzial": None, "tozsamosciowych": 0,
                 "zalozenie": zalozenie, "werdykt": NIE_ZMIERZONO}
     n = len(xs)
     przedzial = przedzial_sredniej(xs)
     return {
         "rodzaj": rodzaj,
         "n": n,
+        # ILE Z TYCH OBSERWACJI TO ARYTMETYKA, A NIE EGZEKUCJA. Bez tej liczby
+        # proba zlozona z samych tozsamosci wyglada identycznie jak proba
+        # z idealna egzekucja - a to dwa zupelnie rozne stany wiedzy.
+        "tozsamosciowych": tozsamosci,
         "srednia": statistics.fmean(xs),
         # Mediana obok sredniej, bo jedno wypelnienie w cienkim arkuszu potrafi
         # przesunac srednia o wiecej niz cala mierzona wielkosc.
@@ -238,12 +274,12 @@ def _proba(rodzaj: str, xs: list[float]) -> dict:
         "odchylenie": statistics.stdev(xs) if n > 1 else None,
         "przedzial": przedzial,
         "zalozenie": zalozenie,
-        "werdykt": werdykt(n, przedzial, zalozenie),
+        "werdykt": werdykt(n, przedzial, zalozenie, tozsamosci),
     }
 
 
 def werdykt(n: int, przedzial: tuple[float, float] | None,
-            zalozenie: float) -> str:
+            zalozenie: float, tozsamosci: int = 0) -> str:
     """Czy pomiar podważa założenie. CZYSTA FUNKCJA.
 
     PROGIEM JEST PRZEDZIAŁ UFNOŚCI, A NIE LICZBA DOBRANA NA OKO. To ta sama
@@ -261,9 +297,27 @@ def werdykt(n: int, przedzial: tuple[float, float] | None,
         znaczy „nie mamy dość danych, żeby je odrzucić",
       * `założenie poza przedziałem` — dopiero to jest powodem, żeby stałą
         ruszyć, i dopiero wtedy jest czym ją zastąpić.
+
+    PIĄTY STAN, DOŁOŻONY 2026-09-24: `odniesienie równe cenie wykonania`.
+
+    Gdy KAŻDA obserwacja w próbie ma cenę odniesienia równą co do grosza cenie
+    wykonania, wszystkie poślizgi są zerami z arytmetyki (patrz
+    `tozsamosciowy`). Przedział ufności takiej próby ma zerową szerokość i
+    obejmuje założenie zero, więc poprzednia wersja wydawała werdykt
+    `nieodróżnialne od założenia`. Tak właśnie raportowała czujka produkcyjna:
+
+        poślizg maker (założenie +0.00 pb): n=4, mediana +0.00 pb
+        — NIEODROZNIALNE OD ZALOZENIA
+
+    Czyta się to jako „zmierzone, zgadza się z założeniem". Nie było zmierzone.
+    Ten stan należy do rodziny `nie zmierzono`, nie do rodziny werdyktów
+    o założeniu — i musi wyprzedzać sprawdzenie przedziału, bo inaczej przedział
+    o zerowej szerokości sam wyda werdykt potwierdzający.
     """
     if n == 0:
         return NIE_ZMIERZONO
+    if tozsamosci >= n:
+        return TOZSAMOSC
     if przedzial is None:
         return ZA_MALO
     lo, hi = przedzial
@@ -280,6 +334,10 @@ def statystyki(wiersze: list[dict]) -> dict:
     właśnie ono jest tą obserwacją, której nie chcemy stracić.
     """
     proby: dict[str, list[float]] = {"maker": [], "taker": []}
+    # TOZSAMOSCI LICZONE OSOBNO DLA KAZDEGO RODZAJU, nie razem. Maker i taker
+    # maja osobne zalozenia i osobne werdykty, wiec wspolny licznik oznaczylby
+    # probe takera jako tozsamosciowa na podstawie wierszy makera.
+    tozsamosci: dict[str, int] = {"maker": 0, "taker": 0}
     zrodla: dict[str, int] = {}
     pominiete: dict[str, int] = {}
 
@@ -295,11 +353,13 @@ def statystyki(wiersze: list[dict]) -> dict:
             pominiete[powod] = pominiete.get(powod, 0) + 1
             continue
         proby[rodzaj].append(poslizg)
+        if tozsamosciowy(w):
+            tozsamosci[rodzaj] += 1
         zrodla[info] = zrodla.get(info, 0) + 1
 
     return {
-        "maker": _proba("maker", proby["maker"]),
-        "taker": _proba("taker", proby["taker"]),
+        "maker": _proba("maker", proby["maker"], tozsamosci["maker"]),
+        "taker": _proba("taker", proby["taker"], tozsamosci["taker"]),
         # Skad wzieto cene odniesienia. Widoczne, bo pomiar wzgledem limitu
         # i wzgledem ceny decyzji odpowiadaja na dwa rozne pytania.
         "odniesienia": zrodla,
@@ -343,6 +403,70 @@ def ulamki(wiersze: list[dict]) -> dict:
     return rozjazd_z_ulamkow(pary) | {"bez_ulamka": bez_ulamka}
 
 
+# Statusy `exec.order` (schemat: migracja 0005, plus `expired` i `unknown`
+# dopisane przez `gielda_exec`). Podzial na TRZY grupy, nie dwa, bo trzecia
+# nie jest jeszcze wynikiem.
+STATUS_WYPELNIONE = frozenset({"filled"})
+STATUS_CZESCIOWE = frozenset({"partial"})
+STATUS_NIEWYPELNIONE = frozenset({"cancelled", "rejected", "expired"})
+# `new` lezy jeszcze w arkuszu, `unknown` to zerwana odpowiedz gieldy. Zadne
+# z nich nie rozstrzygnelo sie w zadna strone - zaliczenie ich do niewypelnien
+# zanizaloby wypelnialnosc o wszystko, co akurat jest w locie.
+STATUS_NIEROZSTRZYGNIETE = frozenset({"new", "unknown"})
+
+
+def wypelnialnosc(zlecenia: list[dict]) -> dict:
+    """Ile ZE ZLOZONYCH zlecen sie wypelnilo. CZYSTA FUNKCJA.
+
+    DLACZEGO OSOBNA PROBA, SKORO `ulamki()` JUZ COS LICZY
+
+    Bo tamta proba nie moze zawierac niewypelnienia. `exec.fill` ma wiersz
+    wylacznie dla zlecenia, ktore weszlo, wiec srednia z ulamkow jest
+    warunkowana na „cos weszlo" i wychodzi 1,000 niezaleznie od tego, ile
+    zlecen przepadlo. Przy tysiacu wypelnien byloby to dalej 1,000 - a raport
+    stawia te jedynke obok zdania „symulacja przyjmuje 1.000", czyli obok
+    zalozenia, ktore ta liczba rzekomo potwierdza.
+
+    Pytanie backtestu brzmi inaczej: symulacja przyjmuje, ze zlecenie z limitem
+    wchodzi ZAWSZE, gdy swieca dotknela ceny. Odpowiada na nie `exec.order`,
+    gdzie zlecenie zostawia wiersz niezaleznie od losu.
+
+    MIANOWNIKIEM SA ZLECENIA ROZSTRZYGNIETE, nie wszystkie zlozone. Inaczej
+    jedno zlecenie lezace w arkuszu w chwili pomiaru liczyloby sie jak
+    niewypelnione i wypelnialnosc spadalaby przy kazdym odczycie w trakcie
+    cyklu. Czesciowe wchodzi do licznika - weszlo, choc nie w calosci; jego
+    wlasna wielkosc jest w `ulamki()`.
+
+    None przy pustej probie, a nie 1,0. Jedynka byloby tu najgorsza z mozliwych
+    odpowiedzi: to dokladnie ta liczba, ktora symulacja zaklada.
+    """
+    liczniki = {"wypelnionych": 0, "czesciowych": 0, "niewypelnionych": 0,
+                "nierozstrzygnietych": 0}
+    nieznany: dict[str, int] = {}
+    for z in zlecenia:
+        s = (z.get("status") or "").strip().lower()
+        if s in STATUS_WYPELNIONE:
+            liczniki["wypelnionych"] += 1
+        elif s in STATUS_CZESCIOWE:
+            liczniki["czesciowych"] += 1
+        elif s in STATUS_NIEWYPELNIONE:
+            liczniki["niewypelnionych"] += 1
+        elif s in STATUS_NIEROZSTRZYGNIETE:
+            liczniki["nierozstrzygnietych"] += 1
+        else:
+            # NIE ZGADUJEMY. Status spoza znanego zbioru nie trafia do zadnej
+            # grupy i jest widoczny z nazwa - tak samo jak nieznany typ zlecenia
+            # w `statystyki()`. Cicha kwalifikacja na chybil trafil przesuwalaby
+            # wypelnialnosc w strone zalezna od literowki w cudzym kodzie.
+            nieznany[s or "(puste)"] = nieznany.get(s or "(puste)", 0) + 1
+    rozstrzygniete = (liczniki["wypelnionych"] + liczniki["czesciowych"]
+                      + liczniki["niewypelnionych"])
+    udzial = (None if rozstrzygniete == 0 else
+              (liczniki["wypelnionych"] + liczniki["czesciowych"]) / rozstrzygniete)
+    return {"wyslanych": len(zlecenia), "rozstrzygnietych": rozstrzygniete,
+            "udzial": udzial, "nieznany_status": nieznany} | liczniki
+
+
 def rozjazd_ksiag(wiersze: list[dict]) -> dict:
     """Odleglosc miedzy cena PLANU a cena WYSLANA. CZYSTA FUNKCJA.
 
@@ -374,8 +498,23 @@ def rozjazd_ksiag(wiersze: list[dict]) -> dict:
             continue
         xs.append(abs(float((p - z) / z)))
     if not xs:
-        return {"n": 0, "mediana": None, "najwiekszy": None}
-    return {"n": len(xs), "mediana": statistics.median(xs), "najwiekszy": max(xs)}
+        return {"n": 0, "mediana": None, "najwiekszy": None, "zerowych": 0}
+    # ILE Z TYCH ROZJAZDOW TO DEFINICYJNE ZERA.
+    #
+    # Podmiana ceny na `cena_makera` zachodzi WYLACZNIE przy wyjsciu
+    # (`zlecenia.sprawdz_zlecenie`). Przy wejsciu plan ROWNA SIE cenie wyslanej
+    # z zalozenia, wiec jego zero nie jest pomiarem rozjazdu - jest jego
+    # definicyjnym brakiem. Zmierzone na komplecie pieciu wypelnien
+    # produkcyjnych: dwa wyjscia daja 41,56 pb i 5,34 pb (mediana 23,45 pb),
+    # a dwa wejscia dokladane do tej samej mediany sciagaja ja na 2,67 pb -
+    # prawie dziesieciokrotnie, i tym mocniej, im wiecej wejsc w probie.
+    #
+    # Mediana zostaje liczona ze WSZYSTKICH wierszy, bo odsianie ich tutaj
+    # wymagaloby wiedzy, ktorej ten modul nie ma (wejscie czy wyjscie nie stoi
+    # w zadnej z pobieranych kolumn). Liczba zer stoi obok, zeby czytajacy
+    # wiedzial, z czego ta mediana powstala.
+    return {"n": len(xs), "mediana": statistics.median(xs), "najwiekszy": max(xs),
+            "zerowych": sum(1 for x in xs if x == 0.0)}
 
 
 def pomiar(wiersze: list[dict]) -> dict:
@@ -413,10 +552,29 @@ def opis(p: dict) -> list[str]:
             linie.append(f"{etykieta}: n=0 — NIE ZMIERZONO. Stała pozostaje "
                          f"założeniem; to nie jest pomiar zerowego poślizgu.")
             continue
+        if s["werdykt"] == TOZSAMOSC:
+            # ANI SREDNIEJ, ANI MEDIANY, ANI PRZEDZIALU. Wszystkie trzy sa tu
+            # zerami i kazda z nich, wypisana obok slowa „zmierzono", czyta sie
+            # jako potwierdzenie stalej. Liczba, ktorej nie ma, ma wygladac na
+            # nieobecna - to ta sama zasada, co przy pustej probie wyzej.
+            linie.append(
+                f"{etykieta}: n={s['n']}, ale we WSZYSTKICH {s['tozsamosciowych']} "
+                f"wierszach cena odniesienia = cena wykonania — TO NIE JEST "
+                f"POMIAR POŚLIZGU, tylko (x−x)/x. Zlecenie z limitem wypełnia "
+                f"się po cenie limitu z definicji, a `loop.zapisz_wejscie` "
+                f"nadpisuje `exec.order.limit_price` ceną wykonania. Stała "
+                f"pozostaje założeniem.")
+            continue
         przedzial = ("—" if s["przedzial"] is None
                      else f"[{_bp(s['przedzial'][0])}, {_bp(s['przedzial'][1])}]")
+        # Udzial tozsamosci wypisany TAKZE przy probie mieszanej: kazdy taki
+        # wiersz ciagnie srednia do zera, wiec proba w polowie tozsamosciowa
+        # raportuje polowe prawdziwego poslizgu i wyglada jak lepsza egzekucja.
+        arytmetyka = (f", z tego {s['tozsamosciowych']} zer z arytmetyki "
+                      f"(odniesienie = cena wykonania)"
+                      if s["tozsamosciowych"] else "")
         linie.append(
-            f"{etykieta}: n={s['n']}, mediana {_bp(s['mediana'])}, "
+            f"{etykieta}: n={s['n']}{arytmetyka}, mediana {_bp(s['mediana'])}, "
             f"średnia {_bp(s['srednia'])}, odch. {_bp(s['odchylenie'], znak=False)}, "
             f"przedział 95% {przedzial} — {s['werdykt'].upper()}")
 
@@ -433,15 +591,51 @@ def opis(p: dict) -> list[str]:
             f" (symulacja przyjmuje 1.000), odch. {odch}, "
             f"przedział 95% {przedzial}; częściowych {u['czesciowych']}, "
             f"nie do zamknięcia {u['nie_do_zamkniecia']}")
+        # ZDANIE, BEZ KTOREGO POWYZSZA LINIA CZYTA SIE JAK POTWIERDZENIE.
+        #
+        # `exec.fill` ma wiersz wylacznie dla zlecenia, ktore weszlo, wiec ta
+        # srednia jest warunkowana na „cos weszlo" i wyjdzie 1,000 takze wtedy,
+        # gdy przepadla wiekszosc zlecen. Docstring `ulamki()` mowi o tym
+        # wprost - ale czytany jest raport, nie docstring.
+        linie.append(
+            "  UWAGA: ta próba nie zawiera NIEWYPEŁNIEŃ i zawierać ich nie "
+            "może — `exec.fill` ma wiersz tylko dla zlecenia, które weszło. "
+            "Założenia symulacji (limit wchodzi zawsze, gdy świeca dotknęła "
+            "ceny) nie da się tą średnią ani potwierdzić, ani obalić; "
+            "odpowiada na to wypełnialność z `exec.order` niżej.")
+
+    # WYPELNIALNOSC: jedyna proba, w ktorej niewypelnienie MOZE sie pojawic.
+    wyp = p.get("wypelnialnosc")
+    if wyp is not None:
+        if wyp["udzial"] is None:
+            linie.append(
+                f"wypełnialność: {wyp['wyslanych']} złożonych zleceń, "
+                f"0 rozstrzygniętych — NIE ZMIERZONO. Symulacja nadal przyjmuje, "
+                f"że zlecenie z limitem wchodzi zawsze, gdy świeca dotknęła ceny.")
+        else:
+            linie.append(
+                f"wypełnialność: {wyp['wypelnionych'] + wyp['czesciowych']} "
+                f"z {wyp['rozstrzygnietych']} rozstrzygniętych zleceń weszło "
+                f"({wyp['udzial']:.1%}), symulacja przyjmuje 100,0%; "
+                f"{wyp['wyslanych']} złożonych, w locie {wyp['nierozstrzygnietych']}, "
+                f"przepadło {wyp['niewypelnionych']}")
+        for s, n in sorted(wyp["nieznany_status"].items()):
+            linie.append(f"  nieznany status zlecenia {s!r}: {n} — poza rachunkiem")
 
     # OSOBNA LINIA, OSOBNA NAZWA. Wpisana w poslizg ta liczba kazalaby podniesc
     # stala kosztowa; wypisana obok mowi, jak daleko ksiega docelowa stoi od tej,
     # na ktorej stanal plan - i nic ponadto.
     r = p.get("rozjazd_ksiag") or {"n": 0}
     if r["n"]:
+        # LICZBA ZER OBOK MEDIANY. Przy wejsciach podmiany ceny nie ma, wiec ich
+        # zero jest definicyjne, a nie zmierzone - wrzucone do wspolnej mediany
+        # rozciencza ja tym mocniej, im wiecej wejsc w probie.
+        zera = (f", z tego {r['zerowych']} zerowe (plan = cena wysłana — przy "
+                f"wejściach podmiany nie ma, więc to zero jest definicyjne)"
+                if r.get("zerowych") else "")
         linie.append(
-            f"rozjazd ksiąg (plan vs cena wysłana, NIE poślizg): n={r['n']}, "
-            f"mediana {_bp(r['mediana'], znak=False)}, "
+            f"rozjazd ksiąg (plan vs cena wysłana, NIE poślizg): n={r['n']}"
+            f"{zera}, mediana {_bp(r['mediana'], znak=False)}, "
             f"największy {_bp(r['najwiekszy'], znak=False)}")
 
     for skad, n in sorted(p["odniesienia"].items()):
@@ -487,6 +681,34 @@ SELECT o.order_type                     AS rodzaj_zlecenia,
 """
 
 
+# Zakotwiczone na `exec.order`, NIE na `exec.fill` - i to jest cala roznica.
+# Zlecenie zostawia tu wiersz niezaleznie od tego, czy weszlo, wiec dopiero ta
+# proba moze zawierac niewypelnienie. Bez `JOIN exec.fill`, bo szukamy wlasnie
+# tych, ktore wypelnienia nie maja.
+#
+# Filtr `raw->>'execution' = 'gielda'` jest tu z tego samego powodu, co przy
+# poslizgu: rachunek papierowy zapisuje status z wlasnego rozstrzygniecia,
+# wiec policzona z niego wypelnialnosc bylaby echem modelu symulacji.
+ZAPYTANIE_ZLECENIA = """
+SELECT o.status AS status
+  FROM exec.order o
+ WHERE o.engine::text = %(engine)s
+   AND o.mode::text = %(mode)s
+   AND o.raw->>'execution' = 'gielda'
+   AND (%(h)s::int IS NULL
+        OR o.submitted_at > now() - make_interval(hours => %(h)s::int))
+ ORDER BY o.submitted_at
+"""
+
+
+async def pobierz_zlecenia(fetch_all, *, engine: str = "crypto",
+                           mode: str = "demo",
+                           okno_h: int | None = None) -> list[dict]:
+    """Cienka warstwa: statusy ZLOZONYCH zlecen. Bez rachunku."""
+    return list(await fetch_all(ZAPYTANIE_ZLECENIA,
+                                {"engine": engine, "mode": mode, "h": okno_h}))
+
+
 async def pobierz(fetch_all, *, engine: str = "crypto", mode: str = "demo",
                   okno_h: int | None = None) -> list[dict]:
     """Cienka warstwa: wypełnienia z bazy. Bez rachunku — ten jest wyżej.
@@ -518,10 +740,14 @@ async def main() -> int:
     try:
         wiersze = await pobierz(fetch_all, engine=args.engine, mode=args.mode,
                                 okno_h=args.okno_h)
+        zlecenia = await pobierz_zlecenia(fetch_all, engine=args.engine,
+                                          mode=args.mode, okno_h=args.okno_h)
         okno = "od poczatku" if args.okno_h is None else f"{args.okno_h} h"
         print(f"poślizg ({args.engine}/{args.mode}, {okno}), "
-              f"wypełnień w rejestrze: {len(wiersze)}")
-        for linia in opis(pomiar(wiersze)):
+              f"wypełnień w rejestrze: {len(wiersze)}, "
+              f"złożonych zleceń: {len(zlecenia)}")
+        pom = pomiar(wiersze) | {"wypelnialnosc": wypelnialnosc(zlecenia)}
+        for linia in opis(pom):
             print(f"  {linia}")
     finally:
         await close_pool()
