@@ -1327,7 +1327,11 @@ SWIEC_ZWLOKI = 3
 # Dlugosc timeframe'u w minutach. Nieznany timeframe NIE dostaje wartosci
 # domyslnej: prog wyliczony ze zgadnietej dlugosci albo krzyczy bez powodu,
 # albo milczy, gdy powinien krzyknac - a oba psuja czujke.
-MINUT_TIMEFRAME = {"1m": 1, "5m": 5, "15m": 15, "1h": 60, "4h": 240, "1d": 1440}
+#
+# Mapa mieszka w `horizons`, bo ten sam przelicznik potrzebny jest potokowi
+# cech do rozgrzewki. Tu zostaje sama nazwa, zeby czytelnik tego pliku dalej
+# widzial, czym jest prog swiezosci.
+from services.engine.horizons import MINUT_TIMEFRAME  # noqa: E402
 
 
 def ocen_swiezosc(wiersze: list[dict], swiec_zwloki: int = SWIEC_ZWLOKI
@@ -1482,6 +1486,16 @@ async def sprawdz_swiezosc(fetch_all, notify, sucho: bool = False,
     return kod_wyjscia(zgloszone, trwale, "źródło danych nieświeże")
 
 
+# Ile nieudanych wyjsc z RZEDU czyni z otwartej pozycji awarie.
+#
+# Decyzje zapadaja na swiecy 4h, czyli szesc razy na dobe. Jedno nieudane
+# wyjscie jest normalne — zlecenie idzie jako PostOnly i potrafi nie zlapac
+# swojej swiecy. Trzy to okolo pol doby pozycji trzymanej WBREW DECYZJI,
+# a przy tym wciaz trzy razy mniej niz cztery, ktore awaria SOLUSDC zdazyla
+# przejsc w ciszy przez 19 godzin (2026-09-23 17:18 .. 2026-09-24 05:15).
+PROB_WYJSCIA_BEZ_SKUTKU = 3
+
+
 def ocen_egzekucje(stan: dict) -> list[tuple[str, str, str]]:
     """Czy zlecenia w ogole dochodza do gieldy. CZYSTA FUNKCJA.
 
@@ -1498,6 +1512,29 @@ def ocen_egzekucje(stan: dict) -> list[tuple[str, str, str]]:
     nie weszło. „Nieznane" znaczy, że odpowiedź nie dotarła — a zlecenie mogło
     wejść. Każde takie, które przeleżało dłużej niż jedną świecę, jest kandydatem
     na pozycję-widmo i wymaga sprawdzenia, nie czekania.
+
+    DLACZEGO DOSZLY DWA LICZNIKI, KTORYCH TU WCZESNIEJ NIE BYLO
+
+    2026-09-24 ta czujka wydrukowala „egzekucja (24 h): przyjętych 5,
+    odrzuconych 0, o nieznanym stanie 0 — bez zastrzeżeń", podczas gdy pozycja
+    SOLUSDC stala niezamykalna od 19 godzin, a cztery kolejne wyjscia odbily
+    sie od gieldy. Kazdy z trzech licznikow milczal z INNEGO powodu i zadnego
+    z nich nie dalo sie naprawic przestawieniem progu:
+
+      * `przyjete` liczylo wszystko poza `rejected`/`unknown`, wiec `cancelled`
+        wpadalo do PRZYJETYCH. Cztery zlecenia, ktore nigdy nie dotarly do
+        gieldy, podbijaly licznik sukcesu,
+      * `odrzucone` liczy `status='rejected'`, a sciezka bledu zapisywala
+        wylacznie `unknown` — licznik byl strukturalnie martwy,
+      * `nieznane` liczy wiersze NADAL `unknown` i starsze niz 4 h, a sprzatanie
+        przestawialo je na `cancelled` po ~2 h 45 min.
+
+    Stad `bez_kontaktu` (zlecenie domkniete bez `venue_order_id`, czyli takie,
+    ktore NIGDY nie dotarlo do gieldy — slad, ktorego sprzatanie nie moze
+    nadpisac) oraz `wyjscia_bez_skutku` (pozycja otwarta, przy ktorej zadna
+    sprzedaz sie nie wypelnila mimo kolejnych prob). Ta druga regula nie patrzy
+    na statusy zlecen W OGOLE i dlatego zlapalaby te awarie od pierwszego dnia:
+    pyta o SKUTEK — czy pozycja, ktora system chce zamknac, daje sie zamknac.
     """
     powody = []
     przyjete, odrzucone = stan["przyjete"], stan["odrzucone"]
@@ -1531,6 +1568,40 @@ def ocen_egzekucje(stan: dict) -> list[tuple[str, str, str]]:
             f"z niej ekspozycję, więc blokowałaby wejścia, których nic nie "
             f"blokuje.\n\nIdentyfikatory: " + ", ".join(stan["id_nieznanych"])))
 
+    if stan.get("bez_kontaktu"):
+        powody.append((
+            "order.rejected",
+            f"Zlecenia zamknięte BEZ KONTAKTU Z GIEŁDĄ: {stan['bez_kontaktu']}",
+            f"{stan['bez_kontaktu']} zleceń zostało zamkniętych, choć nigdy nie "
+            f"dostały `venue_order_id` — czyli giełda ich nie widziała.\n\n"
+            f"Do 2026-09-24 takie zlecenie było NIEWIDOCZNE dla nadzoru: "
+            f"sprzątanie przestawiało je z `unknown` na `cancelled` po ~2 h 45 min, "
+            f"czyli przed progiem 4 h licznika „o nieznanym stanie\", a `cancelled` "
+            f"wpadało do licznika PRZYJĘTYCH. Cztery wyjścia SOLUSDC, które nie "
+            f"doszły do giełdy, podbijały w ten sposób licznik sukcesu przez "
+            f"19 godzin.\n\n"
+            f"Zlecenie bez kontaktu z giełdą nie jest ani wypełnione, ani "
+            f"odrzucone przez rynek — jest próbą, która nie dotarła."))
+
+    for w in stan.get("wyjscia_bez_skutku", []):
+        powody.append((
+            "order.rejected",
+            f"Pozycja {w['symbol']} nie daje się zamknąć "
+            f"({w['prob']} prób wyjścia bez wypełnienia)",
+            f"Pozycja {w['symbol']} (id {w['pozycja']}) jest otwarta od "
+            f"{w['opened_at']:%Y-%m-%d %H:%M}, a od tej chwili ANI JEDNA sprzedaż "
+            f"się nie wypełniła — mimo {w['prob']} prób, ostatnia "
+            f"{w['ostatnia']:%Y-%m-%d %H:%M}.\n\n"
+            f"Ta reguła nie patrzy na statusy zleceń, tylko na SKUTEK, i dlatego "
+            f"jest niezależna od tego, jak ścieżka błędu zapisała swoją porażkę. "
+            f"Pozycja, której system chce się pozbyć i nie potrafi, to ekspozycja "
+            f"trzymana wbrew decyzji: risk kernel liczy z niej ekspozycję, więc "
+            f"blokuje wejścia, a strategia nie ma jak zrealizować wyniku.\n\n"
+            f"Najczęstsza przyczyna zmierzona na produkcji: `exec.position.qty` "
+            f"zaksięgowane BRUTTO, gdy giełda pobrała prowizję kupna w kupionym "
+            f"aktywie — wyjście prosi wtedy o więcej, niż leży na rachunku, "
+            f"i giełda odrzuca CAŁOŚĆ za brak salda."))
+
     if stan["zawieszone_plany"]:
         powody.append((
             "engine.down",
@@ -1554,9 +1625,25 @@ async def sprawdz_egzekucje(fetch_all, notify, sucho: bool = False,
     tyle, ze przyczyna bedzie znana, gdy juz ktos zauwazy skutek.
     """
     st = await fetch_all(
-        "SELECT count(*) FILTER (WHERE status NOT IN ('rejected','unknown')) AS przyjete,"
+        # PRZYJETE ZNACZY „GIELDA TO WIDZIALA", A NIE „NIE ZAPISALISMY PORAZKI".
+        #
+        # Warunek brzmial tu `status NOT IN ('rejected','unknown')`, wiec
+        # `cancelled` bylo liczone jako PRZYJETE. Sprzatanie zamyka tym statusem
+        # takze zlecenia, ktore NIGDY nie dotarly do gieldy — zmierzone
+        # 2026-09-24: cztery martwe wyjscia SOLUSDC podbijaly licznik sukcesu
+        # do piatki, przy zerze odrzucen i zerze nieznanych.
+        #
+        # `venue_order_id` jest jedynym dowodem kontaktu: nadaje go GIELDA przy
+        # przyjeciu zlecenia, wiec zadne nasze pozniejsze sprzatanie go nie
+        # wytworzy ani nie skasuje.
+        "SELECT count(*) FILTER (WHERE status IN ('filled','partial','new')"
+        "                          AND venue_order_id IS NOT NULL) AS przyjete,"
         "       count(*) FILTER (WHERE status = 'rejected') AS odrzucone,"
-        "       count(*) FILTER (WHERE status = 'unknown') AS nieznane"
+        "       count(*) FILTER (WHERE status = 'unknown') AS nieznane,"
+        # ZLECENIE ZAMKNIETE, KTOREGO GIELDA NIGDY NIE WIDZIALA. To jest slad po
+        # sprzataniu — jedyny, ktorego sprzatanie nie moze nadpisac.
+        "       count(*) FILTER (WHERE status = 'cancelled'"
+        "                          AND venue_order_id IS NULL) AS bez_kontaktu"
         "  FROM exec.order WHERE submitted_at > now() - make_interval(hours => %(h)s)",
         {"h": okno_h})
     powody_rows = await fetch_all(
@@ -1571,12 +1658,58 @@ async def sprawdz_egzekucje(fetch_all, notify, sucho: bool = False,
         "SELECT count(*) AS n, max(valid_until) AS ostatni"
         "  FROM journal.planned_order"
         " WHERE status = 'pending' AND valid_until < now() - make_interval(hours => 4)")
+    # REGULA NIEZALEZNA OD STATUSOW ZLECEN — PYTA O SKUTEK, NIE O ZAPIS.
+    #
+    # Wszystkie trzy liczniki wyzej czytaja `exec.order.status`, wiec kazdy da
+    # sie ominac zapisujac porazke innym slowem. Ta regula nie da sie: pyta,
+    # czy pozycja, ktora system PROBUJE zamykac, daje sie zamknac. Awaria
+    # z 2026-09-23/24 wygladala tu jednoznacznie od pierwszego dnia — pozycja
+    # 32 otwarta 2026-09-22, cztery sprzedaze i zero wypelnien.
+    #
+    # DWA WARUNKI, BO JEDEN BY NIE WYSTARCZYL. „Sa nieudane sprzedaze" samo
+    # w sobie jest normalne: wyjscie idzie jako PostOnly, wiec potrafi nie
+    # zlapac swojej swiecy i wygasnac. Dopiero „zadna sprzedaz sie nie
+    # wypelnila" (`NOT EXISTS`) zamienia to w zdanie o AWARII.
+    #
+    # PROG 3 PROBY, bo decyzje zapadaja na swiecy 4h — szesc razy na dobe.
+    # Trzy nieudane wyjscia to okolo pol doby pozycji trzymanej wbrew decyzji,
+    # czyli wyraznie wiecej niz jedno pechowe ustawienie ceny makera, a wyraznie
+    # mniej niz 19 godzin, ktore ta awaria przezyla w ciszy.
+    wyjscia = await fetch_all(
+        "SELECT i.symbol AS symbol, p.id AS pozycja, p.opened_at AS opened_at,"
+        "       count(*) AS prob, max(o.submitted_at) AS ostatnia"
+        "  FROM exec.position p"
+        "  JOIN ref.instrument i ON i.id = p.instrument_id"
+        "  JOIN exec.order o ON o.instrument_id = p.instrument_id"
+        "                   AND o.side = 'sell'"
+        "                   AND o.submitted_at >= p.opened_at"
+        "                   AND o.status NOT IN ('filled','partial','new')"
+        # TYLKO POZYCJE DLUGIE. Wyjsciem z krotkiej jest KUPNO, wiec ta regula
+        # jej nie opisuje. Na spocie krotkich nie ma (`koszty.krotka_pozycja`),
+        # wiec dzis nic to nie kosztuje — ale warunek stoi tu jawnie, zeby
+        # pierwsza pozycja krotka nie wypadla z nadzoru po cichu.
+        " WHERE p.closed_at IS NULL AND p.side = 'long'"
+        "   AND NOT EXISTS (SELECT 1 FROM exec.order o2"
+        "                    WHERE o2.instrument_id = p.instrument_id"
+        "                      AND o2.side = 'sell'"
+        "                      AND o2.submitted_at >= p.opened_at"
+        "                      AND o2.status IN ('filled','partial'))"
+        " GROUP BY i.symbol, p.id, p.opened_at"
+        " HAVING count(*) >= %(prob)s"
+        " ORDER BY p.id", {"prob": PROB_WYJSCIA_BEZ_SKUTKU})
     # ZNACZNIKI STANU DLA TLUMIENIA (patrz nizej). Kazdy mowi "kiedy pojawil sie
     # NAJNOWSZY dowod tej awarii" - powiadomienie mlodsze od znacznika znaczy,
     # ze o tym dowodzie juz powiedzielismy. Oba liczy BAZA, bo porownujemy je
     # z `created_at`, ktore tez zapisuje baza.
     znaczniki = await fetch_all(
-        "SELECT max(submitted_at) FILTER (WHERE status IN ('rejected','unknown'))"
+        # ZNACZNIK MUSI OBEJMOWAC WSZYSTKIE DOWODY TEJ GALEZI, inaczej nowy
+        # dowod nie obudzi alarmu. Doszedl trzeci rodzaj: zlecenie zamkniete
+        # bez kontaktu z gielda (`cancelled` bez `venue_order_id`) — gdyby go
+        # tu nie bylo, seria takich zlecen zglosilaby sie raz i zamilkla,
+        # mimo ze kazde kolejne jest nowym dowodem tej samej awarii.
+        "SELECT max(submitted_at) FILTER (WHERE status IN ('rejected','unknown')"
+        "                              OR (status = 'cancelled'"
+        "                                  AND venue_order_id IS NULL))"
         "         AS ostatnie_zlecenie"
         "  FROM exec.order"
         " WHERE submitted_at > now() - make_interval(hours => %(h)s)",
@@ -1591,9 +1724,16 @@ async def sprawdz_egzekucje(fetch_all, notify, sucho: bool = False,
         "id_nieznanych": [r["client_order_id"] or "?" for r in nieznane_rows],
         "powody": [r["powod"] for r in powody_rows],
         "zawieszone_plany": zawieszone[0]["n"] if zawieszone else 0,
+        "bez_kontaktu": (st[0]["bez_kontaktu"] if st else 0) or 0,
+        # BEZ OKNA CZASOWEGO. Pozycja, ktorej nie da sie zamknac, nie przestaje
+        # nia byc po dobie — przeciwnie, im dluzej stoi, tym gorzej. Okno 24 h
+        # wyciszyloby ja dokladnie wtedy, gdy zaczyna kosztowac najwiecej.
+        "wyjscia_bez_skutku": [dict(w) for w in wyjscia],
     }
     print(f"egzekucja ({okno_h} h): przyjętych {stan['przyjete']}, "
           f"odrzuconych {stan['odrzucone']}, o nieznanym stanie {stan['nieznane']}, "
+          f"zamkniętych bez kontaktu z giełdą {stan['bez_kontaktu']}, "
+          f"pozycji nie do zamknięcia {len(stan['wyjscia_bez_skutku'])}, "
           f"planów bez rozstrzygnięcia {stan['zawieszone_plany']}")
 
     powody = ocen_egzekucje(stan)

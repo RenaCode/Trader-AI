@@ -340,6 +340,115 @@ def pozycje_z_wypelnien(wypelnienia, baza_symbolu: dict[str, str]) -> dict[str, 
     return stan
 
 
+def pozycje_brutto(wiersze) -> list[dict]:
+    """Pozycje zaksięgowane BRUTTO — czyli takie, których nie da się sprzedać.
+
+    CZYSTA FUNKCJA — bez bazy i bez sieci. Wiersze daje `zaksiegowane_brutto`.
+
+    DLACZEGO TO JEST OSOBNE SPRAWDZENIE, A NIE PRÓG W `rozjazdy`
+
+    `rozjazdy` porównuje dwie sumy przez tolerancję, a tolerancja jest tu
+    zbudowana DOKŁADNIE na wysokość jednej prowizji — jej własny docstring mówi
+    to wprost: „zabezpiecza przypadek, w którym jedna strona przestaje odejmować
+    prowizję pobraną w kupionym aktywie". Różnica brutto/netto ma dokładnie tę
+    wysokość, więc jest dla tamtej metody NIEWIDOCZNA Z ZAŁOŻENIA, i to podwójnie:
+
+        SOLUSDC, pozycja 32 (stan na 2026-09-24)
+          u nas          12.138       (exec.position.qty, BRUTTO)
+          z rejestru     12.125862    (execQty − execFee w SOL)
+          różnica         0.012138
+          próg bezwzględny  max(lot 0.001, min_notional 5 / 117.24) = 0.0427
+          tolerancja        2 × taker(spot_eu) = 0.5%  =  0.0607
+                                        różnica przechodzi POD OBOMA
+
+    Obniżenie któregokolwiek z tych progów byłoby lekarstwem gorszym od choroby:
+    próg bezwzględny wycisza pył po sprzedaży zaokrąglonej w dół, a tolerancja
+    wycisza asymetrię księgowania prowizji, której `/v5/order/*` nie pozwala
+    rozstrzygnąć. Obie mierzą WIELKOŚĆ różnicy, a tutaj wielkość nie ma
+    znaczenia: 0,012 SOL fantomu blokuje sprzedaż CAŁYCH 12,138.
+
+    TO SPRAWDZENIE NIE MA WIĘC PROGU, BO NIE PORÓWNUJE SUM — porównuje ILOŚĆ
+    Z KSIĄG z GÓRNĄ GRANICĄ tego, co giełda mogła nam wydać:
+
+        maksimum, jakie mogliśmy dostać  =  `exec.order.qty` − prowizja bazowa
+
+    Gdy giełda pobrała prowizję w kupionym aktywie (`fee_ccy = base_ccy`),
+    wypełnienie w całości MUSI dać mniej, niż zamówiliśmy — dokładnie o tę
+    prowizję. `exec.position.qty` większe od tej granicy opisuje więc aktywo,
+    którego na rachunku NIE MA, i każda sprzedaż całości padnie na brak salda.
+    Żadna giełda ani żaden host nie jest do tego potrzebny, więc sprawdzenie
+    działa także na `api-demo.bybit.eu`, który sald nie wystawia — czyli
+    dokładnie tam, gdzie uzgodnienie sald jest niedostępne.
+
+    MIERZYMY `exec.position.qty`, A NIE `exec.fill.qty`, I TO JEST ISTOTNE.
+    Wyjście planuje ilość z POZYCJI, więc to ona decyduje, czy sprzedaż
+    przejdzie. Wiersz wypełnienia może zostać zapisany brutto i nie zaszkodzić
+    nikomu, jeżeli pozycja została potem skorygowana — a czujka, która wtedy
+    nadal krzyczy, uczy odbiorcę, że można ją pomijać. Zmierzone 2026-09-24 po
+    ręcznej korekcie pozycji 32: `fill.qty` nadal 12.138 (brutto), `position.qty`
+    już 12.125862 (netto) — sprzedaż przechodzi, więc alarmu być nie może.
+
+    WYPEŁNIENIE MUSI POKRYWAĆ CAŁE ZLECENIE, inaczej porównanie nie ma sensu:
+    przy wypełnieniu częściowym granica `zlecono − prowizja` opisuje zlecenie,
+    którego giełda w całości nie wykonała, a `p.qty` — tylko jego część. Stąd
+    warunek `wypelniono + prowizja >= zlecono`, który przepuszcza zarówno
+    wiersz netto (12.125862 + 0.012138 = 12.138), jak i brutto (12.138 + …),
+    a odrzuca połówkę. CZEGO WIĘC NIE ZŁAPIE: pozycji zbudowanej z wypełnień
+    częściowych. Milczymy tam zamiast zgadywać — ale mówimy, że milczymy.
+    """
+    out = []
+    for w in wiersze:
+        prowizja = Decimal(str(w["prowizja"] or 0))
+        aktywo = (w["aktywo"] or "").upper()
+        if prowizja <= 0 or (w["prowizja_w"] or "").upper() != aktywo:
+            # Prowizja w walucie kwotowanej nie rusza ilosci — nie ma czego
+            # odejmowac i nie ma tu zadnej wady.
+            continue
+        wypelniono = Decimal(str(w["wypelniono"]))
+        zlecono = Decimal(str(w["zlecono"]))
+        if wypelniono + prowizja < zlecono:
+            continue
+        ilosc = Decimal(str(w["ilosc"]))
+        mozliwe = zlecono - prowizja
+        if ilosc <= mozliwe:
+            continue
+        out.append({
+            "pozycja": w["pozycja"],
+            "symbol": w["symbol"],
+            "aktywo": aktywo,
+            "ilosc": ilosc,
+            "zlecono": zlecono,
+            "wypelniono": wypelniono,
+            "prowizja": prowizja,
+            # Ile aktywa nie ma na rachunku, choc stoi w ksiegach.
+            "nadmiar": ilosc - mozliwe,
+            "rodzaj": "pozycja-brutto",
+        })
+    return out
+
+
+async def zaksiegowane_brutto(fetch_all, engine: str, mode: str) -> list[dict]:
+    """Wiersze do `pozycje_brutto`: otwarte pozycje i ich wejściowe wypełnienia.
+
+    Wejście pozycji rozpoznajemy po `open_decision_id` — to ta sama decyzja,
+    która zrodziła zlecenie kupna. Wiązanie po samym instrumencie zebrałoby
+    także zlecenia innych rund na tej samej parze.
+    """
+    return await fetch_all(
+        "SELECT p.id AS pozycja, i.symbol AS symbol, i.base_ccy AS aktywo,"
+        "       p.qty AS ilosc, o.qty AS zlecono, f.qty AS wypelniono,"
+        "       f.fee AS prowizja, f.fee_ccy AS prowizja_w"
+        "  FROM exec.position p"
+        "  JOIN ref.instrument i ON i.id = p.instrument_id"
+        "  JOIN exec.order o ON o.decision_id = p.open_decision_id"
+        "                   AND o.instrument_id = p.instrument_id"
+        "                   AND o.side = 'buy'"
+        "  JOIN exec.fill f ON f.order_id = o.id"
+        " WHERE p.closed_at IS NULL AND p.side = 'long'"
+        "   AND p.engine::text = %s AND p.mode::text = %s"
+        " ORDER BY p.id", (engine, mode))
+
+
 def zakres_wypelnien(pozycje) -> tuple[object | None, object | None]:
     """Od kiedy pytac gielde o wypelnienia i wzgledem czego mierzyc pokrycie.
 
@@ -574,6 +683,20 @@ async def uzgodnij(fetch_all, notify, adapter, engine: str = "crypto",
     progi = await progi_bezwzgledne(fetch_all, engine)
     r = rozjazdy(nasze, salda, tolerancja_wzgledna(kind), progi)
 
+    # POZYCJA ZAKSIEGOWANA BRUTTO — SPRAWDZENIE BEZ PROGU I BEZ GIELDY.
+    #
+    # `rozjazdy` tego nie widzi i nie ma jak zobaczyc: roznica brutto/netto ma
+    # dokladnie wysokosc jednej prowizji, czyli tyle, ile tolerancja ma z
+    # zalozenia pochlaniac (patrz `pozycje_brutto`). Dokladamy wiec sprawdzenie,
+    # ktore porownuje nasze wlasne zapisy tego samego zlecenia, a nie dwie sumy.
+    brutto = pozycje_brutto(await zaksiegowane_brutto(fetch_all, engine, mode))
+    for b in brutto:
+        print(f"  POZYCJA BRUTTO {b['symbol']} (id {b['pozycja']}): w księgach "
+              f"{b['ilosc']}, a giełda mogła wydać najwyżej "
+              f"{b['zlecono'] - b['prowizja']} (wysłano {b['zlecono']}, prowizja "
+              f"{b['prowizja']} {b['aktywo']} pobrana w kupionym aktywie) — "
+              f"o {b['nadmiar']} za dużo, więc sprzedaż CAŁOŚCI padnie na brak salda")
+
     # ZMIERZONE ZERO MA WLASNE ZDANIE NA EKRANIE, bo inaczej trzeci stan
     # odtworzenia (`pozycje_z_wypelnien`) zamienialby sie w cisze — a zamiana
     # falszywego alarmu na cisze bylaby gorsza od samego falszywego alarmu.
@@ -590,7 +713,7 @@ async def uzgodnij(fetch_all, notify, adapter, engine: str = "crypto",
     # opisywac stan, w ktorym zadna z dwoch stron nie wniosla do porownania
     # niczego, co mozna by trzymac.
     zywe = {k: v for k, v in salda.items() if v != 0}
-    if not r and not nasze and not zywe:
+    if not r and not brutto and not nasze and not zywe:
         # PUSTO PO OBU STRONACH TO NIE JEST UZGODNIENIE. Zgadzaja sie dwa puste
         # zbiory, czyli nie porownano niczego. Komunikat "zgodne" powiedzialby
         # o tym stanie dokladnie tyle samo, co o stanie faktycznie sprawdzonym -
@@ -598,18 +721,30 @@ async def uzgodnij(fetch_all, notify, adapter, engine: str = "crypto",
         print(f"uzgodnienie {engine}/{mode}: brak otwartych pozycji po obu "
               f"stronach — ścieżka działa, ale NIC NIE ZOSTAŁO PORÓWNANE")
         return 0
-    if not r:
+    if not r and not brutto:
         if zrodlo == "salda":
             print(f"uzgodnienie {engine}/{mode}: zgodne z saldami giełdy "
                   f"({len(nasze)} aktywów w dzienniku)")
         else:
-            # NIGDY nie piszemy tu "zgodne z saldami". Sprawdzone zostalo
-            # wezsze pytanie i komunikat musi to niesc, bo to on trafia do
-            # decyzji o dopuszczeniu trybu do handlu.
-            print(f"uzgodnienie {engine}/{mode}: zgodne z REJESTREM TRANSAKCJI "
-                  f"giełdy ({len(nasze)} aktywów) — UWAGA: ten host nie wystawia "
-                  f"sald, więc ręczne zamknięcie w panelu i przelewy pozostają "
-                  f"niesprawdzone")
+            # TO NIE JEST ZGODNOSC, TYLKO LUKA POMIAROWA — I MUSI TAK BRZMIEC.
+            #
+            # Do 2026-09-24 stalo tu zdanie zaczynajace sie od slowa „zgodne",
+            # z zastrzezeniem doklejonym w tej samej linii. Czytelnik (i czujka,
+            # ktorej wydruk to trafia) zapamietywal pierwsze slowo. Tymczasem
+            # odtworzenie z rejestru transakcji odpowiada na pytanie WEZSZE od
+            # zadanego: odejmuje prowizje po obu stronach, wiec rozjazd polegajacy
+            # WLASNIE na prowizji jest dla niego matematycznie niewidoczny —
+            # i tak wlasnie pozycja SOLUSDC, ktorej nie dalo sie sprzedac,
+            # przeszla przez uzgodnienie jako „zgodna".
+            #
+            # Zdanie zaczyna sie wiec od tego, czego NIE zmierzono, a dopiero
+            # potem mowi, co zmierzono.
+            print(f"uzgodnienie {engine}/{mode}: LUKA POMIAROWA — ten host nie "
+                  f"wystawia sald, więc uzgodnienia sald NIE BYŁO. Zmierzono "
+                  f"pytanie węższe: {len(nasze)} aktywów zgadza się z REJESTREM "
+                  f"TRANSAKCJI giełdy. Pozostają niesprawdzone: ręczne zamknięcie "
+                  f"w panelu, przelewy oraz każdy rozjazd wielkości prowizji "
+                  f"(rejestr odejmuje ją po obu stronach)")
         return 0
 
     for x in r:
@@ -618,8 +753,12 @@ async def uzgodnij(fetch_all, notify, adapter, engine: str = "crypto",
 
     if not sucho:
         tresc = "\n".join(
-            f"{x['aktywo']}: u nas {x['u_nas']}, u giełdy {x['u_gieldy']} "
-            f"({x['rodzaj']})" for x in r)
+            [f"{x['aktywo']}: u nas {x['u_nas']}, u giełdy {x['u_gieldy']} "
+             f"({x['rodzaj']})" for x in r]
+            + [f"{b['symbol']} (pozycja {b['pozycja']}): w księgach {b['ilosc']}, "
+               f"na rachunku o {b['nadmiar']} {b['aktywo']} mniej — prowizja "
+               f"pobrana w kupionym aktywie nie zeszła z ilości (pozycja-brutto)"
+               for b in brutto])
         # KAZDY RODZAJ MA WLASNE ZDANIE, bo kazdy wysyla czlowieka gdzie indziej.
         # Wspolny akapit o pozycji-widmie kazalby przy `ilosc-ujemna` szukac
         # aktywa na gieldzie, podczas gdy szukac trzeba brakujacej polowy
@@ -633,10 +772,19 @@ async def uzgodnij(fetch_all, notify, adapter, engine: str = "crypto",
                              "giełdy oddał sprzedaż bez odpowiadającego jej "
                              "kupna, więc odtworzenie liczy z urwanego okna "
                              "i żadnej z pozostałych liczb nie wolno ufać"),
+            "pozycja-brutto": ("pozycja-brutto jest NIE DO SPRZEDANIA: wyjście "
+                               "planuje całą ilość z ksiąg, a na rachunku leży "
+                               "o prowizję mniej, więc giełda odrzuca CAŁOŚĆ za "
+                               "brak salda — i powtórzy to przy każdej świecy. "
+                               "Naprawą jest skorygowanie `exec.position.qty` "
+                               "do ilości faktycznie posiadanej, nie ponawianie "
+                               "sprzedaży"),
         }
         obecne = [wyjasnienia[k] for k in
                   ("pozycja-widmo", "saldo-nieznane", "ilosc-ujemna")
                   if any(x["rodzaj"] == k for x in r)]
+        if brutto:
+            obecne.append(wyjasnienia["pozycja-brutto"])
         for u in await fetch_all('SELECT id FROM app."user" WHERE is_active'):
             await notify(
                 u["id"], "killswitch.triggered",
@@ -644,8 +792,13 @@ async def uzgodnij(fetch_all, notify, adapter, engine: str = "crypto",
                 f"{tresc}\n\n" + "; ".join(obecne) +
                 ". Wymaga wyjaśnienia PRZED kolejnym zleceniem.",
                 engine=engine, severity="critical",
-                data={"rozjazdy": [{k: str(v) for k, v in x.items()} for x in r]})
-    return len(r)
+                data={"rozjazdy": [{k: str(v) for k, v in x.items()}
+                                   for x in list(r) + list(brutto)]})
+    # POZYCJE BRUTTO LICZA SIE DO WYNIKU. Zwracana liczba jest kodem wyjscia
+    # zadania cyklicznego, wiec zwrocenie samego `len(r)` zostawialoby Job na
+    # zielono przy pozycji, ktorej nie da sie zamknac — czyli dokladnie ten
+    # ksztalt milczenia, ktory kosztowal 19 godzin.
+    return len(r) + len(brutto)
 
 
 async def main() -> int:

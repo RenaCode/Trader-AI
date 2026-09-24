@@ -246,14 +246,20 @@ def _baza_sprzatania(*, qty_wypelnienia, prowizja, prowizja_ccy):
     db.row_factory = sqlite3.Row
     db.executescript("""
         CREATE TABLE exec_order (id INTEGER, client_order_id TEXT, status TEXT,
-            engine TEXT, mode TEXT, instrument_id INTEGER, planned_order_id INTEGER);
+            engine TEXT, mode TEXT, instrument_id INTEGER, planned_order_id INTEGER,
+            -- `venue_order_id` NADAJE GIELDA przy przyjeciu zlecenia, wiec jego
+            -- brak jest jedynym dowodem, ze zlecenie do niej nie dotarlo.
+            -- Sprzatanie czyta go po to, zeby zostawic ten slad w `raw`
+            -- i w liczniku czujki; atrapa bez tej kolumny sprawdzalaby
+            -- schemat, ktorego baza nie ma.
+            venue_order_id TEXT);
         CREATE TABLE exec_fill (order_id INTEGER, qty REAL, fee REAL, fee_ccy TEXT);
         CREATE TABLE ref_instrument (id INTEGER, symbol TEXT, lot_size REAL,
             base_ccy TEXT);
         CREATE TABLE journal_planned_order (id INTEGER, status TEXT);
     """)
     db.execute("INSERT INTO exec_order VALUES (1,'tai-p42','partial',"
-               "'crypto','demo',3,NULL)")
+               "'crypto','demo',3,NULL,'G1')")
     db.execute("INSERT INTO ref_instrument VALUES (3,'ADAUSDC',0.1,'ADA')")
     db.execute("INSERT INTO exec_fill VALUES (1,?,?,?)",
                (float(qty_wypelnienia), float(prowizja), prowizja_ccy))

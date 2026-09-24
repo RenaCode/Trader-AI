@@ -100,6 +100,12 @@ class _RejestrZeStartTime:
 
 def _fetch(aktywa, pozycje_dziennika=(), okno=()):
     async def fetch_all(sql, params=None):
+        # Nowe pytanie uzgodnienia: czy ktoras otwarta pozycja zostala
+        # zaksiegowana BRUTTO (`uzgodnienie.zaksiegowane_brutto`).
+        # Atrapa musi je ZNAC, inaczej oddalaby na nie wiersz z innego
+        # zapytania - czyli mierzylaby sama siebie.
+        if "AS prowizja_w" in sql:
+            return []
         if "sum(p.qty)" in sql:
             return list(pozycje_dziennika)
         if "min(i.lot_size)" in sql:

@@ -55,6 +55,12 @@ def _progi(aktywa=("LINK", "ADA", "SOL")) -> dict[str, D]:
 
 def _fetch(aktywa, pozycje=(), od=None, cena_swieza=True, okno=None):
     async def fetch_all(sql, params=None):
+        # Nowe pytanie uzgodnienia: czy ktoras otwarta pozycja zostala
+        # zaksiegowana BRUTTO (`uzgodnienie.zaksiegowane_brutto`).
+        # Atrapa musi je ZNAC, inaczej oddalaby na nie wiersz z innego
+        # zapytania - czyli mierzylaby sama siebie.
+        if "AS prowizja_w" in sql:
+            return []
         if "sum(p.qty)" in sql:
             return list(pozycje)
         if "min(i.lot_size)" in sql:
@@ -234,6 +240,12 @@ def _fetch_wiersze(wiersze):
     """Atrapa oddająca podane wiersze na zapytanie o próg. Bez agregacji —
     agregat robi Postgres, więc kierunku `min`/`max` pilnuje test wyżej."""
     async def fetch_all(sql, params=None):
+        # Nowe pytanie uzgodnienia: czy ktoras otwarta pozycja zostala
+        # zaksiegowana BRUTTO (`uzgodnienie.zaksiegowane_brutto`).
+        # Atrapa musi je ZNAC, inaczej oddalaby na nie wiersz z innego
+        # zapytania - czyli mierzylaby sama siebie.
+        if "AS prowizja_w" in sql:
+            return []
         assert "min(i.lot_size)" in sql, f"nieoczekiwane zapytanie: {sql}"
         return wiersze
     return fetch_all

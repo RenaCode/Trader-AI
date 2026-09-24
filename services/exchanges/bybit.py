@@ -59,7 +59,8 @@ import httpx
 
 from .base import (
     AuthError, Balance, BladIpKlucza, BookLevel, Candle, ConnectionCheck, ExchangeError,
-    KontoZamrozone, OrderBook, StanZlecenia, Wypelnienie, ZlozoneZlecenie,
+    KontoZamrozone, OdmowaGieldy, OrderBook, StanZlecenia, Wypelnienie,
+    ZlozoneZlecenie,
 )
 
 # Dane publiczne bierzemy z podmiotu GLOBALNEGO niezaleznie od tego, gdzie stoi
@@ -123,6 +124,50 @@ KODY_KONTO_ZAMROZONE = {"10008", "10024", "10027"}
 # ponawiany, mimo ze wystarczylo odczekac sekunde.
 KODY_LIMIT = {"10006", "10018"}
 
+# --------------------------------------------------- odmowa, a nie brak odpowiedzi
+#
+# GIELDA ODPOWIEDZIALA "NIE". To jest wiedza, nie jej brak - i do 2026-09-24
+# byla ona TRACONA: kazdy kod spoza zbiorow wyzej wpadal w ogolny
+# `ExchangeError`, a `gielda_exec.zloz_plan` zapisywal wtedy `status='unknown'`
+# z etapem `odpowiedz_nie_dotarla`. Zmierzone skutki (SOLUSDC, pozycja 32):
+# cztery wyjscia pod rzad - zlecenia 49, 51, 52, 53 - dostaly
+# `Insufficient balance. (kod 170131)` i kazde zapisalo sie jako "stan
+# nieznany". Pozycja stala 19 godzin, a licznik odrzucen czujki egzekucji
+# pokazywal 0, bo `status='rejected'` nie powstal ani razu.
+#
+# ASYMETRIA RYZYKA DECYDUJE O TYM, CO WOLNO TU WPISAC. Zaliczenie kodu do tego
+# zbioru oznacza zapisanie "zlecenia NA PEWNO nie ma". Pomylka w te strone
+# porzuca zlecenie ZYWE na gieldzie - czyli ekspozycje, ktorej risk kernel nie
+# policzy. Pomylka w druga strone daje tylko wiersz `unknown`, ktory sprzatanie
+# i tak rozstrzygnie zapytaniem. Dlatego wchodza tu WYLACZNIE kody, ktorych
+# tresc nie zostawia miejsca na domysl: gielda podaje POWOD odmowy, a powod
+# odmowy istnieje tylko wtedy, gdy zlecenia nie przyjeto.
+#
+# Dolozenie kodu to jedna linia w jednym miejscu - tak samo jak wyzej.
+
+# Gielda policzyla srodki i jest ich za malo. To jest jedyny rodzaj odmowy,
+# przy ktorym ILOSC Z NASZYCH KSIAG jest kwestionowana przez druga strone,
+# wiec ma wlasny zbior: `gielda_exec` pyta wtedy o stan rachunku zamiast
+# powtarzac te sama liczbe co swiece.
+KODY_BRAK_SALDA = {
+    "170131",  # spot: "Insufficient balance." — zmierzone na produkcji 2026-09-23/24
+    "170033",  # spot margin: "Margin Insufficient..."
+    "110007",  # kontrakty: "ab not enough for new order"
+    "110012",  # kontrakty: "Insufficient available balance"
+    "110045",  # kontrakty: "Wallet balance is insufficient"
+}
+
+# Ksztalt zlecenia lamie regule gieldy. Powtorzenie tej samej liczby da to samo
+# - i to jest cala roznica wobec `unknown`, ktore KAZE ponowic pytanie.
+KODY_ZLY_PARAMETR = {
+    "10001",   # "Request parameter error"
+    "170136",  # "Order quantity exceeded lower limit" (minimum ilosci)
+    "170137",  # "Order quantity has too many decimals" — patrz `zlecenia.bez_ogona`
+    "170140",  # "Order value exceeded lower limit" (min_notional)
+    "170193",  # "Buy order price cannot be higher than ..."
+    "170194",  # "Sell order price cannot be lower than ..."
+}
+
 
 def _blad_z_kodu(ret, msg: str) -> ExchangeError:
     """Zamienia `retCode` gieldy na wyjatek, ktory MOWI, CO ZROBIC.
@@ -167,6 +212,20 @@ def _blad_z_kodu(ret, msg: str) -> ExchangeError:
         # `retryable=True`: limit mija sam. Bez tego chwilowe zdlawienie
         # wygladalo jak blad klucza i konczylo zapytanie przy pierwszej probie.
         return ExchangeError(f"{msg} (kod {kod}) — limit zapytan", code=kod, retryable=True)
+    if kod in KODY_BRAK_SALDA:
+        return OdmowaGieldy(
+            f"{msg} (kod {kod}) — GIELDA ODMOWILA: za malo srodkow. Zlecenie NIE "
+            f"WESZLO i powtorzenie tej samej ilosci da to samo. Nasze ksiegi "
+            f"podaja wiecej, niz gielda potwierdza — przy WYJSCIU znaczy to, ze "
+            f"pozycji nie da sie zamknac w calosci, dopoki roznica nie zostanie "
+            f"wyjasniona.",
+            code=kod, rodzaj="saldo")
+    if kod in KODY_ZLY_PARAMETR:
+        return OdmowaGieldy(
+            f"{msg} (kod {kod}) — GIELDA ODMOWILA: zlecenie lamie jej regule "
+            f"(krok, precyzja albo minimum). Zlecenie NIE WESZLO; ponowienie bez "
+            f"zmiany liczb da to samo.",
+            code=kod, rodzaj="parametr")
     return ExchangeError(f"{msg} (kod {kod})", code=kod)
 
 

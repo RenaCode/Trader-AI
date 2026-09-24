@@ -275,6 +275,12 @@ def _fetch_all_stub(pozycje, symbole=(("BTCUSDC", "BTC"),), od=None,
                     okno=None):
     """Rozdziela zapytania po treści SQL — jeden stub na cztery różne pytania."""
     async def fetch_all(sql, params=None):
+        # Nowe pytanie uzgodnienia: czy ktoras otwarta pozycja zostala
+        # zaksiegowana BRUTTO (`uzgodnienie.zaksiegowane_brutto`).
+        # Atrapa musi je ZNAC, inaczej oddalaby na nie wiersz z innego
+        # zapytania - czyli mierzylaby sama siebie.
+        if "AS prowizja_w" in sql:
+            return []
         # Rozroznienie po NAJWEZSZYM markerze. Zapytanie o pozycje takze
         # dotyka ref.instrument, wiec dopasowanie po nazwie tabeli laczyloby
         # dwa rozne pytania w jedno - i test padalby na wlasnym stubie.
@@ -557,6 +563,12 @@ def test_uzgodnienie_WIDZI_aktywo_ktorego_nie_ma_w_dzienniku():
                             available=Decimal("4"))]
 
     async def fetch_all(sql, params=None):
+        # Nowe pytanie uzgodnienia: czy ktoras otwarta pozycja zostala
+        # zaksiegowana BRUTTO (`uzgodnienie.zaksiegowane_brutto`).
+        # Atrapa musi je ZNAC, inaczej oddalaby na nie wiersz z innego
+        # zapytania - czyli mierzylaby sama siebie.
+        if "AS prowizja_w" in sql:
+            return []
         if "sum(p.qty)" in sql:
             return []                       # nasz dziennik jest PUSTY
         if "DISTINCT base_ccy" in sql:
@@ -594,6 +606,12 @@ def test_uzgodnienie_nadal_pomija_walute_kwotowana():
                             available=Decimal("7"))]
 
     async def fetch_all(sql, params=None):
+        # Nowe pytanie uzgodnienia: czy ktoras otwarta pozycja zostala
+        # zaksiegowana BRUTTO (`uzgodnienie.zaksiegowane_brutto`).
+        # Atrapa musi je ZNAC, inaczej oddalaby na nie wiersz z innego
+        # zapytania - czyli mierzylaby sama siebie.
+        if "AS prowizja_w" in sql:
+            return []
         if "sum(p.qty)" in sql:
             return []
         if "DISTINCT base_ccy" in sql:

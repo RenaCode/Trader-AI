@@ -35,7 +35,7 @@ from services.engine.egzekucja import co_z_wypelnieniem, rozlicz_prowizje
 from services.engine.loop import (
     trwale_niesprzedawalna, zapisz_wejscie, zapisz_wyjscie)
 from services.engine.zlecenia import Filtry, sprawdz_zlecenie
-from services.exchanges.base import ExchangeError
+from services.exchanges.base import ExchangeError, OdmowaGieldy
 # `recv_window` to jedyna liczba, ktora opisuje dopuszczalny rozjazd naszego
 # zegara z zegarem gieldy — ta sama, ktorej pilnuje `BybitAdapter.dryf_zegara`.
 from services.exchanges.bybit import RECV_WINDOW
@@ -63,6 +63,38 @@ def filtry_z_bazy(cur, engine: str) -> dict[int, Filtry]:
 def id_zlecenia(plan_id: int) -> str:
     """Nasz identyfikator zlecenia. Z PLANU, nie z czasu i nie losowy."""
     return f"tai-p{plan_id}"
+
+
+async def potwierdzone_saldo(adapter, aktywo: str | None) -> Decimal | None:
+    """Ile tego aktywa POTWIERDZA gielda. None znaczy „nie da sie zapytac".
+
+    NONE I ZERO TO DWIE ROZNE ODPOWIEDZI i mylenie ich kosztowaloby pozycje.
+    Zero znaczy „gielda mowi, ze nie mamy nic" — wtedy sprzedawac nie ma czego.
+    None znaczy „nie wiemy" — a na tym wlasnie hoscie jest to stan CODZIENNY,
+    nie awaryjny: `api-demo.bybit.eu` oddaje 404 na kazdej sciezce do salda
+    (patrz `uzgodnienie.uzgodnij`). Podstawienie zera za brak odpowiedzi
+    zamienialoby niewiedze w twierdzenie i zatrzymywalo wyjscie tam, gdzie
+    pozycja moze byc calkiem w porzadku.
+
+    BIERZEMY `total`, TE SAMA LICZBE CO UZGODNIENIE (`uzgodnij`: `b.total`).
+    Pytanie brzmi „ile aktywa mamy", a nie „ile da sie wyplacic";
+    `availableToWithdraw` bywa na koncie zunifikowanym puste i schodzi wtedy
+    do `walletBalance` — czyli i tak do `total`, tyle ze niejawnie. Jedna
+    liczba w obu miejscach znaczy, ze rozjazd zglaszany przez uzgodnienie
+    i rozjazd widziany przez egzekucje to TEN SAM rozjazd.
+    """
+    if not aktywo:
+        return None
+    try:
+        salda = await adapter.fetch_balances()
+    except ExchangeError:
+        return None
+    for b in salda:
+        if b.currency.upper() == aktywo.upper():
+            return Decimal(str(b.total))
+    # Aktywa nie ma na liscie sald. `fetch_balances` pomija monety o zerowym
+    # `walletBalance`, wiec to JEST odpowiedz gieldy: nie trzymamy nic.
+    return Decimal(0)
 
 
 # Stany, w ktorych gielda NIE MA JUZ NIC DO ZROBIENIA z tym zleceniem.
@@ -352,6 +384,15 @@ async def zloz_plan(cur, adapter, plan: dict, f: Filtry, *, engine: str,
             symbol=plan["symbol"], strona=plan["side"],
             ilosc=ilosc, cena_limitu=cena, id_wlasne=id_zlecenia(plan["id"]),
             kategoria=kategoria)
+    except OdmowaGieldy as e:
+        # GIELDA ODPOWIEDZIALA „NIE" — to jest wiedza, nie jej brak.
+        # Cala obsluga jest nizej, w `odmowa_gieldy`; tutaj tylko rozdzielamy
+        # odmowe od braku odpowiedzi, bo do 2026-09-24 obie wpadaly w ten sam
+        # `except` i konczyly sie zapisem `status='unknown'`.
+        return await odmowa_gieldy(
+            cur, adapter, plan, f, e, ilosc=ilosc, cena=cena, engine=engine,
+            mode=mode, kategoria=kategoria, wyjscie=wyjscie, kupno=kupno,
+            odniesienie=odniesienie, atr=atr)
     except ExchangeError as e:
         # NIE OZNACZAMY PLANU JAKO ODRZUCONEGO. Zlecenie moglo wejsc mimo bledu
         # odpowiedzi; rozstrzygniecie w nastepnym cyklu zapyta gielde po naszym
@@ -377,6 +418,150 @@ async def zloz_plan(cur, adapter, plan: dict, f: Filtry, *, engine: str,
          json.dumps({"execution": "gielda", "juz_istnialo": z.juz_istnialo})))
     return True, ("odnalezione u giełdy (idempotencja)" if z.juz_istnialo
                   else f"złożone {ilosc} @ {cena}")
+
+
+async def odmowa_gieldy(cur, adapter, plan: dict, f: Filtry, blad: OdmowaGieldy, *,
+                        ilosc: Decimal, cena: Decimal, engine: str, mode: str,
+                        kategoria: str, wyjscie: bool, kupno: bool,
+                        odniesienie: Decimal | None,
+                        atr: float | None) -> tuple[bool, str]:
+    """Giełda ODMÓWIŁA przyjęcia zlecenia. Zapisuje to jako fakt, nie jako niewiedzę.
+
+    DLACZEGO TO JEST OSOBNA ŚCIEŻKA, A NIE GAŁĄŹ W `except ExchangeError`
+
+    Do 2026-09-24 każda odpowiedź niebędąca sukcesem kończyła się zapisem
+    `status='unknown'` z etapem `odpowiedz_nie_dotarla`. Dla przekroczenia czasu
+    to jest jedyna uczciwa odpowiedź — zlecenie mogło wejść. Dla `retCode`
+    z powodem odmowy jest to zapisanie w bazie NIEPRAWDY o stanie, który akurat
+    znamy dokładnie, i właśnie ta nieprawda blokowała wyjście przez 19 godzin:
+
+        SOLUSDC, pozycja 32, zlecenia 49 / 51 / 52 / 53
+        2026-09-23 17:18:52 .. 2026-09-24 05:15:52, za każdym razem qty 12.138
+        „Insufficient balance. (kod 170131)"  ->  status='unknown'
+
+    Stan „nieznany" nie może niczego przerwać, bo nie jest rozstrzygnięciem:
+    każda świeca widziała pozycję nadal otwartą, planowała wyjście od nowa
+    i dostawała tę samą odmowę. Licznik odrzuceń czujki egzekucji nie drgnął
+    ani razu, bo `status='rejected'` nie został zapisany ANI RAZU w całej
+    historii produkcji.
+
+    CO ROBI TA FUNKCJA PRZY ODMOWIE ZA SALDO — I CZEGO CELOWO NIE ROBI
+
+    Odmowa za saldo jest jedyną, przy której giełda kwestionuje LICZBĘ Z NASZYCH
+    KSIĄG. Pytamy więc o stan rachunku i składamy to, co giełda potwierdza —
+    zamiast powtarzać tę samą ilość co świecę. Wynik zmierzony na tej awarii:
+    księgi mówią 12.138 SOL, rachunek ma 12.125862 (Bybit pobrał prowizję kupna
+    W KUPIONYM AKTYWIE), więc sprzedaż całości musi padać, a sprzedaż 12.125
+    przechodzi normalnie — brakuje dokładnie prowizji, nie płynności.
+
+    RÓŻNICA NIE JEST PRZY TYM ZAMIATANA. `exec.position.qty` ZOSTAJE NIETKNIĘTE,
+    a rozjazd idzie do `reject_reason` i do `raw.rozjazd_ksiag` z obiema
+    liczbami. Skorygowanie ilości „przy okazji" byłoby dopasowaniem ksiąg do
+    giełdy bez śladu — czyli zamienieniem awarii widocznej w awarię cichą,
+    dokładnie tak jak zrobiła to korekta z 2026-09-24 07:45, która poprawiła
+    jednostkę prowizji i zostawiła ilość brutto, nie zapisawszy ani jednej linii
+    w logu. Ilość naprawia człowiek albo uzgodnienie; egzekucja ma ją POKAZAĆ.
+
+    JEDEN WIERSZ `exec.order` NA JEDEN `client_order_id`. Baza ma UNIQUE
+    (mode, client_order_id), więc nie wolno zapisać najpierw odmowy, a potem
+    zlecenia zastępczego: to byłby drugi INSERT z tym samym identyfikatorem
+    i wywróciłby całą transakcję cyklu. Najpierw więc próbujemy złożyć mniejszą
+    ilość, a dopiero potem zapisujemy JEDEN wiersz opisujący to, co naprawdę
+    się stało.
+    """
+    id_w = id_zlecenia(plan["id"])
+    meta = {"execution": "gielda", "etap": "odmowa_gieldy",
+            "rodzaj_odmowy": blad.rodzaj, "kod_gieldy": blad.code,
+            "ilosc_z_ksiag": str(ilosc)}
+    powod = str(blad)
+    zastepcze = None            # ZlozoneZlecenie, gdy udalo sie zlozyc mniej
+
+    if wyjscie and blad.brak_salda:
+        potwierdzone = await potwierdzone_saldo(adapter, plan.get("base_ccy"))
+        if potwierdzone is None:
+            # NIEWIEDZA NAZWANA NIEWIEDZA. Host demo podmiotu unijnego nie
+            # wystawia sald (404), wiec to nie jest przypadek brzegowy, tylko
+            # stan codzienny — i jedyne, co wtedy wolno zrobic, to zapisac
+            # odmowe z prawdziwym powodem i zostawic ja widoczna dla nadzoru.
+            meta["saldo_gieldy"] = "nie_do_odczytania"
+            powod += (" | STANU RACHUNKU NIE DA SIE ODCZYTAC na tym hoscie,"
+                      " wiec nie wiemy, o ile ksiegi sie rozjechaly")
+        elif potwierdzone >= ilosc:
+            # Gielda potwierdza tyle, ile chcemy sprzedac — wiec odmowa NIE
+            # dotyczy naszej ilosci (srodki moga byc zablokowane innym
+            # zleceniem). Zgadywanie mniejszej liczby byloby tu sprzedaniem
+            # pozycji bez powodu.
+            meta["saldo_gieldy"] = str(potwierdzone)
+            powod += (f" | rachunek potwierdza {potwierdzone}, czyli NIE MNIEJ"
+                      f" niz {ilosc} — odmowa nie dotyczy naszej ilosci")
+        else:
+            meta["saldo_gieldy"] = str(potwierdzone)
+            meta["rozjazd_ksiag"] = {
+                "ksiegi": str(ilosc), "gielda": str(potwierdzone),
+                "roznica": str(ilosc - potwierdzone),
+                "instrument": plan["symbol"],
+                "position_id": plan["trigger"].get("position_id"),
+            }
+            rozjazd = (
+                f"ROZJAZD KSIĄG: wyjście prosiło o {ilosc} {plan.get('base_ccy')}, "
+                f"a giełda potwierdza {potwierdzone} (różnica "
+                f"{ilosc - potwierdzone}). Księgi mówią WIĘCEJ niż rachunek, "
+                f"więc sprzedaż całości nie przejdzie NIGDY. `exec.position.qty` "
+                f"ZOSTAJE bez zmian — różnica ma zostać wyjaśniona, a nie "
+                f"domknięta sprzedażą reszty")
+            powod += " | " + rozjazd
+            # Ta sama funkcja, co przy pierwszym podejsciu — reguly gieldy
+            # sprawdzamy dla NOWEJ ilosci, bo nizsza ilosc potrafi wpasc pod
+            # `min_notional` albo minimum ilosci.
+            ilosc2, cena2, powod2 = sprawdz_zlecenie(
+                potwierdzone, Decimal(plan["limit_price"]), f,
+                kupno=kupno, wyjscie=True,
+                cena_odniesienia=odniesienie, atr_pct=atr)
+            if powod2:
+                meta["zastepcze"] = f"niemozliwe ({powod2})"
+                powod += (f" | ilości potwierdzonej też nie da się wysłać:"
+                          f" {powod2}")
+            else:
+                try:
+                    zastepcze = await adapter.zloz_zlecenie(
+                        symbol=plan["symbol"], strona=plan["side"],
+                        ilosc=ilosc2, cena_limitu=cena2, id_wlasne=id_w,
+                        kategoria=kategoria)
+                    ilosc, cena = ilosc2, cena2
+                    meta["zastepcze"] = "zlozone"
+                    meta["ilosc_wyslana"] = str(ilosc2)
+                except ExchangeError as e2:
+                    # Druga proba tez padla. NIE zapisujemy jej jako `unknown`
+                    # nawet przy bledzie nieokreslonym: pierwsza odpowiedz byla
+                    # jednoznaczna, a ta jest dopiskiem do niej.
+                    meta["zastepcze"] = f"nie_powiodlo_sie ({e2})"
+                    powod += f" | próba na ilość potwierdzoną też padła ({e2})"
+
+    if zastepcze is not None:
+        # ZLECENIE JEST NA GIELDZIE. Plan zostaje `pending`, zeby
+        # `rozstrzygnij_oczekujace` zapytalo o nie po naszym identyfikatorze —
+        # dokladnie tak jak przy zlozeniu bez odmowy.
+        cur.execute(
+            "INSERT INTO exec.order (decision_id, planned_order_id, engine, mode,"
+            " instrument_id, venue_order_id, client_order_id, side, order_type, qty,"
+            " limit_price, status, reject_reason, submitted_at, raw)"
+            " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,'limit',%s,%s,%s,%s,now(),%s)",
+            (plan["decision_id"], plan["id"], engine, mode, plan["instrument_id"],
+             zastepcze.id_gieldy, id_w, plan["side"], ilosc, cena,
+             zastepcze.status, powod, json.dumps(meta)))
+        return True, (f"giełda odmówiła ({blad}); złożone {ilosc} @ {cena} —"
+                      f" tyle, ile giełda potwierdza. " + powod)
+
+    cur.execute("UPDATE journal.planned_order SET status='rejected',"
+                " resolved_at=now() WHERE id=%s", (plan["id"],))
+    cur.execute(
+        "INSERT INTO exec.order (decision_id, planned_order_id, engine, mode,"
+        " instrument_id, client_order_id, side, order_type, qty, limit_price,"
+        " status, reject_reason, submitted_at, raw)"
+        " VALUES (%s,%s,%s,%s,%s,%s,%s,'limit',%s,%s,'rejected',%s,now(),%s)",
+        (plan["decision_id"], plan["id"], engine, mode, plan["instrument_id"],
+         id_w, plan["side"], ilosc, cena, powod, json.dumps(meta)))
+    return False, f"giełda ODRZUCIŁA zlecenie: {powod}"
 
 
 async def rozstrzygnij_plan(cur, adapter, plan: dict, f: Filtry, *, engine: str,
@@ -1042,9 +1227,11 @@ async def posprzataj_zlecenia(cur, adapter, *, engine: str, mode: str,
     PYTAMY GIEŁDĘ, ZANIM COKOLWIEK ZAPISZEMY. Nasz status jest stary z definicji
     — to on właśnie okazał się nieprawdziwy.
     """
-    st = {"zdjete": 0, "domkniete": 0, "wypelnione_po_fakcie": 0}
+    st = {"zdjete": 0, "domkniete": 0, "wypelnione_po_fakcie": 0,
+          "bez_kontaktu": 0}
     cur.execute(
-        "SELECT o.id, o.client_order_id, o.status, i.symbol, i.lot_size,"
+        "SELECT o.id, o.client_order_id, o.status, o.venue_order_id,"
+        "       i.symbol, i.lot_size,"
         # ILE JUZ ZAKSIEGOWALISMY z tego zlecenia. Bez tej liczby jedynym
         # sygnalem bylby status wiersza - a status mowi "bylo czesciowe",
         # nie "ile z tego trafilo do dziennika".
@@ -1099,12 +1286,48 @@ async def posprzataj_zlecenia(cur, adapter, *, engine: str, mode: str,
             # GIELDA GO NIE ZNA. Zlecenie albo nigdy nie powstalo, albo dawno
             # zniknelo - w obu przypadkach wiersz otwarty jest juz tylko
             # zrodlem falszywego alarmu.
+            #
+            # SPRZATANIE ZOSTAWIA SLAD, KTOREGO CZUJKA NIE ZGUBI.
+            #
+            # Do 2026-09-24 ta jedna instrukcja KASOWALA DOWOD AWARII, zanim
+            # ktokolwiek zdazyl go zobaczyc. Czujka egzekucji liczy zlecenia
+            # `unknown` starsze niz 4 h; sprzatanie chodzi co cykl i przestawia
+            # je na `cancelled` po ~2 h 45 min. Zmierzone na tej awarii:
+            #
+            #     order 49  unknown 17:18:52 -> cancelled 20:03:48  (2 h 45)
+            #     order 51  unknown 21:28:58 -> cancelled 00:04:46  (2 h 35)
+            #     order 52  unknown 01:14:54 -> cancelled 04:00:44  (2 h 46)
+            #     order 53  unknown 05:15:52 -> cancelled 08:01:42  (2 h 46)
+            #
+            # Prog 4 h nie zostal przekroczony ANI RAZU — sprzatanie scigalo sie
+            # z czujka i wygrywalo za kazdym razem. Gorzej: `cancelled` wpadalo
+            # u czujki do licznika PRZYJETYCH, wiec cztery zlecenia, ktore nigdy
+            # nie dotarly do gieldy, podbijaly licznik sukcesu.
+            #
+            # Sladem jest BRAK `venue_order_id` — fakt strukturalny, ktorego
+            # zadne sprzatanie nie moze nadpisac, bo identyfikator gieldy nigdy
+            # nie powstal. `raw.etap` dopisujemy, zeby dalo sie to znalezc
+            # gremem, a nie tylko zapytaniem o NULL-a. Czujka liczy to osobnym
+            # licznikiem (`dozor.sprawdz_egzekucje`: `bez_kontaktu`).
+            bez_kontaktu = not o.get("venue_order_id")
             cur.execute(
                 "UPDATE exec.order SET status='cancelled', updated_at=now(),"
-                " reject_reason=%s WHERE id=%s",
+                " reject_reason=%s, raw = COALESCE(raw,'{}'::jsonb) || %s"
+                " WHERE id=%s",
                 ("sprzątanie: giełda nie zna tego zlecenia — wiersz zamknięty, "
-                 "żeby przestał być zgłaszany jako o nieznanym stanie", o["id"]))
+                 "żeby przestał być zgłaszany jako o nieznanym stanie"
+                 + ("; ZLECENIE NIGDY NIE DOTARŁO DO GIEŁDY (brak venue_order_id)"
+                    if bez_kontaktu else ""),
+                 json.dumps({"etap": ("zamkniete_bez_kontaktu_z_gielda"
+                                      if bez_kontaktu else "zamkniete_przez_sprzatanie"),
+                             "status_przed_sprzataniem": o["status"]}),
+                 o["id"]))
             st["domkniete"] += 1
+            if bez_kontaktu:
+                st["bez_kontaktu"] += 1
+                if verbose:
+                    print(f"  [sprzątanie] {o['symbol']}: zamknięte BEZ KONTAKTU "
+                          f"Z GIEŁDĄ (było {o['status']}, brak venue_order_id)")
             continue
 
         # ILE WYPELNILO SIE PONAD TO, CO JUZ ZAKSIEGOWANE.

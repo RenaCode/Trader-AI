@@ -64,6 +64,53 @@ class BladIpKlucza(AuthError):
     """
 
 
+class OdmowaGieldy(ExchangeError):
+    """Gielda ODPOWIEDZIALA i odmowila przyjecia zlecenia. Zlecenie NIE WESZLO.
+
+    DLACZEGO TO NIE MOZE BYC ZWYKLY `ExchangeError`
+
+    Wywolujacy ma dwie zupelnie rozne reakcje na dwa zdarzenia, ktore w kodzie
+    wygladaly dotad identycznie:
+
+      * odpowiedz NIE DOTARLA (timeout, zerwane polaczenie, 5xx) - zlecenie
+        moglo wejsc, wiec zapisujemy `status='unknown'` i pytamy gielde
+        w nastepnym cyklu po naszym identyfikatorze,
+      * gielda ODMOWILA strukturalnym `retCode` - zlecenia NIE MA i nie bedzie,
+        wiec zapisujemy `status='rejected'` z prawdziwym powodem.
+
+    Sklejenie ich kosztowalo 19 godzin zamrozonej pozycji (SOLUSDC, 2026-09-23
+    17:18 -> 2026-09-24 05:15). Bybit odpowiadal `Insufficient balance.
+    (kod 170131)` - odpowiedz jednoznaczna - a kod zapisywal `unknown`
+    z etapem `odpowiedz_nie_dotarla`, czyli "nie wiemy, czy weszlo". Stan
+    nieznany nie moze niczego przerwac: kazda swieca planowala wyjscie od nowa,
+    cztery zlecenia (49, 51, 52, 53) odbily sie identycznie, a zaden licznik
+    odrzucen sie nie ruszyl, bo `status='rejected'` nie zostal zapisany ANI RAZU.
+
+    `rodzaj` mowi, CO odmowa znaczy dla wywolujacego:
+
+      * 'saldo'    - gielda policzyla srodki i jest ich za malo. Ilosc z ksiag
+                     jest wieksza niz stan rachunku; wyjscie ma o ten stan
+                     ZAPYTAC, a nie powtarzac te sama liczbe bez konca,
+      * 'parametr' - ksztalt zlecenia lamie regule gieldy (krok, precyzja,
+                     minimum). Powtorzenie tej samej liczby da to samo.
+
+    `wymaga_czlowieka` zostaje FALSZEM: to nie jest awaria klucza ani konta,
+    tylko zlecenie, ktorego gielda nie przyjela. Czlowieka budzi dopiero
+    POWTARZALNOSC tej odmowy i to jest zadanie czujki egzekucji, nie adaptera.
+    """
+
+    def __init__(self, message: str, *, code: str | None = None,
+                 rodzaj: str = "parametr", retryable: bool = False,
+                 wymaga_czlowieka: bool = False):
+        super().__init__(message, code=code, retryable=retryable,
+                         wymaga_czlowieka=wymaga_czlowieka)
+        self.rodzaj = rodzaj
+
+    @property
+    def brak_salda(self) -> bool:
+        return self.rodzaj == "saldo"
+
+
 class KontoZamrozone(ExchangeError):
     """Gielda wstrzymala handel na koncie (compliance, ban, blokada).
 

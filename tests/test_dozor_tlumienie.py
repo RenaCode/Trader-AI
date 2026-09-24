@@ -141,12 +141,19 @@ def _stend_egzekucji(*, zawieszonych, ostatni_plan, powiadomiono):
             return [{"n": zawieszonych, "ostatni": ostatni_plan}]
         if "max(submitted_at)" in p:
             return [{"ostatnie_zlecenie": None}]
+        # REGULA O SKUTKU, NIE O STATUSIE: pozycja otwarta, przy ktorej zadna
+        # sprzedaz sie nie wypelnila. Sprawdzana PRZED galeziami `exec.order`,
+        # bo to zapytanie dotyka obu tabel — dopasowanie po szerszym markerze
+        # oddaloby mu liczniki z innego pytania.
+        if "exec.position" in p:
+            return []
         if "exec.order" in p and "reject_reason" in p:
             return []
         if "exec.order" in p and "client_order_id" in p:
             return []
         if "exec.order" in p:
-            return [{"przyjete": 5, "odrzucone": 0, "nieznane": 0}]
+            return [{"przyjete": 5, "odrzucone": 0, "nieznane": 0,
+                     "bez_kontaktu": 0}]
         raise AssertionError(f"atrapa nie zna zapytania: {p}")
 
     async def notify(user_id, kod, tytul, tresc, **kw):
