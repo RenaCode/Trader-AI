@@ -1526,8 +1526,23 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
         new = cur.fetchone()
         if not (old and new and old["sd_old"] and new["sd_new"]):
             continue
-        # Uproszczony wskaznik dryfu: przesuniecie sredniej w jednostkach
-        # historycznego odchylenia plus zmiana samego odchylenia.
+        # UPROSZCZONY WSKAZNIK DRYFU - I NIE JEST TO PSI, mimo nazwy kolumny,
+        # do ktorej trafia (`learn.drift_metric.psi`, migracja 0057).
+        #
+        # Przesuniecie sredniej w jednostkach historycznego odchylenia plus
+        # wzgledna zmiana samego odchylenia. Population Stability Index liczy
+        # co innego - dywergencje rozkladow po koszykach - i ma INNA SKALE.
+        #
+        # Dlaczego to ma znaczenie: PSI ma powszechnie znane progi (0,1 / 0,25 /
+        # 0,5), wiec liczba nazwana "PSI" jest czytana wedlug nich. Progi czujki
+        # dla TEJ wielkosci to 0,5 i 1,0 i sa normalnym zakresem pracy.
+        # Zmierzone 2026-09-24: `ret_long__4h` = 2,43 przy mediannie OOS Sharpe
+        # toru 4h nadal DODATNIEJ (+0,1145) - czytane jako PSI znaczyloby model
+        # do wyrzucenia, czytane poprawnie znaczy "srednia odjechala o dwa
+        # historyczne odchylenia", co bylo prawda o rynku, nie o potoku.
+        #
+        # Nazwa zmiennej zostaje `psi`, bo taka jest kolumna; przemianowanie
+        # obu naraz to osobna zmiana, nie skutek uboczny komentarza.
         psi = abs(float(new["m_new"]) - float(old["m_old"])) / float(old["sd_old"]) \
             + abs(float(new["sd_new"]) / float(old["sd_old"]) - 1)
         max_psi = max(max_psi, psi)

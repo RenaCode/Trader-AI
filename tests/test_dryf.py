@@ -517,3 +517,53 @@ def test_progi_w_opisie_zdarzenia_zgadzaja_sie_z_czujka():
     assert f"{DRYF_TRWALY_PROG:.1f}".replace(".", ",") in opis, (
         f"tresc zdarzenia nie podaje progu trwalego {DRYF_TRWALY_PROG}")
     assert "0,25" not in opis, "prog 0,25 wrocil do tresci zdarzenia"
+
+
+# ------------------------------------------------- wskaznik dryfu to NIE jest PSI
+def test_wskaznik_dryfu_nie_podszywa_sie_pod_psi():
+    """PSI ma powszechnie znaną skalę (0,1 / 0,25 / 0,5), więc liczba nazwana
+    „PSI" jest czytana według niej.
+
+    `train.py` liczy co innego: przesunięcie średniej w jednostkach
+    historycznego odchylenia plus względną zmianę odchylenia. Progi czujki
+    (0,5 i 1,0) opisują TĘ wielkość i są normalnym zakresem pracy — w skali PSI
+    byłyby katastrofą.
+
+    Zmierzone 2026-09-24: wskaźnik 2,43 przy medianie OOS Sharpe toru 4h nadal
+    dodatniej (+0,1145). Czytany jako PSI znaczyłby model do wyrzucenia.
+    """
+    from pathlib import Path
+
+    korzen = Path(__file__).resolve().parents[1]
+    migracja = (korzen / "db/migrations/0057_dryf_nazywa_sie_tym_czym_jest.sql"
+                ).read_text(encoding="utf-8")
+    # Komentarz w schemacie — jedyne miejsce, w którym zobaczy to ktoś
+    # czytający `\d+ learn.drift_metric`.
+    assert "COMMENT ON COLUMN learn.drift_metric.psi" in migracja
+    assert "COMMENT ON COLUMN learn.learning_state_log.max_psi" in migracja
+
+    # Opis zdarzenia nie ma prawa TWIERDZIĆ, że to PSI.
+    #
+    # Liczba 0,25 wolno w nim wystąpić — nowy opis wymienia ją po to, żeby
+    # powiedzieć „nie przykładaj tego progu". Pierwsza wersja tego testu
+    # zabraniała samego ciągu „0,25" i przez to padała na własnym ostrzeżeniu.
+    katalog = (korzen / "db/migrations/0011_notifications.sql").read_text(encoding="utf-8")
+    stary = katalog.split("learning.drift_high")[1].split("),")[0]
+    assert "PSI powyżej 0,25" in stary, (
+        "ten test opisuje stan sprzed 0057 — zmienił się katalog")
+
+    nowy = migracja.split("UPDATE notify.event_type")[1]
+    assert "PSI powyżej 0,25" not in nowy, "nowy opis nadal twierdzi, że to PSI"
+    assert "NIE jest PSI" in nowy, "nowy opis nie prostuje nazwy"
+
+
+def test_kod_liczacy_dryf_mowi_czym_ta_liczba_NIE_jest():
+    """Komentarz przy wzorze jest tu ostatnią linią obrony: nazwa zmiennej
+    i nazwa kolumny mówią „psi", więc czytający kod musi znaleźć sprostowanie
+    dokładnie tam, gdzie liczba powstaje."""
+    from pathlib import Path
+
+    zrodlo = (Path(__file__).resolve().parents[1]
+              / "services/engine/train.py").read_text(encoding="utf-8")
+    blok = zrodlo.split("psi = abs(float(new[")[0][-1400:]
+    assert "NIE JEST TO PSI" in blok
