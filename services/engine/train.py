@@ -50,7 +50,10 @@ from services.engine.portfolio import (
     Egzekucja, kup_i_trzymaj, metrics as portfolio_metrics, precompute_panels,
     simulate_portfolio,
 )
-from services.engine.statystyka import spearman, wilson
+from services.engine.koszty import Karta, karta_rundy, opis_karty
+from services.engine.statystyka import (
+    profit_factor, rozklad, sharpe as sharpe_proby, spearman, wilson,
+)
 from services.engine.uniwersum import odcisk
 from services.engine.signals import (
     DEFAULT_WEIGHTS, REGIMES, SIGNALS, classify_regime, combine, evaluate,
@@ -191,8 +194,297 @@ MIN_INSTRUMENTS = 8
 # testowych - miesci sie w szesciomiesiecznej fazie demonstracyjnej i jest
 # wystarczajaco duzo, zeby mediana nie byla pojedynczym pomiarem.
 MIN_OKIEN_ZYWEGO = 5
-FEE = 0.00055
-SLIP = 0.0004
+# USUNIETE 2026-09-24: `FEE = 0.00055` i `SLIP = 0.0004`.
+#
+# Stale lezaly tu nieuzywane od wydzielenia `koszty.py` - ani symulacja, ani
+# petla nie czytaly ich ani razu (`grep -rn 'FEE\|SLIP' services/` dawal
+# wylacznie te dwie linie i wzmianki w komentarzach). Wartosc `0,00055` to
+# w dodatku stawka taker kontraktu wieczystego, czyli dokladnie ta liczba,
+# ktorej naglowek `koszty.py` uzywa jako przykladu bledu.
+#
+# Druga kopia stawki, ktorej nikt nie czyta, jest gorsza niz zadna: przy
+# nastepnej zmianie cennika ktos poprawi te, ktora ma przed oczami, i bedzie
+# przekonany, ze zmienil koszt. Cennik jest jeden i jest w `koszty.py`.
+
+# Bezwzgledna podloga pokrycia okna treningowego - patrz `prog_pokrycia`.
+MIN_SWIEC_OKNA = 100
+
+
+def krotnosc_zabojcza(koszt_progowy: float | None,
+                      spread: float | None) -> float | None:
+    """Ile razy szerszy musialby byc spread, zeby zjesc cala przewage.
+
+    DLACZEGO AKURAT TA LICZBA
+
+    Spread mamy zmierzony na ksiedze GLOBALNEJ, a zlecenia skladamy na
+    bybit.eu - podmiocie o rzedu 0,1% tamtego wolumenu (migracja 0018).
+    Nasz spread jest wiec nieznany i niemal na pewno szerszy; pytanie „ile
+    wynosi" nie ma dzis odpowiedzi.
+
+    Pytanie „ile razy szerszy musialby byc, zeby przewaga zeszla do zera" ma
+    odpowiedz, i to odpowiedz DAJACA SIE SPRAWDZIC: zamienia nieznane w warunek,
+    ktory ktos moze pojsc i zweryfikowac jednym odczytem arkusza z wlasciwego
+    hosta. To jest jedyna postac, w jakiej nieznana wielkosc moze wejsc do
+    raportu, nie udajac przy tym pomiaru.
+
+    None, gdy pytanie nie ma sensu: przewagi juz nie ma (prog niedodatni),
+    spreadu nie zmierzono, albo zmierzony spread jest zerem - wtedy nie ma
+    czego mnozyc i zadna krotnosc niczego nie zmieni.
+    """
+    if koszt_progowy is None or spread is None:
+        return None
+    if koszt_progowy <= 0 or spread <= 0:
+        return None
+    return koszt_progowy / spread
+
+
+def _pb(x: float | None) -> str:
+    """Punkty bazowe albo myslnik. Zero bylo by tu klamstwem."""
+    return "—" if x is None else f"{x * 1e4:+.2f} pb"
+
+
+def opis_przewagi(zwroty: list[float], sharpe_okien: list[float],
+                  karta: Karta,
+                  zwroty_okien: list[list[float]] | None = None) -> list[str]:
+    """Przewaga wypisana tak, zeby zalozenie nie wygladalo jak pomiar.
+
+    TRZY BLOKI, W TEJ KOLEJNOSCI, I ZADNEGO NIE WOLNO POMINAC:
+
+      1. co symulacja NALICZYLA - liczby po kosztach, ktore w niej sa,
+      2. czego NIE NALICZYLA - skladniki karty bez wartosci, wypisane slowami,
+      3. KOSZT PROGOWY - o ile te nienaliczone skladniki musialyby byc mniejsze,
+         zeby przewaga przezyla. To jedyna z tych liczb, ktora nie wymaga
+         zadnego zalozenia, i jedyna, na ktora warto patrzec przed wejsciem
+         na zywo.
+
+    Bloku trzeciego nie da sie zastapic punktowym oszacowaniem kosztu, dopoki
+    spread i niewypelnienie nie sa zmierzone. Wstawienie tam wymyslonej liczby
+    zamienia „nie wiem" na „wiem i wynosi tyle" - czyli robi dokladnie to,
+    przed czym cala ta warstwa ma bronic.
+    """
+    zwroty_okien = zwroty_okien or []
+    p = podsumowanie_przewagi(zwroty, sharpe_okien)
+    if not zwroty:
+        return ["Przewaga: brak transakcji OOS — nie ma czego liczyć."]
+
+    linie = ["", "PRZEWAGA PO KOSZTACH, KTÓRE SYMULACJA NALICZYŁA:"]
+    linie.append(
+        f"  Sharpe/transakcję ze ZŁĄCZONEJ próby {p['n_transakcji']} transakcji: "
+        f"{p['sharpe_zbiorczy']:+.4f}" if p["sharpe_zbiorczy"] is not None
+        else "  Sharpe/transakcję ze złączonej próby: — (za mało transakcji)")
+    # OBIE LICZBY NARAZ. Rozjazd miedzy nimi jest wynikiem, nie szczegolem:
+    # gdy sa rozne, to znaczy, ze srednia po oknach mowi o wadze okien,
+    # a nie o transakcjach.
+    linie.append(
+        f"  ta sama miara jako ŚREDNIA PO {p['n_okien']} OKNACH: "
+        f"{p['sharpe_sredni_po_oknach']:+.4f} — inna liczba niż wyżej, bo "
+        f"średnia ilorazów nie jest ilorazem; okno o kilku transakcjach waży "
+        f"w niej tyle samo, co okno o dwustu"
+        if p["sharpe_sredni_po_oknach"] is not None else "  średnia po oknach: —")
+    ok = p["okna"]
+    if ok["n"]:
+        linie.append(
+            f"  rozkład okien: mediana {ok['mediana']:+.4f}, kwartyle "
+            f"[{ok['q1']:+.4f}, {ok['q3']:+.4f}]" if ok["q1"] is not None
+            else f"  rozkład okien: mediana {ok['mediana']:+.4f}")
+        linie.append(
+            f"  okien ujemnych: {ok['ujemnych']}/{ok['n']} "
+            f"({ok['udzial_ujemnych']:.1%})")
+    pf = p["profit_factor_zbiorczy"]
+    linie.append(
+        f"  profit factor ZBIORCZY: {pf:.4f}" if pf is not None
+        else "  profit factor zbiorczy: — (brak strat w próbie)")
+    linie.append(f"  średni zwrot z transakcji: {p['sredni_zwrot'] * 100:+.4f}%, "
+                 f"trafnych {p['hit_rate']:.1%}")
+
+    linie.append("")
+    linie.append("RACHUNEK KOSZTU RUNDY — SKŁADNIK PO SKŁADNIKU, Z POCHODZENIEM:")
+    linie.extend(opis_karty(karta))
+
+    linie.append("")
+    prog = p["koszt_progowy"]
+    if prog is None:
+        linie.append("KOSZT PROGOWY: — (brak transakcji)")
+    elif prog <= 0:
+        linie.append(
+            f"KOSZT PROGOWY: {_pb(prog)} na rundę — UJEMNY. Przewagi nie ma "
+            f"JUŻ przy kosztach, które symulacja nalicza; nienaliczone "
+            f"składniki ({', '.join(karta.nieznane) or 'brak'}) mogą ją tylko "
+            f"pogłębić.")
+    else:
+        linie.append(
+            f"KOSZT PROGOWY: {_pb(prog)} na rundę. Tyle wynosi cały zapas na "
+            f"to, czego symulacja NIE liczy. Jeśli spread, niewypełnienie "
+            f"i finansowanie sumują się do więcej, przewagi nie ma — i nikt "
+            f"dotąd nie zmierzył, czy sumują się do mniej.")
+        # SKALA ODNIESIENIA, ZEBY PROG NIE WISIAL W PROZNI. Sam spread rzedu
+        # kilku punktow bazowych na noge zjada go w calosci przy progach
+        # rzedu kilkunastu - i to jest wielkosc, ktora w produkcji LEZY
+        # ZMIERZONA w `market.book_snapshot`, tylko nikt jej stad nie czyta.
+        linie.append(
+            f"  dla skali: koszt naliczony to {karta.policzone * 1e4:.2f} pb "
+            f"rundy, czyli {karta.policzone / prog:.2f}× próg")
+
+    # KROTNOSC SPREADU, PRZY KTOREJ PRZEWAGA SCHODZI DO ZERA.
+    #
+    # Wypisywana WYLACZNIE wtedy, gdy spread w karcie jest podloga z obcej
+    # ksiegi - bo tylko wtedy pytanie brzmi „ile razy wiecej", a nie „ile".
+    spread_skl = next((s for s in karta.skladniki if s.nazwa == "spread"), None)
+    if spread_skl is not None and spread_skl.wartosc and not spread_skl.wiarygodny:
+        k = krotnosc_zabojcza(prog, spread_skl.wartosc)
+        linie.append("")
+        if k is None:
+            linie.append(
+                f"KROTNOŚĆ SPREADU: nie ma czego liczyć — zapas jest "
+                f"niedodatni ({_pb(prog)}), więc spread nie musi być szerszy "
+                f"o nic, żeby przewagi nie było.")
+        else:
+            linie.append(
+                f"KROTNOŚĆ SPREADU, PRZY KTÓREJ PRZEWAGA SCHODZI DO ZERA: "
+                f"{k:.1f}× spreadu zmierzonego na obcej księdze "
+                f"({spread_skl.wartosc * 1e4:.3f} pb).")
+            linie.append(
+                "  Nasz spread jest nieznany — arkusz czytamy z hosta "
+                "globalnego, a zlecenia składamy na bybit.eu, który ma rzędu "
+                "0,1% tamtego wolumenu (migracja 0018). To jest warunek do "
+                "sprawdzenia, nie wynik: wystarczy jeden odczyt arkusza "
+                "z właściwego hosta, żeby wiedzieć, po której stronie stoimy.")
+
+    # DRABINA WRAZLIWOSCI ZAMIAST JEDNEJ LICZBY „PO UCZCIWYCH KOSZTACH".
+    #
+    # Pokusa jest tu oczywista: wstawic w miejsce nieznanego spreadu liczbe
+    # „rozsadna" i podac jeden wynik. To zamienia „nie wiem" na „wiem i wynosi
+    # tyle", czyli robi dokladnie to, przed czym ta warstwa ma bronic - tylko
+    # z ladniejsza liczba niz poprzednio. Drabina pokazuje NACHYLENIE: o ile
+    # Sharpe spada na kazdy punkt bazowy nienaliczonego kosztu. Nachylenie jest
+    # policzone z danych i nie wymaga zadnego zalozenia; miejsce, w ktorym
+    # strategia siada, kazdy widzi sam.
+    if p["sharpe_zbiorczy"] is not None:
+        linie.append("")
+        linie.append("SHARPE PRZY RÓŻNYCH WARTOŚCIACH TEGO, CZEGO NIE ZMIERZONO "
+                     "(dopłata na rundę):")
+        linie.append("  dopłata |  zbiorczy | średnia po oknach")
+        for bps in (0.0, 2.0, 5.0, 10.0, 20.0):
+            z = podsumowanie_przewagi(zwroty, sharpe_okien,
+                                      doplata=bps / 1e4)["sharpe_zbiorczy"]
+            o = _sharpe_po_oknach(zwroty_okien, bps / 1e4)
+            o_txt = "—" if o is None else f"{o:+.4f}"
+            znacznik = "   <- dzisiejszy rachunek" if bps == 0 else ""
+            linie.append(f"  {bps:6.1f} pb | {z:+9.4f} | {o_txt:>17}{znacznik}")
+        linie.append(
+            "  Obie kolumny liczone tym samym odchyleniem PRÓBKOWYM (n−1). "
+            "`portfolio.metrics` liczy populacyjne (n), czyli przy medianie "
+            "dwudziestu transakcji na okno zawyża każdy Sharpe o ok. 2,6% — "
+            "zawsze w górę.")
+    return linie
+
+
+def _sharpe_po_oknach(zwroty_okien: list[list[float]],
+                      doplata: float) -> float | None:
+    """Srednia po oknach z Sharpe'a liczonego W OKNIE. Ta miara, ktora podaje
+    dzisiejszy raport - przeliczona przy doliczonym koszcie.
+
+    Okna, w ktorych Sharpe nie istnieje (jedna transakcja, zerowy rozrzut),
+    WYPADAJA z tej sredniej zamiast wchodzic do niej jako zera. Zero jest tu
+    konkretna wartoscia - „brak przewagi" - i podstawione za „nie da sie
+    policzyc" ciagnie srednia do zera tym mocniej, im wiecej okien jest pustych.
+    """
+    s = [x for x in (sharpe_proby([r - doplata for r in okno])
+                     for okno in zwroty_okien) if x is not None]
+    return statistics.fmean(s) if s else None
+
+
+def podsumowanie_przewagi(zwroty: list[float], sharpe_okien: list[float],
+                          doplata: float = 0.0) -> dict:
+    """Przewaga policzona ze ZLACZONEJ proby transakcji. CZYSTA FUNKCJA.
+
+    DLACZEGO OBOK MIARY, KTORA JUZ JEST
+
+    Raport walk-forward podaje `sharpe` jako SREDNIA PO OKNACH z ilorazow
+    liczonych osobno w kazdym oknie. Srednia ilorazow nie jest ilorazem: okno
+    z pieciu transakcji wazy w niej tyle samo, co okno z dwustu, a okno o malym
+    rozrzucie dostaje duzy iloraz z samego mianownika. Obie liczby stoja tu
+    obok siebie, bo to ICH ROZJAZD jest wynikiem - pojedyncza z nich niczego
+    nie rozstrzyga.
+
+    `doplata` TO KOSZT, KTOREGO SYMULACJA NIE NALICZA
+
+    Ulamek ceny na cala runde - spread, niewypelnienie, finansowanie; patrz
+    `koszty.karta_rundy`. Odejmuje sie go od KAZDEJ transakcji z osobna, bo tak
+    wlasnie jest placony. Stala odjeta od kazdej obserwacji przesuwa srednia
+    i zostawia rozrzut nietknietym; gdyby ruszyla takze rozrzut, bylby to blad
+    rachunku, a nie koszt.
+
+    `koszt_progowy` TO JEDYNA LICZBA TU, KTORA NIE WYMAGA ZADNEGO ZALOZENIA
+
+    Sredni zwrot z transakcji przed doplata - czyli doplata, przy ktorej
+    przewaga schodzi do zera. Dopoki spread i niewypelnienie nie sa zmierzone,
+    uczciwe zdanie o przewadze brzmi „przezyje, jesli to, czego nie
+    policzylismy, jest mniejsze niz tyle", a nie „wynosi tyle". Ujemny prog
+    znaczy, ze zapasu nie ma juz teraz - i ma byc wypisany jako liczba ujemna,
+    nie jako zero.
+    """
+    po = [r - doplata for r in zwroty]
+    return {
+        "n_transakcji": len(po),
+        "n_okien": len(sharpe_okien),
+        "sredni_zwrot": statistics.fmean(po) if po else None,
+        "odchylenie": statistics.stdev(po) if len(po) > 1 else None,
+        "sharpe_zbiorczy": sharpe_proby(po),
+        # Ta sama liczba, ktora raport podaje dzis - zeby rozjazd byl widoczny,
+        # a nie zeby ja zastapic po cichu.
+        "sharpe_sredni_po_oknach": (statistics.fmean(sharpe_okien)
+                                    if sharpe_okien else None),
+        "okna": rozklad(sharpe_okien),
+        "profit_factor_zbiorczy": profit_factor(po),
+        "hit_rate": (sum(1 for r in po if r > 0) / len(po)) if po else None,
+        # PRZED doplata, nie po - to jest zapas, ktory strategia ma na koszty,
+        # a nie to, co z niego zostalo po doliczeniu czesci z nich.
+        "koszt_progowy": statistics.fmean(zwroty) if zwroty else None,
+    }
+
+
+def prog_pokrycia(pokrycie: dict[str, int]) -> int:
+    """Ile swiec musi miec instrument, zeby liczyl sie w tym oknie. CZYSTA FUNKCJA.
+
+    Pytanie brzmi: czy instrument byl notowany przez WIEKSZOSC tego okna -
+    a nie: ile godzin ma doba. Odniesieniem jest wiec najlepiej pokryty
+    instrument w TYM oknie, a nie liczba swiec wyliczona z kalendarza.
+
+    Wczesniej prog byl `train_days * 1440 / bar_minutes / 4`, czyli cwierc
+    liczby swiec, ktora zmiescilaby sie w oknie na rynku notowanym BEZ PRZERWY.
+    Dla krypto to ta sama liczba (2 158 swiec 1h w 90 dniach, cwierc to 539
+    wobec dawnych 540 - roznica jednej swiecy nie przesuwa zadnego
+    instrumentu). Dla gieldy amerykanskiej okno 90 dni to okolo 62 sesji po
+    siedem swiec, czyli 521-524 swiece przy progu 540: NIE PRZECHODZIL ZADEN
+    instrument, `aktywne` bylo puste, kazde okno odpadalo na MIN_INSTRUMENTS,
+    a walk-forward konczyl sie z zerem okien i komunikatem "za malo
+    informatywnych okien" - brzmiacym jak brak danych, a nie jak prog policzony
+    dla innego rynku.
+    """
+    return max(MIN_SWIEC_OKNA, max(pokrycie.values(), default=0) // 4)
+
+
+def cechy_nadazaja(najnowsza_cecha, ostatnia_swieca, max_staleness_min: int) -> bool:
+    """Czy potok cech nadaza za DANYMI. CZYSTA FUNKCJA.
+
+    Odniesieniem jest ostatnia swieca zrodlowa, nie zegar. Cecha powstaje po
+    zamknieciu swiecy, wiec przy zdrowym potoku zostaje w tyle najwyzej
+    o swiece-dwie - niezaleznie od tego, czy rynek akurat handluje.
+
+    Wczesniej liczylo sie `now - najnowsza_cecha`, czyli zalozenie rynku
+    ciaglego. Na gieldzie ostatnia swieca zamyka sie o 20:00 UTC, a nastepna
+    przychodzi nazajutrz o 13:00: w pelni aktualna cecha ma nad ranem 800
+    minut, a po weekendzie ponad 3900, przy progu 180. Zadanie cykliczne
+    trenera chodzi o 02:40 UTC, czyli ZAWSZE przy zamknietej gieldzie - kazdy
+    nocny trening equity przerywalby sie, meldujac awarie dzialajacego potoku.
+
+    CZEGO TO NIE LAPIE: sytuacji, w ktorej stanely takze swiece - wtedy cechy
+    nadazaja za danymi, bo dane tez stoja. To zadanie `dozor.py --co swiezosc`,
+    ktory patrzy wprost na `market.candle`.
+    """
+    spoznienie_min = (ostatnia_swieca - najnowsza_cecha).total_seconds() / 60
+    return spoznienie_min <= max_staleness_min
 
 SEED = 20260827
 
@@ -579,8 +871,17 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
           sucho: bool = False, wybor: str = "argmax",
           tylko: set[str] | None = None,
           zakladane_pozycje: int | None = None,
-          zgoda_na_promocje: bool = False) -> None:
+          zgoda_na_promocje: bool = False,
+          spread_bps: float | None = None,
+          spread_nasza_ksiega: bool = True) -> None:
     cur = conn.cursor()
+    # KARTA KOSZTU, NIE JEDNA LICZBA. Wymienia z nazwy skladniki, ktorych
+    # symulacja nie nalicza, zamiast wliczac je jako zera - patrz `koszty.py`.
+    # `spread_bps` zostaje None, dopoki nikt nie poda POMIARU; wymyslona liczba
+    # zamienilaby tu „nie wiem" na „wiem i wynosi tyle".
+    karta = karta_rundy(kind, (egzekucja or Egzekucja()).limit,
+                        spread_bps=spread_bps,
+                        spread_nasza_ksiega=spread_nasza_ksiega)
     rng = random.Random(SEED)
     now = datetime.now(timezone.utc)
 
@@ -731,13 +1032,44 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
     # decyzyjna uzywa przy odczycie point-in-time, a nie osobna stala dobrana tu
     # na nowo. Kod wyjscia idzie do dozoru, wiec awaria konczy sie
     # powiadomieniem, a nie wpisem w logu, ktorego nikt nie czyta.
+    #
+    # WIEK MIERZY SIE WZGLEDEM OSTATNIEJ SWIECY, NIE WZGLEDEM ZEGARA.
+    #
+    # Do 2026-09-24 stalo tu `now - najnowszy`, czyli zalozenie, ze rynek jest
+    # notowany bez przerwy. Na gieldzie amerykanskiej ostatnia swieca zamyka sie
+    # o 20:00 UTC i nastepna przychodzi dopiero nazajutrz o 13:00, wiec cecha
+    # w pelni aktualna ma nad ranem 800 minut, a po weekendzie ponad 3900 -
+    # przy progu 180. Zadanie cykliczne trenera chodzi o 02:40 UTC, czyli
+    # ZAWSZE przy zamknietej gieldzie: trening equity przerywalby sie co noc
+    # i za kazdym razem meldowal awarie potoku, ktory dziala poprawnie.
+    #
+    # Falszywy alarm psuje czujke skuteczniej niz jej brak - uczy odbiorce, ze
+    # mozna ja pomijac. A pytanie, ktore ten straznik NAPRAWDE zadaje, brzmi
+    # "czy cechy nadazaja za danymi", nie "czy rynek handluje teraz". Odniesienie
+    # do ostatniej swiecy zrodlowej odpowiada dokladnie na to i jest poprawne
+    # na obu rynkach naraz, bez wiedzy o godzinach sesji i kalendarzu swiat.
+    #
+    # CZEGO TEN STRAZNIK PRZEZ TO NIE LAPIE: sytuacji, w ktorej stanely TAKZE
+    # swiece. Wtedy cechy nadazaja za danymi, bo dane tez stoja. To nalezy do
+    # `dozor.py --co swiezosc`, ktory patrzy wprost na `market.candle`.
+    cur.execute(
+        "SELECT max(event_time) AS ostatnia FROM market.candle"
+        " WHERE instrument_id = ANY(%s) AND timeframe = %s",
+        ([inst_ids[s] for s in panels], h.source_timeframe))
+    ostatnia_swieca = (cur.fetchone() or {}).get("ostatnia")
+    # Brak swiec przy niepustym panelu jest niemozliwy, ale gdyby zapytanie
+    # zwrocilo NULL, zegar jest jedynym odniesieniem, jakie zostaje.
+    odniesienie = ostatnia_swieca or now
+
     najnowszy = max(p[-1]["t"] for p in panels.values())
-    wiek_min = (now - najnowszy).total_seconds() / 60
-    if wiek_min > h.max_staleness_min:
-        komunikat = (f"najnowsza cecha ma {wiek_min:.0f} min, dopuszczalne "
-                     f"{h.max_staleness_min} min — potok cech dla świecy {h.bar} stanął")
+    wiek_min = (odniesienie - najnowszy).total_seconds() / 60
+    if not cechy_nadazaja(najnowszy, odniesienie, h.max_staleness_min):
+        komunikat = (f"najnowsza cecha jest o {wiek_min:.0f} min starsza od "
+                     f"ostatniej świecy, dopuszczalne {h.max_staleness_min} min "
+                     f"— potok cech dla świecy {h.bar} stanął")
         print(f"\nPRZERWANO: {komunikat}")
-        print(f"  ostatni punkt panelu: {najnowszy:%Y-%m-%d %H:%M} UTC")
+        print(f"  ostatni punkt panelu:  {najnowszy:%Y-%m-%d %H:%M} UTC")
+        print(f"  ostatnia świeca {h.source_timeframe}: {odniesienie:%Y-%m-%d %H:%M} UTC")
         print(f"  sprawdź: kubectl logs deploy/trader-features --tail=30")
         cur.execute("UPDATE learn.training_run SET status='failed', finished_at=now(),"
                     " error=%s WHERE id=%s", (komunikat, run_id))
@@ -783,6 +1115,12 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
     sharpe_grup: dict[str, list[float]] = {}
     porownywalne = 0
     all_sharpes: list[float] = []
+    # Zwroty WSZYSTKICH transakcji OOS, nie usrednione po oknach - patrz
+    # `podsumowanie_przewagi`.
+    wszystkie_zwroty: list[float] = []
+    # To samo rozbite na okna: potrzebne, zeby przeliczyc srednia PO OKNACH
+    # przy doliczonym koszcie. Sama lista Sharpe'ow tego nie pozwala.
+    zwroty_okien_transakcje: list[list[float]] = []
     worst_dd = 0.0
     predictions: list[tuple[float, bool]] = []
     start = now - timedelta(days=days)
@@ -801,9 +1139,30 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
         # warunek i wyrzucal komplet wczesniejszych okien. Przy 24 instrumentach
         # kosztowalo to dziewiec okien z czterdziestu - czyli prawie czwarta
         # czesc dowodow, i to bez zadnego komunikatu.
-        min_train_bars = max(100, h.train_days * 1440 // h.bar_minutes // 4)
-        aktywne = [s for s, p in panels.items()
-                   if sum(1 for r in p if train_from <= r["t"] < train_to) >= min_train_bars]
+        # PROG POKRYCIA LICZY SIE Z TEGO OKNA, NIE Z KALENDARZA.
+        #
+        # Wczesniej bylo tu `h.train_days * 1440 // h.bar_minutes // 4`, czyli
+        # cwierc liczby swiec, ktora zmiescilaby sie w oknie, GDYBY rynek byl
+        # notowany bez przerwy. Na krypto to prawda; na gieldzie nie.
+        #
+        # Okno 90 dni to na gieldzie amerykanskiej okolo 62 sesji po 7 swiec,
+        # czyli 521-524 swiece - przy progu 540. Zaden instrument nie
+        # przechodzil, `aktywne` bylo puste, kazde okno odpadalo na warunku
+        # MIN_INSTRUMENTS i walk-forward konczyl sie z ZEREM okien. Trener
+        # meldowal wtedy "za malo informatywnych okien", co brzmi jak brak
+        # danych, a bylo progiem policzonym dla innego rynku - i przegrywal
+        # o niecale cztery procent, wiec wystarczyloby troche gestszych danych,
+        # zeby zaczal "dzialac" bez naprawienia czegokolwiek.
+        #
+        # Pytanie, ktore ten prog zadaje, brzmi: czy ten instrument byl notowany
+        # przez WIEKSZOSC tego okna - a nie: ile godzin ma doba. Odniesieniem
+        # jest wiec najlepiej pokryty instrument w TYM oknie. Dla rynku ciaglego
+        # wychodzi dokladnie tyle samo co dawniej (2 160 swiec w 90 dniach,
+        # cwierc to 540), a dla gieldy - tyle, ile sesja naprawde daje.
+        pokrycie = {s: sum(1 for r in p if train_from <= r["t"] < train_to)
+                    for s, p in panels.items()}
+        min_train_bars = prog_pokrycia(pokrycie)
+        aktywne = [s for s, n in pokrycie.items() if n >= min_train_bars]
         # Portfel z garstki instrumentow to juz inna strategia, nie ta sama
         # w chudszym okresie - ponizej tego progu okno naprawde nie niesie
         # informacji o tym, co testujemy.
@@ -933,6 +1292,20 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
             worst_dd = min(worst_dd, agg["max_dd"])
             if agg["sharpe"] > 0:
                 positive += 1
+            # ZLACZONA PROBA WSZYSTKICH TRANSAKCJI OOS.
+            #
+            # `all_sharpes` zbiera ILORAZY policzone osobno w kazdym oknie,
+            # a ich srednia nie jest ilorazem ze zlaczonej proby - okno
+            # o pieciu transakcjach wazy tam tyle samo, co okno o dwustu.
+            # Dokladanie kosztu tez wymaga tej listy: koszt placi kazda
+            # transakcja z osobna, nie kazde okno.
+            zwroty_okna = [t["ret"] for t in oos_res.trades]
+            wszystkie_zwroty.extend(zwroty_okna)
+            # ROZBITE NA OKNA, a nie tylko zlaczone - zeby te sama miare, ktora
+            # raport podaje dzis (srednia po oknach), dalo sie PRZELICZYC po
+            # doliczeniu kosztu. Bez tego „przed" i „po" byloby liczone dwiema
+            # roznymi miarami i roznica nie znaczylaby nic.
+            zwroty_okien_transakcje.append(zwroty_okna)
 
         # Kalibracja: deklarowana PRZED wejsciem pewnosc kontra faktyczny wynik.
         # Wczesniejsza wersja budowala "prognoze" z wielkosci samego zwrotu
@@ -1388,6 +1761,9 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
           f"   przedział ufności 95%: {ci_lo:.1%}–{ci_hi:.1%}")
     print(f"Mediana Sharpe (OOS): {median:+.3f}" if median is not None else "Mediana Sharpe: —")
     print(f"Najgorsze obsunięcie: {worst_dd:.2f}%")
+    for linia in opis_przewagi(wszystkie_zwroty, all_sharpes, karta,
+                               zwroty_okien_transakcje):
+        print(linia)
     if len(sharpe_grup) > 1:
         print("Sharpe/transakcję policzony OSOBNO dla grup, w tym samym przebiegu:")
         for grupa, wartosci in sorted(sharpe_grup.items()):
@@ -1424,6 +1800,21 @@ def main() -> int:
                     help="zlecenia z limitem zamiast rynkowych")
     ap.add_argument("--sucho", action="store_true",
                     help="nie zapisuj wyniku do bazy (do porownywania wariantow)")
+    ap.add_argument("--spread-obca-ksiega", action="store_true",
+                    dest="spread_obca_ksiega",
+                    help="podany --spread-bps pochodzi z ksiegi, na ktorej NIE "
+                         "skladamy zlecen (arkusz czytamy z hosta globalnego, "
+                         "zlecenia ida na bybit.eu - migracja 0018). Liczba "
+                         "wchodzi wtedy do rachunku jako PODLOGA, karta zostaje "
+                         "niepelna, a raport podaje krotnosc spreadu, przy "
+                         "ktorej przewaga schodzi do zera")
+    ap.add_argument("--spread-bps", type=float, default=None, dest="spread_bps",
+                    help="ZMIERZONA polowa spreadu na noge razy dwie nogi, "
+                         "w punktach bazowych na runde. Zrodlo: "
+                         "market.book_snapshot / cecha book_spread_bps. "
+                         "BEZ TEJ WARTOSCI spread zostaje w karcie kosztu jako "
+                         "NIE ZMIERZONY - i tak ma byc, dopoki nikt go nie "
+                         "policzyl. Nie wpisywac liczby 'na oko'")
     # ZGODA CZLOWIEKA NA PODMIANE STRATEGII W TRYBIE LIVE.
     #
     # Flaga przebiegu, nie ustawienie w bazie i nie wpis w chart: zadanie
@@ -1481,13 +1872,18 @@ def main() -> int:
 
     with psycopg.connect(url, row_factory=dict_row) as conn:
         h = get_horizon(args.bar)
-        from services.engine.koszty import runda
         egz = Egzekucja(limit=args.limit)
         print(f"Walk-forward: świeca {h.bar}, trening {h.train_days} dni / "
               f"test {h.test_days} dni, krok {h.step_days} dni")
+        # NAGLOWEK PODAWAL DOTAD SAMA LICZBE: „koszt rundy 0.040%". Czytalo sie
+        # to jak pelny rachunek, a byla to suma dwoch skladnikow z czterech.
+        # Karta wypisuje takze te, ktorych nie ma - slowami, nie zerami.
+        karta = karta_rundy(args.kind, args.limit, spread_bps=args.spread_bps,
+                            spread_nasza_ksiega=not args.spread_obca_ksiega)
         print(f"Egzekucja: {args.kind}, zlecenia "
-              f"{'z limitem' if args.limit else 'rynkowe'}, "
-              f"koszt rundy {runda(args.kind, args.limit) * 100:.3f}%")
+              f"{'z limitem' if args.limit else 'rynkowe'}")
+        for linia in opis_karty(karta):
+            print(linia)
         print(f"Wybór wag na oknie treningowym: {args.wybor}"
               f"{f' ({args.trials} losowań + założenia + IC)' if args.wybor == 'argmax' else ' (bez losowania)'}\n")
         tylko = {s.strip().upper() for s in args.instrumenty.split(",") if s.strip()}
@@ -1497,7 +1893,9 @@ def main() -> int:
         train(conn, args.engine, args.days, args.trials, h, args.kind, egz,
               sucho=args.sucho, wybor=args.wybor, tylko=tylko or None,
               zakladane_pozycje=args.zakladane_pozycje or None,
-              zgoda_na_promocje=args.zgoda_na_promocje)
+              zgoda_na_promocje=args.zgoda_na_promocje,
+              spread_bps=args.spread_bps,
+              spread_nasza_ksiega=not args.spread_obca_ksiega)
     return 0
 
 

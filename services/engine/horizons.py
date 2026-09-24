@@ -18,6 +18,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+# Dlugosc swiecy w minutach wedlug nazwy timeframe'u w `market.candle`.
+#
+# JEDNO ZRODLO, bo czytelnicy sa w dwoch modulach: potok cech przelicza nim
+# rozgrzewke na liczbe swiec zrodlowych, a dozor - wiek danych na "ile swiec
+# zwloki". Druga kopia rozjechalaby sie przy pierwszym nowym timeframie,
+# a rozjazd bylby CICHY: obie strony nadal zwracaja liczbe, tylko inna.
+MINUT_TIMEFRAME = {"1m": 1, "5m": 5, "15m": 15, "1h": 60, "4h": 240, "1d": 1440}
+
 
 @dataclass(frozen=True)
 class Horizon:
@@ -51,6 +59,19 @@ class Horizon:
 
     def name(self, role: str) -> str:
         return f"{role}__{self.bar}"
+
+    @property
+    def swiec_zrodlowych_na_swiece(self) -> int:
+        """Ile swiec `source_timeframe` sklada sie na JEDNA swiece horyzontu.
+
+        Wyliczane, a nie zapisane osobnym polem, zeby nie dalo sie ustawic
+        wartosci niezgodnej z `source_timeframe` i `bar_minutes`.
+        """
+        zrodlo = MINUT_TIMEFRAME.get(self.source_timeframe)
+        if zrodlo is None:
+            raise ValueError(
+                f"nieznany timeframe zrodlowy: {self.source_timeframe}")
+        return max(1, self.bar_minutes // zrodlo)
 
     @staticmethod
     def role_of(feature_name: str) -> str:

@@ -234,6 +234,30 @@ class AlpacaAdapter:
         tf = TIMEFRAMES.get(timeframe)
         if not tf:
             raise ValueError(f"nieobslugiwany timeframe: {timeframe}")
+        # `adjustment: "raw"` - CENY NIESKORYGOWANE O PODZIALY AKCJI. Dlug
+        # swiadomy, opisany, NIE pomylka do cichego poprawienia.
+        #
+        # CO TO ZNACZY DLA CECH. Podzial 10:1 wyglada w szeregu jak spadek
+        # o 90%, bo cena z dnia na dzien dzieli sie przez dziesiec, a my
+        # zapisujemy oba stany obok siebie. Zmierzone na produkcji 2026-09-24,
+        # `ret_short__1h` (zwrot z czterech swiec):
+        #
+        #     NVDA  2024-06-10   -90,25 %      podzial 10:1
+        #     AVGO  2024-07-15   -90,07 %      podzial 10:1
+        #     NFLX  2025-11-17   -90,12 %      podzial 10:1
+        #
+        # To NIE sa ruchy rynku. `ret_long` siega 168 swiec wstecz, a bufor EMA
+        # 288, wiec jedno zdarzenie zatruwa okolo 670 swiec po sobie - i wchodzi
+        # do treningu jako obserwacja kilkunastosigmowa, ktora zdominuje kazda
+        # kalibracje nieodporna na wartosci skrajne.
+        #
+        # DLACZEGO WCIAZ `raw`. Przejscie na `split` nie jest zmiana jednego
+        # slowa: Alpaca koryguje ceny wzgledem DZIS, wiec kazdy kolejny podzial
+        # uniewaznia cala zapisana historie i wymaga POWTORZENIA BACKFILLU.
+        # Dopoki silnik equity nie handluje, dlug jest tanszy niz operacja.
+        #
+        # Zanim ktokolwiek bedzie trenowal equity na serio: najpierw `split`
+        # i pelny backfill `equity 1h`, potem trening.
         params: dict = {"symbols": symbol, "timeframe": tf, "feed": self._feed,
                         "adjustment": "raw", "limit": min(limit, 10_000), "sort": "asc"}
         if start is not None:

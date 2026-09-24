@@ -54,7 +54,20 @@ from services.ingest import puls
 # swiec idzie do `detail`, bo jest argumentem: gdyby wchodzila do klucza, zmiana
 # `--bar` w charcie zakladalaby nowy wiersz i zostawialaby stary, ktory od tej
 # chwili starzalby sie w nieskonczonosc jako „martwy worker".
+#
+# OSOBNY WIERSZ NA KAZDY SILNIK, tak samo jak w `market_worker` i
+# `history_worker`. Cechy krypto i cechy equity licza DWA procesy o roznych
+# cyklach; gdyby bily w ten sam wiersz, smierc jednego z nich bylaby dla czujki
+# niewidoczna - drugi odswiezalby `last_beat_at` za obu.
 PULS = "features"
+
+
+def _puls(engine: str) -> str:
+    """Nazwa pulsu dla silnika. `crypto` zostaje bez sufiksu, bo tak nazywa sie
+    wiersz istniejacy od poczatku - zmiana nazwy zostawilaby stary jako
+    „martwy worker" starzejacy sie w nieskonczonosc."""
+    return PULS if engine == "crypto" else f"{PULS}-{engine}"
+
 
 # Opoznienie obliczeniowe doliczane do ingested_at przy datowaniu wstecz.
 COMPUTE_LAG = timedelta(seconds=3)
@@ -297,30 +310,64 @@ def zscore(values: list[float]) -> float | None:
 
 # ------------------------------------------------------------------ swiece
 def load_bars(cur, instrument_id: int, h: Horizon, since: datetime,
-              until: datetime) -> list[dict]:
-    """Swiece horyzontu: albo wprost z market.candle, albo agregat z nizszej."""
+              until: datetime, *, rozgrzewka: int = 0) -> list[dict]:
+    """Swiece horyzontu: albo wprost z market.candle, albo agregat z nizszej.
+
+    `rozgrzewka` to liczba swiec PRZED `since`, a NIE odcinek czasu.
+
+    DLACZEGO TO MUSI BYC LICZBA SWIEC. Do 2026-09-24 wolajacy cofal `since`
+    o `bar_minutes * lookback` MINUT, co jest tym samym tylko na rynku
+    notowanym bez przerwy. Gielda amerykanska daje SIEDEM swiec 1h na dzien
+    handlowy i zero przez ~17 h nocy oraz ~65 h weekendu, wiec 205 swiec
+    rozgrzewki rozciaga sie tam na ~41 dni kalendarzowych, nie na 205 godzin.
+
+    Skutek byl niewidoczny, bo nie byl bledem: w oknie 205 godzin lezalo
+    okolo 55 swiec equity, `compute_prices` trafialo na `len(bars) <= lookback`
+    i zwracalo zero. Potok konczyl cykl z kodem 0, bil puls i drukowal
+    "0 cen" dla kazdego instrumentu - proces zdrowy, ktory nie policzyl
+    ANI JEDNEJ cechy. Zmierzone na produkcji 2026-09-24: krypto 228 swiec
+    w tym samym oknie (liczy sie normalnie), equity 55 (nie liczy sie nigdy).
+
+    Rozgrzewka pobierana po LICZBIE swiec jest poprawna na obu rynkach naraz
+    i nie wymaga od potoku wiedzy o godzinach sesji ani o kalendarzu swiat.
+    """
+    # Przy agregacji jedna swieca horyzontu powstaje z kilku swiec zrodlowych,
+    # wiec limit stawiamy na zrodle i tam przelicznik jest potrzebny.
+    limit_zrodla = rozgrzewka * h.swiec_zrodlowych_na_swiece
+    # ZRODLO to rozgrzewka (ostatnie N swiec przed `since`) SKLEJONA z oknem
+    # wlasciwym. Osobny podzapytaniem, bo rozgrzewka wybiera sie po LIMIT,
+    # a okno po zakresie czasu - jednym warunkiem WHERE sie tego nie wyrazi.
+    zrodlo = """
+        (SELECT event_time, open, high, low, close, volume
+           FROM market.candle
+          WHERE instrument_id = %s AND timeframe = %s AND event_time < %s
+          ORDER BY event_time DESC LIMIT %s)
+        UNION ALL
+        (SELECT event_time, open, high, low, close, volume
+           FROM market.candle
+          WHERE instrument_id = %s AND timeframe = %s
+            AND event_time >= %s AND event_time < %s)
+    """
+    args = (instrument_id, h.source_timeframe, since, limit_zrodla,
+            instrument_id, h.source_timeframe, since, until)
     if h.aggregate:
-        sql = """
+        sql = f"""
+            WITH zrodlo AS ({zrodlo})
             SELECT time_bucket(%s::interval, event_time) AS t,
                    (array_agg(open  ORDER BY event_time))[1]      AS open,
                    max(high) AS high, min(low) AS low,
                    (array_agg(close ORDER BY event_time DESC))[1] AS close,
                    sum(volume) AS volume
-            FROM market.candle
-            WHERE instrument_id = %s AND timeframe = %s
-              AND event_time >= %s AND event_time < %s
+            FROM zrodlo
             GROUP BY 1 ORDER BY 1
         """
-        args = (f"{h.bar_minutes} minutes", instrument_id, h.source_timeframe, since, until)
+        args = args + (f"{h.bar_minutes} minutes",)
     else:
-        sql = """
+        sql = f"""
+            WITH zrodlo AS ({zrodlo})
             SELECT event_time AS t, open, high, low, close, volume
-            FROM market.candle
-            WHERE instrument_id = %s AND timeframe = %s
-              AND event_time >= %s AND event_time < %s
-            ORDER BY 1
+            FROM zrodlo ORDER BY 1
         """
-        args = (instrument_id, h.source_timeframe, since, until)
     cur.execute(sql, args)
     return [{"t": r["t"], "open": float(r["open"]), "high": float(r["high"]),
              "low": float(r["low"]), "close": float(r["close"]),
@@ -335,9 +382,15 @@ def compute_prices(cur, instrument_id: int, h: Horizon, feat_ids: dict[str, int]
     # swiece policzone przy nastepnym uruchomieniu.
     lookback = max(h.ret_long, h.range_window, h.volume_lookback,
                    h.ema_slow, h.warmup) + 5
-    bars = load_bars(cur, instrument_id, h,
-                     since - timedelta(minutes=h.bar_minutes * lookback), until)
+    bars = load_bars(cur, instrument_id, h, since, until, rozgrzewka=lookback)
     if len(bars) <= lookback:
+        # NIE CICHE ZERO. Ten warunek znaczy "ten instrument nie dostanie
+        # ZADNEJ cechy", a nie "nie przybylo nowych" - i przez rok wygladal
+        # w logu tak samo jak spokojny cykl bez nowych swiec. Dopoki milczal,
+        # potok equity meldowal zdrowie, nie liczac niczego.
+        print(f"    UWAGA instrument {instrument_id}: {len(bars)} świec "
+              f"przy wymaganej rozgrzewce {lookback} — cech NIE BĘDZIE. "
+              f"Za krótka historia albo za rzadka siatka notowań.")
         return 0
 
     closes = [b["close"] for b in bars]
@@ -414,6 +467,28 @@ def compute_news(cur, instrument_id: int, h: Horizon, feat_id: int,
     cokolwiek, co ta cecha mierzy", a nie „czy probka jest duza". Jedna analiza
     o kierunku `neutral` daje uczciwe zero - to JEST pomiar. Zero z zera analiz
     nim nie jest.
+
+    JEDNA HISTORIA LICZY SIE RAZ - poprawka z 2026-09-24.
+
+    Kanaly typu „live updates" to relacja na zywo: ten sam URL wraca przy
+    kazdym pobraniu z DOPISANA trescia. `content_hash` sluszznie widzi za kazdym
+    razem co innego, wiec w `news.article` powstaje osobny wiersz - a wszystkie
+    dziedzicza `event_time` PIERWSZEJ publikacji, bo tyle podaje RSS.
+
+    Zmierzone na produkcji: jedna relacja CoinDesk z 2026-09-15 06:37 ma
+    DZIEWIEC wierszy, pobranych od 06:39 do 18:49 tego samego dnia, wszystkie
+    z tym samym `event_time`. Sumowanie po wierszach wliczalo wiec sentyment
+    jednej historii dziewiec razy do kazdej swiecy 24-godzinnego okna. Przy 27
+    artykulach uznanych za istotne w calej bazie taka dziewiatka to znaczna
+    czesc probki - cecha mierzyla nie „co sie dzieje", tylko „jak czesto
+    redakcja dopisuje akapit".
+
+    Stad `DISTINCT ON (a.url)`: jedna historia wnosi JEDEN wklad, i to ten
+    z NAJSWIEZSZEJ analizy znanej w chwili `t`. Kolejne migawki nie sa smieciem
+    do skasowania - relacja o 18:49 mowila co innego niz o 06:39 - wiec zostaja
+    w bazie, a wybor „ktora obowiazuje" zapada przy liczeniu cechy. Filtr
+    `an.ingested_at <= b.t` dalej pilnuje, ze wybiera sie wylacznie z migawek
+    znanych wtedy.
     """
     since = na_siatce(since, h)
     # `until` cofamy o jedna swiece: ostatnia swieca jest jeszcze otwarta.
@@ -421,18 +496,28 @@ def compute_news(cur, instrument_id: int, h: Horizon, feat_id: int,
     cur.execute(
         """
         SELECT b.t,
-               COALESCE(sum(
-                   CASE an.direction WHEN 'bullish' THEN 1 WHEN 'bearish' THEN -1 ELSE 0 END
-                   * an.magnitude * an.confidence * an.novelty * ai.relevance
-               ), 0) AS score,
-               count(an.id) AS analiz
+               COALESCE(sum(h.wklad), 0) AS score,
+               count(h.wklad) AS analiz
         FROM generate_series(%s, %s, %s::interval) AS b(t)
-        LEFT JOIN news.article_instrument ai ON ai.instrument_id = %s
-        LEFT JOIN news.article a  ON a.id  = ai.article_id
-                                 AND a.event_time <= b.t
-                                 AND a.event_time >  b.t - interval '24 hours'
-        LEFT JOIN news.article_analysis an ON an.article_id = a.id
-                                          AND an.ingested_at <= b.t
+        -- JEDEN WKLAD NA HISTORIE, nie na migawke - patrz docstring.
+        -- LATERAL, bo podzapytanie musi znac `b.t`: i okno 24 h, i granica
+        -- bitemporalna `an.ingested_at <= b.t` zaleza od liczonej swiecy.
+        LEFT JOIN LATERAL (
+            SELECT DISTINCT ON (a.url)
+                   (CASE an.direction WHEN 'bullish' THEN 1
+                                      WHEN 'bearish' THEN -1 ELSE 0 END
+                    * an.magnitude * an.confidence * an.novelty
+                    * ai.relevance) AS wklad
+            FROM news.article_instrument ai
+            JOIN news.article a  ON a.id = ai.article_id
+            JOIN news.article_analysis an ON an.article_id = a.id
+            WHERE ai.instrument_id = %s
+              AND a.event_time <= b.t
+              AND a.event_time >  b.t - interval '24 hours'
+              AND an.ingested_at <= b.t
+            -- Najswiezsza migawka TEJ historii, znana w chwili `t`.
+            ORDER BY a.url, an.ingested_at DESC
+        ) h ON true
         GROUP BY b.t ORDER BY b.t
         """,
         (since, until, f"{h.bar_minutes} minutes", instrument_id),
@@ -913,7 +998,37 @@ def main() -> int:
                     help="świeca albo lista po przecinku (np. 4h,1h) — jeden proces "
                          f"liczy wszystkie. Dostępne: {', '.join(sorted(HORIZONS))}")
     ap.add_argument("--backfill", action="store_true")
-    ap.add_argument("--days", type=int, default=90)
+    ap.add_argument("--days", type=int, default=90,
+                    help="glebokosc JEDNORAZOWEGO backfillu w dniach; "
+                         "cyklu rutynowego NIE dotyczy — ten ma --okno-dni")
+    # OKNO CYKLU RUTYNOWEGO, OSOBNO OD GLEBOKOSCI BACKFILLU.
+    #
+    # Do 2026-09-24 okno cyklu bylo zaszyte na sztywno jako jedna doba, a
+    # `--days` dzialalo wylacznie z `--backfill`. Na rynku notowanym bez przerwy
+    # doba wystarcza: po kazdej swiecy nastepna przychodzi godzine pozniej,
+    # wiec kazda zdazy trafic w okno, zanim to okno ja minie.
+    #
+    # Na gieldzie nie. `compute_prices` pomija swiece OSTATNIA z panelu, bo ta
+    # jest jeszcze otwarta - swieca dostaje cechy dopiero w cyklu, w ktorym
+    # istnieje juz swieca po niej. Po piatkowym zamknieciu (19:00 UTC) nastepna
+    # swieca pojawia sie w poniedzialek o 13:00, czyli 65 godzin pozniej -
+    # a wtedy piatkowa lezy juz POZA oknem jednodobowym i nie dostanie cech
+    # NIGDY. Zmierzone: przy oknie 1 dnia cykl poniedzialkowy zapisuje 0
+    # wartosci dla piatkowej swiecy, przy oknie 7 dni - komplet osmiu.
+    #
+    # Dziura byla systematyczna (co tydzien, kazdy instrument) i niewidoczna:
+    # backfill na 90 dniach zasypuje ja natychmiast, bo tam okno obejmuje
+    # nastepna swiece. Widac ja wylacznie w pracy ciaglej.
+    #
+    # SIEDEM DNI, nie cztery: cztery starcza na zwykly dlugi weekend, ale nie
+    # na przerwy swiateczne ani na zamkniecia nadzwyczajne (po 11 wrzesnia
+    # gielda stala cztery sesje). Okno liczy sie ponownie co cykl i wpisy
+    # ida przez ON CONFLICT DO NOTHING, wiec szersze okno kosztuje tylko
+    # powtorzone porownanie kilkudziesieciu swiec - a wezsze gubi dane trwale.
+    ap.add_argument("--okno-dni", type=int, default=1, dest="okno_dni",
+                    help="ile dni wstecz przelicza CYKL RUTYNOWY. Domyslnie 1 "
+                         "(rynek ciagly). Dla rynku z przerwami musi przykryc "
+                         "najdluzsza przerwe w notowaniach — dla gieldy USA 7")
     ap.add_argument("--once", action="store_true", help="jeden cykl zamiast pętli")
     ap.add_argument("--interval", type=int, default=900,
                     help="przerwa między cyklami (s)")
@@ -971,7 +1086,7 @@ def main() -> int:
         # w chwili startu procesu i po tygodniu pracy proces liczylby cechy
         # dla doby sprzed tygodnia.
         now = datetime.now(timezone.utc)
-        since = now - timedelta(days=args.days if args.backfill else 1)
+        since = now - timedelta(days=args.days if args.backfill else args.okno_dni)
         bledy: list[str] = []
         total = 0
         try:
@@ -999,14 +1114,15 @@ def main() -> int:
                 # Warunek jest TYM SAMYM warunkiem, ktory nizej zeruje licznik
                 # `pod_rzad`: pusta lista bledow.
                 if bledy:
-                    puls.zglos_awarie(conn, PULS, args.interval, pod_rzad + 1,
+                    puls.zglos_awarie(conn, _puls(args.engine), args.interval,
+                                      pod_rzad + 1,
                                       bledy[0])
                 else:
                     # Blad zapisu pulsu NIE jest tu lapiany (patrz `puls.bij`):
                     # wpadnie do `except` nizej i policzy sie jako awaria cyklu.
                     # Worker, ktorego czujka nie widzi, jest dla nadzoru
                     # nieodrozninalny od workera, ktorego nie ma.
-                    puls.bij(conn, PULS, args.interval,
+                    puls.bij(conn, _puls(args.engine), args.interval,
                              {"engine": args.engine, "bary": bary,
                               "wartosci": total, "backfill": bool(args.backfill)})
         except Exception as e:                                # noqa: BLE001

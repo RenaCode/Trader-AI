@@ -46,7 +46,7 @@ class _Kursor:
         plaski = " ".join(sql.split())
         if plaski.startswith("SELECT b.t"):
             self.sql = plaski
-            assert "count(an.id)" in plaski, (
+            assert "AS analiz" in plaski and "count(" in plaski, (
                 "zapytanie `compute_news` nie pobiera liczby analiz — kod "
                 "czytający `r['analiz']` opierałby się na kolumnie, której "
                 "produkcja mu nie daje")
@@ -141,6 +141,6 @@ def test_ZAPYTANIE_POBIERA_LICZBE_ANALIZ(monkeypatch, horyzont):
     czasy = _okno(1, horyzont.bar_minutes)
     _, cur = _policz(monkeypatch, [(czasy[0], 0.0, 1)], horyzont)
 
-    assert "count(an.id)" in cur.sql
+    assert "AS analiz" in cur.sql and "count(" in cur.sql
     assert "COALESCE(sum(" in cur.sql, (
         "suma zniknęła z zapytania — cecha przestała być cechą")

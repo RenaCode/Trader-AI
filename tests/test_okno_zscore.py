@@ -18,6 +18,8 @@ pochodzi z zadeklarowanych 30 dni, a nie z ostatnich kilku świec.
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import yaml
+
 from services.engine.horizons import get as get_horizon
 from services.ingest import features
 
@@ -182,20 +184,69 @@ def test_okno_krotsze_niz_prog_daje_TE_SAME_wartosci_co_dluzsze():
 
 # ============================================ dlaczego akurat jedna doba
 
-def test_cykliczny_worker_NIE_ma_backfillu_wiec_okno_to_JEDNA_doba():
+def _workery_cech() -> dict[str, list[str]]:
+    """Polecenia wszystkich workerów cech z chartu. Z PARSOWANEGO YAML-a.
+
+    Wcześniej szło to po liniach pliku i brało `linia[0]`. Odkąd workerów cech
+    jest więcej niż jeden, a polecenie potrafi się łamać na dwie linie, test
+    po liniach sprawdzałby PIERWSZY worker i milczał o pozostałych — czyli
+    dokładnie wtedy, gdy zaczyna być potrzebny.
+    """
+    wartosci = yaml.safe_load(
+        Path("charts/trader/values.yaml").read_text(encoding="utf-8"))
+    return {nazwa: w["command"]
+            for nazwa, w in (wartosci.get("workers") or {}).items()
+            if any("services/ingest/features.py" in str(c) for c in w["command"])}
+
+
+def test_cykliczny_worker_NIE_ma_backfillu():
+    """Backfill liczy inne okno niż cykl — testy wyżej modelują cykl."""
+    workery = _workery_cech()
+    assert workery, "nie ma polecenia workera cech w charcie"
+    for nazwa, cmd in workery.items():
+        assert "--backfill" not in cmd, (
+            f"worker cech {nazwa} dostał --backfill — okno przestało być "
+            f"cykliczne, przejrzyj założenia testów okna z-score")
+
+
+def test_domyslne_okno_cyklu_to_JEDNA_doba():
     """Uzasadnienie okna z testów wyżej, wzięte z produkcji, nie z założenia.
 
-    `features.py` bez `--backfill` liczy `now - 1 dzień` (patrz `main`), a chart
-    uruchamia go właśnie tak. Gdyby to się zmieniło, powyższe testy mierzyłyby
-    okno, którego produkcja nie używa.
+    Testy wyżej wołają `dni=1`, bo tyle liczy `features.py` bez `--backfill`
+    i bez `--okno-dni`. Gdyby DOMYŚLNA wartość się zmieniła, mierzyłyby okno,
+    którego produkcja nie używa.
     """
-    chart = Path("charts/trader/values.yaml").read_text(encoding="utf-8")
-    linia = [l for l in chart.splitlines() if "services/ingest/features.py" in l]
-    assert linia, "nie ma polecenia workera cech w charcie"
-    assert "--backfill" not in linia[0], (
-        "worker cech dostał --backfill — okno przestało być dobowe, "
-        "przejrzyj założenia testów okna z-score")
-
     zrodlo = Path("services/ingest/features.py").read_text(encoding="utf-8")
-    assert "days=args.days if args.backfill else 1" in zrodlo, (
-        "zmieniło się okno cyklicznego przebiegu — testy wyżej zakładają dobę")
+    assert "days=args.days if args.backfill else args.okno_dni" in zrodlo, (
+        "zmienił się sposób liczenia okna cyklicznego przebiegu")
+    assert '"--okno-dni", type=int, default=1' in zrodlo, (
+        "zmieniła się DOMYŚLNA długość okna cyklu — testy wyżej zakładają dobę")
+
+
+def test_szersze_okno_wolno_TYLKO_tam_gdzie_rynek_ma_przerwy():
+    """Worker krypto zostaje przy dobie; equity musi mieć okno szersze.
+
+    To nie jest kosmetyka. Świeca dostaje cechy dopiero w cyklu, w którym
+    istnieje świeca PO niej (ostatnia w panelu jest jeszcze otwarta). Na rynku
+    ciągłym następna świeca przychodzi po godzinie i doba zawsze wystarcza.
+    Po piątkowym zamknięciu giełdy następna przychodzi po 65 godzinach — przy
+    oknie dobowym świeca piątkowa 19:00 nie dostałaby cech NIGDY.
+
+    Że szersze okno nie zmienia WARTOŚCI, dowodzi
+    `test_okno_krotsze_niz_prog_daje_TE_SAME_wartosci_co_dluzsze` wyżej.
+    """
+    def okno(cmd: list[str]) -> int:
+        cmd = [str(c) for c in cmd]
+        return int(cmd[cmd.index("--okno-dni") + 1]) if "--okno-dni" in cmd else 1
+
+    def silnik(cmd: list[str]) -> str:
+        cmd = [str(c) for c in cmd]
+        return cmd[cmd.index("--engine") + 1] if "--engine" in cmd else "crypto"
+
+    okna = {silnik(cmd): okno(cmd) for cmd in _workery_cech().values()}
+    assert okna.get("crypto") == 1, (
+        f"worker cech krypto liczy okno {okna.get('crypto')} dni zamiast doby "
+        f"— rynek ciągły go nie potrzebuje, a testy wyżej modelują dobę")
+    assert okna.get("equity", 0) >= 4, (
+        f"worker cech equity liczy okno {okna.get('equity')} dni. Musi przykryć "
+        f"weekend (65 h bez notowań), inaczej świece piątkowe nie dostaną cech")
