@@ -92,6 +92,14 @@ db:
     news:
       user: trader_news
       secretKey: NEWS_DB_PASSWORD
+    # Dziennik jakosciowy (migracja 0054). Robi dwie rzeczy naraz: CZYTA pelna
+    # historie handlu i WYSYLA jej streszczenie do dostawcy LLM. Zadna
+    # z istniejacych rol nie pasuje - silnik ma klucze gieldy, skaner ma
+    # z 0052 zakaz siegania do `exec`/`journal`/`learn`, a czujka tylko czyta.
+    # Zapis ma do DWOCH tabel i obie sa jego wlasnym wytworem.
+    postmortem:
+      user: trader_postmortem
+      secretKey: POSTMORTEM_DB_PASSWORD
   appUsername: trader_app
   resources:
     limits:   { cpu: 2000m, memory: 3Gi }
@@ -336,6 +344,51 @@ workers:
       limits:   { cpu: 1000m, memory: 512Mi }
       requests: { cpu: 100m,  memory: 128Mi }
 
+  # PETLA DECYZYJNA SILNIKA GIELDOWEGO. Ten sam modul, ten sam obraz, ten sam
+  # ksztalt komendy co wyzej - rozni sie tym, czym rozni sie rynek.
+  #
+  # --bar 1h, NIE 4h. Ten sam powod co przy `features-equity`: sesja trwa
+  # 6,5 godziny, wiec swieca 4h nie dzieli jej na rowne czesci, a horyzont,
+  # ktorego nie liczy potok cech, silnik obstawialby na pustce. Rozjazd tej
+  # liczby z `trainerCron.equity.horyzonty` i z `features-equity` nie objawilby
+  # sie awaria - objawilby sie silnikiem, ktory nie znajduje cech i cichnie.
+  #
+  # --kind stock: cennik Alpaki (zero prowizji, services/engine/koszty.py),
+  # a nie `spot_eu` Bybita. Rachunek papierowy i trener musza kosztowac tyle,
+  # ile kosztuje strategia, ktora kalibrujemy.
+  #
+  # --wymagaj-modelu: BEZ AKTYWNEJ WERSJI MODELU TEN SILNIK NIE HANDLUJE.
+  # `active_model` przy braku modelu cofa sie do zalozen poczatkowych i handluje
+  # dalej - dla silnika, ktory dopiero rusza, znaczyloby to krzywa kapitalu
+  # mierzaca heurystyke i wygladajaca jak wynik modelu. Model powstaje pierwszy
+  # (`trainerCron.equity`), handel drugi. Crypto tej flagi nie dostaje swiadomie:
+  # ma aktywny model i chodzi tak od miesiecy.
+  #
+  # --egzekucja gielda --mode demo: tak samo jak crypto. Konto paper Alpaki jest
+  # odseparowane, a bez prawdziwych zlecen poslizg i ulamek wypelnienia zostaja
+  # ZALOZENIEM - tym samym, ktore na krypto kosztowalo cala zmierzona przewage.
+  #
+  # POZA SESJA CYKL JEST PUSTY, A PULS BIJE (services/engine/sesja.py). Stan
+  # sesji pochodzi z `/v2/clock` Alpaki, czyli od tej samej gieldy, ktora przyjmie
+  # albo odrzuci zlecenie - nie z wlasnego kalendarza, ktory moglby sie z nia
+  # rozjechac. Zegar nieodpowiadajacy NIE jest otwarciem: cykl konczy sie wtedy
+  # bledem i po pieciu pod rzad proces sie konczy, zeby restart byl WIDOCZNY.
+  engine-equity:
+    # WYLACZONE DO CZASU ZBUDOWANIA OBRAZU (2026-09-24).
+    #
+    # Komenda ponizej uzywa `--wymagaj-modelu`, flagi, ktorej NIE MA w obrazie
+    # `sha-c758da2`. ArgoCD wdraza szablony natychmiast, bez podbicia tagu, wiec
+    # wlaczenie tego wpisu przed zbudowaniem obrazu na VPS daje CrashLoopBackOff
+    # z `unrecognized arguments` - dokladnie ta awaria, ktora 2026-09-24
+    # zatrzymala `features-equity` (docs/08, "Stan na dzis").
+    #
+    # ZDJAC PO: scripts/build-on-vps.sh + podbiciu `api.image.tag`.
+    enabled: false
+    command: ["sh", "-c", "sleep 90; python services/engine/loop.py --engine equity --bar 1h --sprawdz && exec python services/engine/loop.py --engine equity --bar 1h --interval 300 --kind stock --limit --wymagaj-modelu --egzekucja gielda --mode demo"]
+    resources:
+      limits:   { cpu: 1000m, memory: 512Mi }
+      requests: { cpu: 100m,  memory: 128Mi }
+
   # Trener walk-forward. Wlasny proces, bo trwa dziesiatki minut - uruchamiany
   # w podzie API ginal przy kazdym wdrozeniu razem z podem. Raz na dobe wystarczy:
   # okna przesuwaja sie o 30 dni, wiec czestsze przeliczanie nic nie wnosi, a
@@ -516,6 +569,30 @@ trainerCron:
   # Silnik handluje wylacznie horyzontem domyslnym; 1h jest torem porownawczym
   # i nie podnosi alarmu.
   horyzonty: ["4h", "1h"]
+  # TOR EQUITY - OSOBNY SILNIK, OSOBNY MODEL, OSOBNY CENNIK.
+  #
+  # Petla decyzyjna equity (`workers.engine-equity`) chodzi z `--wymagaj-modelu`,
+  # wiec BEZ tego toru nie zlozy ani jednego zlecenia i bedzie to mowic w logu
+  # przy kazdym cyklu. To jest zaleznosc w te strone celowo: model powstaje
+  # pierwszy, handel drugi.
+  #
+  # TYLKO 1h. Powod jest ten sam, dla ktorego `workers.features-equity` liczy
+  # wylacznie 1h: sesja trwa 6,5 godziny, wiec swieca 4h nie dzieli jej na rowne
+  # czesci i agregat sklada swiece o roznej liczbie notowan pod jedna nazwa.
+  # Horyzont, ktorego nie liczy potok cech, trener kalibrowalby na pustce.
+  #
+  # `kind: stock` - cennik Alpaki, czyli zero prowizji (services/engine/koszty.py).
+  # Liczby w docs/08 dla equity (23,1% okien dodatnich) powstaly przy cenniku
+  # BYBITA, bo innego wtedy nie bylo - mierzyly oplaty, ktorych to konto nie
+  # placi. Po tej zmianie tor equity liczy sie wlasnym rachunkiem i tamte liczby
+  # nie sa juz jego opisem.
+  equity:
+    # WYLACZONE DO CZASU ZBUDOWANIA OBRAZU - `train.py --kind stock` nie istnieje
+    # w `sha-c758da2`. Zdjac razem z `workers.engine-equity`.
+    enabled: false
+    horyzonty: ["1h"]
+    kind: "stock"
+    limit: true
   # Limity dobrane do ZMIERZONEGO zuzycia (388 MB przy pelnym przebiegu na
   # 24 instrumentach), nie do zapasu "na wszelki wypadek". Wezel ma 7,8 GB
   # i dzieli je z trzema innymi projektami; limit 3 GB dla zadania, ktore
@@ -523,6 +600,32 @@ trainerCron:
   resources:
     limits:   { cpu: 2000m, memory: 1Gi }
     requests: { cpu: 200m,  memory: 384Mi }
+
+# DZIENNIK JAKOSCIOWY z zamknietych transakcji (learn.postmortem).
+#
+# Tabela istnieje od migracji 0006, typ zdarzenia `postmortem.ready` od 0011,
+# a zakladka w panelu od poczatku - i do 2026-09-24 NIC nie zapisalo do niej
+# ani jednego wiersza. To zadanie zamyka ten obieg: decyzja -> wynik -> wniosek.
+#
+# PO TRENERZE, NIE PRZED. Trener konczy okolo 04:40-05:10; dziennik czyta
+# zamkniete pozycje, wiec nie zalezy od modelu, ale wspolne okno obciazenia
+# wezla dwoch procesow po 0,5 CPU nie jest potrzebne nikomu.
+#
+# `dni` dotyczy WYLACZNIE pierwszego przebiegu. Kolejne licza okres od konca
+# poprzedniego dziennika, wiec okresy nie zachodza na siebie, ta sama
+# transakcja nie jest oceniana dwa razy, a przebieg opuszczony przez przestoj
+# nadrabia sie sam.
+postmortemCron:
+  # WYLACZONE DO CZASU ZBUDOWANIA OBRAZU - `services/engine/postmortem.py`
+  # nie istnieje w `sha-c758da2`. Zdjac razem z `workers.engine-equity`.
+  enabled: false
+  schedule: "50 5 * * *"     # codziennie 05:50 UTC, po trenerze
+  # OBA SILNIKI. Silnik equity dopisze sie tu sam z chwila, gdy zacznie zamykac
+  # pozycje; do tego czasu jego przebieg konczy sie linia "0 zamknietych
+  # pozycji, prog to 5" i kodem zero - czyli cisza, ktora widac.
+  silniki: ["crypto", "equity"]
+  mode: "demo"
+  dni: 7
 
 # Kurs waluty odniesienia wlasciciela (market.fx_rate, migracja 0036).
 #

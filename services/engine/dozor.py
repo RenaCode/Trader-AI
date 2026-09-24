@@ -1370,8 +1370,39 @@ def ocen_swiezosc(wiersze: list[dict], swiec_zwloki: int = SWIEC_ZWLOKI
     return powody
 
 
+async def poza_sesja(fetch_all, engine: str) -> bool:
+    """Czy silnik sam zglosil, ze jego rynek jest teraz zamkniety.
+
+    DLACZEGO PYTAMY SILNIK, A NIE WLASNEGO KALENDARZA
+
+    Czujka swiezosci porownuje wiek danych z `now()`. Dla rynku z sesjami ta
+    roznica rosnie KAZDEJ NOCY az do otwarcia, a przez weekend siega 65 godzin -
+    czyli czujka zapalalaby sie co wieczor, przy w pelni zdrowym potoku. Alarm
+    przychodzacy codziennie o tej samej porze bez powodu konczy sie wyciszeniem
+    kanalu, a wyciszony kanal jest gorszym stanem niz brak czujki (ten sam
+    wniosek co przy `engine.down` wyzej).
+
+    Drugi kalendarz w tym pliku bylby DRUGA KOPIA wiedzy o godzinach sesji -
+    tej samej, ktora `services/engine/sesja.py` bierze wprost z zegara gieldy.
+    Kopie sie rozjezdzaja, a rozjazd objawilby sie tu cisza, nie awaria.
+
+    Petla decyzyjna zapisuje ten stan do `risk.engine_heartbeat.detail` przy
+    KAZDYM cyklu, czyli co piec minut, i robi to na podstawie odpowiedzi gieldy.
+    To jest ta sama informacja, tylko juz w bazie.
+
+    CZEGO TA FUNKCJA NIE UDAJE: gdy petla nie zyje, `detail` jest stary i moze
+    mowic "poza sesja" dowolnie dlugo. Nie jest to luka, bo martwa petla nalezy
+    do `sprawdz_zywotnosc` - ta czyta `last_beat_at` z tego samego wiersza
+    i krzyczy niezaleznie od tresci `detail`.
+    """
+    w = await fetch_all(
+        "SELECT (detail->>'poza_sesja')::boolean AS poza"
+        "  FROM risk.engine_heartbeat WHERE engine::text = %s", (engine,))
+    return bool(w and w[0]["poza"])
+
+
 async def sprawdz_swiezosc(fetch_all, notify, sucho: bool = False,
-                           bar: str = "4h") -> int:
+                           bar: str = "4h", engine: str = "crypto") -> int:
     """Czy dane, na ktorych silnik podejmuje decyzje, sa swieze.
 
     DLACZEGO PULS SILNIKA TU NIE WYSTARCZA
@@ -1406,22 +1437,46 @@ async def sprawdz_swiezosc(fetch_all, notify, sucho: bool = False,
               f"nie ma z czym porównać wieku danych")
         return 0
 
+    # RYNEK ZAMKNIETY NIE JEST NIESWIEZOSCIA. Patrz `poza_sesja` wyzej: cisza
+    # jest tu wynikiem, wiec musi byc widoczna w logu, a nie zalatwiona
+    # milczacym `return`.
+    if await poza_sesja(fetch_all, engine):
+        print(f"świeżość {engine}: rynek zamknięty (silnik zgłosił `poza_sesja`) "
+              f"— wiek danych nie jest tu miarą awarii, pomijam")
+        return 0
+
+    # ZAPYTANIE FILTRUJE PO SILNIKU, I TO JEST NAPRAWA, NIE OZDOBA.
+    #
+    # Do 2026-09-24 oba czlony szly po CALEJ tabeli, bez `ref.instrument`.
+    # `max(event_time)` bralo wiec najnowszy wiersz JAKIEGOKOLWIEK silnika,
+    # a krypto dopisuje swiece co minute, 24/7 - czyli potok equity mogl byc
+    # martwy tygodniami i ta czujka nie zauwazylaby tego ANI RAZU. Sprawdzone
+    # na produkcji 2026-09-24: swiece equity stoja od poprzedniego zamkniecia,
+    # a czujka meldowala "bez zastrzezen", bo patrzyla na krypto.
+    #
+    # NAZWA ZRODLA ZAWIERA SILNIK, bo to po niej tlumia sie powiadomienia
+    # (`data->>'zrodlo'` nizej). Wspolna nazwa dla obu silnikow znaczylaby, ze
+    # alarm o equity milknie, bo alarm o krypto byl wczesniej - czyli dokladnie
+    # ta awaria, ktora ten plik tropi.
     wiersze = await fetch_all(
-        "SELECT 'market.candle (' || %(tf)s || ', źródło świecy ' || %(bar)s || ')' AS co,"
+        "SELECT %(engine)s || ': market.candle (' || %(tf)s || ', źródło świecy '"
+        "       || %(bar)s || ')' AS co,"
         "       %(min)s::numeric AS minut_swiecy,"
-        "       round(extract(epoch from (now() - max(event_time)))/60) AS wiek_min,"
+        "       round(extract(epoch from (now() - max(c.event_time)))/60) AS wiek_min,"
         # ZNACZNIK STANU dla tlumienia nizej - ta sama chwila, z ktorej liczy
         # sie wiek, tyle ze surowa. Liczona w bazie, bo drugi zegar w Pythonie
         # rozjechalby sie z `created_at` powiadomien, ktore zapisuje baza.
-        "       max(event_time) AS ostatni"
-        "  FROM market.candle WHERE timeframe::text = %(tf)s"
+        "       max(c.event_time) AS ostatni"
+        "  FROM market.candle c JOIN ref.instrument i ON i.id = c.instrument_id"
+        " WHERE c.timeframe::text = %(tf)s AND i.engine::text = %(engine)s"
         " UNION ALL"
-        " SELECT 'feat.feature_value', %(min_bar)s::numeric,"
-        "        round(extract(epoch from (now() - max(event_time)))/60),"
-        "        max(event_time)"
-        "   FROM feat.feature_value",
+        " SELECT %(engine)s || ': feat.feature_value', %(min_bar)s::numeric,"
+        "        round(extract(epoch from (now() - max(f.event_time)))/60),"
+        "        max(f.event_time)"
+        "   FROM feat.feature_value f JOIN ref.instrument i ON i.id = f.instrument_id"
+        "  WHERE i.engine::text = %(engine)s",
         {"tf": h.source_timeframe, "bar": bar, "min": minut_zrodla,
-         "min_bar": h.bar_minutes})
+         "min_bar": h.bar_minutes, "engine": engine})
 
     for w in wiersze:
         wiek = "brak danych" if w["wiek_min"] is None else f"{w['wiek_min']:.0f} min temu"
@@ -2468,6 +2523,7 @@ async def main() -> int:
             return await sprawdz_kopie(fetch_all, notify, sucho=args.sucho)
         if args.co == "swiezosc":
             return await sprawdz_swiezosc(fetch_all, notify, sucho=args.sucho,
+                                          engine=args.engine,
                                           bar=args.bar)
         if args.co == "egzekucja":
             return await sprawdz_egzekucje(fetch_all, notify, sucho=args.sucho)

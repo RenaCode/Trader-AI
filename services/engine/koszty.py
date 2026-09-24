@@ -90,13 +90,34 @@ CENNIK = {
     "spot_eu": Koszty(maker=0.0010, taker=0.0025, krotka_pozycja=False),
     "perp": Koszty(maker=0.0002, taker=0.00055, krotka_pozycja=True,
                    finansowanie=True),
-    # Akcje i ETF-y przez IBKR - stawki prowizyjne, nie procentowe; zaslepka
-    # do czasu wdrozenia silnika equity. FINANSOWANIA NIE MA: krotka sprzedaz
-    # akcji kosztuje odsetki od pozyczki papieru, ale to inna wielkosc, z innego
-    # zrodla i naliczana inaczej - podpiecie jej pod stawke perpetuala byloby
-    # nazwaniem dwoch roznych rzeczy jedna nazwa.
-    "stock": Koszty(maker=0.0005, taker=0.0005, krotka_pozycja=True),
-    "etf": Koszty(maker=0.0005, taker=0.0005, krotka_pozycja=True),
+    # AKCJE I ETF-Y NA ALPACE. Zero, i to jest LICZBA, a nie brak liczby.
+    #
+    # Do 2026-09-24 stalo tu 0,0005 z podpisem "zaslepka IBKR do czasu wdrozenia
+    # silnika equity". Silnik equity wlasnie rusza, a konto stoi na Alpace, nie
+    # na IBKR - stawka prowizyjna tamtego brokera opisywala wiec rachunek, ktory
+    # w tym projekcie nie istnieje. Zaslepka, ktora przezyla powod swojego
+    # istnienia, jest gorsza od jej braku: wyglada jak pomiar.
+    #
+    # Alpaca nie pobiera prowizji od akcji i ETF-ow notowanych w USA, ani od
+    # strony makerskiej, ani od takerskiej. To jest cala prowizja i dlatego
+    # obie stawki sa zerami.
+    #
+    # CZEGO TE ZERA NIE MOWIA - i dlatego `karta_rundy` dokleja dla tych dwoch
+    # rodzajow osobny skladnik BEZ WARTOSCI:
+    #   * oplaty regulacyjne (SEC Section 31, FINRA TAF) obciazaja WYLACZNIE
+    #     noge sprzedazy, a TAF liczy sie od LICZBY AKCJI, nie od notionalu -
+    #     zadna z tych dwoch wielkosci nie miesci sie w symetrycznym ulamku
+    #     ceny, ktorym jest ta tabela. Wpisanie ich tutaj jako sredniej
+    #     zamienioby rachunek gieldy w nasze zalozenie,
+    #   * spread, ktorego na equity nikt jeszcze nie zmierzyl - dokladnie ta
+    #     sama luka co na krypto (docs/08, brama 0).
+    #
+    # FINANSOWANIA NIE MA: krotka sprzedaz akcji kosztuje odsetki od pozyczki
+    # papieru, ale to inna wielkosc, z innego zrodla i naliczana inaczej -
+    # podpiecie jej pod stawke perpetuala byloby nazwaniem dwoch roznych rzeczy
+    # jedna nazwa.
+    "stock": Koszty(maker=0.0, taker=0.0, krotka_pozycja=True),
+    "etf": Koszty(maker=0.0, taker=0.0, krotka_pozycja=True),
 }
 
 # Chwile wyplaty finansowania na Bybicie: co osiem godzin, o pelnych 00:00,
@@ -317,6 +338,25 @@ def karta_rundy(kind: str, maker: bool = False, *,
             "0018). Rynek mniej plynny nie ma wezszego spreadu, wiec to jest "
             "PODLOGA naszego kosztu, nie jego pomiar",
             wiarygodny=False))
+
+    # OPLATY REGULACYJNE - TYLKO AKCJE I ETF-Y, I TYLKO NOGA SPRZEDAZY.
+    #
+    # Skladnik bez wartosci, bo zadna wartosc nie byloby tu uczciwa. SEC
+    # Section 31 liczy sie od notionalu, FINRA TAF od LICZBY AKCJI, obie
+    # wylacznie przy sprzedazy, a stawka SEC zmienia sie raz do roku. Ulamek
+    # ceny na runde - jedyna wielkosc, ktora ta karta umie dodac - nie opisuje
+    # zadnej z nich. Jawne "nie zmierzono" zostawia `pelna` na False, wiec
+    # `opis_karty` podpisze sume jako DOLNE oszacowanie, a nie jako koszt.
+    #
+    # Zamkniecie tej pozycji nie wymaga cennika: wymaga odczytania kolumny
+    # oplat z `exec.fill` po pierwszych sprzedazach equity na koncie paper.
+    if kind in ("stock", "etf"):
+        s.append(Skladnik(
+            "oplaty regulacyjne", None, NIEZMIERZONE,
+            "SEC Section 31 i FINRA TAF obciazaja WYLACZNIE noge sprzedazy, "
+            "a TAF liczy sie od liczby akcji, nie od notionalu - symetryczny "
+            "ulamek ceny nie opisuje zadnej z nich. Zrodlo docelowe: oplaty "
+            "z `exec.fill` po pierwszych sprzedazach na koncie Alpaca paper"))
 
     if k.finansowanie:
         s.append(Skladnik(

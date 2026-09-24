@@ -38,6 +38,8 @@ from psycopg.rows import dict_row
 
 from services.engine.horizons import DEFAULT_BAR, HORIZONS, Horizon, get as get_horizon
 from services.engine.risk import RiskKernel
+from services.engine.sesja import StanSesji, stan_sesji
+from services.ingest.features import wklady_newsow
 from services.engine.uniwersum import odcisk, sql_uniwersum_decyzyjnego
 from services.engine.koszty import POSLIZG_MAKER, POSLIZG_TAKER, koszty
 from services.engine.portfolio import _wypelnione
@@ -727,7 +729,8 @@ def record_decision(cur, engine: str, mode: str, instrument_id: int, as_of: date
                     pokrycie_sygnalow: float | None = None,
                     powod_holdu: str | None = None,
                     prog_wejscia: float | None = None,
-                    prog_wyjscia: float | None = None) -> int | None:
+                    prog_wyjscia: float | None = None,
+                    bar_start: datetime | None = None) -> int | None:
     # PROGI ZAPISUJEMY PRZY DECYZJI, a nie zostawiamy ich w wersji modelu.
     #
     # Wersja modelu zyje krocej niz decyzja: purge_demo.py kasuje cala tabele
@@ -773,6 +776,29 @@ def record_decision(cur, engine: str, mode: str, instrument_id: int, as_of: date
     for name, value in features.items():
         rows.append((did, "feature", zlib.crc32(name.encode()) % 2147483647,
                      name, value, 0.0, 0.0))
+
+    # ARTYKULY, KTORE ZLOZYLY SIE NA `news_sent` TEJ SWIECY.
+    #
+    # Do 2026-09-24 ten rodzaj wkladu NIE BYL ZAPISYWANY ANI RAZU, mimo ze
+    # `CHECK (kind IN ('feature','signal','news'))` i komentarz `ref_id =
+    # article_id` czekaly na niego od migracji 0005. Skutkiem bylo pytanie bez
+    # odpowiedzi: dziennik mowil "sentyment newsowy -0,21", ale nie mowil,
+    # KTORY artykul to powiedzial - wiec przy zlej decyzji nie dalo sie
+    # odroznic zlej wiadomosci od zlej interpretacji dobrej.
+    #
+    # `bar_start`, NIE `as_of`. Decyzja zapada po chwili `as_of`, ale liczby,
+    # na ktorych zapada, pochodza ze swiecy `bar_start` (patrz `cechy_i_obce`:
+    # do `cechy` wchodzi wylacznie `event_time == bar_start`). Atrybucja liczona
+    # z `as_of` opisywalaby okno przesuniete wzgledem tego, co model widzial.
+    #
+    # WAGA I WKLAD ZEREM, tak samo jak przy cechach: artykul jest WEJSCIEM do
+    # cechy, a nie osobnym skladnikiem wyniku. Niezerowa wartosc podwajalaby go
+    # w kazdym zestawieniu sumujacym `contribution`.
+    if bar_start is not None:
+        for a in wklady_newsow(cur, instrument_id, bar_start):
+            rows.append((did, "news", a["article_id"],
+                         (a["title"] or a["url"])[:200], a["wklad"], 0.0, 0.0))
+
     cur.executemany(
         "INSERT INTO journal.decision_contribution (decision_id, kind, ref_id, label,"
         " value, weight, contribution) VALUES (%s,%s,%s,%s,%s,%s,%s)"
@@ -1784,10 +1810,94 @@ async def sprawdz(conn, engine: str = "crypto", h: Horizon | None = None) -> int
     return 0
 
 
+def nowe_stats(**flagi) -> dict:
+    """Komplet licznikow przebiegu, WSZYSTKIE zalozone zerem. JEDNO ZRODLO.
+
+    `risk.engine_heartbeat` jest nadpisywana co przebieg (ON CONFLICT (engine)
+    DO UPDATE), wiec licznik zakladany dopiero przy pierwszym wystapieniu daje
+    puls, w ktorym "nic nie pominieto" jest nieodrozialne od "ta wersja silnika
+    w ogole tego nie liczy".
+
+    DLACZEGO FUNKCJA, A NIE TRZY LITERALY
+
+    Cykl przerwany bramka sesji albo brakiem modelu TEZ zapisuje `detail`, wiec
+    tez musi miec pelny ksztalt - inaczej kazda noc silnika equity kasowalaby
+    z pulsu liczniki, ktore panel czyta, a "poza sesja" znaczyloby przy okazji
+    "ta wersja nie liczy pominiec". Trzy kopie tej listy rozjechalyby sie przy
+    pierwszym nowym liczniku, a rozjazd objawilby sie brakiem klucza w JSON-ie,
+    nie awaria.
+
+    `flagi` dokladaja POWOD przerwania (`poza_sesja`, `bez_modelu`). Powod nigdy
+    nie nadpisuje licznika: to dwie rozne rzeczy i czytelnik pulsu ma prawo
+    widziec obie naraz.
+    """
+    stats = {"rozwazone": 0, "wejscia": 0, "wyjscia": 0, "wstrzymane": 0,
+             "zablokowane": 0, "poza_swieca": 0, "bez_swiecy": 0,
+             "wypelnione": 0, "niewypelnione": 0, "czekaja": 0,
+             # Ile decyzji zapadlo na NIEPELNYM komplecie sygnalow. Idzie do
+             # heartbeatu, bo poza tym stanu tego nie widac z zewnatrz w ogole:
+             # od czasu renormalizacji wyniku (services/engine/signals.combine)
+             # decyzja z trzech sygnalow ma te sama skale co decyzja z osmiu.
+             "niepelne_sygnaly": 0,
+             # ZERO TEZ JEST WYNIKIEM. Licznik byl wczesniej zakladany przez
+             # `stats.get(...) + 1`, wiec klucz pojawial sie w heartbeacie
+             # WYLACZNIE w cyklach, w ktorych byl niezerowy - a `detail` jest
+             # nadpisywany co przebieg (ON CONFLICT (engine) DO UPDATE). Brak
+             # klucza znaczyl wtedy jednoczesnie "zadnego shorta nie odrzucono"
+             # i "ten silnik w ogole tego nie liczy", czyli nie znaczyl nic.
+             "short_niewykonalny": 0,
+             # POMINIECIA Z ROZBICIEM NA POWOD. Obie te sciezki konczyly sie
+             # samym `continue`: instrument wypadal z przebiegu, nie zostawiajac
+             # ani wiersza, ani liczby. Tu odpowiadaja na pytanie "ile pominieto
+             # TERAZ i dlaczego"; na pytanie "co sie stalo WTEDY" odpowiada
+             # journal.pominiecie (0041), bo heartbeat ma `engine` w kluczu
+             # glownym i kazdy przebieg kasuje poprzedni.
+             "pominiete_bez_cech": 0, "pominiete_bez_ceny": 0,
+             # Decyzje ODLOZONE przez niepelne pokrycie wag - patrz MIN_POKRYCIE.
+             "odlozone_niepelne": 0,
+             # POTOK SPOZNIONY, A NIE MARTWY - podzbior `pominiete_bez_cech`.
+             #
+             # Rozroznienie jest tu cala trescią licznika. "Brak cech" znaczy
+             # "worker stoi" i konczy sie alarmem zywotnosci. "Cechy sa, ale
+             # dla swiecy wczesniejszej" znaczy "worker zyje, tylko nie zdazyl"
+             # - zywotnosc milczy, wszystko bije, a silnik nie handluje.
+             # Bez osobnej liczby obie awarie wygladaja w heartbeacie
+             # identycznie, a reakcja na nie jest inna.
+             "cechy_z_poprzedniej_swiecy": 0,
+             # Rozmiar uniwersum decyzyjnego. Bez tej liczby przebieg na PUSTEJ
+             # liscie instrumentow - `tradeable` zdjete pomylkowo, migracja
+             # w polowie - wyglada w heartbeacie identycznie jak przebieg,
+             # w ktorym po prostu nie bylo czego robic: same zera.
+             "instrumenty": 0}
+    stats.update(flagi)
+    return stats
+
+def zapisz_puls(cur, engine: str, mode: str, stats: dict) -> None:
+    """Puls silnika po cyklu. JEDNO miejsce zapisu, bo wyjsc z `run_once` jest kilka.
+
+    Cykl przerwany bramka sesji albo brakiem modelu TEZ bije. Gdyby nie bil,
+    `dozor.py --co zywotnosc` uznalby kazda noc za smierc silnika equity
+    i wysylal alarm krytyczny o 22:00 kazdego dnia roboczego - a czujka, ktora
+    krzyczy codziennie o tej samej porze bez powodu, konczy wyciszona. Wyciszony
+    kanal jest gorszym stanem niz brak czujki (patrz `dozor.sprawdz_swiezosc`).
+
+    Powod przerwania idzie do `detail`, wiec panel i `overview.py` odrozniaja
+    "silnik spi, bo gielda zamknieta" od "silnik pracuje" bez zagladania w logi.
+    """
+    cur.execute(
+        "INSERT INTO risk.engine_heartbeat (engine, mode, last_beat_at, status, detail)"
+        " VALUES (%s,%s, now(), 'running', %s)"
+        " ON CONFLICT (engine) DO UPDATE SET last_beat_at=now(), status='running',"
+        " detail=EXCLUDED.detail",
+        (engine, mode, json.dumps(stats)))
+
+
 async def run_once(conn, engine: str = "crypto", mode: str = "demo",
                    kind_kosztow: str = "spot", limit: bool = False,
                    verbose: bool = True, h: Horizon | None = None,
-                   gielda=None, kategoria: str = "spot") -> dict:
+                   gielda=None, kategoria: str = "spot",
+                   wymagaj_modelu: bool = False,
+                   sesja: StanSesji | None = None) -> dict:
     """Jeden przebieg silnika.
 
     `gielda` PRZELACZA ZRODLO PRAWDY O WYPELNIENIU, a nie sposob decydowania.
@@ -1800,6 +1910,56 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
     signal_ids = ensure_signal_defs(cur, engine)
     seed_equity(cur, engine, mode)
     conn.commit()
+
+    # ---------------------------------------------------------- BRAMKI CYKLU
+    #
+    # Obie sa PRZED jakimkolwiek odczytem cen i przed `RiskKernel`, i obie
+    # koncza cykl pulsem. Powod jest ten sam w obu przypadkach: stan, w ktorym
+    # silnik NIE MA PRAWA decydowac, musi byc odrozialny od stanu, w ktorym
+    # decyduje i nic mu nie wychodzi. Bez tego jedna linia "rozwazone 21,
+    # wejscia 0" znaczylaby jednoczesnie "rynek spi", "nie ma modelu"
+    # i "sygnaly nie przekroczyly progu" - czyli nie znaczylaby nic.
+
+    # BRAMKA 1: SESJA GIELDY.
+    #
+    # `stan_sesji` zwraca trzy stany, nie dwa, i `None` NIE jest otwarciem -
+    # patrz naglowek `services/engine/sesja.py`. Dla rynku ciaglego bramka
+    # konczy sie na `is_24_7` i nie kosztuje ani jednego zapytania do gieldy,
+    # wiec silnik crypto nie placi za nia niczym.
+    if sesja is not None and not sesja.wolno_decydowac:
+        stats = nowe_stats(poza_sesja=True, sesja_zrodlo=sesja.zrodlo,
+                           sesja_znana=sesja.otwarta is not None)
+        if verbose:
+            print(f"  {sesja.opis()} — cykl bez decyzji")
+        zapisz_puls(cur, engine, mode, stats)
+        conn.commit()
+        return stats
+
+    # BRAMKA 2: WYMAGANY ZWALIDOWANY MODEL.
+    #
+    # `active_model` przy braku aktywnej wersji NIE przerywa - cofa sie do
+    # zalozen poczatkowych i handluje dalej. Dla silnika, ktory dopiero rusza,
+    # to jest najgorszy mozliwy domysl: krzywa kapitalu zaczyna mierzyc
+    # heurystyke, a wyglada jak wynik modelu, i nikt tego nie odrozni po fakcie.
+    #
+    # DLACZEGO PRZELACZNIK, A NIE REGULA DLA OBU SILNIKOW. Crypto ma aktywny
+    # model i chodzi tak od miesiecy; zmiana jego zachowania przy okazji
+    # uruchamiania equity byla by zmiana produkcji, o ktora nikt nie prosil.
+    # Wlaczenie nalezy do chartu - tak samo jak wlaczenie egzekucji gieldowej.
+    if wymagaj_modelu:
+        m = active_model(cur, engine, h)
+        if not m.get("version"):
+            stats = nowe_stats(
+                bez_modelu=True,
+                model_nazwa=f"{engine}_signal_weighting_{h.bar}")
+            if verbose:
+                print(f"  BRAK ZWALIDOWANEGO MODELU "
+                      f"({engine}_signal_weighting_{h.bar}, status 'active') — "
+                      f"cykl bez decyzji. Handel na założeniach początkowych "
+                      f"jest tu wyłączony świadomie (--wymagaj-modelu).")
+            zapisz_puls(cur, engine, mode, stats)
+            conn.commit()
+            return stats
 
     risk = RiskKernel(conn, engine, mode)
 
@@ -1926,44 +2086,7 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
     if verbose:
         print(f"  wagi: {'wersja modelu ' + str(model['version']) if model['version'] else 'założenia początkowe (brak zwalidowanego modelu)'}"
               f", próg wejścia {model['enter']:.4f}")
-    stats = {"rozwazone": 0, "wejscia": 0, "wyjscia": 0, "wstrzymane": 0,
-             "zablokowane": 0, "poza_swieca": 0, "bez_swiecy": 0,
-             "wypelnione": 0, "niewypelnione": 0, "czekaja": 0,
-             # Ile decyzji zapadlo na NIEPELNYM komplecie sygnalow. Idzie do
-             # heartbeatu, bo poza tym stanu tego nie widac z zewnatrz w ogole:
-             # od czasu renormalizacji wyniku (services/engine/signals.combine)
-             # decyzja z trzech sygnalow ma te sama skale co decyzja z osmiu.
-             "niepelne_sygnaly": 0,
-             # ZERO TEZ JEST WYNIKIEM. Licznik byl wczesniej zakladany przez
-             # `stats.get(...) + 1`, wiec klucz pojawial sie w heartbeacie
-             # WYLACZNIE w cyklach, w ktorych byl niezerowy - a `detail` jest
-             # nadpisywany co przebieg (ON CONFLICT (engine) DO UPDATE). Brak
-             # klucza znaczyl wtedy jednoczesnie "zadnego shorta nie odrzucono"
-             # i "ten silnik w ogole tego nie liczy", czyli nie znaczyl nic.
-             "short_niewykonalny": 0,
-             # POMINIECIA Z ROZBICIEM NA POWOD. Obie te sciezki konczyly sie
-             # samym `continue`: instrument wypadal z przebiegu, nie zostawiajac
-             # ani wiersza, ani liczby. Tu odpowiadaja na pytanie "ile pominieto
-             # TERAZ i dlaczego"; na pytanie "co sie stalo WTEDY" odpowiada
-             # journal.pominiecie (0041), bo heartbeat ma `engine` w kluczu
-             # glownym i kazdy przebieg kasuje poprzedni.
-             "pominiete_bez_cech": 0, "pominiete_bez_ceny": 0,
-             # Decyzje ODLOZONE przez niepelne pokrycie wag - patrz MIN_POKRYCIE.
-             "odlozone_niepelne": 0,
-             # POTOK SPOZNIONY, A NIE MARTWY - podzbior `pominiete_bez_cech`.
-             #
-             # Rozroznienie jest tu cala trescią licznika. "Brak cech" znaczy
-             # "worker stoi" i konczy sie alarmem zywotnosci. "Cechy sa, ale
-             # dla swiecy wczesniejszej" znaczy "worker zyje, tylko nie zdazyl"
-             # - zywotnosc milczy, wszystko bije, a silnik nie handluje.
-             # Bez osobnej liczby obie awarie wygladaja w heartbeacie
-             # identycznie, a reakcja na nie jest inna.
-             "cechy_z_poprzedniej_swiecy": 0,
-             # Rozmiar uniwersum decyzyjnego. Bez tej liczby przebieg na PUSTEJ
-             # liscie instrumentow - `tradeable` zdjete pomylkowo, migracja
-             # w polowie - wyglada w heartbeacie identycznie jak przebieg,
-             # w ktorym po prostu nie bylo czego robic: same zera.
-             "instrumenty": 0}
+    stats = nowe_stats()
 
     # ROZSTRZYGNIECIE PLANOW IDZIE PRZED OCENA, nie po niej.
     #
@@ -2261,7 +2384,8 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
                               price, confidence, regime, features, verdict,
                               rationale, contributions, signal_ids, latency,
                               model.get("model_version_id"), pokrycie,
-                              powod_holdu, model["enter"], model["exit"])
+                              powod_holdu, model["enter"], model["exit"],
+                              bar_start=bar_start)
 
         risk.record_usage(verdict.usage)
         risk.record_violations(verdict.violations, did)
@@ -2347,12 +2471,7 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
     if not pomiar_koncowy.pomiar_pelny and verbose:
         print(f"  UWAGA: kapitał policzony z NIEPEŁNEGO pomiaru — "
               f"{pomiar_koncowy.opis_brakow()}")
-    cur.execute(
-        "INSERT INTO risk.engine_heartbeat (engine, mode, last_beat_at, status, detail)"
-        " VALUES (%s,%s, now(), 'running', %s)"
-        " ON CONFLICT (engine) DO UPDATE SET last_beat_at=now(), status='running',"
-        " detail=EXCLUDED.detail",
-        (engine, mode, json.dumps(stats)))
+    zapisz_puls(cur, engine, mode, stats)
     conn.commit()
     return stats
 
@@ -2428,8 +2547,18 @@ async def main() -> int:
     # Rachunek papierowy musi kosztowac tyle, ile kosztuje strategia, ktora
     # kalibrujemy. Rozjazd nie objawia sie awaria: krzywa kapitalu po prostu
     # rosnie szybciej, niz powinna, i wyglada jak wynik.
-    ap.add_argument("--kind", default="spot", choices=("spot", "spot_eu", "perp"),
+    # "stock" dolaczylo 2026-09-24 razem z petla equity. Cennik akcji na Alpace
+    # to zero prowizji (koszty.py) - i to jest liczba, nie brak liczby; skladniki,
+    # ktorych zero nie obejmuje, wymienia `karta_rundy` z nazwy.
+    ap.add_argument("--kind", default="spot",
+                    choices=("spot", "spot_eu", "perp", "stock"),
                     help="cennik giełdy dla rachunku papierowego")
+    # ZWALIDOWANY MODEL JAKO WARUNEK HANDLU. Patrz "BRAMKA 2" w `run_once`.
+    # Domysl `False` zostaje SWIADOMIE: wlaczenie tej reguly dla silnika, ktory
+    # chodzi na produkcji od miesiecy, byloby zmiana jego zachowania przy okazji.
+    ap.add_argument("--wymagaj-modelu", action="store_true", dest="wymagaj_modelu",
+                    help="bez aktywnej wersji modelu silnik NIE handluje "
+                         "(zamiast cofać się do założeń początkowych)")
     ap.add_argument("--limit", action="store_true",
                     help="zlecenia z limitem: stawka maker, bez poślizgu")
     # EGZEKUCJA JEST PRZELACZNIKIEM ZRODLA PRAWDY, nie sposobu decydowania.
@@ -2495,24 +2624,52 @@ async def main() -> int:
         t0 = datetime.now(timezone.utc)
         try:
             with psycopg.connect(url, row_factory=dict_row) as conn:
+                # STAN SESJI LICZY SIE CO CYKL, NIE RAZ PRZED PETLA. Proces
+                # zyje tygodniami; otwarcie i zamkniecie wypadaja w jego
+                # srodku, a swieta gieldowe nie pytaja o restart poda.
+                sesja = await stan_sesji(conn.cursor(), args.engine, gielda, teraz=t0)
+                # "NIE WIEM" JEST AWARIA, A NIE CICHYM POMINIECIEM.
+                #
+                # `run_once` na tym stanie i tak nie handluje (bramka 1), ale
+                # samo pominiecie byloby niewidoczne: silnik bilby puls
+                # "running" i nie robil nic - tygodniami, bez jednej czerwonej
+                # linii. Podniesienie tego do wyjatku wpina stan w licznik
+                # pieciu awarii pod rzad, ktory KONCZY PROCES - a restart poda
+                # widac w `kubectl get pods`, czego wpisu w logu nie.
+                if sesja.otwarta is None:
+                    raise RuntimeError(sesja.opis())
                 s = await run_once(conn, args.engine, mode=args.mode,
                                    kind_kosztow=args.kind, limit=args.limit,
-                                   verbose=not args.quiet, h=h, gielda=gielda)
-            plany = (f", plany: wypełnione {s['wypelnione']}, "
-                     f"niewypełnione {s['niewypelnione']}, czekają {s['czekaja']}"
-                     if args.limit else "")
-            if s.get("bez_swiecy"):
-                plany += f", BEZ ŚWIECY {s['bez_swiecy']}"
-            # POMINIECIA W JEDNEJ LINII PODSUMOWANIA, a nie tylko w komunikatach
-            # `--verbose` wewnatrz przebiegu: przy `--quiet` (tak chodzi produkcja)
-            # tamtych nie ma wcale, a ta linia jest zawsze.
-            if s.get("pominiete_bez_cech") or s.get("pominiete_bez_ceny"):
-                plany += (f", POMINIĘTE: bez cech {s['pominiete_bez_cech']}, "
-                          f"bez ceny {s['pominiete_bez_ceny']}")
-            print(f"[{t0:%H:%M:%S}] rozważone {s['rozwazone']}, wejścia {s['wejscia']}, "
-                  f"wyjścia {s['wyjscia']}, wstrzymane {s['wstrzymane']}, "
-                  f"zablokowane {s['zablokowane']}, "
-                  f"już rozstrzygnięte w tej świecy {s['poza_swieca']}{plany}")
+                                   verbose=not args.quiet, h=h, gielda=gielda,
+                                   wymagaj_modelu=args.wymagaj_modelu,
+                                   sesja=sesja)
+            # CYKL ZABLOKOWANY BRAMKA MA WLASNA LINIE, NIE SAME ZERA.
+            #
+            # "rozwazone 0, wejscia 0, wyjscia 0..." przez cala noc wyglada
+            # identycznie jak silnik, ktory patrzy i nic nie znajduje. Powod
+            # blokady jest jedyna informacja w takim cyklu, wiec jest jedyna
+            # rzecza, ktora ta linia ma zawierac.
+            if s.get("poza_sesja"):
+                print(f"[{t0:%H:%M:%S}] {sesja.opis()} — bez decyzji")
+            elif s.get("bez_modelu"):
+                print(f"[{t0:%H:%M:%S}] BEZ ZWALIDOWANEGO MODELU "
+                      f"({s['model_nazwa']}) — bez decyzji")
+            else:
+                plany = (f", plany: wypełnione {s['wypelnione']}, "
+                         f"niewypełnione {s['niewypelnione']}, czekają {s['czekaja']}"
+                         if args.limit else "")
+                if s.get("bez_swiecy"):
+                    plany += f", BEZ ŚWIECY {s['bez_swiecy']}"
+                # POMINIECIA W JEDNEJ LINII PODSUMOWANIA, a nie tylko w komunikatach
+                # `--verbose` wewnatrz przebiegu: przy `--quiet` (tak chodzi produkcja)
+                # tamtych nie ma wcale, a ta linia jest zawsze.
+                if s.get("pominiete_bez_cech") or s.get("pominiete_bez_ceny"):
+                    plany += (f", POMINIĘTE: bez cech {s['pominiete_bez_cech']}, "
+                              f"bez ceny {s['pominiete_bez_ceny']}")
+                print(f"[{t0:%H:%M:%S}] rozważone {s['rozwazone']}, wejścia {s['wejscia']}, "
+                      f"wyjścia {s['wyjscia']}, wstrzymane {s['wstrzymane']}, "
+                      f"zablokowane {s['zablokowane']}, "
+                      f"już rozstrzygnięte w tej świecy {s['poza_swieca']}{plany}")
             pod_rzad = 0
         except Exception as e:                                # noqa: BLE001
             pod_rzad += 1

@@ -64,6 +64,12 @@ MIGRACJE_NADAN = [
     # tests/test_rola_skanera_wiadomosci.py; tutaj migracja jest po to, żeby
     # twierdzenia o schemacie `public` obejmowały także ją.
     KORZEN / "db" / "migrations" / "0052_rola_skanera_wiadomosci.sql",
+    # Dziennik jakosciowy dostaje wlasna, waska role - z tego samego powodu co
+    # skaner: czyta historie handlu i wysyla jej streszczenie do obcego API,
+    # wiec nie moze widziec `app.api_credential` ani `app.secret` (0054).
+    # Zakres tamtej roli pilnuje tests/test_postmortem.py; tutaj migracja jest
+    # po to, zeby twierdzenia o schemacie `public` obejmowaly takze ja.
+    KORZEN / "db" / "migrations" / "0054_rola_postmortemu.sql",
 ]
 
 # Role procesów z 0034 i 0052. Wypisane tutaj, a nie wyciągnięte z chartu, bo to

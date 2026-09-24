@@ -246,12 +246,35 @@ def test_cennik_jest_sprawdzany_cyklicznie_a_nie_tylko_recznie():
     assert "|| RC=$?" in linia
 
 
+# CENNIKI, KTÓRYCH TEN CRON SPRAWDZIĆ NIE UMIE — i dlaczego, z nazwy.
+#
+# Lista jest WĄSKA CELOWO. Nie jest zwolnieniem z pomiaru, tylko zapisem, że
+# pomiaru nie ma: pusty wyjątek „bo na razie nie da się sprawdzić" rozrósłby się
+# do listy, na której nikt już nie pamięta, co jest zweryfikowane.
+CENNIKI_BEZ_AUTOMATU = {
+    "stock": (
+        "services/exchanges/mozliwosci.py pyta WYŁĄCZNIE Bybita: ma zaszyte "
+        "`WHERE v.code = 'bybit'` i buduje `BybitAdapter`. Alpaca nie wystawia "
+        "przy tym odpowiednika `/v5/account/fee-rate` — zero prowizji jest tam "
+        "warunkiem umowy, nie polem w API. Realny koszt sprzedaży to opłaty "
+        "regulacyjne, a te `koszty.karta_rundy` wymienia jako NIEZMIERZONE "
+        "i zamknie je odczyt `exec.fill` po pierwszych sprzedażach — nie cennik."
+    ),
+}
+
+
 def test_cron_pyta_o_ten_sam_cennik_ktorym_liczy_silnik():
     """Dwa `--kind` w dwóch plikach to rozjazd przy pierwszej zmianie.
 
     Sprawdzenie cennika `spot` przy silniku liczącym `spot_eu` meldowałoby
     zgodność, nie dotykając ani jednej liczby wchodzącej do wyniku — czyli
     byłoby gorsze niż brak sprawdzenia, bo wygląda jak sprawdzenie.
+
+    OD 2026-09-24 SILNIKÓW SĄ DWA, więc `--kind` też jest dwa. Warunek „dokładnie
+    jeden cennik" przestał opisywać system: pilnował liczby, a nie pokrycia.
+    Teraz test żąda, żeby KAŻDY cennik, którym liczy któraś pętla decyzyjna, był
+    albo sprawdzany cyklicznie, albo wymieniony w `CENNIKI_BEZ_AUTOMATU` razem
+    z powodem. Cennik, który po cichu wypadł z obu list, kończy test na czerwono.
     """
     import re as _re
 
@@ -261,8 +284,20 @@ def test_cron_pyta_o_ten_sam_cennik_ktorym_liczy_silnik():
                             .read_text(encoding="utf-8"))
     komendy = " ".join(str(w.get("command", ""))
                        for w in values["workers"].values() if isinstance(w, dict))
-    (kind_silnika,) = set(_re.findall(r"--kind[ ',\"]+(\w+)", komendy))
-    assert f"--kind {kind_silnika}" in _linia_cennika()
+    kindy_silnikow = set(_re.findall(r"--kind[ ',\"]+(\w+)", komendy))
+    assert kindy_silnikow, "żadna pętla decyzyjna nie podaje `--kind`"
+
+    linia = _linia_cennika()
+    sprawdzane = set(_re.findall(r"--kind[ ',\"]+(\w+)", linia))
+    bez_pokrycia = kindy_silnikow - sprawdzane - set(CENNIKI_BEZ_AUTOMATU)
+    assert not bez_pokrycia, (
+        f"cennik {sorted(bez_pokrycia)} wchodzi do wyniku silnika, a nic go nie "
+        f"weryfikuje wobec giełdy i nie ma go wśród jawnych wyjątków")
+
+    # Wyjątek, który przestał być potrzebny, ma zniknąć — inaczej lista rośnie
+    # w jedną stronę i po roku nie opisuje już niczego.
+    zbedne = set(CENNIKI_BEZ_AUTOMATU) & sprawdzane
+    assert not zbedne, f"{sorted(zbedne)} jest już sprawdzany cyklicznie — zdejmij z wyjątków"
 
 
 def test_czujka_ma_prawo_czytac_klucze_gieldy():

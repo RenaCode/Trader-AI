@@ -437,6 +437,54 @@ def compute_prices(cur, instrument_id: int, h: Horizon, feat_ids: dict[str, int]
     return insert_values(cur, rows)
 
 
+# KTORE ARTYKULY SKLADAJA SIE NA `news_sent` W CHWILI `t` - JEDNA DEFINICJA.
+#
+# DLACZEGO STALA, A NIE DWA ZAPYTANIA
+#
+# Od 2026-09-24 pyta o to takze petla decyzyjna: zapisuje do
+# `journal.decision_contribution` wiersze `kind='news'`, zeby po fakcie dalo sie
+# powiedziec, KTORY artykul stal za transakcja - a nie tylko, ze "sentyment
+# wynosil -0,21". Druga kopia tego zapytania rozjechalaby sie przy pierwszej
+# zmianie okna albo reguly `DISTINCT ON`, a rozjazd nie objawilby sie awaria:
+# atrybucja opisywalaby INNY zbior artykulow niz ten, ktory wytworzyl liczbe.
+#
+# ZAPYTANIE JEST ODTWARZALNE i to jest warunek uczciwosci atrybucji. Oba filtry
+# czasowe sa domkniete na `{chwila}` - takze bitemporalny `an.ingested_at`
+# - wiec ten sam `(instrument, chwila)` daje ten sam zbior niezaleznie od tego,
+# KIEDY zapytanie zostanie uruchomione. Artykul, ktory przyszedl pozniej, nie
+# wchodzi do atrybucji decyzji podjetej wczesniej.
+SQL_WKLAD_NEWSOW = """
+SELECT DISTINCT ON (a.url)
+       a.id AS article_id, a.url, a.title,
+       an.direction, an.magnitude, an.confidence, an.novelty, ai.relevance,
+       (CASE an.direction WHEN 'bullish' THEN 1
+                          WHEN 'bearish' THEN -1 ELSE 0 END
+        * an.magnitude * an.confidence * an.novelty
+        * ai.relevance) AS wklad
+FROM news.article_instrument ai
+JOIN news.article a  ON a.id = ai.article_id
+JOIN news.article_analysis an ON an.article_id = a.id
+WHERE ai.instrument_id = {instrument}
+  AND a.event_time <= {chwila}
+  AND a.event_time >  {chwila} - interval '24 hours'
+  AND an.ingested_at <= {chwila}
+-- Najswiezsza migawka TEJ historii, znana w chwili `chwila`.
+ORDER BY a.url, an.ingested_at DESC
+"""
+
+
+def wklady_newsow(cur, instrument_id: int, chwila) -> list[dict]:
+    """Artykuly, ktore zlozyly sie na `news_sent` tego instrumentu w `chwila`.
+
+    Ta sama stala, ktorej uzywa `compute_news` - wiec suma `wklad` z tej listy
+    jest DOKLADNIE wartoscia cechy dla tej swiecy. Wolacz, ktory chce to
+    sprawdzic, ma to zrobic jawnie: rozjazd znaczy blad, a nie szczegol.
+    """
+    cur.execute(SQL_WKLAD_NEWSOW.format(instrument="%s", chwila="%s"),
+                (instrument_id, chwila, chwila, chwila))
+    return cur.fetchall()
+
+
 def compute_news(cur, instrument_id: int, h: Horizon, feat_id: int,
                  since: datetime, until: datetime) -> int:
     """Sentyment newsowy - z jawnym poszanowaniem opoznienia analizy.
@@ -493,6 +541,10 @@ def compute_news(cur, instrument_id: int, h: Horizon, feat_id: int,
     since = na_siatce(since, h)
     # `until` cofamy o jedna swiece: ostatnia swieca jest jeszcze otwarta.
     until = na_siatce(until, h) - timedelta(minutes=h.bar_minutes)
+    # Podzapytanie jest WSTRZYKIWANE ZE STALEJ, a nie przepisane tutaj -
+    # `SQL_WKLAD_NEWSOW` jest jedynym miejscem, w ktorym zyje definicja "ktore
+    # artykuly sie licza". `{chwila}` staje sie tu `b.t` (kolumna generatora),
+    # a przy atrybucji decyzji - parametrem. To ta sama regula, oba razy.
     cur.execute(
         """
         SELECT b.t,
@@ -503,20 +555,7 @@ def compute_news(cur, instrument_id: int, h: Horizon, feat_id: int,
         -- LATERAL, bo podzapytanie musi znac `b.t`: i okno 24 h, i granica
         -- bitemporalna `an.ingested_at <= b.t` zaleza od liczonej swiecy.
         LEFT JOIN LATERAL (
-            SELECT DISTINCT ON (a.url)
-                   (CASE an.direction WHEN 'bullish' THEN 1
-                                      WHEN 'bearish' THEN -1 ELSE 0 END
-                    * an.magnitude * an.confidence * an.novelty
-                    * ai.relevance) AS wklad
-            FROM news.article_instrument ai
-            JOIN news.article a  ON a.id = ai.article_id
-            JOIN news.article_analysis an ON an.article_id = a.id
-            WHERE ai.instrument_id = %s
-              AND a.event_time <= b.t
-              AND a.event_time >  b.t - interval '24 hours'
-              AND an.ingested_at <= b.t
-            -- Najswiezsza migawka TEJ historii, znana w chwili `t`.
-            ORDER BY a.url, an.ingested_at DESC
+        """ + SQL_WKLAD_NEWSOW.format(instrument="%s", chwila="b.t") + """
         ) h ON true
         GROUP BY b.t ORDER BY b.t
         """,

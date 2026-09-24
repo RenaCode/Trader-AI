@@ -664,6 +664,11 @@ def test_swiezosc_pyta_o_timeframe_ZRODLOWY_a_nie_o_swiece_docelowa():
     zapytania = []
 
     async def fetch_all(sql, params=None):
+        # Czujka pyta NAJPIERW o stan sesji silnika (risk.engine_heartbeat).
+        # Atrapa oddająca wiersze świeżości na KAŻDE zapytanie odpowiadałaby
+        # nie na to, o co zapytano — i ukryłaby każdą pomyłkę w tamtym SQL-u.
+        if "risk.engine_heartbeat" in " ".join(sql.split()):
+            return [{"poza": False}]
         zapytania.append(params)
         return [{"co": "market.candle", "minut_swiecy": 60, "wiek_min": 30},
                 {"co": "feat.feature_value", "minut_swiecy": 240, "wiek_min": 30}]

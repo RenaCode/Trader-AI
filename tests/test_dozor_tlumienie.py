@@ -51,6 +51,12 @@ def _stend_swiezosci(*, wiek_min, ostatni, powiadomiono_po_ostatnim):
             return [{"?column?": 1}] if powiadomiono_po_ostatnim else []
         if 'app."user"' in p:
             return [{"id": 1}]
+        # Czujka pyta NAJPIERW, czy rynek silnika jest otwarty — dla rynku
+        # ciągłego odpowiedź jest zawsze „w sesji". Bez tej gałęzi atrapa
+        # oddawałaby wiersze świeżości na pytanie o puls silnika, czyli
+        # odpowiadałaby nie na to, o co zapytano.
+        if "risk.engine_heartbeat" in p:
+            return [{"poza": False}]
         if "market.candle" in p:
             return [
                 {"co": "market.candle (1h, źródło świecy 4h)",

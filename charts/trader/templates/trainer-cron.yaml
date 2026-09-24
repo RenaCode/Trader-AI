@@ -74,6 +74,30 @@ spec:
                   K=$?
                   [ "$K" = 0 ] || RC=$K
                   {{- end }}
+                  {{- if .Values.trainerCron.equity.enabled }}
+                  # ---------------------------------------------- TOR EQUITY
+                  #
+                  # OSOBNY SILNIK, wiec osobny model, osobny licznik hipotez
+                  # i osobny stan nauki - nie jest to kolejny horyzont krypto.
+                  # Wlasny `--kind`, bo cennik Alpaki (zero prowizji) nie ma nic
+                  # wspolnego z cennikiem bybit.eu; tor liczony stawka Bybita
+                  # mierzylby oplaty, ktorych to konto nie placi.
+                  #
+                  # KOD WYJSCIA ZBIERA SIE DO TEGO SAMEGO `RC`. Osobne zadanie
+                  # dawaloby druga kopie harmonogramu, drugi obraz do podbicia
+                  # i druga sciezke, ktora moze cicho zniknac.
+                  {{- range $h := .Values.trainerCron.equity.horyzonty }}
+                  echo "===== equity, horyzont {{ $h }} ====="
+                  python services/engine/train.py                     --engine equity                     --bar {{ $h | quote }}                     --days {{ $.Values.trainerCron.days | quote }}                     --trials {{ $.Values.trainerCron.trials | quote }}                     --kind {{ $.Values.trainerCron.equity.kind | default "stock" | quote }}                     {{- if $.Values.trainerCron.equity.limit }} --limit{{ end }}
+                  K=$?
+                  [ "$K" = 0 ] || RC=$K
+                  {{- end }}
+                  # Dozor stanu nauki dla equity - ten sam powod co dla krypto
+                  # nizej: bez niego model traci przewage i NIKT tego nie mowi.
+                  python services/engine/dozor.py --engine equity                     --bar {{ (first .Values.trainerCron.equity.horyzonty) | quote }} --kod-trenera $RC
+                  E=$?
+                  [ "$E" = 0 ] || RC=$E
+                  {{- end }}
                   # Dozor WYLACZNIE dla horyzontu produkcyjnego: tory porownawcze
                   # maja wlasny stan, ale alarm o modelu, ktorym nikt nie handluje,
                   # bylby halasem.

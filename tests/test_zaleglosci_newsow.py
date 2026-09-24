@@ -25,7 +25,14 @@ def test_okno_zaleglosci_zgadza_sie_z_oknem_cechy():
     za artykuły, które i tak nie mogą wejść do żadnej świecy."""
     from services.ingest.news_worker import OKNO_ZALEGLOSCI_H
 
-    assert re.search(r"a\.event_time >\s+b\.t - interval '24 hours'", CECHY), \
+    # Okno mieszka od 2026-09-24 w stałej `SQL_WKLAD_NEWSOW` (jedno źródło dla
+    # cechy i dla atrybucji decyzji), więc chwila świecy jest tam polem
+    # `{chwila}`, a nie kolumną `b.t`. Kanarek pyta o stałą, czyli o to samo
+    # miejsce, które teraz naprawdę rozstrzyga okno.
+    from services.ingest.features import SQL_WKLAD_NEWSOW
+
+    assert re.search(r"a\.event_time >\s+\{chwila\} - interval '24 hours'",
+                     SQL_WKLAD_NEWSOW), \
         "okno cechy newsowej nie wynosi już 24 h — popraw OKNO_ZALEGLOSCI_H"
     assert OKNO_ZALEGLOSCI_H == 24
 

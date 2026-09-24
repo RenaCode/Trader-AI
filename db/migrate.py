@@ -56,6 +56,10 @@ ROLE_HASLA = {
     # obcych - kanaly RSS i odpowiedzi modeli jezykowych - wiec jedyny, ktory
     # nie moze dzielic roli z procesami widzacymi zaszyfrowane klucze gieldy.
     "trader_news": "NEWS_DB_PASSWORD",
+    # Dziennik jakosciowy (migracja 0054). Czyta pelna historie handlu i wysyla
+    # jej streszczenie do dostawcy LLM - wiec, tak samo jak skaner, nie moze
+    # dzielic roli z procesami widzacymi zaszyfrowane klucze gieldy.
+    "trader_postmortem": "POSTMORTEM_DB_PASSWORD",
 }
 
 

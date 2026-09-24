@@ -77,7 +77,25 @@ dozorcą.
 {{- range $nazwa, $r := .Values.db.role }}
 - name: {{ $r.secretKey }}
   valueFrom:
-    secretKeyRef: { name: {{ $.Values.secretName }}, key: {{ $r.secretKey }} }
+    {{/*
+    `optional: true` - I TO JEST WYBOR MIEDZY DWOMA AWARIAMI, nie poluzowanie.
+
+    Bez tego klucz nieobecny w sekrecie daje `CreateContainerConfigError`
+    kontenerowi, ktory to czyta. Czyta to kontener STARTOWY poda API, wiec
+    brak JEDNEGO hasla - np. przy dodaniu nowej roli - zatrzymuje caly pod
+    API. Kladzie to dashboard, czyli JEDYNE miejsce, w ktorym widac stan
+    systemu, i robi to z powodu niezwiazanego z niczym, co API robi.
+
+    Z `optional` brak hasla przestaje dotyczyc API: migrator wypisuje wprost
+    "X nie ustawione - rola zostaje bez hasla i jej proces sie nie zaloguje"
+    (db/migrate.py), a czerwony robi sie ten pod albo Job, KTORY TEJ ROLI
+    UZYWA. Awaria zostaje widoczna i trafia tam, gdzie jej przyczyna.
+
+    GWARANCJA BEZPIECZENSTWA ZOSTAJE NIETKNIETA: rola bez hasla nie zaloguje
+    sie w ogole, wiec zaden proces nie zaczyna dzialac na cudzych
+    poswiadczeniach. Zmienia sie wylacznie to, KTORY pod pada.
+    */}}
+    secretKeyRef: { name: {{ $.Values.secretName }}, key: {{ $r.secretKey }}, optional: true }
 {{- end }}
 {{- end -}}
 

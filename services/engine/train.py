@@ -1793,7 +1793,12 @@ def main() -> int:
     ap.add_argument("--trials", type=int, default=40)
     ap.add_argument("--engine", default="crypto")
     ap.add_argument("--bar", default=DEFAULT_BAR, choices=sorted(HORIZONS))
-    ap.add_argument("--kind", default="spot", choices=("spot", "spot_eu", "perp"),
+    # "stock" dolaczylo 2026-09-24 razem z torem equity. Cennik akcji na Alpace
+    # to zero prowizji - patrz `koszty.CENNIK`. Trener MUSI kosztowac tyle, ile
+    # kosztuje strategia, ktora kalibruje: tor equity liczony cennikiem Bybita
+    # (tak powstaly liczby w docs/08) mierzyl oplaty, ktorych to konto nie placi.
+    ap.add_argument("--kind", default="spot",
+                    choices=("spot", "spot_eu", "perp", "stock"),
                     help="rodzaj instrumentu - wyznacza stawki prowizji; "
                          "spot_eu to cennik podmiotu unijnego (taker 0,250%%)")
     ap.add_argument("--limit", action="store_true",

@@ -1,0 +1,90 @@
+{{/*
+DZIENNIK JAKOSCIOWY z zamknietych transakcji - warstwa "uczenia sie na bledach".
+
+DLACZEGO ZADANIE CYKLICZNE, A NIE WORKER
+
+Ten proces ma chodzic raz na dobe i MUSI dobiec konca niezaleznie od wdrozen -
+dokladnie jak trener. Petla w Deploymencie ginelaby przy kazdym rolloucie,
+takze takim, ktory tego procesu nie dotyczy. `concurrencyPolicy: Forbid`
+pilnuje przy tym, zeby dwa przebiegi nie policzyly tego samego okresu
+rownolegle i nie zapisaly go dwa razy.
+
+DLACZEGO OSOBNA ROLA BAZODANOWA (migracja 0054)
+
+Bo ten Job robi dwie rzeczy naraz: czyta pelna historie handlu i wysyla jej
+streszczenie do zewnetrznego dostawcy LLM. Rola silnika dawalaby mu przy tym
+`app.api_credential` i `app.secret`, czyli szyfrogram kluczy gieldy razem
+z kluczem do niego w tej samej przestrzeni adresowej - uklad, ktory migracja
+0052 rozmontowala dla skanera wiadomosci z tego samego powodu.
+
+`SECRETS_KEY` jest tu potrzebny i ma jedno zastosowanie: odszyfrowanie klucza
+dostawcy analizy z widoku `app.secret_llm`. Rola nie widzi tabeli `app.secret`,
+wiec ten klucz nie pasuje tutaj do niczego innego.
+
+KOD WYJSCIA MA ZNACZYC AWARIE ZADANIA, A NIE BRAK MATERIALU
+
+Okres bez transakcji i osiagniety limit dobowy koncza sie ZEREM i linia w logu -
+to sa stany poprawne. Czerwony Job znaczy: dostawca nie odpowiedzial albo nie ma
+czym pytac. Odwrotna konwencja nauczylaby przewijac czerwone Joby, czyli
+dokladnie tego, przed czym broni sie reszta tego chartu.
+*/}}
+{{- if .Values.postmortemCron.enabled }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "trader.fullname" . }}-postmortem
+  labels: {{- include "trader.labels" . | nindent 4 }}
+spec:
+  schedule: {{ .Values.postmortemCron.schedule | quote }}
+  # STREFA JAWNIE, nie domyslnie. Bez `timeZone` k3s liczy harmonogram
+  # w strefie kontrolera, a nie w tej, w ktorej czyta sie wynik - przesuniecie
+  # myli przy zestawianiu chwil z dziennikiem wydatkow (ten liczy dobe w UTC).
+  timeZone: "Etc/UTC"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 1
+  startingDeadlineSeconds: 600
+  jobTemplate:
+    spec:
+      # BEZ PONAWIANIA. Odmowa dostawcy i pusty limit dobowy nie mijaja przez
+      # powtorzenie za minute, a kazda proba kosztuje tokeny. Awaria ma byc
+      # widoczna raz, a nie odbita szesc razy w dzienniku wydatkow.
+      backoffLimit: 0
+      # Zawieszony przebieg trzyma Joba bez konca, a `Forbid` pomija wtedy po
+      # cichu kazdy kolejny termin - dziennik zamarza, a nic o tym nie mowi.
+      activeDeadlineSeconds: 1800
+      template:
+        spec:
+          restartPolicy: Never
+          terminationGracePeriodSeconds: 30
+          containers:
+            - name: postmortem
+              image: "{{ .Values.api.image.repository }}:{{ .Values.api.image.tag }}"
+              imagePullPolicy: {{ .Values.api.image.pullPolicy }}
+              command:
+                - sh
+                - -c
+                - |
+                  RC=0
+                  {{- range $e := .Values.postmortemCron.silniki }}
+                  echo "===== silnik {{ $e }} ====="
+                  python services/engine/postmortem.py \
+                    --engine {{ $e | quote }} \
+                    --mode {{ $.Values.postmortemCron.mode | quote }} \
+                    --dni {{ $.Values.postmortemCron.dni | quote }}
+                  K=$?
+                  [ "$K" = 0 ] || RC=$K
+                  {{- end }}
+                  exit $RC
+              env:
+                {{- include "trader.rolaDbEnv" (dict "ctx" $ "rola" "postmortem") | nindent 16 }}
+                - name: SECRETS_KEY
+                  valueFrom:
+                    secretKeyRef: { name: {{ .Values.secretName }}, key: SECRETS_KEY }
+                {{- include "trader.llmEnv" . | nindent 16 }}
+                - name: PYTHONUNBUFFERED
+                  value: "1"
+              resources:
+                limits:   { cpu: 500m, memory: 512Mi }
+                requests: { cpu: 50m,  memory: 128Mi }
+{{- end }}
