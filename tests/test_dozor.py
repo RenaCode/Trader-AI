@@ -829,7 +829,8 @@ def test_brak_liczy_sie_PER_ODBIORCA():
     assert [k for k, _ in braki] == ["engine.down:2"]
 
 
-def _stend_kanalow(*, luk: int = 5, juz_w_bazie: bool = False):
+def _stend_kanalow(*, luk: int = 5, juz_w_bazie: bool = False,
+                   tryby: tuple[str, ...] = ("live",)):
     """Stend, ktory MODELUJE COOLDOWN KATALOGOWY `notify()`.
 
     Poprzednia wersja tej atrapy oddawala te sama odpowiedz na kazde pytanie
@@ -849,6 +850,8 @@ def _stend_kanalow(*, luk: int = 5, juz_w_bazie: bool = False):
 
     async def fetch_all(sql, params=None):
         p = " ".join(sql.split())
+        if "risk.engine_heartbeat" in p:
+            return [{"mode": m} for m in tryby]
         # KOLEJNOSC GALEZI JEST ISTOTNA: zapytanie o kanaly TEZ zawiera
         # `app."user"` (CROSS JOIN), wiec rozroznia je dopiero `notify.event_type`.
         # Atrapa, ktora tego nie rozroznia, oddaje liste odbiorcow na pytanie
@@ -942,3 +945,51 @@ def test_czujka_kanalow_jest_wpieta_w_zadanie_cykliczne():
     assert "--co kanaly" in cron
     assert "|| RC=$?" in cron.split("--co kanaly")[1].split("\n")[0], \
         "kod wyjscia czujki kanalow nie idzie do RC — Job byl by zielony"
+
+
+def test_czujka_kanalow_MILCZY_w_demo():
+    """Decyzja wlasciciela 2026-09-24: „to jest demo, nie musze miec alarmow od
+    demo, zostawiaj na stronie".
+
+    Panel jako jedyny kanal jest wtedy WYBOREM, nie luka. Czujka zglaszajaca
+    swiadomy wybor raz na dobe uczy przewijac powiadomienia — czyli psuje
+    dokladnie ten kanal, ktorego pilnuje.
+    """
+    import asyncio
+
+    from services.engine.dozor import sprawdz_kanaly
+
+    fetch_all, notify, wolania = _stend_kanalow(luk=5, tryby=("demo",))
+    assert asyncio.run(sprawdz_kanaly(fetch_all, notify)) == 0
+    assert wolania == []
+
+
+def test_czujka_kanalow_WLACZA_SIE_SAMA_na_zywo():
+    """Wyciszenie, ktore trzeba PAMIETAC zdjac, jest wylaczone na stale.
+
+    Warunek czyta `risk.engine_heartbeat.mode`, ktory kazdy silnik zapisuje przy
+    kazdym cyklu — wiec pierwszy silnik przelaczony na `live` wlacza czujke bez
+    niczyjej pamieci i bez zmiany w charcie.
+    """
+    import asyncio
+
+    from services.engine.dozor import sprawdz_kanaly
+
+    # Jeden silnik na zywo obok demo wystarczy: alarm dotyczy calego systemu.
+    fetch_all, notify, wolania = _stend_kanalow(luk=5, tryby=("demo", "live"))
+    assert asyncio.run(sprawdz_kanaly(fetch_all, notify)) == 5
+    assert len(wolania) == 1
+
+
+def test_brak_pulsu_silnikow_nie_wycisza_czujki():
+    """Pusta tabela pulsow to nie jest dowod, ze system chodzi w demo.
+
+    Cisza nie moze byc czytana jako zgoda — przy braku wpisow czujka pracuje
+    normalnie, bo „nie wiem" nigdy nie znaczy tu „bezpiecznie".
+    """
+    import asyncio
+
+    from services.engine.dozor import sprawdz_kanaly
+
+    fetch_all, notify, _ = _stend_kanalow(luk=2, tryby=())
+    assert asyncio.run(sprawdz_kanaly(fetch_all, notify)) == 2

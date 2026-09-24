@@ -2373,7 +2373,31 @@ def ocen_kanaly(wiersze: list[dict]) -> list[tuple[str, str]]:
 
 
 async def sprawdz_kanaly(fetch_all, notify, sucho: bool = False) -> int:
-    """Czy alarm krytyczny ma jak opuscic dashboard."""
+    """Czy alarm krytyczny ma jak opuscic dashboard.
+
+    MILCZY, DOPOKI CALY SYSTEM CHODZI W DEMO - decyzja wlasciciela 2026-09-24:
+    "to jest demo, nie musze miec alarmow od demo, zostawiaj na stronie".
+
+    Panel jako jedyny kanal jest wtedy WYBOREM, nie luka, a czujka zglaszajaca
+    swiadomy wybor raz na dobe uczy odbiorce przewijac powiadomienia - czyli
+    psuje dokladnie ten kanal, ktorego pilnuje.
+
+    WARUNEK CZYTAMY ZE STANU, NIE Z FLAGI. Gdyby tryb przychodzil parametrem
+    z chartu, przejscie na `live` wymagaloby, zeby ktos pamietal o zdjeciu
+    wyciszenia - a wyciszenie, ktore trzeba pamietac zdjac, jest wylaczone na
+    stale. `risk.engine_heartbeat.mode` zapisuje KAZDY silnik przy kazdym cyklu,
+    wiec pierwszy silnik przelaczony na `live` wlacza te czujke sam, bez niczyjej
+    pamieci. To ta sama zasada, ktora w tym pliku odroznia stan od zdarzenia.
+    """
+    zywe = await fetch_all(
+        "SELECT DISTINCT mode::text AS mode FROM risk.engine_heartbeat")
+    tryby = {w["mode"] for w in zywe}
+    if tryby and "live" not in tryby:
+        print(f"kanaly: wszystkie silniki w trybie {', '.join(sorted(tryby))} — "
+              f"panel jako jedyny kanal jest wyborem, nie luka; czujka wlaczy "
+              f"sie sama, gdy ktorykolwiek silnik przejdzie na `live`")
+        return 0
+
     wiersze = await fetch_all(
         "SELECT et.code AS event_code, et.default_severity AS severity,"
         "       u.id AS user_id, u.login,"
