@@ -213,8 +213,22 @@ def test_migracja_nadaje_odczyt_dokladnie_tym_rolom_ktorych_uzywa_chart():
     """Nadanie i bramka są w dwóch plikach. Rola, która ma bramkę i nie ma
     nadania, pada na „permission denied for table schema_migrations" —
     w kontenerze startowym, w pętli ponawiania, gdzie wygląda dokładnie jak
-    „baza jeszcze nie wstała"."""
-    tresc = _plik_bramki().read_text(encoding="utf-8")
+    „baza jeszcze nie wstała".
+
+    NADANIE LICZONE Z MIGRACJI BRAMKI I WSZYSTKICH PÓŹNIEJSZYCH.
+
+    Wcześniej ten test czytał wyłącznie plik, na który wskazuje `NADANIE`, więc
+    każda nowa rola procesu musiałaby wracać do tamtego pliku po własny GRANT.
+    To jest pułapka, a nie zabezpieczenie: rola założona w swojej własnej
+    migracji (tak powstał `trader_news` w 0052) nadaje sobie ten odczyt na
+    miejscu, razem z resztą swoich praw. Mierzoną WŁASNOŚCIĄ jest „żadna rola
+    z bramką nie zostaje bez odczytu", a nie „wszystkie nadania stoją w jednym
+    pliku" — pilnowanie tego drugiego kazałoby przepisywać historię migracji.
+    Sam wskaźnik `NADANIE` nadal musi wskazywać dokładnie jeden istniejący plik
+    (patrz `_plik_bramki`) i nadal wolno mu nadawać tylko USAGE i SELECT.
+    """
+    bramka = _plik_bramki()
+    pliki = [p for p in sorted(MIGRACJE.glob("*.sql")) if p.name >= bramka.name]
     values = yaml.safe_load(
         (KORZEN / "charts" / "trader" / "values.yaml").read_text(encoding="utf-8"))
 
@@ -223,10 +237,12 @@ def test_migracja_nadaje_odczyt_dokladnie_tym_rolom_ktorych_uzywa_chart():
     assert uzywane, "żaden worker nie jest włączony — test nic by nie mierzył"
 
     nadane = set()
-    for z in _zdania(tresc):
-        m = re.match(r"GRANT SELECT ON public\.schema_migrations TO (.+)$", z, re.I)
-        if m:
-            nadane |= {r.strip() for r in m.group(1).split(",")}
+    for plik in pliki:
+        for z in _zdania(plik.read_text(encoding="utf-8")):
+            m = re.match(r"GRANT SELECT ON public\.schema_migrations TO (.+)$",
+                         z, re.I)
+            if m:
+                nadane |= {r.strip() for r in m.group(1).split(",")}
     brakuje = uzywane - nadane
     assert not brakuje, (
         f"workery chodzą rolami {sorted(brakuje)}, którym migracja nie daje "

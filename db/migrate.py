@@ -52,6 +52,10 @@ ROLE_HASLA = {
     "trader_dozorca": "DOZORCA_DB_PASSWORD",
     "trader_czujka": "CZUJKA_DB_PASSWORD",
     "trader_proba": "PROBA_DB_PASSWORD",
+    # Skaner wiadomosci (migracja 0052). Jedyny proces przetwarzajacy tresc od
+    # obcych - kanaly RSS i odpowiedzi modeli jezykowych - wiec jedyny, ktory
+    # nie moze dzielic roli z procesami widzacymi zaszyfrowane klucze gieldy.
+    "trader_news": "NEWS_DB_PASSWORD",
 }
 
 

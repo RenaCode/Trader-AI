@@ -120,8 +120,19 @@ def _klucz(conn, nazwa_sekretu: str, nazwa_env: str) -> str | None:
 
     Baza ma pierwszenstwo, bo to ona jest wymieniana bez redeployu; zmienna
     srodowiskowa zostaje jako sciezka dla CI i uruchomien lokalnych.
+
+    CZYTAMY WIDOK `app.secret_llm`, NIE TABELE `app.secret` (migracja 0052).
+
+    Ten proces jest jedynym, ktory przetwarza tresc od obcych - kanaly RSS
+    i odpowiedzi modeli jezykowych - i jednoczesnie ma w srodowisku
+    `SECRETS_KEY`. Widok oddaje wylacznie klucze dostawcow analizy, wiec ten
+    klucz nie pasuje juz tutaj do niczego innego: kazdy przyszly sekret
+    w `app.secret` jest stad niewidoczny, dopoki ktos swiadomie nie dopisze go
+    do widoku. Lista nazw w widoku i `ZRODLA_KLUCZY` nizej sa zwiazane testem
+    `tests/test_rola_skanera_wiadomosci.py` - inaczej nowy dostawca spadalby
+    po cichu na sciezke zapasowa ze srodowiska, a worker pracowalby dalej.
     """
-    row = conn.execute("SELECT value_enc FROM app.secret WHERE name = %s",
+    row = conn.execute("SELECT value_enc FROM app.secret_llm WHERE name = %s",
                        (nazwa_sekretu,)).fetchone()
     if row:
         return SecretBox().decrypt(bytes(row[0]))

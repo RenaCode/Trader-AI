@@ -83,6 +83,15 @@ db:
     proba:
       user: trader_proba
       secretKey: PROBA_DB_PASSWORD
+    # Skaner wiadomosci (migracja 0052). JEDYNY proces przetwarzajacy tresc od
+    # obcych - dziesiec kanalow RSS i odpowiedzi modeli jezykowych - czyli
+    # najwieksza powierzchnia ataku we wdrozeniu. Nie handluje i nie widzi
+    # zaszyfrowanych kluczy gieldy (app.api_credential): SECRETS_KEY, ktory ma
+    # w srodowisku, odszyfrowuje tu wylacznie klucz dostawcy analizy
+    # (widok app.secret_llm), i nic wiecej.
+    news:
+      user: trader_news
+      secretKey: NEWS_DB_PASSWORD
   appUsername: trader_app
   resources:
     limits:   { cpu: 2000m, memory: 3Gi }
@@ -260,6 +269,33 @@ workers:
       limits:   { cpu: 1000m, memory: 768Mi }
       requests: { cpu: 100m,  memory: 192Mi }
 
+  # Cechy dla silnika gieldowego. OSOBNY PROCES, nie kolejny argument obok
+  # krypto, bo `features.py` liczy JEDEN silnik na przebieg (`--engine` filtruje
+  # `ref.instrument`), a puls ma wtedy wlasny wiersz `features-equity` - smierc
+  # jednego z potokow zostaje widoczna zamiast byc przykryta pulsem drugiego.
+  #
+  # TYLKO 1h, i to nie z oszczednosci. Sesja gieldowa trwa 6,5 godziny, wiec
+  # swieca 4h nie dzieli sesji na rowne czesci: pierwsza obejmowalaby 13:00-17:00
+  # UTC, druga 17:00-20:00 doklejone do nocnej przerwy. Agregat z `time_bucket`
+  # zlozylby swiece o roznej liczbie notowan i nazwal je tak samo. Dane
+  # godzinowe siedza na siatce 13:00-19:00 UTC (7 swiec na sesje, zmierzone na
+  # produkcji 2026-09-24) i to jest jedyny horyzont, na ktorym swieca equity
+  # znaczy to samo co swieca equity obok.
+  #
+  # --okno-dni 7 ZAMIAST DOMYSLNEJ DOBY. Swieca dostaje cechy dopiero wtedy,
+  # gdy istnieje swieca po niej (ostatnia w panelu jest jeszcze otwarta).
+  # Po piatkowym zamknieciu nastepna swieca przychodzi 65 godzin pozniej, wiec
+  # w oknie jednodobowym piatkowa nie dostalaby cech NIGDY - co tydzien, kazdy
+  # instrument, bez jednego bledu w logu. Siedem dni przykrywa takze przerwy
+  # swiateczne i zamkniecia nadzwyczajne.
+  features-equity:
+    enabled: true
+    command: ["python", "services/ingest/features.py", "--bar", "1h",
+              "--engine", "equity", "--okno-dni", "7", "--interval", "900"]
+    resources:
+      limits:   { cpu: 1000m, memory: 768Mi }
+      requests: { cpu: 100m,  memory: 192Mi }
+
   # Petla decyzyjna. Odpala sie po cechach, wiec ma wlasny, przesuniety cykl.
   engine:
     enabled: true
@@ -358,6 +394,10 @@ workers:
   # dlatego wlaczony dopiero wtedy, gdy klucz jest w bazie.
   news:
     enabled: true
+    # Nie chodzi rola silnika (migracja 0052). Rola silnika ma SELECT na
+    # app.api_credential, a ten pod dostaje SECRETS_KEY - razem daly klucz
+    # gieldy w jawnej postaci procesowi, ktory parsuje cudzy XML.
+    dbRole: news
     # --auto: z kluczem analizuje, bez klucza SAM POBIERA artykuly.
     #
     # Bez tego proces konczyl sie komunikatem o braku klucza, zanim zdazyl

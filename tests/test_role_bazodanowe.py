@@ -59,12 +59,17 @@ MIGRACJE_NADAN = [
     # workerów (0050). Odczyt, i tylko odczyt: pilnuje tego test niżej.
     KORZEN / "db" / "migrations"
            / "0050_role_procesow_czytaja_schema_migrations.sql",
+    # Skaner wiadomości dostaje własną, wąską rolę — bez `app.api_credential`
+    # (0052). Zakres tamtej roli pilnuje osobny plik,
+    # tests/test_rola_skanera_wiadomosci.py; tutaj migracja jest po to, żeby
+    # twierdzenia o schemacie `public` obejmowały także ją.
+    KORZEN / "db" / "migrations" / "0052_rola_skanera_wiadomosci.sql",
 ]
 
-# Role procesów z 0034. Wypisane tutaj, a nie wyciągnięte z chartu, bo to
+# Role procesów z 0034 i 0052. Wypisane tutaj, a nie wyciągnięte z chartu, bo to
 # właśnie zgodność chartu z tą listą jest jednym z twierdzeń w tym pliku.
 ROLE_PROCESOW = ("trader_silnik", "trader_dozorca", "trader_czujka",
-                 "trader_proba")
+                 "trader_proba", "trader_news")
 ROLA_APLIKACJI = KORZEN / "db" / "migrations" / "0013_rola_aplikacji.sql"
 MIGRACJE = KORZEN / "db" / "migrations"
 VALUES = KORZEN / "charts" / "trader" / "values.yaml"
