@@ -1911,6 +1911,36 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
     seed_equity(cur, engine, mode)
     conn.commit()
 
+    risk = RiskKernel(conn, engine, mode)
+
+    # Limity konta sprawdzamy RAZ NA CYKL, zanim cokolwiek rozwazymy.
+    # Wczesniej risk.check() wolane bylo wylacznie przy probie wejscia, wiec
+    # obsuniecie kapitalu podczas samego trzymania pozycji nie bylo oceniane
+    # przez nikogo - kill-switch nie mogl zadzialac dokladnie w tej sytuacji,
+    # dla ktorej istnieje.
+    konto = risk.check_account()
+    conn.commit()
+
+    # BRAMKI CYKLU STOJA ZA POMIAREM RYZYKA, A NIE PRZED NIM.
+
+    # Pierwsza wersja (2026-09-24) miala je wyzej, przed `RiskKernel`. Czujka
+    # `--co ryzyko` zglosila to przy PIERWSZYM cyklu silnika equity:
+    # "BEZPIECZNIK NIE RAPORTUJE equity/demo: ANI JEDNEGO zapisanego pomiaru
+    # limitow konta w calej historii". Sluszznie - kazdy cykl konczyl sie na
+    # bramce sesji, wiec `check_account` nie wykonal sie ani razu.
+
+    # PODLOGA KAPITALU NIE PRZESTAJE OBOWIAZYWAC, GDY GIELDA ZAMYKA. Pozycje
+    # zostaja otwarte przez noc i weekend, a `kapital-equity` aktualizuje
+    # krzywa kapitalu z ksiag Alpaki co 15 minut niezaleznie od sesji. Obsuniecie
+    # moze wiec przekroczyc limit o 03:00 i nie byloby przez nikogo ocenione.
+
+    # `check_account` jest tu bezpieczny poza sesja: czyta `exec.equity_point`,
+    # a ekspozycji SWIADOMIE nie liczy (`exposure=None` w `risk.check_account`),
+    # wiec nie siega po swieze swiece, ktorych poza sesja nie ma.
+
+    # Bramki nadal wstrzymuja WSZYSTKO, co nastepuje dalej: decyzje, zlecenia
+    # i kontakt z gielda. Zmienia sie tylko to, ze pomiar ryzyka dzieje sie
+    # przed nimi - bo pomiar nie jest handlem.
     # ---------------------------------------------------------- BRAMKI CYKLU
     #
     # Obie sa PRZED jakimkolwiek odczytem cen i przed `RiskKernel`, i obie
@@ -1961,15 +1991,6 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
             conn.commit()
             return stats
 
-    risk = RiskKernel(conn, engine, mode)
-
-    # Limity konta sprawdzamy RAZ NA CYKL, zanim cokolwiek rozwazymy.
-    # Wczesniej risk.check() wolane bylo wylacznie przy probie wejscia, wiec
-    # obsuniecie kapitalu podczas samego trzymania pozycji nie bylo oceniane
-    # przez nikogo - kill-switch nie mogl zadzialac dokladnie w tej sytuacji,
-    # dla ktorej istnieje.
-    konto = risk.check_account()
-    conn.commit()
 
     # POZYCJA BEZ SWIEZEJ CENY WSTRZYMUJE WEJSCIA - i to jest druga polowa
     # naprawy z `wycen()`.
