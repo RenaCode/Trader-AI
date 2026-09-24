@@ -16,7 +16,7 @@ imagePullSecrets: []
 api:
   image:
     repository: ghcr.io/renacode/trader-ai-api
-    tag: "sha-c758da2"
+    tag: "sha-e137efc"
     pullPolicy: IfNotPresent
   resources:
     limits:   { cpu: 1000m, memory: 1Gi }
@@ -25,7 +25,7 @@ api:
 web:
   image:
     repository: ghcr.io/renacode/trader-ai-web
-    tag: "sha-c758da2"
+    tag: "sha-e137efc"
     pullPolicy: IfNotPresent
   resources:
     limits:   { cpu: 200m, memory: 256Mi }
@@ -374,16 +374,7 @@ workers:
   # rozjechac. Zegar nieodpowiadajacy NIE jest otwarciem: cykl konczy sie wtedy
   # bledem i po pieciu pod rzad proces sie konczy, zeby restart byl WIDOCZNY.
   engine-equity:
-    # WYLACZONE DO CZASU ZBUDOWANIA OBRAZU (2026-09-24).
-    #
-    # Komenda ponizej uzywa `--wymagaj-modelu`, flagi, ktorej NIE MA w obrazie
-    # `sha-c758da2`. ArgoCD wdraza szablony natychmiast, bez podbicia tagu, wiec
-    # wlaczenie tego wpisu przed zbudowaniem obrazu na VPS daje CrashLoopBackOff
-    # z `unrecognized arguments` - dokladnie ta awaria, ktora 2026-09-24
-    # zatrzymala `features-equity` (docs/08, "Stan na dzis").
-    #
-    # ZDJAC PO: scripts/build-on-vps.sh + podbiciu `api.image.tag`.
-    enabled: false
+    enabled: true
     command: ["sh", "-c", "sleep 90; python services/engine/loop.py --engine equity --bar 1h --sprawdz && exec python services/engine/loop.py --engine equity --bar 1h --interval 300 --kind stock --limit --wymagaj-modelu --egzekucja gielda --mode demo"]
     resources:
       limits:   { cpu: 1000m, memory: 512Mi }
@@ -587,9 +578,7 @@ trainerCron:
   # placi. Po tej zmianie tor equity liczy sie wlasnym rachunkiem i tamte liczby
   # nie sa juz jego opisem.
   equity:
-    # WYLACZONE DO CZASU ZBUDOWANIA OBRAZU - `train.py --kind stock` nie istnieje
-    # w `sha-c758da2`. Zdjac razem z `workers.engine-equity`.
-    enabled: false
+    enabled: true
     horyzonty: ["1h"]
     kind: "stock"
     limit: true
@@ -616,9 +605,7 @@ trainerCron:
 # transakcja nie jest oceniana dwa razy, a przebieg opuszczony przez przestoj
 # nadrabia sie sam.
 postmortemCron:
-  # WYLACZONE DO CZASU ZBUDOWANIA OBRAZU - `services/engine/postmortem.py`
-  # nie istnieje w `sha-c758da2`. Zdjac razem z `workers.engine-equity`.
-  enabled: false
+  enabled: true
   schedule: "50 5 * * *"     # codziennie 05:50 UTC, po trenerze
   # OBA SILNIKI. Silnik equity dopisze sie tu sam z chwila, gdy zacznie zamykac
   # pozycje; do tego czasu jego przebieg konczy sie linia "0 zamknietych
