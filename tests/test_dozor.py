@@ -829,25 +829,61 @@ def test_brak_liczy_sie_PER_ODBIORCA():
     assert [k for k, _ in braki] == ["engine.down:2"]
 
 
-def test_czujka_kanalow_NIE_WOLA_powiadomienia():
-    """Alarm o braku kanalu wyslany brakujacym kanalem to ta sama wada, ktora
-    opisuje „nadzor ginie razem z nadzorowanym". Jedynym sygnalem jest kod
-    wyjscia — czyli czerwony Job, slad nieprzechodzacy przez sprawdzany mechanizm.
+def _stend_kanalow(*, powiadomiono_w_dobie: bool):
+    """Atrapa rozroznia TRZY zapytania czujki; oddaje tylko to, o co pytano."""
+    wyslane = []
+
+    async def fetch_all(sql, params=None):
+        p = " ".join(sql.split())
+        if "notify.notification" in p:
+            return [{"?column?": 1}] if powiadomiono_w_dobie else []
+        if 'app."user"' in p and "is_active" in p and "event_type" not in p:
+            return [{"id": 1}]
+        return [_wiersz_kanalu("killswitch.triggered", ["inapp"])]
+
+    async def notify(user_id, event_code, tytul, tresc, **kw):
+        wyslane.append((event_code, kw.get("data", {}).get("klucz")))
+
+    return fetch_all, notify, wyslane
+
+
+def test_czujka_kanalow_ZGLASZA_luke_pierwszy_raz():
+    """Pierwsze zgloszenie musi dac czerwony Job — drugi, niezalezny od kanalu slad."""
+    import asyncio
+
+    from services.engine.dozor import sprawdz_kanaly
+
+    fetch_all, notify, wyslane = _stend_kanalow(powiadomiono_w_dobie=False)
+    assert asyncio.run(sprawdz_kanaly(fetch_all, notify)) == 1
+    assert wyslane == [("notify.no_channel", "killswitch.triggered:1")]
+
+
+def test_czujka_kanalow_NIE_SWIECI_NA_CZERWONO_BEZ_KONCA():
+    """KOREKTA z 2026-09-24. Brak kanalu jest luka konfiguracyjna i nie mija sam.
+
+    Czujka bez tlumienia swiecilaby co 10 minut bez konca, a `trader-zywotnosc`
+    uruchamia w tym samym zadaniu osiem innych sprawdzen — trwale czerwony Job
+    uczy przewijac czerwone Joby, czyli psuje sygnal dla WSZYSTKICH czujek.
     """
     import asyncio
 
     from services.engine.dozor import sprawdz_kanaly
 
-    async def fetch_all(sql, params=None):
-        return [_wiersz_kanalu("killswitch.triggered", ["inapp"])]
+    fetch_all, notify, wyslane = _stend_kanalow(powiadomiono_w_dobie=True)
+    assert asyncio.run(sprawdz_kanaly(fetch_all, notify)) == 0, (
+        "stan juz zgloszony nadal podnosi kod wyjscia — Job bedzie czerwony "
+        "bez konca i przestanie cokolwiek znaczyc")
+    assert wyslane == [], "powtorzenie nie ma prawa wysylac drugiego powiadomienia"
 
-    async def notify(*a, **k):
-        raise AssertionError("czujka kanalu nie ma prawa uzywac kanalu")
 
+def test_tryb_suchy_nie_wysyla_ale_liczy():
+    import asyncio
+
+    from services.engine.dozor import sprawdz_kanaly
+
+    fetch_all, notify, wyslane = _stend_kanalow(powiadomiono_w_dobie=False)
     assert asyncio.run(sprawdz_kanaly(fetch_all, notify, sucho=True)) == 1
-    # Takze przy `--sucho`: to jest STAN, nie zdarzenie, wiec ma swiecic na
-    # czerwono tak dlugo, jak trwa.
-    assert asyncio.run(sprawdz_kanaly(fetch_all, notify, sucho=False)) == 1
+    assert wyslane == []
 
 
 def test_czujka_kanalow_jest_wpieta_w_zadanie_cykliczne():

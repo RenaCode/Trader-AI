@@ -2328,16 +2328,26 @@ async def sprawdz_puls_workerow(fetch_all, notify, sucho: bool = False,
 # dobie. Kanal wychodzacy (whatsapp, webhook) nie byl skonfigurowany ani razu
 # w calej historii tabeli.
 #
-# DLACZEGO TA CZUJKA NIE MOZE WYSYLAC POWIADOMIENIA
+# DLACZEGO TA CZUJKA JEDNAK POWIADAMIA - KOREKTA Z TEGO SAMEGO DNIA
 #
-# Bo sprawdza dokladnie ten mechanizm, ktorym musialaby je wyslac. Alarm
-# o braku kanalu wyslany kanalem, ktorego brakuje, jest ta sama wada, ktora
-# opisuje `nadzor ginie razem z nadzorowanym`: adres alarmu w tym samym
-# sekrecie, o ktorego braku ma donosic.
+# Pierwsza wersja nie wysylala nic i mowila wylacznie kodem wyjscia. Powod:
+# czujka sprawdzajaca kanal alarmowy nie powinna uzywac kanalu alarmowego -
+# to ta sama wada, ktora opisuje `nadzor ginie razem z nadzorowanym`.
 #
-# Dlatego jedynym sygnalem jest KOD WYJSCIA i linia w logu - czyli czerwony Job
-# widoczny w `kubectl get jobs` i w ArgoCD. To jest slad, ktory nie przechodzi
-# przez sprawdzany mechanizm.
+# Rozumowanie bylo poprawne, wniosek zly. Brak kanalu jest luka KONFIGURACYJNA
+# i nie mija sam, wiec czujka bez tlumienia swiecilaby na czerwono co dziesiec
+# minut BEZ KONCA - a `trader-zywotnosc` uruchamia w tym samym zadaniu osiem
+# innych sprawdzen. Trwale czerwony Job uczy przewijac czerwone Joby, czyli
+# psuje sygnal dla WSZYSTKICH czujek, nie tylko dla tej. To jest dokladnie ta
+# szkoda, przed ktora broni sie `kod_wyjscia`.
+#
+# Obieg zamkniety zostaje i jest nazwany wprost w tresci zdarzenia
+# `notify.no_channel` (migracja 0056): powiadomienie o tym, ze alarmy nie
+# wychodza poza panel, przychodzi do panelu. Nie da sie inaczej - nie ma czym.
+#
+# DRUGI SLAD ZOSTAJE NIEZALEZNY OD KANALU: pierwsze zgloszenie daje niezerowy
+# kod wyjscia, wiec Job swieci na czerwono RAZ, a linia w logu wypisuje pelny
+# stan przy kazdym przebiegu. Tlumione sa dopiero powtorzenia.
 RODZAJ_TYLKO_PANEL = "inapp"
 
 
@@ -2363,11 +2373,7 @@ def ocen_kanaly(wiersze: list[dict]) -> list[tuple[str, str]]:
 
 
 async def sprawdz_kanaly(fetch_all, notify, sucho: bool = False) -> int:
-    """Czy alarm krytyczny ma jak opuscic dashboard.
-
-    `notify` jest w sygnaturze dla zgodnosci z pozostalymi czujkami i NIE JEST
-    WOLANY - patrz naglowek wyzej. Ta czujka mowi wylacznie kodem wyjscia.
-    """
+    """Czy alarm krytyczny ma jak opuscic dashboard."""
     wiersze = await fetch_all(
         "SELECT et.code AS event_code, et.default_severity AS severity,"
         "       u.id AS user_id, u.login,"
@@ -2394,17 +2400,40 @@ async def sprawdz_kanaly(fetch_all, notify, sucho: bool = False) -> int:
         print("  każde krytyczne zdarzenie ma drogę poza panel")
         return 0
 
-    print(f"\n  {len(braki)} × ALARM KRYTYCZNY WYLACZNIE W PANELU.")
-    print("  Kill-switch, martwy silnik i brak kopii dotra do czlowieka dopiero,")
-    print("  gdy ten sam otworzy dashboard. Skonfiguruj kanal `whatsapp` albo")
-    print("  `webhook` w Ustawieniach i wlacz go dla tych zdarzen.")
+    tytul = f"{len(braki)} × alarm krytyczny wyłącznie w panelu"
+    tresc = (
+        "Zdarzenia krytyczne bez kanału innego niż panel:\n  "
+        + "\n  ".join(opis for _, opis in braki)
+        + "\n\nKill-switch, martwy silnik i brak kopii dotrą do człowieka "
+          "dopiero, gdy ten sam otworzy dashboard. Skonfiguruj kanał "
+          "`whatsapp` albo `webhook` w Ustawieniach i włącz go dla tych zdarzeń."
+        "\n\nTo powiadomienie z konieczności przyszło tą samą drogą, której "
+        "brak opisuje — innej nie ma.")
+    print(f"\n  {tytul}")
     if sucho:
-        print("  Tryb suchy — kod wyjścia i tak niezerowy, bo to STAN, nie zdarzenie.")
-    # BEZ TLUMIENIA I BEZ `kod_wyjscia`. Pozostale czujki tlumia powtorzenia,
-    # bo kazde z nich wysyla POWIADOMIENIE, a powtarzane powiadomienie uczy je
-    # wyciszac. Tu sygnalem jest czerwony Job - stan trwaly ma swiecic na
-    # czerwono tak dlugo, jak trwa, bo nic innego o nim nie mowi.
-    return len(braki)
+        print("  Tryb suchy — powiadomienie nie wysyłane.")
+        return len(braki)
+
+    # TLUMIENIE OKNEM DOBOWYM, tak jak przy wycofaniu instrumentu. Stan nie ma
+    # wlasnego znacznika w bazie (nie ma tu `last_beat_at`, od ktorego liczyc
+    # nawrot), wiec powtorzenie rozpoznajemy po tym, czy powiadomienie o TEJ
+    # SAMEJ luce poszlo w ostatniej dobie. Klucz jest stabilny (kod zdarzenia
+    # + id odbiorcy), wiec dolozenie szostej luki zglasza sie jako nowa.
+    odbiorcy = await fetch_all('SELECT id FROM app."user" WHERE is_active')
+    zgloszone = trwale = 0
+    for klucz, opis in braki:
+        juz = await fetch_all(
+            "SELECT 1 FROM notify.notification"
+            " WHERE event_code = 'notify.no_channel' AND data->>'klucz' = %s"
+            "   AND created_at > now() - interval '24 hours' LIMIT 1", (klucz,))
+        if juz:
+            trwale += 1
+            continue
+        zgloszone += 1
+        for u in odbiorcy:
+            await notify(u["id"], "notify.no_channel", tytul, tresc,
+                         severity="critical", data={"klucz": klucz, "opis": opis})
+    return kod_wyjscia(zgloszone, trwale, "alarm krytyczny tylko w panelu")
 
 
 async def sprawdz_dryf(fetch_all, notify, sucho: bool = False, *,
