@@ -1,15 +1,25 @@
-"""Worker rynku: lista instrumentów odświeżana w trakcie pracy.
+"""Worker rynku: lista instrumentów odświeżana w trakcie pracy, licznik nie kłamie.
 
-LISTA CZYTANA RAZ NA PROCES
+DWIE WADY, JEDNA FUNKCJA, TEN SAM KSZTAŁT: system melduje coś, czego nie robi.
 
-`market_worker.main` czytał `ref.instrument` PRZED pętlą `while True`, więc zmiana
-w bazie działała dopiero po restarcie poda — a pod procesu tła nie restartuje się
-sam. Instrument wyłączony był odpytywany dalej, a instrument DOPISANY nie zbierał
-danych, dopóki ktoś nie zauważył, że ich nie ma. Drugi kierunek jest gorszy, bo
-nie widać go w żadnym logu: brak wiersza wygląda jak rynek bez zmian.
+  1. LISTA CZYTANA RAZ NA PROCES. `market_worker.main` czytał `ref.instrument`
+     PRZED pętlą `while True`, więc zmiana w bazie działała dopiero po restarcie
+     poda — a pod procesu tła nie restartuje się sam. Instrument wyłączony był
+     odpytywany dalej, a instrument DOPISANY nie zbierał danych, dopóki ktoś nie
+     zauważył, że ich nie ma. Drugi kierunek jest gorszy, bo nie widać go
+     w żadnym logu: brak wiersza wygląda jak rynek bez zmian.
 
-CO TU JEST ATRAPĄ, A CO MIERZONE. Atrapą jest baza i giełda; mierzona jest
-`market_worker.main` — prawdziwa, nieprzepisana.
+  2. LICZNIK ARKUSZY ROSNĄCY NIEZALEŻNIE OD ZAPISU. `stats["orderbooki"] += 1`
+     stało za `INSERT ... ON CONFLICT DO NOTHING`, a klucz główny
+     `market.book_snapshot` to `(instrument_id, event_time)` — gdzie `event_time`
+     bierze się ze ZNACZNIKA OFERTY, nie z chwili odpytania. Giełda oddająca tę
+     samą ofertę co minutę (poza sesją Alpaca oddaje ostatnią znaną) dawała więc
+     log „orderbooki 21" przy ZERU zapisanych wierszy, i ta sama liczba szła do
+     pulsu, czyli do bazy. Świece były liczone poprawnie (`cur.rowcount`) w tej
+     samej funkcji, dwadzieścia wierszy wyżej.
+
+CO TU JEST ATRAPĄ, A CO MIERZONE. Atrapą jest baza i giełda; mierzone są
+`market_worker.cycle` i `market_worker.main` — prawdziwe, nieprzepisane.
 Nic nie łączy się z siecią ani z produkcyjną bazą.
 """
 from __future__ import annotations
@@ -279,3 +289,50 @@ def test_awaria_odczytu_listy_LICZY_SIE_jako_awaria_cyklu(monkeypatch):
     assert awarie, (
         "wywrócony odczyt listy nie zgłosił awarii cyklu — proces chodziłby "
         "dalej na starej liście i twierdził, że wszystko zebrał")
+
+
+# ================================================ 2. LICZNIK ARKUSZY
+
+def _cykl(rowcount_arkusza: int) -> dict:
+    conn = Polaczenie([instrument(1, "BTCUSDC"), instrument(2, "ETHUSDC")],
+                      rowcount_arkusza=rowcount_arkusza)
+    return asyncio.run(market_worker.cycle(conn, Gielda(),
+                                           list(conn.instrumenty), 25))
+
+
+def test_licznik_arkuszy_NIE_rosnie_gdy_nic_nie_zapisano():
+    """Sedno poprawki 11d.
+
+    `ON CONFLICT DO NOTHING` przy tym samym `(instrument_id, event_time)` nie
+    wstawia wiersza. Log meldujący postęp, którego nie ma, jest gorszy od braku
+    logu: ta liczba idzie także do pulsu, czyli do bazy.
+    """
+    s = _cykl(rowcount_arkusza=0)
+    assert s["orderbooki"] == 0, (
+        f"licznik arkuszy pokazuje {s['orderbooki']} przy ZERU wstawionych "
+        f"wierszy — log i puls meldują postęp, którego nie było")
+    assert s["bledy"] == 0, "brak nowego wiersza to nie awaria pobrania"
+    assert s["bez_arkusza"] == 0, "giełda oddała arkusz, więc to nie ta kolumna"
+
+
+def test_licznik_arkuszy_LICZY_gdy_wiersz_powstal():
+    """Kanarek odwrotny: licznik zawsze zerowy przeszedłby test wyżej."""
+    s = _cykl(rowcount_arkusza=1)
+    assert s["orderbooki"] == 2, (
+        f"dwa nowe wiersze arkusza, a licznik pokazuje {s['orderbooki']}")
+
+
+def test_licznik_arkuszy_z_pulsu_zgadza_sie_z_cyklem(monkeypatch):
+    """Ta liczba nie zostaje w logu — idzie do `risk.worker_heartbeat.detail`.
+
+    Nagłówek modułu mówi wprost, dlaczego: log ginie przy restarcie, a liczba
+    ma być odczytywalna bez zaglądania do poda. Kłamliwa liczba w bazie żyje
+    więc dłużej niż kłamliwa linia w logu.
+    """
+    conn = Polaczenie([instrument(1, "BTCUSDC")], rowcount_arkusza=0)
+    _uruchom(monkeypatch, conn, Gielda(), cykli=1)
+    pulsy = _pulsy(conn)
+    assert pulsy, "cykl się udał, a pulsu nie ma — test nie mierzy niczego"
+    assert pulsy[-1]["orderbooki"] == 0, (
+        f"puls zapisał do bazy {pulsy[-1]['orderbooki']} arkuszy przy zerze "
+        f"wstawionych wierszy")

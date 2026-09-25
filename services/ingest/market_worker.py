@@ -183,7 +183,24 @@ async def cycle(conn, adapter, instruments: list[dict], book_depth: int) -> dict
              book.imbalance,
              json.dumps({"bids": [[str(l.price), str(l.qty)] for l in book.bids[:10]],
                          "asks": [[str(l.price), str(l.qty)] for l in book.asks[:10]]})))
-        stats["orderbooki"] += 1
+        # LICZYMY ZAPISANE WIERSZE, NIE UDANE ODPYTANIA.
+        #
+        # Do 2026-09-25 stalo tu `+= 1` bezwarunkowo, czyli licznik rosl takze
+        # wtedy, gdy `ON CONFLICT DO NOTHING` nie wstawil niczego. Klucz glowny
+        # `market.book_snapshot` to (instrument_id, event_time) - migracja 0002 -
+        # a `event_time` bierze sie ze ZNACZNIKA OFERTY, nie z chwili odpytania.
+        # Gielda, ktora oddaje te sama oferte co minute (poza sesja Alpaca oddaje
+        # ostatnia znana), dawala wiec log meldujacy "orderbooki 21" przy ZERU
+        # zapisanych wierszy - i ta sama liczba szla do pulsu, czyli do bazy.
+        #
+        # To jest ten sam ksztalt wady, ktory ten plik tropi w naglowku: melduje
+        # postep, ktorego nie ma. Swiece byly liczone poprawnie (`cur.rowcount`)
+        # juz wyzej, wiec rozjazd byl miedzy dwiema liniami w jednej funkcji.
+        #
+        # `if > 0`, bo `rowcount` przy niektorych sterownikach potrafi byc -1
+        # dla polecenia, ktore nie raportuje liczby wierszy - ta sama ostroznosc
+        # co przy swiecach.
+        stats["orderbooki"] += cur.rowcount if cur.rowcount > 0 else 0
         conn.commit()
 
     return stats
