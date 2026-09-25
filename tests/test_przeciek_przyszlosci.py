@@ -61,24 +61,45 @@ def przez_load_panel(event_time, ingested_at, h):
 
 
 # --- straż produkcyjna -------------------------------------------------------
+#
+# SPARAMETRYZOWANE PO HORYZONTACH 2026-09-25. Do tego dnia oba testy niżej
+# stały na `H4H` wpisanym na sztywno, tak samo jak regresja starego datowania,
+# choć produkcja liczy cechy na DWÓCH horyzontach krypto (`4h` i `1h`), a tor
+# equity WYŁĄCZNIE na `1h` (`trainerCron.equity.horyzonty`).
+#
+# ZMIERZONE MUTACYJNIE na zestawie sprzed tej zmiany: wada w datowaniu wywracała
+# 8 testów dla wszystkich horyzontów razem, a dla samej świecy 1h — JEDEN.
+# Horyzont, którym ma handlować equity, był więc pilnowany osiem razy słabiej
+# niż ten, którym handluje krypto, i różnica wychodziła wyłącznie z tego, że
+# `H4H` przypadkiem trafiło do tych trzech testów.
+#
+# WSZYSTKIE PRZESUNIĘCIA CZASU LICZĄ SIĘ TERAZ Z `h.bar_minutes`, a nie z liczby
+# godzin: `timedelta(hours=4)` dla świecy 1h opisywałoby czwartą świecę po tej
+# mierzonej i test przeszedłby z innego powodu niż mierzony.
 
-def test_as_of_odrzuca_ceche_ktora_w_tamtej_chwili_jeszcze_nie_istniala():
-    """ZŁA PRÓBKA: cecha świecy 08:00 zapisana dopiero o 12:00:03, czytana o 12:00:00.
 
-    To jest dokładnie cecha liczona z ZAMKNIĘCIA świecy, o którą pytamy zanim
-    świeca się domknęła. Bez tego warunku model uczyłby się na niej.
+@pytest.mark.parametrize("h", [H5M, H1H, H4H])
+def test_as_of_odrzuca_ceche_ktora_w_tamtej_chwili_jeszcze_nie_istniala(h):
+    """ZŁA PRÓBKA: cecha świecy T zapisana o `zamknięcie + 3 s`, czytana
+    DOKŁADNIE w chwili zamknięcia.
+
+    To jest cecha liczona z ZAMKNIĘCIA świecy, o którą pytamy, zanim świeca się
+    domknęła. Bez tego warunku model uczyłby się na niej — i to na każdym
+    horyzoncie, bo `znane_od` dokłada `bar_minutes` niezależnie od świecy.
     """
-    decyzja = T + timedelta(hours=4)                 # 12:00:00
-    dostepna_od = znane_od(T, H4H)                   # 12:00:03
-    assert not przez_as_of(T, dostepna_od, decyzja, H4H.max_staleness_min), \
-        "as_of przepuściło cechę, której w chwili decyzji jeszcze nie policzono"
+    decyzja = T + timedelta(minutes=h.bar_minutes)    # chwila zamknięcia świecy
+    dostepna_od = znane_od(T, h)                      # zamknięcie + 3 s
+    assert not przez_as_of(T, dostepna_od, decyzja, h.max_staleness_min), \
+        f"as_of ({h.bar}) przepuściło cechę, której w chwili decyzji nie policzono"
 
 
-def test_as_of_przepuszcza_te_sama_ceche_trzy_sekundy_pozniej():
+@pytest.mark.parametrize("h", [H5M, H1H, H4H])
+def test_as_of_przepuszcza_te_sama_ceche_trzy_sekundy_pozniej(h):
     """Kanarek odwrotny: bez niego poprzedni test zdałby przy strażniku,
     który odrzuca WSZYSTKO."""
-    assert przez_as_of(T, znane_od(T, H4H), T + timedelta(hours=4, seconds=3),
-                       H4H.max_staleness_min)
+    assert przez_as_of(T, znane_od(T, h), znane_od(T, h), h.max_staleness_min), (
+        f"strażnik {h.bar} odrzuca cechę czytaną w chwili, w której stała się "
+        f"znana — mierzyłby wtedy coś innego niż przeciek przyszłości")
 
 
 def test_as_of_odrzuca_ceche_o_ZNACZNIKU_z_przyszlosci():
@@ -103,22 +124,34 @@ def test_load_panel_odrzuca_ceche_ktora_doszla_za_pozno(h):
         "ten sam strażnik odrzuca poprawne datowanie — test nie mierzy strażnika"
 
 
-def test_stare_datowanie_bylo_by_zlapane_gdyby_wrocilo():
+@pytest.mark.parametrize("h", [H5M, H1H, H4H])
+def test_stare_datowanie_bylo_by_zlapane_gdyby_wrocilo(h):
     """Regresja na błąd opisany w `znane_od`: `ingested_at = t + 3 sekundy`.
 
     Ten wariant przechodzi strażnika TRENINGOWEGO (jest wcześniejszy, nie
     późniejszy) i dlatego łapie go dopiero straż produkcyjna — cecha świecy
-    08:00–12:00 byłaby wtedy „znana" o 08:00:03, czyli cztery godziny przed
-    swoim własnym zamknięciem.
+    byłaby wtedy „znana" trzy sekundy po swoim OTWARCIU, czyli cały czas trwania
+    świecy przed jej własnym zamknięciem.
+
+    Szkoda rośnie z długością świecy (przy 4h to cztery godziny wiedzy
+    z przyszłości), ale ISTNIEJE NA KAŻDYM horyzoncie — także na `1h`, którym
+    ma handlować tor equity.
     """
     blednie = T + timedelta(seconds=3)
-    assert przez_load_panel(T, blednie, H4H), \
-        "test nie odtwarza starego, błędnego datowania"
-    # I to jest cała szkoda: as_of oddałoby ją decyzji z 08:05.
-    assert przez_as_of(T, blednie, T + timedelta(minutes=5), H4H.max_staleness_min)
+    assert przez_load_panel(T, blednie, h), \
+        f"test nie odtwarza starego, błędnego datowania dla {h.bar}"
+    # I to jest cała szkoda: as_of oddałoby ją decyzji podjętej W TRAKCIE świecy.
+    # Chwila liczona z `bar_minutes`, a nie stałe 5 minut: dla świecy 5m stałe
+    # 5 minut wypadałoby DOKŁADNIE na jej zamknięciu i test mierzyłby granicę,
+    # a nie wnętrze świecy.
+    w_trakcie = T + timedelta(minutes=h.bar_minutes) / 2
+    assert przez_as_of(T, blednie, w_trakcie, h.max_staleness_min), (
+        f"stare datowanie ({h.bar}) nie przeszłoby przez as_of — test nie "
+        f"odtwarza wady, którą ma pilnować")
     # Przy poprawnym datowaniu ta sama decyzja jej NIE dostaje.
-    assert not przez_as_of(T, znane_od(T, H4H), T + timedelta(minutes=5),
-                           H4H.max_staleness_min)
+    assert not przez_as_of(T, znane_od(T, h), w_trakcie, h.max_staleness_min), (
+        f"poprawne datowanie ({h.bar}) też przechodzi — strażnik nie odróżnia "
+        f"tych dwóch przypadków, czyli nie pilnuje niczego")
 
 
 # --- czego ta straż NIE potrafi ---------------------------------------------

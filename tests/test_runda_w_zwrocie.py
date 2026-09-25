@@ -33,11 +33,28 @@ from decimal import Decimal
 import pytest
 
 from services.engine.horizons import get as get_horizon
-from services.engine.koszty import POSLIZG_MAKER, POSLIZG_TAKER, koszty, runda
+from services.engine.koszty import (
+    POSLIZG_MAKER, POSLIZG_TAKER, karta_rundy, koszty, runda,
+)
 from services.engine.portfolio import Egzekucja, simulate_portfolio
 from services.engine.signals import DEFAULT_WEIGHTS
 
 H = get_horizon("4h")
+
+# RODZAJE INSTRUMENTU W PARAMETRYZACJI.
+#
+# `stock` dołączył 2026-09-25, razem z uruchomieniem toru equity. ZMIERZONE
+# MUTACYJNIE tego dnia na zestawie SPRZED tej zmiany: wada wstawiona w prowizję
+# wywracała 8 testów dla krypto i JEDEN dla equity, a wyłączenie
+# `koszty("stock").krotka_pozycja` nie wywracało ANI JEDNEGO. Tor, który ma
+# handlować, był więc niepokryty dokładnie tam, gdzie krypto jest pokryte
+# ośmiokrotnie.
+#
+# `stock` WYMAGA WŁASNEJ ASERCJI, a nie tylko dopisania do listy: cennik Alpaki
+# to zero prowizji, więc `runda("stock", True) == 0.0` i test porównujący zwrot
+# z zerem przechodzi TAKŻE wtedy, gdy nic nie liczy. Patrz
+# `_karta_stock_wymienia_braki` niżej — to ona jest tu jedynym pomiarem.
+RODZAJE = ["spot", "spot_eu", "perp", "stock"]
 T0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
 CENA = 100.0
 
@@ -86,7 +103,40 @@ def oczekiwany_zwrot(fee: float, slip: float) -> float:
     return (iloraz - 1) - fee * (1 + iloraz)
 
 
-@pytest.mark.parametrize("kind", ["spot", "spot_eu", "perp"])
+def _karta_stock_wymienia_braki(kind: str, limit: bool) -> None:
+    """Dla `stock` i `etf` ZERO w rachunku jest zerem PROWIZJI, nie kosztu.
+
+    Bez tego sprawdzenia test rundy dla `stock` byłby zielony w obie strony:
+    oczekiwana wartość wynosi dokładnie 0,0 (prowizja zero, przy limicie także
+    poślizg zero), więc przeszedłby również dla symulacji, która nie nalicza
+    NICZEGO — i dla takiej, która naliczyłaby nie to, co trzeba.
+
+    Karta kosztu jest tu jedynym miejscem, w którym widać różnicę między
+    „policzone i wyszło zero" a „nie policzone". Trzy składniki MUSZĄ być w niej
+    bez wartości:
+      * opłaty regulacyjne (SEC Section 31, FINRA TAF) — obciążają wyłącznie
+        nogę sprzedaży, a TAF liczy się od LICZBY AKCJI,
+      * spread — na equity nikt go nie zmierzył,
+      * koszt pożyczki papieru — `koszty("stock").krotka_pozycja` jest True,
+        więc symulacja nogę krótką OTWIERA, a tego kosztu nie nalicza.
+    """
+    karta = karta_rundy(kind, limit)
+    assert not karta.pelna, (
+        f"karta kosztu dla {kind} ogłasza się PEŁNA, a `runda({kind!r}, {limit})` "
+        f"wynosi {runda(kind, limit)} — zero z pełnej karty czyta się jako "
+        f"„koszt zmierzony i wynosi zero”, co dla equity jest nieprawdą")
+    braki = set(karta.nieznane)
+    for oczekiwany in ("oplaty regulacyjne", "spread", "koszt pozyczki papieru"):
+        assert oczekiwany in braki, (
+            f"karta {kind} nie wymienia braku „{oczekiwany}”; nieznane: "
+            f"{sorted(braki)}. Składnik nieobecny w karcie wchodzi do sumy jako "
+            f"ZERO, czyli im mniej rozumiemy koszt, tym tańszy wygląda")
+    assert karta.policzone == pytest.approx(runda(kind, limit)), (
+        "policzalna część karty rozjechała się z `runda()` — człowiek czytałby "
+        "jeden koszt, a miara liczyłaby drugi")
+
+
+@pytest.mark.parametrize("kind", RODZAJE)
 @pytest.mark.parametrize("limit", [False, True])
 def test_transakcja_bez_ruchu_ceny_kosztuje_dokladnie_runde(kind, limit):
     k = koszty(kind)
@@ -110,8 +160,15 @@ def test_transakcja_bez_ruchu_ceny_kosztuje_dokladnie_runde(kind, limit):
             f"{kind}/{'limit' if limit else 'rynek'}: zwrot {t['ret']:.8f} zamiast "
             f"{oczekiwane:.8f} — w zwrocie z transakcji brakuje części rundy")
 
+    # DRUGI POMIAR DLA EQUITY, bo pierwszy przy zerowej prowizji nie mierzy nic.
+    if kind in ("stock", "etf"):
+        assert oczekiwane == pytest.approx(0.0, abs=1e-9) or not limit, (
+            "test przestał odtwarzać sytuację, w której zero jest zerem "
+            "z cennika — sprawdź `CENNIK[\"stock\"]`")
+        _karta_stock_wymienia_braki(kind, limit)
 
-@pytest.mark.parametrize("kind", ["spot", "spot_eu", "perp"])
+
+@pytest.mark.parametrize("kind", RODZAJE)
 @pytest.mark.parametrize("limit", [False, True])
 def test_zwrot_zgadza_sie_z_deklarowana_runda(kind, limit):
     """`runda()` jest liczbą wypisywaną przy starcie pętli (`loop.py --kind`).
@@ -125,6 +182,67 @@ def test_zwrot_zgadza_sie_z_deklarowana_runda(kind, limit):
     # Różnica to wyłącznie człon drugiego rzędu 2s(s+fee)/(1+s) — poniżej 1% rundy.
     assert faktyczna == pytest.approx(deklarowana, rel=0.01)
     assert faktyczna <= deklarowana, "zwrot nie może być TAŃSZY niż deklarowana runda"
+
+
+@pytest.mark.parametrize("kind", ["stock", "etf"])
+def test_krotka_pozycja_na_equity_JEST_WLACZONA_i_ma_swoj_koszt_w_karcie(kind):
+    """ZMIERZONE MUTACYJNIE 2026-09-25: wyłączenie `koszty("stock").krotka_pozycja`
+    nie wywracało ANI JEDNEGO testu w całym zestawie.
+
+    Flaga nie jest ozdobą — decyduje o DWÓCH rzeczach naraz:
+
+      1. czy symulacja i pętla decyzyjna otwierają nogę krótką na akcjach;
+      2. czy `evaluate_limits` wymaga limitu dźwigni (od 2026-09-24 odmawia
+         handlu instrumentem z pozycją krótką bez `max_leverage` — strata
+         na shorcie nie ma górnego końca).
+
+    Zmiana jej po cichu na `False` odjęłaby połowę sygnału na całym torze equity
+    i NIE objawiłaby się niczym poza mniejszą liczbą transakcji; zmiana na `True`
+    tam, gdzie broker nie pożyczy papieru, otwierałaby pozycje niewykonalne —
+    ten drugi błąd zdarzył się już na spocie (8 z 12 pozycji w dzienniku
+    produkcyjnym to były krótkie sprzedaże na instrumentach spotowych).
+
+    Test pilnuje obu stron naraz: flagi ORAZ tego, że jej koszt jest w karcie
+    wymieniony. Sama flaga bez składnika w karcie znaczyłaby, że symulacja
+    otwiera nogę, której kosztu rachunek nie zna i o tym nie mówi.
+    """
+    k = koszty(kind)
+    assert k.krotka_pozycja is True, (
+        f"`koszty({kind!r}).krotka_pozycja` jest False — tor equity handlowałby "
+        f"wyłącznie długą stroną sygnału, cicho i bez śladu w żadnej metryce")
+    assert k.finansowanie is False, (
+        "akcje nie płacą finansowania perpetuala; podpięcie jednej wielkości pod "
+        "drugą byłoby nazwaniem dwóch różnych rzeczy jedną nazwą")
+    for limit in (False, True):
+        nieznane = karta_rundy(kind, limit).nieznane
+        assert "koszt pozyczki papieru" in nieznane, (
+            f"noga krótka jest otwierana, a karta ({kind}, "
+            f"{'limit' if limit else 'rynek'}) nie wymienia kosztu pożyczki "
+            f"papieru — wchodzi więc do sumy jako zero")
+
+
+def test_perpetual_NIE_dostaje_kosztu_pozyczki_papieru():
+    """Kanarek do poprzedniego: składnik doklejony wszystkim z pozycją krótką
+    liczyłby perpetualowi ten sam koszt dwa razy.
+
+    Kosztem trzymania nogi krótkiej na perpetualu JEST finansowanie i jest ono
+    naliczane (`portfolio.simulate_portfolio` od 2026-09-24).
+    """
+    assert koszty("perp").krotka_pozycja is True, "test nie odtwarza sytuacji"
+    nazwy = [s.nazwa for s in karta_rundy("perp", True).skladniki]
+    assert "koszt pozyczki papieru" not in nazwy, (
+        "perpetual dostał drugą pozycję o znaczeniu finansowania")
+    assert "finansowanie" in nazwy
+
+
+def test_spot_bez_pozycji_krotkiej_NIE_dostaje_tego_skladnika():
+    """Druga strona tego samego warunku: składnik pojawia się i znika RAZEM
+    z powodem swojego istnienia, a nie według listy nazw rodzajów."""
+    assert koszty("spot").krotka_pozycja is False
+    nazwy = [s.nazwa for s in karta_rundy("spot", True).skladniki]
+    assert "koszt pozyczki papieru" not in nazwy, (
+        "karta liczy koszt pożyczki papieru instrumentowi, którego nogi krótkiej "
+        "symulacja nie otwiera")
 
 
 def test_wariant_produkcyjny_jest_drozszy_niz_zaden_koszt():

@@ -116,6 +116,13 @@ CENNIK = {
     # papieru, ale to inna wielkosc, z innego zrodla i naliczana inaczej -
     # podpiecie jej pod stawke perpetuala byloby nazwaniem dwoch roznych rzeczy
     # jedna nazwa.
+    #
+    # OD 2026-09-25 TO ZDANIE MA SWOJ SKLADNIK W KARCIE. Samo stwierdzenie
+    # "finansowania nie ma" zostawialo koszt pozyczki papieru poza rachunkiem,
+    # a `krotka_pozycja=True` znaczy, ze symulacja te noge otwiera - wiec brak
+    # pozycji w karcie wliczal go jako zero. `karta_rundy` dokleja go teraz jako
+    # skladnik BEZ WARTOSCI, czyli trafia do `karta.nieznane` i suma podpisuje
+    # sie jako DOLNE oszacowanie.
     "stock": Koszty(maker=0.0, taker=0.0, krotka_pozycja=True),
     "etf": Koszty(maker=0.0, taker=0.0, krotka_pozycja=True),
 }
@@ -378,6 +385,37 @@ def karta_rundy(kind: str, maker: bool = False, *,
             "a TAF liczy sie od liczby akcji, nie od notionalu - symetryczny "
             "ulamek ceny nie opisuje zadnej z nich. Zrodlo docelowe: oplaty "
             "z `exec.fill` po pierwszych sprzedazach na koncie Alpaca paper"))
+
+    # KOSZT POZYCZKI PAPIERU - SKLADNIK BEZ WARTOSCI, DLA INSTRUMENTOW,
+    # KTORYCH NOGE KROTKA SYMULACJA OTWIERA, A ICH CENNIK NIE MA FINANSOWANIA.
+    #
+    # Naglowek tego modulu mowi wprost: "krotka sprzedaz akcji kosztuje odsetki
+    # od pozyczki papieru, ale to inna wielkosc, z innego zrodla i naliczana
+    # inaczej". To zdanie tlumaczylo, dlaczego kosztu NIE MA w `CENNIK` - i na
+    # tym sie konczylo. `koszty("stock").krotka_pozycja` jest `True`, wiec
+    # symulacja noge krotka OTWIERA, a karta kosztu tej pozycji nie wymieniala
+    # ani jako liczby, ani jako braku. Czyli dokladnie stan, przed ktorym ten
+    # plik ostrzega w naglowku sekcji: skladnik nieobecny w karcie jest w sumie
+    # zerem, a "im wiecej rzeczy nie policzylismy, tym tanszy koszt wyglada".
+    #
+    # WARUNEK CZYTA FLAGE, A NIE LISTE NAZW. `k.krotka_pozycja` to ta sama
+    # flaga, ktora DECYDUJE o otwarciu nogi krotkiej, wiec skladnik pojawia sie
+    # i znika RAZEM z powodem swojego istnienia: nowy rodzaj instrumentu
+    # z pozycja krotka dostanie go bez dopisywania do listy, a wylaczenie
+    # `krotka_pozycja` usunie go razem z pozycja, ktorej dotyczy.
+    #
+    # `not k.finansowanie` odcina perpetuala: tam kosztem trzymania nogi krotkiej
+    # JEST finansowanie i jest ono naliczane (skladnik nizej). Dwie pozycje
+    # rachunku o tym samym znaczeniu policzylyby ten koszt dwa razy.
+    if k.krotka_pozycja and not k.finansowanie:
+        s.append(Skladnik(
+            "koszt pozyczki papieru", None, NIEZMIERZONE,
+            "krotka sprzedaz akcji wymaga pozyczenia papieru i odsetek od niej; "
+            "symulacja noge krotka OTWIERA (`krotka_pozycja=True`), a tego "
+            "kosztu NIE nalicza. Stawka zalezy od dostepnosci konkretnego "
+            "papieru u brokera i od CZASU TRZYMANIA, wiec nie jest stala rundy - "
+            "zrodlo docelowe: pozycje `FEE` rejestru Alpaki po pierwszych "
+            "krotkich sprzedazach na koncie paper"))
 
     if k.finansowanie:
         s.append(Skladnik(
