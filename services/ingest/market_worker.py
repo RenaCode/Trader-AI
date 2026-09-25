@@ -88,6 +88,44 @@ POD_RZAD_MAX = 5
 # Nazwa w `risk.worker_heartbeat` - ROLA w potoku, nie egzemplarz procesu.
 PULS = "market"
 
+# CO ILE SEKUND CZYTAMY LISTE INSTRUMENTOW OD NOWA.
+#
+# Do 2026-09-25 lista byla czytana RAZ, przed petla `while True`, wiec instrument
+# wylaczony w bazie byl odpytywany az do restartu poda - a pod procesu tla nie
+# restartuje sie sam. To dotyczy obu kierunkow zmiany i drugi jest gorszy:
+# instrument DOPISANY do bazy nie zbieral danych, dopoki ktos nie zauwazyl, ze
+# ich nie ma.
+#
+# 900 s, a nie `interval` (60 s) ani doba:
+#   * lista zmienia sie migracja albo przebiegiem `instrumenty.py`, czyli
+#     w skali godzin - czytanie jej co cykl byloby 1440 zapytaniami na dobe
+#     o odpowiedz, ktora sie nie zmienia,
+#   * kwadrans to gorna granica rozjazdu, ktora da sie przezyc: wylaczony
+#     instrument jest odpytywany najwyzej 15 zapytan dluzej niz trzeba,
+#   * ta sama liczba co `workers.features` w values.yaml i `ODSWIEZANIE` nie
+#     jest wiec trzecia niezalezna stala do rozjechania - rytm zmian danych
+#     referencyjnych jest w tym projekcie jeden.
+ODSWIEZANIE_LISTY_S = 900
+
+
+def czytaj_instrumenty(cur, venue_code: str) -> list[dict]:
+    """Instrumenty tej gieldy, dla ktorych zbieramy dane.
+
+    `tradeable` wchodzi do SELECT-a, bo wyznacza KSIEGE, ktorej pytamy o arkusz
+    (patrz naglowek). Filtrem nadal jest `active`: historie zbieramy dla
+    wszystkiego, co aktywne, takze dla par nieobjetych uniwersum decyzyjnym.
+
+    OSOBNA FUNKCJA, bo zapytanie jest wolane w DWOCH miejscach - raz przed petla
+    i potem co `ODSWIEZANIE_LISTY_S`. Dwie kopie tego samego SELECT-a rozjechalyby
+    sie cicho: po odswiezeniu lista mialaby inny sklad niz przy starcie, a jedyny
+    objaw bylby taki, ze arkusz idzie z innej ksiegi niz poprzednio.
+    """
+    cur.execute(
+        "SELECT i.id, i.symbol, i.tradeable FROM ref.instrument i"
+        " JOIN ref.venue v ON v.id=i.venue_id"
+        " WHERE v.code = %s AND i.active ORDER BY i.symbol", (venue_code,))
+    return cur.fetchall()
+
 
 async def cycle(conn, adapter, instruments: list[dict], book_depth: int) -> dict:
     cur = conn.cursor()
@@ -172,22 +210,48 @@ async def main() -> int:
     try:
         with psycopg.connect(url, row_factory=dict_row) as conn:
             cur = conn.cursor()
-            # `tradeable` wchodzi do tego SELECT-a, bo wyznacza KSIEGE, ktorej
-            # pytamy o arkusz (patrz naglowek). Filtrem nadal jest `active`:
-            # historie zbieramy dla wszystkiego, co aktywne, takze dla par
-            # nieobjetych uniwersum decyzyjnym.
-            cur.execute(
-                "SELECT i.id, i.symbol, i.tradeable FROM ref.instrument i"
-                " JOIN ref.venue v ON v.id=i.venue_id"
-                " WHERE v.code = %s AND i.active ORDER BY i.symbol", (adapter.venue_code,))
-            instruments = cur.fetchall()
+            instruments = czytaj_instrumenty(cur, adapter.venue_code)
             print(f"Obserwowane instrumenty: {', '.join(i['symbol'] for i in instruments)}")
 
             pod_rzad = 0
+            lista_z = datetime.now(timezone.utc)
             while True:
                 t0 = datetime.now(timezone.utc)
                 blad: str | None = None
                 try:
+                    # LISTA INSTRUMENTOW ODSWIEZANA W TRAKCIE PRACY.
+                    #
+                    # Do 2026-09-25 czytala sie RAZ, przed ta petla, wiec zmiana
+                    # w `ref.instrument` dzialala dopiero po restarcie poda -
+                    # a pod procesu tla nie restartuje sie sam. Instrument
+                    # wylaczony byl odpytywany dalej, a instrument DOPISANY nie
+                    # zbieral danych, dopoki ktos nie zauwazyl, ze ich nie ma.
+                    #
+                    # ODCZYT JEST W TYM SAMYM `try`, co cykl, i to nie jest
+                    # przypadek: zapytanie do bazy moze sie wywrocic, a awaria
+                    # odswiezenia listy jest awaria cyklu - inaczej proces
+                    # chodzilby na starej liscie, milczac o tym, ze nie umie jej
+                    # odczytac.
+                    if (t0 - lista_z).total_seconds() >= ODSWIEZANIE_LISTY_S:
+                        nowa = czytaj_instrumenty(cur, adapter.venue_code)
+                        lista_z = t0
+                        stare = {i["symbol"] for i in instruments}
+                        nowe = {i["symbol"] for i in nowa}
+                        # ROZNICE WYPISUJEMY Z NAZWY. Sama zmiana liczby nie mowi,
+                        # ktory instrument przyszedl, a ktory odszedl - a to jest
+                        # jedyny slad, po ktorym da sie potem odpowiedziec, od
+                        # kiedy dany szereg sie konczy albo zaczyna.
+                        if nowe - stare:
+                            print(f"[{t0:%H:%M:%S}] doszły: "
+                                  f"{', '.join(sorted(nowe - stare))}")
+                        if stare - nowe:
+                            print(f"[{t0:%H:%M:%S}] odeszły: "
+                                  f"{', '.join(sorted(stare - nowe))}")
+                        # Podmiana TAKZE gdy zbior symboli sie nie zmienil:
+                        # `tradeable` moglo sie przestawic przy tym samym
+                        # skladzie, a ta flaga wyznacza ksiege, ktorej pytamy
+                        # o arkusz.
+                        instruments = nowa
                     s = await cycle(conn, adapter, instruments, args.depth)
                     print(f"[{t0:%H:%M:%S}] świece +{s['swiece']}, orderbooki {s['orderbooki']}, "
                           f"bez arkusza {s['bez_arkusza']}, błędy {s['bledy']}")
