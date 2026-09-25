@@ -107,6 +107,23 @@ async def engines():
     obok placeholderu ibkr) dalo DWIE zakladki "Gielda". Gielda silnika to ta,
     z ktora umiemy rozmawiac (`fabryka.OBSLUGIWANE`) - ta sama lista, ktora
     filtruje formularz kluczy - a nie pierwszy wiersz z brzegu.
+
+    DWIE LICZBY, BO SA TO DWA ROZNE ZBIORY
+
+    Do 2026-09-25 wychodzila stad jedna liczba - `count(*) ... AND i.active` -
+    a panel podpisywal ja "N instrumentow". Zmierzone na produkcji: panel mowil
+    "Bybit - 34 instrumentow" dla silnika, ktory obstawia DZIESIEC (24 pary USDT
+    stracily `tradeable` w migracji 0023, zostaly `active`, bo historie zbieramy
+    szerzej niz handlujemy - 0020), oraz "Alpaca - 21" dla silnika, ktory
+    obstawia ZERO (migracja 0047 zdjela `tradeable` wszystkim akcjom).
+    Ta druga liczba byla najgorsza: opisywala silnik gotowy do handlu, a silnik
+    equity nie zlozyl ani jednego zlecenia i zlozyc nie mogl.
+
+    `active` i `tradeable` odpowiadaja na dwa rozne pytania i zadne z nich nie
+    jest zbedne: pierwsze mowi, dla ilu instrumentow ZBIERAMY dane, drugie -
+    ile z nich silnik OBSTAWIA. Panel pokazuje wiec obie, z wlasnymi podpisami.
+    Wzor poprawny obok: `routers/kapital_laczny.py` liczy waluty osobno dla
+    `tradeable` i osobno dla wszystkich aktywnych, i nie myli tych zbiorow.
     """
     from services.exchanges.fabryka import OBSLUGIWANE
     rows = await fetch_one(
@@ -117,8 +134,18 @@ async def engines():
                 'venue', v.name,
                 'venue_code', v.code,
                 'is_24_7', v.is_24_7,
+                -- ZOSTAJE POD STARA NAZWA, bo to ta sama liczba co dotad:
+                -- instrumenty, dla ktorych zbieramy historie. Zmienil sie
+                -- wylacznie jej PODPIS w panelu ("w historii").
                 'instruments', (SELECT count(*) FROM ref.instrument i
-                                WHERE i.venue_id = v.id AND i.active)
+                                WHERE i.venue_id = v.id AND i.active),
+                -- UNIWERSUM DECYZYJNE - dokladnie ten warunek, ktory czyta
+                -- petla decyzyjna i trener (services/engine/uniwersum.py).
+                -- `kind <> 'perp'` tez, bo perpetuali nikt nie obstawia:
+                -- sa w bazie wylacznie jako zrodlo stawki finansowania.
+                'tradeable', (SELECT count(*) FROM ref.instrument i
+                              WHERE i.venue_id = v.id AND i.active
+                                AND i.tradeable AND i.kind <> 'perp')
             ) AS x
             FROM ref.venue v
             ORDER BY v.engine, (v.code = ANY(%s)) DESC, v.id

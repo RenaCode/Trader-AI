@@ -149,7 +149,20 @@ export default function App() {
         <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center',
                       marginBottom: 14, fontSize: '0.78rem', color: 'var(--text-dim)' }}>
           <span className="badge info">{current.venue}</span>
-          <span>{current.instruments} instrumentów</span>
+          {/* DWIE LICZBY, DWA RÓŻNE ZBIORY.
+
+              Do 2026-09-25 stała tu JEDNA liczba — `active` — podpisana
+              słowem opisującym uniwersum decyzyjne.
+              Panel mówił przez to „Bybit — 34 instrumentów" dla silnika
+              obstawiającego dziesięć i „Alpaca — 21" dla obstawiającego ZERO.
+
+              `active` to instrumenty, dla których zbieramy historię (szerzej,
+              niż handlujemy — migracja 0020); `tradeable` to te, które silnik
+              obstawia. Podpisy mówią teraz, o co chodzi w każdej z nich. */}
+          <span>{current.instruments} w historii</span>
+          <span title="uniwersum decyzyjne: instrumenty, którymi silnik obstawia">
+            {current.tradeable ?? 0} w uniwersum
+          </span>
           <span>{current.is_24_7 ? 'rynek 24/7' : 'sesje giełdowe'}</span>
         </div>
       )}
