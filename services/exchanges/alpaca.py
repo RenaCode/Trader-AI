@@ -57,6 +57,21 @@ HOSTS = {
 }
 DATA_HOST = "https://data.alpaca.markets"
 
+# POTWIERDZENIE, ZE ZAPISANE SWIECE SA SKORYGOWANE O PODZIALY AKCJI.
+#
+# Klucz w `ref.instrument.meta`, wartosc `true` (jsonb). Nazwa stoi TUTAJ, a nie
+# w trenerze, bo to ten modul decyduje o `adjustment` nizej - a wiec on jest
+# zrodlem stanu, o ktory znacznik pyta. Dwa literaly w dwoch plikach rozjechalyby
+# sie cicho: bramka pytalaby o klucz, ktorego nikt nie ustawia, i milczalaby
+# ZAWSZE albo krzyczala ZAWSZE, w obu przypadkach niezaleznie od danych.
+#
+# ZNACZNIKA NIE USTAWIA NIC W TYM REPOZYTORIUM - i tak ma byc. Ustawic go wolno
+# dopiero po przejsciu na `adjustment=split` i POWTORZENIU backfillu `equity 1h`;
+# dopoki tego nie ma, bramka w `services/engine/train.py` odmawia treningu
+# equity. Znacznik wpisany "zeby ruszylo" zamienilby nieznany stan danych
+# w potwierdzony i to jest jedyny sposob, w jaki ta bramka moze zawiesc.
+ZNACZNIK_KOREKTY_PODZIALOW = "swiece_skorygowane_o_podzialy"
+
 # Nazwy taktow po stronie Alpaca Data. Klucze to nasze `timeframe`
 # z `market.candle` - te same, ktorych uzywa adapter Bybita.
 TIMEFRAMES = {
@@ -258,6 +273,13 @@ class AlpacaAdapter:
         #
         # Zanim ktokolwiek bedzie trenowal equity na serio: najpierw `split`
         # i pelny backfill `equity 1h`, potem trening.
+        #
+        # OD 2026-09-25 TA KOLEJNOSC JEST WYMUSZONA, A NIE ZALECANA. `train.py`
+        # przerywa tor equity, dopoki kazdy instrument uniwersum nie ma znacznika
+        # `ZNACZNIK_KOREKTY_PODZIALOW` w `ref.instrument.meta` (patrz stala na
+        # gorze modulu). Samo zdanie w komentarzu nie zatrzymalo niczego: tor
+        # equity byl juz wpisany do `trainerCron.equity` i probowal trenowac
+        # kazdej nocy.
         params: dict = {"symbols": symbol, "timeframe": tf, "feed": self._feed,
                         "adjustment": "raw", "limit": min(limit, 10_000), "sort": "asc"}
         if start is not None:

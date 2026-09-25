@@ -67,12 +67,45 @@ spec:
                 - sh
                 - -c
                 - |
+                  # KOD 3 (`train.KOD_TOR_NIEGOTOWY`) NIE ZAPALA ZADANIA - I TO
+                  # JEST CALA POPRAWKA Z 2026-09-25.
+                  #
+                  # ZMIERZONE NA PRODUKCJI TEGO DNIA: tor crypto konczyl sie
+                  # wynikiem ("Stan: learning, 26/38 okien"), a nastepnie tor
+                  # equity przerywal na pustym uniwersum (`tradeable = false` na
+                  # wszystkich 21 akcjach, ustawione SWIADOMIE migracja 0047,
+                  # z adnotacja "wlaczenie to osobna migracja PO pierwszym
+                  # walk-forwardzie"). Kod 2 szedl do wspolnego `RC`, wiec caly
+                  # Job byl czerwony, ArgoCD stalo trwale `Degraded`, a to samo
+                  # padniete zadanie wracalo kazdej nocy.
+                  #
+                  # Czerwony powtarzany codziennie o stanie, ktory sie nie zmienia
+                  # i o ktorym ktos JUZ zdecydowal, to ten sam wzorzec, ktory
+                  # 2026-09-12 dal 144 padniete Joby na dobe i - jak mowi
+                  # docstring services/engine/dozor.py - "uczy odklikiwac cala
+                  # kategorie". Zabieral przy tym jedyny sygnal, jakim tor crypto
+                  # dysponuje.
+                  #
+                  # CZEGO TA ZMIANA NIE ROBI: nie wycisza bramki. `train.py` dalej
+                  # odmawia, dalej wypisuje PRZERWANO z powodem i poleceniem
+                  # sprawdzajacym, a na koncu tego skryptu stoi podsumowanie
+                  # wymieniajace kazdy nieuruchomiony tor. KAZDY inny kod
+                  # niezerowy - 1, 2, traceback - zapala Joba tak jak dotad.
                   RC=0
+                  # Kody per tor: dozor silnika X ma dostac kod trenera SILNIKA X.
+                  # Do 2026-09-25 oba dozory dostawaly wspolne `$RC`, wiec awaria
+                  # crypto kazala dozorowi equity oglosic "Trener zawiodl
+                  # (equity)" - alarm o torze, ktory sie nie wywrocil.
+                  RC_CRYPTO=0
+                  RC_EQUITY=0
+                  NIEGOTOWE=""
                   {{- range $h := .Values.trainerCron.horyzonty | default (list .Values.trainerCron.bar) }}
                   echo "===== horyzont {{ $h }} ====="
                   python services/engine/train.py                     --bar {{ $h | quote }}                     --days {{ $.Values.trainerCron.days | quote }}                     --trials {{ $.Values.trainerCron.trials | quote }}                     --kind {{ $.Values.trainerCron.kind | default "spot" | quote }}                     {{- if $.Values.trainerCron.limit }} --limit{{ end }}
                   K=$?
-                  [ "$K" = 0 ] || RC=$K
+                  if [ "$K" = 3 ]; then NIEGOTOWE="${NIEGOTOWE}crypto/{{ $h }} "
+                  elif [ "$K" != 0 ]; then RC=$K; RC_CRYPTO=$K
+                  fi
                   {{- end }}
                   {{- if .Values.trainerCron.equity.enabled }}
                   # ---------------------------------------------- TOR EQUITY
@@ -83,18 +116,23 @@ spec:
                   # wspolnego z cennikiem bybit.eu; tor liczony stawka Bybita
                   # mierzylby oplaty, ktorych to konto nie placi.
                   #
-                  # KOD WYJSCIA ZBIERA SIE DO TEGO SAMEGO `RC`. Osobne zadanie
+                  # AWARIE ZBIERAJA SIE DO TEGO SAMEGO `RC`. Osobne zadanie
                   # dawaloby druga kopie harmonogramu, drugi obraz do podbicia
-                  # i druga sciezke, ktora moze cicho zniknac.
+                  # i druga sciezke, ktora moze cicho zniknac - a przede
+                  # wszystkim NIE rozwiazaloby problemu, tylko go przenosilo:
+                  # Job equity padalby co noc z dokladnie tego samego powodu.
+                  # Rozdzielony jest wiec KOD, nie zadanie (patrz gora skryptu).
                   {{- range $h := .Values.trainerCron.equity.horyzonty }}
                   echo "===== equity, horyzont {{ $h }} ====="
                   python services/engine/train.py                     --engine equity                     --bar {{ $h | quote }}                     --days {{ $.Values.trainerCron.days | quote }}                     --trials {{ $.Values.trainerCron.trials | quote }}                     --kind {{ $.Values.trainerCron.equity.kind | default "stock" | quote }}                     {{- if $.Values.trainerCron.equity.limit }} --limit{{ end }}
                   K=$?
-                  [ "$K" = 0 ] || RC=$K
+                  if [ "$K" = 3 ]; then NIEGOTOWE="${NIEGOTOWE}equity/{{ $h }} "
+                  elif [ "$K" != 0 ]; then RC=$K; RC_EQUITY=$K
+                  fi
                   {{- end }}
                   # Dozor stanu nauki dla equity - ten sam powod co dla krypto
                   # nizej: bez niego model traci przewage i NIKT tego nie mowi.
-                  python services/engine/dozor.py --engine equity                     --bar {{ (first .Values.trainerCron.equity.horyzonty) | quote }} --kod-trenera $RC
+                  python services/engine/dozor.py --engine equity                     --bar {{ (first .Values.trainerCron.equity.horyzonty) | quote }} --kod-trenera $RC_EQUITY
                   E=$?
                   [ "$E" = 0 ] || RC=$E
                   {{- end }}
@@ -111,7 +149,7 @@ spec:
                   # zielone, ArgoCD zdrowe, powiadomienie nigdy nie wyszlo.
                   # `--co stan-nauki` i `--co dryf` nie sa wolane nigdzie
                   # indziej, wiec byl to CALY nadzor nad jakoscia modelu.
-                  python services/engine/dozor.py --bar {{ .Values.trainerCron.bar | quote }} --kod-trenera $RC
+                  python services/engine/dozor.py --bar {{ .Values.trainerCron.bar | quote }} --kod-trenera $RC_CRYPTO
                   D=$?
                   [ "$D" = 0 ] || RC=$D
                   # Czujka stanu TRWALEGO, osobno od czujki zmiany powyzej.
@@ -140,6 +178,32 @@ spec:
                   # awarii wlasnym kodem wyjscia nalezy do dozor.py, nie do
                   # tego szablonu.
                   python services/engine/dozor.py --co dryf --bar {{ .Values.trainerCron.bar | quote }} || true
+                  # PODSUMOWANIE TOROW NIEURUCHOMIONYCH - GLOSNE MIEJSCE, KTORE
+                  # NIE JEST KODEM WYJSCIA.
+                  #
+                  # Kod 3 nie zapala Joba (uzasadnienie na gorze skryptu), wiec
+                  # bramka musi byc widoczna inaczej niz przez `kubectl get jobs`.
+                  # Stad blok na KONCU logu, po wszystkich czujkach: jest w kazdym
+                  # przebiegu, wymienia tory z nazwy i mowi, czego brakuje.
+                  # `kubectl logs job/trader-trainer-... | tail -12` odpowiada na
+                  # pytanie "czy equity sie trenuje" bez czytania calosci.
+                  #
+                  # Blok stoi PRZED `exit`, a nie w galezi `if [ "$RC" = 0 ]`:
+                  # przebieg, w ktorym padl tor crypto I zostal nieuruchomiony
+                  # tor equity, musi powiedziec oba, a nie tylko pierwsze.
+                  if [ -n "$NIEGOTOWE" ]; then
+                    echo "================================================================"
+                    echo "TORY NIEURUCHOMIONE (kod 3): $NIEGOTOWE"
+                    echo "Nic nie policzono i nic nie zapisano dla tych torow."
+                    echo "Powod i polecenie sprawdzajace stoja wyzej, w logu toru."
+                    echo "Bramke zdejmuje CZLOWIEK: migracja wlaczajaca uniwersum"
+                    echo "(tradeable) albo backfill swiec skorygowanych o podzialy"
+                    echo "wraz ze znacznikiem w ref.instrument.meta."
+                    echo "Kod wyjscia zadania tego NIE niesie swiadomie - inaczej"
+                    echo "czerwony wracalby co noc o stanie, o ktorym juz zdecydowano,"
+                    echo "i przestalby znaczyc cokolwiek takze dla toru crypto."
+                    echo "================================================================"
+                  fi
                   exit $RC
               env:
                 # Trener chodzi rola silnika (migracja 0034): pisze do learn.*,

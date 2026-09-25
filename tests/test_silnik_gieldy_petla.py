@@ -296,15 +296,56 @@ def test_trening_bez_instrumentow_NIE_MELDUJE_SUKCESU():
         "ścieżka wychodzi `return`, więc `main()` i tak zwróci zero")
 
 
-def test_oba_stany_bez_wyniku_koncza_sie_tym_samym_kodem():
-    """Puste uniwersum i za krótki panel znaczą to samo: nie policzono niczego.
+def test_kody_wyjscia_trenera_MAJA_NAZWY_i_jedno_znaczenie():
+    """PRZEPISANY 2026-09-25 — i przyczyna tego przepisania jest częścią wymagania.
 
-    Dwa różne kody wyjścia dla jednego znaczenia uczą czytać kod wyjścia jako
-    przypadek, a nie jako informację.
+    Poprzednia wersja tego testu żądała, żeby WSZYSTKIE ścieżki bez wyniku miały
+    kod 2, z uzasadnieniem: „dwa różne kody dla jednego znaczenia uczą czytać kod
+    wyjścia jako przypadek". Zasada zostaje w mocy, przesłanka nie: to NIE JEDNO
+    znaczenie, a dwa.
+
+    ZMIERZONE NA PRODUKCJI 2026-09-25. Job `trader-trainer` liczy w jednym
+    skrypcie tor crypto i tor equity. Crypto kończyło się wynikiem („Stan:
+    learning, 26/38 okien"), a equity zaraz po nim przerywało na pustym
+    uniwersum — `tradeable = false` na wszystkich 21 akcjach, ustawione
+    ŚWIADOMIE migracją 0047, z adnotacją, że włączenie to osobna migracja PO
+    pierwszym walk-forwardzie. Wspólny kod 2 mówił skryptowi „coś jest zepsute",
+    więc cały Job był czerwony, ArgoCD stało trwale `Degraded`, a to samo
+    padnięte zadanie wracało każdej nocy — czyli sygnał zawsze czerwony,
+    a przez to nic nie znaczący także dla toru crypto. Ten sam wzorzec, który
+    2026-09-12 dał 144 padnięte Joby na dobę (`services/engine/dozor.py`).
+
+    Kod musi więc odróżniać:
+      * NIC NIE POLICZONO, choć miało być policzone → awaria, ktoś ma naprawić;
+      * TOR NIEURUCHOMIONY, bo warunek wstępny zdejmuje CZŁOWIEK (migracja
+        włączająca uniwersum, backfill świec skorygowanych o podziały) → stan
+        dzisiaj oczekiwany, głośny w logu, nie w kodzie wyjścia zadania.
+
+    Czego test pilnuje TERAZ: że liczb w `raise SystemExit` nie ma wcale.
+    Literał `3` w kodzie i `3` w szablonie Helma rozjechałyby się cicho —
+    bramka przestałaby zwalniać Joba albo zwalniałaby go z awarii.
     """
-    import re
-
     zrodlo = (KORZEN / "services/engine/train.py").read_text()
-    kody = set(re.findall(r"raise SystemExit\((\d+)\)", zrodlo))
-    assert kody == {"2"}, (
-        f"trener kończy przebieg bez wyniku różnymi kodami: {sorted(kody)}")
+    liczby = re.findall(r"raise SystemExit\((\d+)\)", zrodlo)
+    assert not liczby, (
+        f"kod wyjścia wpisany liczbą: {sorted(set(liczby))}. Każdy ma mieć nazwę "
+        f"(`KOD_NIC_NIE_POLICZONO`, `KOD_TOR_NIEGOTOWY`) — inaczej znaczenie "
+        f"kodu stoi wyłącznie w komentarzu, a komentarz nie jest sprawdzany")
+    nazwy = set(re.findall(r"raise SystemExit\((KOD_[A-Z_]+)\)", zrodlo))
+    assert nazwy == {"KOD_NIC_NIE_POLICZONO", "KOD_TOR_NIEGOTOWY"}, (
+        f"trener kończy przebieg kodami {sorted(nazwy)} — spodziewane dokładnie "
+        f"dwa znaczenia, każde z własną nazwą")
+
+    from services.engine.train import KOD_NIC_NIE_POLICZONO, KOD_TOR_NIEGOTOWY
+    assert KOD_NIC_NIE_POLICZONO != KOD_TOR_NIEGOTOWY, (
+        "dwa znaczenia pod jedną liczbą — skrypt zadania nie ma ich jak odróżnić")
+    assert KOD_NIC_NIE_POLICZONO != 0 and KOD_TOR_NIEGOTOWY != 0, (
+        "przebieg bez wyniku nie ma prawa wyglądać jak przebieg udany")
+
+    # ROZJAZD SZABLONU Z KODEM. Skrypt zadania zwalnia Joba po LICZBIE, bo
+    # powłoka nie umie zaimportować stałej. To jedyne miejsce z drugą kopią tej
+    # liczby, więc jest tu sprawdzane wprost.
+    szablon = (KORZEN / "charts/trader/templates/trainer-cron.yaml").read_text()
+    assert f'"$K" = {KOD_TOR_NIEGOTOWY}' in szablon, (
+        f"szablon trenera nie rozpoznaje kodu {KOD_TOR_NIEGOTOWY} "
+        f"(`KOD_TOR_NIEGOTOWY`) — bramka znów zapali cały Job")

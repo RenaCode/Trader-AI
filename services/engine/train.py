@@ -84,6 +84,58 @@ MIN_CONF = MIN_CONFIDENCE
 # i status otwierajacy droge do handlu na zywo.
 MIN_WINDOWS_FOR_VALIDATION = 20
 
+# ----------------------------------------------------------- kody wyjscia
+#
+# DWIE ROZNE ODPOWIEDZI, KTORE DO 2026-09-25 MIALY TEN SAM KOD 2.
+#
+# ZMIERZONE NA PRODUKCJI 2026-09-25: Job `trader-trainer` liczy dwa tory w jednym
+# skrypcie (charts/trader/templates/trainer-cron.yaml). Tor crypto konczyl sie
+# wynikiem ("Stan: learning, 26/38 okien"), a nastepnie tor equity przerywal na
+# pustym uniwersum (`tradeable = false` na wszystkich 21 akcjach, ustawione
+# SWIADOMIE migracja 0047) i wypisywal kod 2. Skrypt zbieral kod do `RC`, wiec
+# CALY Job konczyl sie bledem, ArgoCD stalo trwale `Degraded`, a padniete
+# zadanie wracalo kazdej nocy.
+#
+# To jest dokladnie ten wzorzec, ktory `services/engine/dozor.py` opisuje jako
+# zmierzony 2026-09-12: kill-switch aktywny przez poltorej doby dal 144 padniete
+# Joby na dobe i "nauczyl przewijac cala kategorie". Sygnal powtarzany codziennie
+# o stanie, ktory sie nie zmienia i o ktorym ktos juz zdecydowal, nie odroznia
+# sie od sygnalu o awarii - i zabiera wiarygodnosc temu drugiemu.
+#
+# DLACZEGO OSOBNY KOD, A NIE OSOBNY JOB ANI "STATUS CZESCIOWEGO POWODZENIA"
+#
+#   * OSOBNE JOBY dla crypto i equity rozwiazuja to samo, ale za cene drugiej
+#     kopii harmonogramu, drugiego obrazu do podbicia i drugiej sciezki, ktora
+#     moze cicho zniknac - powod podany wprost w trainer-cron.yaml przy zbieraniu
+#     kodu do wspolnego `RC`. Rozdzielenie Jobow przenosi tez problem, a nie
+#     usuwa go: Job equity nadal padalby co noc z tego samego powodu.
+#   * "STATUS CZESCIOWEGO POWODZENIA" (np. kod 0 z ostrzezeniem) kasuje
+#     rozroznienie w miejscu, w ktorym jest ono potrzebne: wolajacy nie moglby
+#     odroznic toru nieuruchomionego od toru, ktory policzyl wynik. Skoro
+#     `main()` obsluguje JEDEN tor na wywolanie, informacja "ktory tor i dlaczego"
+#     musi wyjsc kodem wyjscia, bo innego kanalu do wolajacego nie ma.
+#   * OSOBNY KOD nie zmienia bramki: `train()` dalej odmawia, dalej wypisuje
+#     PRZERWANO i dalej konczy sie niezerowo. Zmienia sie wylacznie to, ze
+#     wolajacy MOZE odroznic te dwie sytuacje - i dopiero to pozwala mu nie
+#     zabijac wyniku drugiego toru.
+#
+# KOD_NIC_NIE_POLICZONO: przebieg MIAL policzyc i nie policzyl. Cos jest zepsute
+# (stanal potok cech, panel jest za krotki, cechy przestaly przychodzic) i ktos
+# musi to naprawic. Job ma byc CZERWONY.
+KOD_NIC_NIE_POLICZONO = 2
+# KOD_TOR_NIEGOTOWY: przebieg nie wystartowal, bo NIE WOLNO mu bylo - warunek
+# wstepny nazwany w kodzie nie jest spelniony, a spelnic go moze wylacznie
+# czlowiek (migracja wlaczajaca uniwersum, backfill danych skorygowanych
+# o podzialy). Nic nie policzono I NIC NIE ZEPSUTO, a stan jest DZISIAJ
+# OCZEKIWANY. Job nie ma sie od tego zapalac; powod idzie do logu przy kazdym
+# przebiegu i do podsumowania na koncu skryptu zadania.
+#
+# Uwaga na rownowaznosc obu bramek uzywajacych tego kodu (puste uniwersum
+# i brak potwierdzenia korekty o podzialy): obie sa GLOSNE i obie odmawiaja
+# treningu. Rozni je tylko to, czego brakuje, i oba komunikaty podaja, kto ma to
+# uzupelnic.
+KOD_TOR_NIEGOTOWY = 3
+
 # OKNO POMIARU DRYFU CECH - WLASNY PARAMETR, NIE POCHODNA `--days`.
 #
 # Do 2026-09-23 okno liczylo sie jako `days // 3` wobec reszty `days`, czyli
@@ -921,20 +973,80 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
         # nie wskazywal na przyczyne. Widac ja bylo wylacznie w logu zadania,
         # ktore meldowalo sukces.
         #
-        # `SystemExit(2)` - ten sam kod, co przy zbyt krotkim panelu nizej.
-        # Oba znacza to samo: NIE POLICZONO NICZEGO. Trening, ktory nie policzyl
-        # niczego, nie ma prawa wygladac jak trening, ktory sie udal.
+        # Trening, ktory nie policzyl niczego, nie ma prawa wygladac jak trening,
+        # ktory sie udal - i to zostaje w mocy. Do 2026-09-25 szedl tu kod 2, ten
+        # sam co przy zbyt krotkim panelu nizej; rozdzielenie ich opisuje akapit
+        # ponizej i komentarz przy stalych `KOD_*`.
         #
         # Dla equity przyczyna byla `tradeable = false` na wszystkich 21
         # instrumentach - ustawione swiadomie w migracji 0047, z adnotacja, ze
         # wlaczenie do uniwersum to osobna migracja PO pierwszym walk-forwardzie.
+        #
+        # KOD ZMIENIONY 2026-09-25 Z 2 NA `KOD_TOR_NIEGOTOWY`. Nie jest to
+        # zluzowanie bramki - bramka odmawia dokladnie tak samo i wypisuje to
+        # samo. Chodzi o to, ze `tradeable = false` ustawil tu CZLOWIEK migracja
+        # i z adnotacja "osobna migracja PO pierwszym walk-forwardzie", wiec ten
+        # stan nie jest awaria do naprawienia dzisiaj. Kod 2 mowil wolajacemu
+        # "cos jest zepsute", a skrypt zadania na tej podstawie zabijal wynik
+        # toru crypto, ktory wlasnie sie policzyl. Uzasadnienie przy stalych.
         print("PRZERWANO: puste uniwersum decyzyjne — nie ma czego trenować")
         print(f"  sprawdź: SELECT count(*) FROM ref.instrument WHERE engine="
               f"'{engine}' AND active AND tradeable AND kind <> 'perp'")
         print("  (flagę `tradeable` ustawia services/ingest/instrumenty.py "
               "oraz migracje; `--instrumenty` z `--sucho` pozwala zmierzyć "
               "uniwersum kandydujące bez wpisywania go do produkcji)")
-        raise SystemExit(2)
+        print(f"  tor {engine}/{h.bar} NIEURUCHOMIONY — nic nie policzono "
+              f"i nic nie zapisano (kod {KOD_TOR_NIEGOTOWY})")
+        raise SystemExit(KOD_TOR_NIEGOTOWY)
+
+    # BRAMKA DANYCH: CENY SKORYGOWANE O PODZIALY AKCJI.
+    #
+    # `services/exchanges/alpaca.py` pobiera swiece z `adjustment: "raw"` - dlug
+    # swiadomy i tam opisany. Skutek dla treningu jest jednak nie do przyjecia:
+    # podzial 10:1 wyglada w szeregu jak spadek o 90% (zmierzone na produkcji
+    # 2026-09-24: NVDA -90,25%, AVGO -90,07%, NFLX -90,12%), `ret_long` siega
+    # 168 swiec, a bufor EMA 288, wiec JEDNO takie zdarzenie zatruwa okolo 670
+    # swiec po sobie - i wchodzi do kalibracji jako obserwacja kilkunastosigmowa.
+    #
+    # DLACZEGO BRAMKA, A NIE PRZEJSCIE NA `adjustment=split`. Bo to nie jest
+    # zmiana jednego slowa: Alpaca koryguje ceny wzgledem DZIS, wiec kazdy
+    # kolejny podzial uniewaznia cala zapisana historie i wymaga POWTORZENIA
+    # backfillu. Ta decyzja - i sam backfill - naleza do wlasciciela; bramka
+    # pilnuje tylko, zeby trening nie ruszyl PRZED nia i nie wyprodukowal wersji
+    # modelu, ktora wyglada na policzona.
+    #
+    # ZNACZNIK, NIE DOMYSL. Pytamy o jawne potwierdzenie w `ref.instrument.meta`,
+    # bo z samych swiec nie da sie odczytac, czy ktos je juz skorygowal:
+    # nieskorygowany szereg wyglada jak szereg z gwaltownym ruchem. Nazwa
+    # znacznika pochodzi z modulu, ktory o korekcie DECYDUJE (adapter Alpaki) -
+    # jedna nazwa w jednym miejscu, zamiast dwoch literalow do rozjechania.
+    if engine == "equity":
+        from services.exchanges.alpaca import ZNACZNIK_KOREKTY_PODZIALOW
+        # PYTAMY O DOKLADNIE TEN ZBIOR, KTORY WEJDZIE DO TRENINGU (takze po
+        # zawezeniu flaga `--instrumenty`), a nie o cale uniwersum decyzyjne.
+        # Inaczej bramka mowilaby o instrumentach, ktorych ten przebieg nie
+        # dotyka - i zapalalaby sie albo milczala nie o tym, co liczy.
+        #
+        # `meta->klucz <> 'true'::jsonb` z COALESCE, a nie `(meta->>klucz)::boolean`:
+        # rzutowanie na boolean wywraca zapytanie na dowolnej innej tresci
+        # w tym polu, czyli bramka danych umialaby paść z powodu danych.
+        cur.execute(
+            "SELECT count(*) AS bez FROM ref.instrument WHERE id = ANY(%s)"
+            "   AND COALESCE(meta->%s, 'false'::jsonb) <> 'true'::jsonb",
+            ([i["id"] for i in instruments], ZNACZNIK_KOREKTY_PODZIALOW))
+        bez_korekty = cur.fetchone()["bez"]
+        if bez_korekty:
+            print("PRZERWANO: świece equity nie są potwierdzone jako "
+                  "skorygowane o podziały akcji")
+            print(f"  {bez_korekty} z {len(instruments)} instrumentów uniwersum "
+                  f"nie ma znacznika `meta->'{ZNACZNIK_KOREKTY_PODZIALOW}' = true`")
+            print("  podział 10:1 to w szeregu −90% zwrotu, a `ret_long` sięga "
+                  "168 świec: jedno zdarzenie zatruwa ~670 świec")
+            print("  wymagane PRZED treningiem: adjustment=split w adapterze "
+                  "Alpaki, pełny backfill `equity 1h`, potem znacznik")
+            print(f"  tor {engine}/{h.bar} NIEURUCHOMIONY — nic nie policzono "
+                  f"i nic nie zapisano (kod {KOD_TOR_NIEGOTOWY})")
+            raise SystemExit(KOD_TOR_NIEGOTOWY)
     if tylko:
         print(f"  uniwersum zawężone do {len(instruments)}: "
               f"{', '.join(i['symbol'] for i in instruments)}")
@@ -1037,7 +1149,7 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
         cur.execute("UPDATE learn.training_run SET status='failed', finished_at=now(),"
                     " error='za mało punktów panelu' WHERE id=%s", (run_id,))
         conn.commit()
-        raise SystemExit(2)
+        raise SystemExit(KOD_NIC_NIE_POLICZONO)
 
     # CECHY, KTORE PRZESTALY PRZYCHODZIC, TO NIE JEST WYNIK - TO AWARIA.
     #
@@ -1096,7 +1208,7 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
         cur.execute("UPDATE learn.training_run SET status='failed', finished_at=now(),"
                     " error=%s WHERE id=%s", (komunikat, run_id))
         conn.commit()
-        raise SystemExit(2)
+        raise SystemExit(KOD_NIC_NIE_POLICZONO)
 
     idx = 0
     positive = 0
