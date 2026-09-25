@@ -25,9 +25,24 @@
 # i te zaleznosci z extras, ktore realnie decyduja o dzialaniu - pelna odtwarzalnosc
 # wymaga pliku blokady i jest osobna decyzja.
 #
-# Wersje ponizej to DOKLADNIE te, na ktorych zestaw testow jest zielony
-# (1651 passed, 25 skipped, 23.09.2026); kazda sprawdzona w PyPI pod katem kola
-# dla cp312/linux-x86_64.
+# WERSJE PONIZEJ TO TE, KTORE INSTALUJE CI PRZED URUCHOMIENIEM TESTOW
+# (.github/workflows/tests.yml: `pip install -r services/api/requirements.txt
+# -r requirements-dev.txt`, potem `python -B -m pytest tests/ -v`). Kazda
+# sprawdzona w PyPI pod katem kola dla cp312/linux-x86_64.
+#
+# LICZBY TESTOW TU NIE MA - I TO JEST POPRAWKA Z 2026-09-25.
+#
+# Stalo tu "zestaw testow jest zielony", z wpisana liczba zaliczonych testow
+# i data 23.09.2026 - przy faktycznych ponad 1900 dwa dni pozniej. Wpisana raz
+# liczba nie jest pomiarem, bo nikt jej nie odswieza; jest twierdzeniem, ktore
+# z kazdym dniem coraz bardziej nie odpowiada rzeczywistosci, a czyta sie tak
+# samo pewnie jak w dniu wpisania. Gorsze od braku liczby jest to, ze taki napis wyglada na dowod
+# ZIELONOSCI tych konkretnych wersji - a dowodem jest przebieg CI, ktory
+# widac przy kazdym commicie i ktory sam sie datuje.
+#
+# Aktualna liczba testow stoi w README, razem z POLECENIEM, ktorym ja zmierzono,
+# i jest pilnowana testem (tests/test_dokumentacja_testow.py) - napis, ktory
+# odjedzie od pomiaru, zapala zestaw, zamiast cicho zostac.
 
 fastapi==0.141.1
 uvicorn[standard]==0.52.4

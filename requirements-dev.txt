@@ -1,2 +1,28 @@
-# Zaleznosci wylacznie do testow - nie trafiaja do obrazu produkcyjnego.
+# ZALEZNOSCI DOKLADANE DO PRODUKCYJNYCH, A NIE CALY ZESTAW DO TESTOW.
+#
+# Do 2026-09-25 stalo tu "zaleznosci wylacznie do testow" i sam `pytest`. Napis
+# byl prawdziwy co do slowa i mylacy co do skutku: swiezy klon, w ktorym ktos
+# zainstalowal TYLKO ten plik, dostaje 59 bledow kolekcji, bo testy importuja
+# `services/*`, a te importuja `psycopg`, `fastapi`, `httpx`, `yaml`, `pyotp`
+# i `cryptography` - czyli warstwe produkcyjna. Komunikat o brakujacym module
+# nie mowi, ktorego pliku brakuje; ten naglowek mowi.
+#
+# ZEBY URUCHOMIC TESTY, POTRZEBNE SA OBA PLIKI:
+#
+#     pip install -r services/api/requirements.txt -r requirements-dev.txt
+#     python -B -m pytest
+#
+# To DOKLADNIE to, co robi CI (.github/workflows/tests.yml) - jedna komenda
+# w dwoch miejscach, nie dwie rozne. `-B` wylacza zapis bajtkodu: bez tego
+# mutacja pliku o niezmienionym rozmiarze potrafi trafic w stary `.pyc` i dac
+# wynik nie z tego kodu.
+#
+# DLACZEGO TEN PLIK NIE POWTARZA LISTY PRODUKCYJNEJ. Bo byla by to druga kopia
+# wersji przypietych w `services/api/requirements.txt`, a ten plik uzasadnia
+# kazde przypiecie osobno. Dwie kopie rozjechalyby sie cicho i testy chodzilyby
+# na innych wersjach niz obraz - czyli dokladnie ten blad, ktory tamten plik
+# opisuje jako zmierzony 23.09.2026 (`anthropic>=0.60` przy kodzie testowanym
+# na `1.1.0`).
+#
+# CO TU NALEZY: wylacznie to, czego obraz produkcyjny NIE MA.
 pytest>=8.0

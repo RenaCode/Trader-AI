@@ -37,7 +37,8 @@ z osobnymi modelami, osobnym ryzykiem i osobnymi zakładkami w UI.
 - [x] Symulacja **portfelowa** przez ten sam risk kernel co produkcja
 - [x] Rola bazy bez uprawnień superużytkownika + kontrola uprawnień
 - [x] Kopie zapasowe (weryfikowane), rotacja `SECRETS_KEY`, limit wydatków na API
-- [x] 123 testy jednostkowe (reguły ryzyka, portfel, koszty, TOTP, kryptografia)
+- [x] 1999 testów jednostkowych (reguły ryzyka, portfel, koszty, TOTP, kryptografia),
+      zmierzone 25.09.2026 — polecenie i sposób sprawdzenia w sekcji [Testy](#testy)
 - [x] Ustawienia, powiadomienia (w aplikacji / WhatsApp / webhook), profil konta
 - [x] Prowizja w mierze, a nie tylko w krzywej kapitału — odsetek dodatnich
       okien i mediana Sharpe były liczone **przed kosztami** (patrz `docs/03`)
@@ -425,6 +426,40 @@ kubectl exec <pod-api> -- sh -c 'printf %s "<hasło>" | python scripts/create_ad
 ```
 
 ## Testy
+
+### Testy jednostkowe
+
+```bash
+pip install -r services/api/requirements.txt -r requirements-dev.txt
+python -B -m pytest
+```
+
+**Potrzebne są OBA pliki zależności.** `requirements-dev.txt` zawiera wyłącznie
+to, czego obraz produkcyjny nie ma (sam `pytest`); testy importują `services/*`,
+a te importują `psycopg`, `fastapi`, `httpx`, `yaml`, `pyotp` i `cryptography`.
+Instalacja samego pliku deweloperskiego daje 59 błędów kolekcji, a komunikat
+o brakującym module nie mówi, którego pliku brakuje.
+
+`-B` wyłącza zapis bajtkodu i nie jest ozdobą: przy sprawdzaniu, czy test
+naprawdę pilnuje tego, co obiecuje (wstawienie wady i sprawdzenie, że test
+pada), mutacja pliku o niezmienionym rozmiarze potrafi trafić w stary `.pyc`
+i dać wynik nie z tego kodu. Dokładnie te dwa polecenia uruchamia CI
+(`.github/workflows/tests.yml`).
+
+**Żaden z tych testów nie dotyka bazy ani giełdy.** Testy wymagające bazy
+z zastosowanymi migracjami pomijają się same i mówią o tym wprost — żeby je
+uruchomić, podaj `TEST_DB_URL` wskazujący na **jednorazową** bazę:
+
+```bash
+TEST_DB_URL=postgresql://... python -B -m pytest tests/test_role_bazodanowe.py
+```
+
+Liczba testów podana wyżej w [Stanie projektu](#stan-projektu) jest pilnowana testem
+(`tests/test_dokumentacja_testow.py`): napis, który odjedzie od pomiaru, zapala
+zestaw, zamiast cicho zostać nieprawdą — tak jak stało się z „123 testy
+jednostkowe" przy faktycznych 1999.
+
+### Test dymny interfejsu
 
 ```bash
 BASE_URL=https://trader.renacode.com TEST_PASSWORD=... node tests/smoke.spec.mjs
