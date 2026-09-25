@@ -22,6 +22,16 @@ CZEGO TEN PLIK PILNUJE: żeby rozjazd nie wrócił — w żadną ze stron. Świe
 przepięte na księgę lokalną zepsułyby szereg treningowy; arkusz przepięty
 z powrotem na globalną zepsułby rachunek kosztów. Żadna z tych zmian nie
 objawia się awarią: obie oddają liczby, które wyglądają poprawnie.
+
+POPRAWKA 2026-09-25: „NA KTÓREJ SKŁADAMY ZLECENIA" DOTYCZY TEGO, CZYM HANDLUJEMY
+
+Powyższe było słuszne i dla par USDC działa. Zabrakło jednego rozróżnienia:
+`market_worker` zbiera arkusz dla wszystkich instrumentów `active`, a to nie to
+samo co `tradeable` (0020). Podmiot unijny jako podmiot MiCA nie listuje ANI
+JEDNEJ pary *USDT, więc 20 z 34 instrumentów kończyło się twardym błędem i po
+pięciu cyklach kończyło proces — 242 restarty. Host wybiera się więc PER
+INSTRUMENT, flagą `ksiega_egzekucji`, a nie raz dla całego adaptera; szczegóły
+w `tests/test_arkusz_per_listing.py`.
 """
 from __future__ import annotations
 
@@ -38,12 +48,30 @@ def _wywolanie(endpoint: str) -> str:
     return ZRODLO[i:ZRODLO.index(")", ZRODLO.index("host=", i))]
 
 
+def _metoda(nazwa: str) -> str:
+    """Ciało metody `nazwa` — od jej `async def` do następnego `    async def`."""
+    i = ZRODLO.index(f"async def {nazwa}(")
+    j = ZRODLO.find("\n    async def ", i + 1)
+    return ZRODLO[i:j if j > 0 else len(ZRODLO)]
+
+
 def test_arkusz_idzie_z_gieldy_na_ktorej_handlujemy():
-    wyw = _wywolanie("/v5/market/orderbook")
-    assert "host=self._host" in wyw, (
+    """Dla instrumentu, którym HANDLUJEMY, pytana jest księga egzekucji."""
+    m = _metoda("fetch_order_book")
+    assert "self._host if ksiega_egzekucji" in m, (
         "arkusz wrócił na host globalny — `book_spread_bps` i składnik `spread` "
         "w `karta_rundy` znowu opisują księgę, na której NIE składamy zleceń")
-    assert "PUBLIC_HOST" not in wyw
+    assert "host=host" in _wywolanie("/v5/market/orderbook"), (
+        "wybrany host nie dochodzi do zapytania — wybór bez skutku jest gorszy "
+        "niż jego brak, bo w kodzie widać regułę, której nikt nie wykonuje")
+
+
+def test_arkusz_dla_INSTRUMENTU_NIEHANDLOWALNEGO_zostaje_na_ksiedze_globalnej():
+    """Nie z wygody: wartości `book_spread_bps` tych instrumentów sprzed
+    2026-09-24 też pochodzą z hosta globalnego, więc szereg zostaje ciągły.
+    Przepięcie ich na księgę unijną, która ich nie listuje, to 20 twardych
+    błędów na cykl — czyli CrashLoopBackOff, nie brak danych."""
+    assert "else PUBLIC_HOST" in _metoda("fetch_order_book")
 
 
 def test_swiece_zostaja_na_ksiedze_globalnej():

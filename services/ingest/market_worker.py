@@ -21,6 +21,43 @@ Ten modul jako jedyny z czterech workerow nie mial ZADNEGO z nich:
     gniezdzie bez limitu czasu nie konczy cyklu, wiec nie dolicza sie do zadnego
     licznika i w `kubectl get pods` widnieje jako `Running` bez konca.
 
+SYMBOL, KTOREGO GIELDA NIE LISTUJE, TO NIE JEST AWARIA - ALE TEZ NIE ZERO (2026-09-25)
+
+Zdanie wyzej („instrument, ktorego gielda nie zna, moglby milczec miesiacami")
+bylo sluszne dopoki „gielda nie zna" i „odczyt sie nie udal" byly nierozroznialne.
+Od 24.09 przestaly byc, i to kosztowalo 242 restarty: `fetch_order_book` przeszlo
+na ksiege podmiotu unijnego, ktory jako podmiot MiCA nie listuje ANI JEDNEJ pary
+*USDT, a ten worker zbiera arkusz dla wszystkich instrumentow `active` - 10 par
+USDC i 24 pary USDT. Dwadziescia twardych bledow na cykl, piec cykli, koniec
+procesu; i tak w kolko, bo restart niczego tu nie naprawia.
+
+Rozroznienie idzie wiec przez typ wyjatku, nie przez wylaczenie licznika:
+
+    SymbolNieListowany  -> stan TRWALY i ZNANY. Cykl konczy sie POWODZENIEM,
+                           a liczba takich symboli idzie do `detail` pulsu jako
+                           `bez_arkusza`.
+    ExchangeError       -> odczyt sie NIE UDAL (siec, klucz, limit, nieznany kod).
+                           Bez zmian: awaria cyklu, licznik, piec i koniec.
+
+DLACZEGO `bez_arkusza` MUSI ISC DO BAZY, A NIE TYLKO DO LOGU. Bo inaczej ta
+poprawka zamienia awarie w CISZE, czyli w gorszy stan: log ginie przy restarcie,
+a liczba rosnaca albo utrzymujaca sie ma byc odczytywalna bez zagladania do poda -
+`SELECT detail->>'bez_arkusza' FROM risk.worker_heartbeat WHERE worker='market'`.
+
+KTORA GIELDE PYTAMY O ARKUSZ: `ref.instrument.tradeable` (migracja 0020), czyli
+ta sama flaga, ktora wyznacza uniwersum decyzyjne.
+
+    tradeable=true  -> ksiega EGZEKUCJI. Arkusz zasila rachunek kosztu
+                       (`koszty.karta_rundy`), a kosztu nie opisuje ksiega,
+                       w ktorej nasze zlecenie nigdy nie stanie.
+    tradeable=false -> host globalny, czyli zachowanie sprzed cd77710. To nie
+                       jest ustepstwo: wartosci `book_spread_bps` tych
+                       instrumentow sprzed 24.09 tez pochodza stamtad, wiec
+                       szereg zostaje ciagly.
+
+Proweniencja nie potrzebuje kolumny w `market.book_snapshot`: wynika z flagi,
+ktora o niej zdecydowala i ktora stoi w bazie obok instrumentu.
+
 Uzycie:
     DATABASE_URL=... python services/ingest/market_worker.py --interval 60
 """
@@ -39,7 +76,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import psycopg
 from psycopg.rows import dict_row
 
-from services.exchanges.base import ExchangeError
+from services.exchanges.base import ExchangeError, SymbolNieListowany
 from services.exchanges.fabryka import adapter_danych
 from services.ingest import puls
 
@@ -54,7 +91,10 @@ PULS = "market"
 
 async def cycle(conn, adapter, instruments: list[dict], book_depth: int) -> dict:
     cur = conn.cursor()
-    stats = {"swiece": 0, "orderbooki": 0, "bledy": 0}
+    # `bez_arkusza` JEST OSOBNA KOLUMNA TEGO RACHUNKU, nie czescia `bledy`.
+    # Zlepienie ich konczy proces (patrz naglowek), rozdzielenie bez licznika
+    # zamienia to w cisze - stad trzecia liczba, ktora idzie do pulsu.
+    stats = {"swiece": 0, "orderbooki": 0, "bledy": 0, "bez_arkusza": 0}
     now = datetime.now(timezone.utc)
 
     for inst in instruments:
@@ -76,7 +116,21 @@ async def cycle(conn, adapter, instruments: list[dict], book_depth: int) -> dict
             stats["swiece"] += cur.rowcount if cur.rowcount > 0 else 0
 
         try:
-            book = await adapter.fetch_order_book(inst["symbol"], book_depth)
+            # KTORA KSIEGA - decyduje `tradeable`, nie sufiks symbolu. Zgadywanie
+            # po „USDC" dzialaloby do pierwszego listingu pary USDC, ktorej
+            # jeszcze nie handlujemy, i do pierwszej giedly z inna waluta
+            # rozliczeniowa - a mylilo by sie cicho, bo arkusz i tak by przyszedl.
+            book = await adapter.fetch_order_book(
+                inst["symbol"], book_depth,
+                ksiega_egzekucji=bool(inst["tradeable"]))
+        except SymbolNieListowany as e:
+            # NIE JEST TO AWARIA CYKLU: ta gielda tego symbolu nie prowadzi
+            # i nie bedzie prowadzic ani za minute, ani za miesiac. Liczy sie
+            # jednak do `bez_arkusza`, ktore idzie do pulsu - inaczej trwaly
+            # brak danych stalby sie niewidoczny.
+            stats["bez_arkusza"] += 1
+            print(f"  {inst['symbol']:10s} orderbook: {e}")
+            continue
         except ExchangeError as e:
             stats["bledy"] += 1
             print(f"  {inst['symbol']:10s} orderbook: {e}")
@@ -118,8 +172,13 @@ async def main() -> int:
     try:
         with psycopg.connect(url, row_factory=dict_row) as conn:
             cur = conn.cursor()
+            # `tradeable` wchodzi do tego SELECT-a, bo wyznacza KSIEGE, ktorej
+            # pytamy o arkusz (patrz naglowek). Filtrem nadal jest `active`:
+            # historie zbieramy dla wszystkiego, co aktywne, takze dla par
+            # nieobjetych uniwersum decyzyjnym.
             cur.execute(
-                "SELECT i.id, i.symbol FROM ref.instrument i JOIN ref.venue v ON v.id=i.venue_id"
+                "SELECT i.id, i.symbol, i.tradeable FROM ref.instrument i"
+                " JOIN ref.venue v ON v.id=i.venue_id"
                 " WHERE v.code = %s AND i.active ORDER BY i.symbol", (adapter.venue_code,))
             instruments = cur.fetchall()
             print(f"Obserwowane instrumenty: {', '.join(i['symbol'] for i in instruments)}")
@@ -131,7 +190,7 @@ async def main() -> int:
                 try:
                     s = await cycle(conn, adapter, instruments, args.depth)
                     print(f"[{t0:%H:%M:%S}] świece +{s['swiece']}, orderbooki {s['orderbooki']}, "
-                          f"błędy {s['bledy']}")
+                          f"bez arkusza {s['bez_arkusza']}, błędy {s['bledy']}")
                     if s["bledy"]:
                         # JEDNO NIEUDANE POBRANIE TO AWARIA CYKLU. Opisy
                         # poszczegolnych bledow poszly juz wyzej, do logu;
@@ -147,10 +206,17 @@ async def main() -> int:
                         # Blad zapisu pulsu celowo NIE jest lapiany osobno
                         # (patrz `puls.bij`) - wpadnie do `except` nizej
                         # i policzy sie jako awaria cyklu, bo nia jest.
+                        #
+                        # `bez_arkusza` JEST TU CZESCIA PULSU, A NIE OSOBNYM
+                        # WPISEM. Cykl policzyl sie jako udany, wiec bez tej
+                        # liczby baza twierdzilaby, ze zebrano wszystko - a to
+                        # zamienia awarie w cisze. Log nie wystarcza: ginie przy
+                        # restarcie, a ta liczba ma byc odczytywalna bez poda.
                         puls.bij(conn, puls_nazwa, args.interval,
                                  {"instrumenty": len(instruments),
                                   "swiece": s["swiece"],
                                   "orderbooki": s["orderbooki"],
+                                  "bez_arkusza": s["bez_arkusza"],
                                   "glebokosc": args.depth})
                 except Exception as e:                        # noqa: BLE001
                     conn.rollback()

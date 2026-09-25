@@ -59,8 +59,8 @@ import httpx
 
 from .base import (
     AuthError, Balance, BladIpKlucza, BookLevel, Candle, ConnectionCheck, ExchangeError,
-    KontoZamrozone, OdmowaGieldy, OrderBook, StanZlecenia, Wypelnienie,
-    ZlozoneZlecenie,
+    KontoZamrozone, OdmowaGieldy, OrderBook, StanZlecenia, SymbolNieListowany,
+    Wypelnienie, ZlozoneZlecenie,
 )
 
 # SWIECE I CECHY bierzemy z podmiotu GLOBALNEGO niezaleznie od tego, gdzie stoi
@@ -90,6 +90,49 @@ PUBLIC_HOST = "https://api.bybit.com"
 # CZEGO TA ZMIANA NIE ROBI: nie rusza szeregu `book_spread_bps` wstecz. Wartosci
 # sprzed tej daty pochodza z ksiegi globalnej i opisuja co innego niz wartosci
 # po niej. Przy czytaniu historii tej cechy trzeba o tym pamietac.
+#
+# ...ALE „ARKUSZ Z GIELDY EGZEKUCJI" DOTYCZY TYLKO TEGO, CZYM HANDLUJEMY (2026-09-25)
+#
+# Powyzsze bylo sluszne i dla par USDC dziala - mierzony spread spadl 10,57 ->
+# 5,85 pb, bo to naprawde ksiega wypelniajaca nasze zlecenia. Zabraklo jednak
+# jednego rozroznienia: `market_worker` zbiera arkusz dla WSZYSTKICH instrumentow
+# `active`, a `active` to nie to samo co `tradeable` (migracja 0020). Podmiot
+# unijny jako podmiot MiCA nie listuje ANI JEDNEJ pary *USDT:
+#
+#     api.bybit.com  ADAUSDT, TRXUSDT -> retCode 0
+#     api.bybit.eu   te same symbole  -> retCode 10001 "Not supported symbols"
+#     api.bybit.eu   instruments-info -> 128 symboli, wszystkie USDC/EUR/PLN
+#
+# 20 z 34 instrumentow odpadalo wiec twardym bledem, cykl byl „nieudany", piec
+# takich pod rzad konczylo proces: 242 restarty od 24.09.
+#
+# Host wybiera odtad WYWOLUJACY, per instrument, flaga `ksiega_egzekucji`:
+#
+#     tradeable=true  -> `self._host` (ksiega, ktora wypelnia nasze zlecenia)
+#     tradeable=false -> `PUBLIC_HOST` (ciaglosc szeregu `book_spread_bps`:
+#                        ich wartosci sprzed 24.09 tez pochodzily stamtad)
+#
+# PROWENIENCJA BEZ KOLUMNY W SCHEMACIE. `market.book_snapshot` nie ma pola na
+# zrodlo i nie dostanie go tutaj - bo nie musi. Zrodlo wynika z tej samej flagi,
+# ktora o nim zdecydowala i ktora stoi w bazie: `ref.instrument.tradeable`.
+# Uniwersum decyzyjne to wylacznie `tradeable`, wiec dla rachunku kosztu
+# (`koszty.karta_rundy`) cala jego dziedzina pochodzi z naszej ksiegi. Okno
+# siegajace przed 24.09 albo pomiar rozciagniety na instrumenty niehandlowalne
+# to nadal INNY_RYNEK - i do tego sluzy `--spread-obca-ksiega`.
+#
+# NIE PRZYJMUJEMY ARKUSZA OD GIELDY, KTORA SYMBOLU NIE LISTUJE - i to jest
+# regula osobna od wyboru hosta, bo sam blad jej nie zapewnia. Cztery majory
+# (BTCUSDT, ETHUSDT, SOLUSDT, XRPUSDT) nie sa listowane na bybit.eu, a endpoint
+# `/v5/market/orderbook` oddaje tam PELNY arkusz: od 24.09 zapisano ~3089 takich
+# snapshotow i spread przeskoczyl 0,39 -> 2,29 pb. Liczba prawdziwa, tylko
+# o czym innym - dokladnie ta klasa bledu, ktora tropi `koszty.py`. Dlatego
+# `fetch_order_book` PYTA O LISTE (`instruments-info`) i odmawia, zanim
+# zapisze cokolwiek.
+
+# Jak dlugo lista instrumentow danego hosta jest uznawana za aktualna. Lista
+# zmienia sie listingami, czyli w skali dni - a nie odswiezana WCALE kazalaby
+# restartowac workera po kazdym nowym listingu.
+LISTING_WAZNOSC_S = 3600.0
 
 # Hosty PRYWATNE (podpisane zapytania). Domyslne wartosci sluza wylacznie
 # adapterom czytajacym dane publiczne; wlasciwy host przychodzi z ref.venue,
@@ -298,6 +341,11 @@ class BybitAdapter:
         self._host = host or HOSTS[mode]
         self._category = category
         self._client = httpx.AsyncClient(timeout=timeout)
+        # Lista symboli listowanych na danym (host, kategoria), ze znacznikiem
+        # czasu odczytu. Pamiec, a nie stala: `market_worker` pyta o arkusz co
+        # minute dla kilkudziesieciu instrumentow i bez tego kazde zapytanie
+        # o arkusz ciagnelo by za soba drugie, o cala liste instrumentow.
+        self._listing: dict[tuple[str, str], tuple[float, frozenset[str]]] = {}
 
     # ------------------------------------------------------------- transport
     def _sign(self, ts: str, payload: str) -> str:
@@ -491,12 +539,78 @@ class BybitAdapter:
         return [(t, udzial.get(t), otwarte.get(t))
                 for t in sorted(set(udzial) | set(otwarte))]
 
-    async def fetch_order_book(self, symbol: str, depth: int = 50) -> OrderBook:
-        res = await self._get(
-            "/v5/market/orderbook",
-            {"category": self._category, "symbol": symbol, "limit": min(depth, 200)},
-            private=False, host=self._host,
-        )
+    async def _listowane(self, host: str, kategoria: str) -> frozenset[str]:
+        """Symbole, ktore TEN host naprawde prowadzi. Z pamiecia na `LISTING_WAZNOSC_S`.
+
+        PUSTA ODPOWIEDZ KONCZY SIE BLEDEM, a nie zbiorem pustym. Zbior pusty
+        znaczylby „ten host nie listuje niczego", czyli uznalby KAZDY symbol za
+        nielistowany - a to zamienia awarie odczytu w cisze dla calego cyklu.
+        Tak samo urwana lista (`nextPageCursor`): lista niepelna, uzyta jako
+        pelna, wypisuje z rynku instrumenty, ktore na nim sa.
+        """
+        klucz = (host, kategoria)
+        teraz = time.monotonic()
+        wpis = self._listing.get(klucz)
+        if wpis is not None and teraz - wpis[0] < LISTING_WAZNOSC_S:
+            return wpis[1]
+
+        res = await self._get("/v5/market/instruments-info",
+                              {"category": kategoria}, private=False, host=host)
+        if res.get("nextPageCursor"):
+            raise ExchangeError(
+                f"lista instrumentow {host} ({kategoria}) jest urwana - "
+                f"gielda oddala kursor nastepnej strony. Lista niepelna uznalaby "
+                f"za nielistowane symbole, ktore sa listowane",
+                code="listing-urwany")
+        symbole = frozenset(s for s in (i.get("symbol", "") for i in res.get("list", [])) if s)
+        if not symbole:
+            raise ExchangeError(
+                f"lista instrumentow {host} ({kategoria}) przyszla PUSTA - to jest "
+                f"nieudany odczyt, nie gielda bez instrumentow",
+                code="listing-pusty", retryable=True)
+        self._listing[klucz] = (teraz, symbole)
+        return symbole
+
+    async def fetch_order_book(self, symbol: str, depth: int = 50, *,
+                               ksiega_egzekucji: bool = True) -> OrderBook:
+        """Arkusz z ksiegi EGZEKUCJI (`ksiega_egzekucji=True`) albo referencyjnej.
+
+        Powod rozdzielenia i pomiary - w komentarzu na gorze modulu. Tutaj sedno:
+        arkusz zasila rachunek kosztu, wiec dla instrumentu, ktorym HANDLUJEMY,
+        pytamy ksiegi, ktora go wypelnia; dla pozostalych zostaje host globalny,
+        bo to on da szeregowi `book_spread_bps` ciaglosc.
+
+        GIELDA, KTORA SYMBOLU NIE LISTUJE, NIE JEST PYTANA O JEGO ARKUSZ. Nie
+        dlatego, ze odmowi - czesto NIE odmawia. `api.bybit.eu` oddaje pelny
+        arkusz dla BTCUSDT, ktorego nie listuje; przez dobe weszlo tak ~3089
+        snapshotow i spread majorow przeskoczyl 0,39 -> 2,29 pb. Odpowiedz
+        wygladala poprawnie, wiec nic sie nie zepsulo w sposob widoczny.
+        """
+        host = self._host if ksiega_egzekucji else PUBLIC_HOST
+        if symbol not in await self._listowane(host, self._category):
+            raise SymbolNieListowany(
+                f"{symbol}: {host} nie prowadzi tego instrumentu (kategoria "
+                f"{self._category}), wiec arkusz z tego hosta opisywalby co innego "
+                f"niz pytanie. Stan TRWALY - ponowienie da to samo",
+                code="nielistowany")
+        try:
+            res = await self._get(
+                "/v5/market/orderbook",
+                {"category": self._category, "symbol": symbol, "limit": min(depth, 200)},
+                private=False, host=host,
+            )
+        except ExchangeError as e:
+            # DRUGA WARSTWA TEJ SAMEJ REGULY, na wypadek rozjazdu miedzy lista
+            # a arkuszem: `10001` na tym endpoincie to „Not supported symbols",
+            # czyli ta sama wiadomosc co brak na liscie. Bez tego wpadalby
+            # w `OdmowaGieldy` (rodzaj „parametr") i liczyl sie jako awaria
+            # cyklu - to jest dokladnie przyczyna 242 restartow z 24.09.
+            if e.code == "10001":
+                raise SymbolNieListowany(
+                    f"{symbol}: {host} odpowiedzial {e} - gielda tego symbolu nie "
+                    f"prowadzi. Stan TRWALY - ponowienie da to samo",
+                    code=e.code) from e
+            raise
         bids = [BookLevel(Decimal(p), Decimal(q)) for p, q in res.get("b", [])]
         asks = [BookLevel(Decimal(p), Decimal(q)) for p, q in res.get("a", [])]
         if not bids or not asks:

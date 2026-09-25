@@ -514,10 +514,10 @@ def _market_argv(*reszta):
 def test_rynek_bije_puls_po_udanym_cyklu(monkeypatch):
     from services.ingest import market_worker
 
-    conn = AtrapaPolaczenia([{"id": 1, "symbol": "BTCUSDT"}])
+    conn = AtrapaPolaczenia([{"id": 1, "symbol": "BTCUSDT", "tradeable": True}])
 
     async def cykl_ok(*a, **kw):
-        return {"swiece": 5, "orderbooki": 1, "bledy": 0}
+        return {"swiece": 5, "orderbooki": 1, "bledy": 0, "bez_arkusza": 0}
 
     monkeypatch.setenv("DATABASE_URL", "postgresql://atrapa")
     monkeypatch.setattr(market_worker.psycopg, "connect", lambda url, **kw: conn)
@@ -539,10 +539,10 @@ def test_rynek_liczy_nieudane_pobranie_jako_awarie_cyklu(monkeypatch):
     """
     from services.ingest import market_worker
 
-    conn = AtrapaPolaczenia([{"id": 1, "symbol": "BTCUSDT"}])
+    conn = AtrapaPolaczenia([{"id": 1, "symbol": "BTCUSDT", "tradeable": True}])
 
     async def cykl_z_bledem(*a, **kw):
-        return {"swiece": 0, "orderbooki": 0, "bledy": 2}
+        return {"swiece": 0, "orderbooki": 0, "bledy": 2, "bez_arkusza": 0}
 
     monkeypatch.setenv("DATABASE_URL", "postgresql://atrapa")
     monkeypatch.setattr(market_worker.psycopg, "connect", lambda url, **kw: conn)
@@ -560,7 +560,7 @@ def test_rynek_konczy_proces_po_pieciu_awariach(monkeypatch, capsys):
     w nocy. Restart JEST widoczny."""
     from services.ingest import market_worker
 
-    conn = AtrapaPolaczenia([{"id": 1, "symbol": "BTCUSDT"}])
+    conn = AtrapaPolaczenia([{"id": 1, "symbol": "BTCUSDT", "tradeable": True}])
 
     async def cykl_pada(*a, **kw):
         raise RuntimeError("giełda nie odpowiada")

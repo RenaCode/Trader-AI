@@ -280,10 +280,19 @@ class AlpacaAdapter:
                 break
         return out[:limit]
 
-    async def fetch_order_book(self, symbol: str, depth: int = 1) -> OrderBook:
+    async def fetch_order_book(self, symbol: str, depth: int = 1, *,
+                               ksiega_egzekucji: bool = True) -> OrderBook:
         """Ksiega JEDNOPOZIOMOWA z najlepszej oferty. Alpaca nie wystawia
         glebokosci w REST; `depth` > 1 nie da wiecej i jest przyjmowany dla
-        zgodnosci sygnatury."""
+        zgodnosci sygnatury.
+
+        `ksiega_egzekucji` NIE ZMIENIA TU NICZEGO i to jest stwierdzenie o Alpace,
+        nie przeoczenie: u Bybita rozdzielil sie PODMIOT (globalny i unijny), wiec
+        istnieja dwie rozne ksiegi tego samego symbolu i trzeba wybrac. Alpaca ma
+        jedno zrodlo danych i jedno miejsce egzekucji, wiec wybor nie istnieje -
+        a jedyne zastrzezenie do tej ksiegi (feed IEX to ulamek rynku) dotyczy
+        obu odpowiedzi na to pytanie jednakowo. Patrz naglowek modulu.
+        """
         res = await self._get("/v2/stocks/quotes/latest",
                               {"symbols": symbol, "feed": self._feed}, host=self._data_host)
         q = (res.get("quotes") or {}).get(symbol)

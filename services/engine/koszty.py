@@ -293,9 +293,21 @@ def karta_rundy(kind: str, maker: bool = False, *,
         czytal go z hosta globalnego i wtedy `False` bylo jedyna uczciwa
         odpowiedzia.
 
-        UWAGA NA HISTORIE: wartosci `book_spread_bps` sprzed tej daty pochodza
-        z ksiegi globalnej. Pomiar liczony na dlugim oknie miesza wiec dwa
-        zrodla i dla niego `False` nadal jest wlasciwe.
+        SKAD WIADOMO, Z KTOREJ KSIEGI JEST WIERSZ, SKORO `market.book_snapshot`
+        NIE MA KOLUMNY ZRODLA. Z flagi, ktora o zrodle zdecydowala i ktora stoi
+        w bazie: `ref.instrument.tradeable`. Od 2026-09-25 `market_worker` pyta
+        ksiegi EGZEKUCJI wylacznie o instrumenty `tradeable`, a pozostale (24
+        pary USDT, ktorych podmiot unijny nie listuje) zostaja na hoscie
+        globalnym. Uniwersum decyzyjne to dokladnie `tradeable`, wiec dla
+        rachunku kosztu cala jego dziedzina pochodzi z naszej ksiegi.
+
+        `False` jest wiec wlasciwe w DWOCH przypadkach i oba da sie wskazac
+        zapytaniem, bez nowej kolumny:
+          * okno siegajace przed 2026-09-24 - wtedy arkusz KAZDEGO instrumentu
+            szedl z hosta globalnego,
+          * pomiar rozciagniety na instrumenty `tradeable = false` - ich arkusz
+            idzie z hosta globalnego nadal i celowo, zeby szereg
+            `book_spread_bps` zostal ciagly.
       * `niewypelnienie` - koszt zlecen, ktore nie weszly, jako ulamek ceny na
         runde. Zrodlo: `poslizg.wypelnialnosc` zestawione z rozkladem ruchu,
         ktory przez to przepadl.

@@ -1850,8 +1850,11 @@ def main() -> int:
                          "podaje krotnosc spreadu, przy ktorej przewaga schodzi "
                          "do zera. OD 2026-09-24 arkusz idzie juz z gieldy, na "
                          "ktorej handlujemy (BybitAdapter.fetch_order_book -> "
-                         "self._host), wiec ta flaga jest potrzebna WYLACZNIE "
-                         "dla okien siegajacych przed te date")
+                         "self._host), a od 2026-09-25 dotyczy to instrumentow "
+                         "`tradeable`; instrumenty niehandlowalne zostaly na "
+                         "hoscie globalnym. Flaga jest wiec potrzebna dla okien "
+                         "siegajacych przed 2026-09-24 ORAZ dla pomiaru "
+                         "liczonego na instrumentach `tradeable = false`")
     ap.add_argument("--spread-bps", type=float, default=None, dest="spread_bps",
                     help="ZMIERZONA polowa spreadu na noge razy dwie nogi, "
                          "w punktach bazowych na runde. Zrodlo: "

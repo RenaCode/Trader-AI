@@ -125,6 +125,37 @@ class KontoZamrozone(ExchangeError):
                          wymaga_czlowieka=wymaga_czlowieka)
 
 
+class SymbolNieListowany(ExchangeError):
+    """GIELDA NIE PROWADZI TEGO INSTRUMENTU. Stan TRWALY i ZNANY, nie awaria.
+
+    DLACZEGO TO NIE MOZE BYC ZWYKLY `ExchangeError`
+
+    Odbiorca odczytu rynkowego ma dwie zupelnie rozne reakcje:
+
+      * odczyt sie NIE UDAL (siec, limit, 5xx, zly klucz, nieznany kod gieldy) -
+        dane MIALY przyjsc i nie przyszly. Cykl jest nieudany, licznik awarii
+        rosnie, po pieciu proces sie konczy i restart jest WIDOCZNY,
+      * gielda tego symbolu NIE LISTUJE - dane nigdy nie przyjda i ponowienie
+        za minute, za godzine i za miesiac da to samo. Liczenie tego jako awarii
+        zamienia znany, trwaly brak w CrashLoopBackOff, czyli w alarm o czyms,
+        czego nikt nie naprawi restartem.
+
+    Zmierzone 2026-09-24: `api.bybit.eu` jako podmiot MiCA nie listuje ANI JEDNEJ
+    pary *USDT (128 symboli, wszystkie USDC/EUR/PLN), a `market_worker` zbiera
+    arkusz dla 34 instrumentow `active`, z czego 24 to pary USDT. Dwadziescia
+    twardych bledow na cykl konczylo proces po pieciu cyklach - 242 restarty.
+
+    CZEGO TEN WYJATEK NIE ZWALNIA: liczba symboli bez arkusza MUSI byc widoczna
+    poza logiem (patrz `market_worker`: `bez_arkusza` w `detail` pulsu). Inaczej
+    awaria zamienia sie w cisze, a cisza jest gorszym stanem niz restart.
+    """
+
+    def __init__(self, message: str, *, code: str | None = None,
+                 retryable: bool = False, wymaga_czlowieka: bool = False):
+        super().__init__(message, code=code, retryable=retryable,
+                         wymaga_czlowieka=wymaga_czlowieka)
+
+
 @dataclass(frozen=True)
 class Balance:
     currency: str
@@ -198,7 +229,13 @@ class ExchangeAdapter(Protocol):
 
     async def fetch_candles(self, symbol: str, timeframe: str, limit: int) -> list[Candle]: ...
 
-    async def fetch_order_book(self, symbol: str, depth: int) -> OrderBook: ...
+    # `ksiega_egzekucji` mowi, CZYJEJ ksiegi dotyczy pytanie: True - tej, na
+    # ktorej skladamy zlecenia (arkusz zasila rachunek kosztu), False - ksiegi
+    # referencyjnej, z ktorej szereg `book_spread_bps` brany byl do 2026-09-24.
+    # Nie jest to ustawienie adaptera, bo w jednym cyklu potrzebne sa OBIE:
+    # patrz `market_worker` i flaga `ref.instrument.tradeable`.
+    async def fetch_order_book(self, symbol: str, depth: int, *,
+                               ksiega_egzekucji: bool = True) -> OrderBook: ...
 
     async def fetch_balances(self) -> list[Balance]: ...
 
