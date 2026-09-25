@@ -90,7 +90,31 @@ spec:
                   # w OSOBNYCH podach; gdy stana, silnik bije dalej i handluje na
                   # cechach sprzed trzech dni. Stare cechy nie wygladaja jak
                   # awaria, tylko jak rynek, ktory przestal dawac sygnaly.
-                  python services/engine/dozor.py --co swiezosc  || RC=$?
+                  #
+                  # PER HORYZONT, NIE RAZ (2026-09-25). Do tego dnia szlo tu
+                  # jedno wywolanie bez `--bar`, czyli z domyslnym `4h`
+                  # (dozor.py), a produkcja liczy cechy na DWOCH horyzontach
+                  # (`workers.features`: "4h,1h") i trenuje oba
+                  # (`trainerCron.horyzonty`). Tor 1h nie byl objety ANI RAZ.
+                  #
+                  # Roznica nie jest formalna. Oba horyzonty skladaja sie ze
+                  # swiec ZRODLOWYCH 1h, wiec czlon `market.candle` wypada
+                  # identycznie - ale prog dla `feat.feature_value` liczy sie
+                  # z `h.bar_minutes`, czyli 240 minut dla 4h i 60 dla 1h.
+                  # Potok cech 1h moze wiec stac ponad trzy godziny i byc
+                  # w calosci przezroczysty dla sprawdzenia liczonego dla 4h.
+                  # Dokladnie ten rozjazd - horyzont dolozony do trenera i nie
+                  # dolozony do cech - kosztowal 21 godzin martwych cech
+                  # 2026-09-04.
+                  #
+                  # LISTA IDZIE Z `trainerCron.horyzonty`, a nie jest przepisana
+                  # tutaj: to ta sama lista, ktora `test_petle_w_serwisach`
+                  # przyklada do `workers.features`, wiec trzeci horyzont
+                  # dolozony do treningu wchodzi tu sam. Wlasna kopia byla by
+                  # trzecim miejscem z ta liczba i rozjechala by sie cicho.
+                  {{- range $h := .Values.trainerCron.horyzonty | default (list .Values.trainerCron.bar) }}
+                  python services/engine/dozor.py --co swiezosc --bar {{ $h | quote }} || RC=$?
+                  {{- end }}
                   # PULS WORKEROW DANYCH. Swiezosc wyzej wykrywa SKUTEK - dane
                   # przestaly naplywac - i robi to dopiero po czasie jednej
                   # swiecy zrodlowej, przy 1h nawet po trzech godzinach. Nie
