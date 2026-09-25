@@ -55,9 +55,35 @@ def ensure_perp(cur, spot: dict) -> tuple[int, str]:
     (patrz migracja 0021).
     """
     perp_symbol = f"{spot['base_ccy']}USDT.P"
+    # `tradeable` PODANE JAWNIE, a nie zdane na DEFAULT.
+    #
+    # Kolumna ma `DEFAULT true` (migracja 0020), a ten INSERT jej nie wymieniał -
+    # czyli każdy NOWY perpetual wchodził do bazy z flagą uniwersum decyzyjnego
+    # WŁĄCZONĄ. Że dziś to nie boli, wynika wyłącznie z tego, że od migracji 0020
+    # nie powstał ani jeden taki wiersz: wszystkie perpetuale w bazie są starsze
+    # i mają `tradeable = false` po migracji. To zbieg okoliczności, nie
+    # zabezpieczenie - wystarczy jeden nowy instrument spotowy z aktywem bez
+    # perpetuala w bazie, żeby wiersz powstał.
+    #
+    # Czym by to groziło: perpetual jest tu WYŁĄCZNIE źródłem stawki
+    # finansowania (`meta.funding_from`) i nikt go nie obstawia. Z `tradeable =
+    # true` wchodziłby do uniwersum decyzyjnego, którym silnik handluje i po
+    # którym liczy się odcisk cechy przekrojowej - a jego zwrot jest niemal
+    # identyczny ze zwrotem pary spotowej tego samego aktywa, więc liczony
+    # podwójnie przesuwałby percentyle całego zbioru.
+    #
+    # `active` zostaje `false` z tego samego powodu i było podane jawnie od
+    # początku; obie flagi opisują teraz jedną decyzję, nie jedną decyzję i jedno
+    # przemilczenie.
+    #
+    # NIE ZMIENIA ISTNIEJĄCYCH WIERSZY: gałąź `DO UPDATE` dotyka wyłącznie
+    # `kind`, tak jak dotąd. Przestawianie `tradeable` istniejącemu instrumentowi
+    # byłoby zmianą uniwersum decyzyjnego przez potok danych, a to należy do
+    # migracji.
     cur.execute(
-        "INSERT INTO ref.instrument (venue_id, symbol, engine, base_ccy, quote_ccy, kind, active)"
-        " VALUES (%s,%s,%s,%s,'USDT','perp',false)"
+        "INSERT INTO ref.instrument (venue_id, symbol, engine, base_ccy, quote_ccy,"
+        " kind, active, tradeable)"
+        " VALUES (%s,%s,%s,%s,'USDT','perp',false,false)"
         " ON CONFLICT (venue_id, symbol) DO UPDATE SET kind='perp'"
         " RETURNING id",
         (spot["venue_id"], perp_symbol, spot["engine"], spot["base_ccy"]),
