@@ -572,7 +572,8 @@ def compute_news(cur, instrument_id: int, h: Horizon, feat_id: int,
 
 def compute_cross_section(cur, h: Horizon, feat_ids: dict[str, int],
                          since: datetime, until: datetime,
-                         instrument_ids: list[int] | None = None) -> int:
+                         instrument_ids: list[int] | None = None,
+                         *, engine: str) -> int:
     """Siła względna: pozycja instrumentu w rankingu zwrotów CAŁEGO zbioru.
 
     DLACZEGO TO JEST INNA INFORMACJA NIŻ POZOSTAŁE SYGNALY
@@ -596,6 +597,28 @@ def compute_cross_section(cur, h: Horizon, feat_ids: dict[str, int],
 
     DATOWANIE WSTECZ jest tu uprawnione: ranking w chwili T korzysta wylacznie
     ze zwrotow znanych w chwili T, tyle ze u wielu instrumentow naraz.
+
+    ZBIOR RANKINGU MUSI BYC TYM SAMYM ZBIOREM, KTORY NAZYWA ODCISK CECHY
+
+    `engine` jest tu argumentem OBOWIAZKOWYM, a nie opcja - i to jest naprawa
+    z 2026-09-25. Do tego dnia zapytanie filtrowalo `i.active AND i.tradeable`,
+    ale NIE `i.engine` ani `i.kind <> 'perp'`, podczas gdy odcisk uniwersum
+    (`przebieg` nizej) liczy sie ZE `engine` i BEZ perpetualow. Dzis oba zbiory
+    sa identyczne, bo `tradeable` maja wylacznie dziesiec par USDC Bybita,
+    a migracja 0047 zdjela te flage wszystkim 21 akcjom - poprawka nie zmienia
+    wiec ANI JEDNEJ wartosci i jest to sprawdzone testem porownujacym licznosci
+    obu zapytan.
+
+    CZEGO NIE ZMIENIA DZIS, A CO ZMIENI PO WLACZENIU UNIWERSUM EQUITY. Migracja
+    0047 zapowiada wprost osobna migracje wlaczajaca akcje do uniwersum. Od tej
+    chwili zapytanie bez `engine` liczylo by percentyl w rankingu 31
+    instrumentow naraz - 21 akcji i 10 par krypto - czyli `rel_strength__1h`
+    przestalby znaczyc "czy ten instrument rosnie mocniej od swojego rynku",
+    a zaczal znaczyc "czy krypto rosnie szybciej niz akcje". Sygnal, ktory ma
+    ODEJMOWAC wspolny czynnik rynku, mierzylby wtedy roznice miedzy dwoma
+    rynkami; nazwa cechy nadal nosilaby odcisk zbioru, ktory jej nie opisuje.
+    Po tamtej migracji poprawka przestaje byc odwracalna, bo wartosci policzone
+    przekrojowo przez dwa rynki wyglądaja jak kazde inne.
     """
     cur.execute(
         """
@@ -609,6 +632,15 @@ def compute_cross_section(cur, h: Horizon, feat_ids: dict[str, int],
             -- calego zbioru.
             JOIN ref.instrument i ON i.id = fv.instrument_id
                  AND i.active
+                 -- TEN SAM WARUNEK, Z KTOREGO LICZY SIE ODCISK UNIWERSUM.
+                 -- `engine`, bo ranking przez dwa rynki naraz mierzy roznice
+                 -- miedzy rynkami, a nie pozycje w swoim; `kind <> 'perp'`, bo
+                 -- perpetual i spot tego samego aktywa to dwa wiersze o niemal
+                 -- identycznym zwrocie - liczony podwojnie przesuwa percentyle
+                 -- calego zbioru. Oba warunki stoja w odcisku od zawsze, tu
+                 -- brakowalo ich do 2026-09-25.
+                 AND i.engine::text = %s
+                 AND i.kind <> 'perp'
                  -- Nawiasy jawnie: bez podanej listy obowiazuje uniwersum
                  -- decyzyjne, z lista - dokladnie ona.
                  AND ((%s::int[] IS NULL AND i.tradeable)
@@ -625,7 +657,8 @@ def compute_cross_section(cur, h: Horizon, feat_ids: dict[str, int],
         -- Ranking z garstki instrumentow nie niesie informacji o zbiorze.
         WHERE l.n >= %s
         """,
-        (instrument_ids, instrument_ids, feat_ids["ret_mid"], since, until, MIN_UNIVERSE),
+        (engine, instrument_ids, instrument_ids, feat_ids["ret_mid"],
+         since, until, MIN_UNIVERSE),
     )
     rows = [
         (feat_ids["rel_strength"], r["instrument_id"], r["event_time"],
@@ -1018,7 +1051,8 @@ def przebieg(conn, h: Horizon, *, engine: str, tylko: list[str],
         if "rel_strength" not in feat_ids:
             sys.exit("brak definicji cechy przekrojowej — uniwersum puste?")
         x = compute_cross_section(cur, h, feat_ids, since, now,
-                                  [i["id"] for i in instruments] if tylko else None)
+                                  [i["id"] for i in instruments] if tylko else None,
+                                  engine=engine)
         conn.commit()
         total += x
         zbior = (f"podany zbiór, odcisk {odcisk(uniwersum)}" if tylko
