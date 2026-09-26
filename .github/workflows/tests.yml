@@ -23,13 +23,73 @@ on:
 jobs:
   pytest:
     runs-on: ubuntu-latest
+    # BAZA W CI, BO 26 TESTOW NIGDY SIE NIE URUCHAMIALO.
+    #
+    # Do 2026-09-26 ten przebieg chodzil bez bazy, a komentarz nizej mowil, ze
+    # testy "nie potrzebuja bazy ani sieci". Bylo to prawda o WIEKSZOSCI testow
+    # i nieprawda o zestawie: 26 z nich ma `skipif` na `TEST_DB_URL`, wiec przy
+    # kazdym przebiegu byly POMIJANE. Zmierzone tego dnia lokalnie: bez bazy
+    # 2038 przeszlo i 26 pominieto, z baza 2064 przeszlo i 0 pominieto - czyli
+    # wszystkie 26 dzialaja i wszystkie 26 milczaly.
+    #
+    # Dlaczego to nie byla drobnostka: te testy pytaja POSTGRESA o rzeczy,
+    # ktorych atrapa kursora nie moze udowodnic, bo sama je odtwarza. Regula
+    # szczytu krzywej kapitalu stoi na `IS NOT DISTINCT FROM`; po podmianie na
+    # `=` wiersz z `zrodlo IS NULL` wypada z `FILTER`, szczyt idzie na wartosc
+    # biezaca i obsuniecie wychodzi zanizone. Na atrapie ta podmiana NIE daje
+    # ani jednego czerwonego testu. Na prawdziwej bazie daje - sprawdzone
+    # kanarkiem 2026-09-26.
+    #
+    # Obraz JEST produkcyjny (`timescale/timescaledb-ha:pg17`, ten sam co
+    # `charts/trader/values.yaml`), bo migracje wymagaja `timescaledb`, `vector`,
+    # `citext` i `pgcrypto`. Zwykly `postgres:17` nie przejdzie migracji 0001.
+    services:
+      db:
+        image: timescale/timescaledb-ha:pg17
+        env:
+          # Rola WLASCICIELA musi nazywac sie `trader`: migracje nadaja
+          # `ALTER DEFAULT PRIVILEGES FOR ROLE trader`, wiec przy innej nazwie
+          # 0034 pada na "role trader does not exist".
+          POSTGRES_USER: trader
+          POSTGRES_PASSWORD: ci
+          POSTGRES_DB: trader
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U trader -d trader"
+          --health-interval 5s --health-timeout 5s --health-retries 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
-      # Testy reguł ryzyka i symulacji portfela nie potrzebują bazy ani sieci —
-      # to czysta logika, więc mogą chodzić przy każdym pushu.
       - run: pip install -q -r services/api/requirements.txt -r requirements-dev.txt
+      # Migracje ida rola wlasciciela, tak jak kontener startowy `migrate`
+      # w `charts/trader/templates/api.yaml`. Hasla rol procesow sa tu
+      # nieustawione - migrator wypisuje o tym ostrzezenie i idzie dalej,
+      # bo w CI nikt sie tymi rolami nie loguje.
+      - run: python -B db/migrate.py
+        env:
+          DATABASE_URL: postgresql://trader:ci@localhost:5432/trader
       # -B wyłącza zapis bajtkodu. Bez tego mutacja pliku o niezmienionym
       # rozmiarze potrafi trafić w stary .pyc i dać wynik nie z tego kodu.
+      #
+      # TEST_DB_URL wlacza te 26 testow. Gdyby kiedys znowu zniknelo, przebieg
+      # nadal bedzie ZIELONY, tylko przestanie sprawdzac baze - dlatego krok
+      # nizej pilnuje, zeby liczba pominietych byla ZEROWA.
       - run: python -B -m pytest tests/ -v
+        env:
+          TEST_DB_URL: postgresql://trader:ci@localhost:5432/trader
+      # CISZA WYGLADA IDENTYCZNIE JAK ZDROWIE - dlatego osobny krok.
+      # `pytest` z pominietymi testami konczy sie kodem 0, wiec samo "zielono"
+      # nie dowodzi, ze baza byla podlaczona. Ten krok pada, jesli cokolwiek
+      # zostalo pominiete, czyli jesli `TEST_DB_URL` przestanie dzialac.
+      - name: Zaden test nie moze byc pominiety
+        run: |
+          python -B -m pytest tests/ -q --override-ini="addopts=" \
+            | tee /tmp/wynik.txt
+          if grep -qE "[0-9]+ skipped" /tmp/wynik.txt; then
+            echo "::error::Testy zostaly POMINIETE - baza nie byla podlaczona:"
+            grep -E "[0-9]+ skipped" /tmp/wynik.txt
+            exit 1
+          fi
+        env:
+          TEST_DB_URL: postgresql://trader:ci@localhost:5432/trader
