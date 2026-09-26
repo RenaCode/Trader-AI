@@ -258,6 +258,41 @@ class ZlozoneZlecenie:
 
 
 @dataclass(frozen=True)
+class PowodOdmowy:
+    """POWOD, dla ktorego gielda odrzucila JUZ PRZYJETE zlecenie.
+
+    DWIE RZECZY NARAZ, ZAWSZE RAZEM: `kod` to wartosc gieldy PRZEPISANA
+    DOSLOWNIE, `rodzaj` i `opis` to nasza interpretacja tej wartosci. Jedno
+    bez drugiego nie wystarcza i dlatego sa w jednej strukturze:
+
+      * sam `rodzaj` jest bezwartosciowy, gdy mapowanie sie pomyli albo gdy
+        gielda doda nowa wartosc — z 'nierozpoznane' nie da sie dojsc do tego,
+        CO gielda powiedziala,
+      * sam `kod` wymaga za kazdym razem czytania dokumentacji gieldy, zeby
+        odpowiedziec na pytanie "czy to nasza wina, czy rynek".
+
+    `rodzaj` NIE JEST ZGADYWANY. Wartosc, ktorej adapter nie zna, dostaje
+    rodzaj 'nierozpoznane' i `kod` przepisany bez zmian. Podstawienie
+    najblizszej znanej kategorii byloby gorsze niz brak kategorii: kod
+    nierozpoznany widac jako nierozpoznany, a kod wpisany pod zla kategorie
+    wyglada jak diagnoza i konczy sledztwo w zlym miejscu.
+
+    ODRZUCENIE PO PRZYJECIU TO NIE `OdmowaGieldy`. Tamta klasa opisuje
+    odpowiedz na SKLADANIE zlecenia (`retCode != 0`, zlecenie nie powstalo).
+    Tu zlecenie POWSTALO — ma `venue_order_id` — i zostalo odrzucone przez
+    silnik dopasowan juz po przyjeciu. Odczytujemy to z tej samej odpowiedzi,
+    z ktorej czytamy status, wiec nie kosztuje to ani jednego zapytania.
+    """
+    kod: str                       # SUROWA wartosc gieldy, bez tlumaczenia
+    rodzaj: str                    # nasza kategoria albo 'nierozpoznane'
+    opis: str                      # zdanie dla czlowieka, zawiera `kod`
+
+    @property
+    def nierozpoznany(self) -> bool:
+        return self.rodzaj == "nierozpoznane"
+
+
+@dataclass(frozen=True)
 class StanZlecenia:
     """Stan zlecenia po stronie giełdy — źródło prawdy przy uzgadnianiu."""
     id_wlasne: str
@@ -271,6 +306,11 @@ class StanZlecenia:
     # W KUPIONYM AKTYWIE, wiec zalozenie "zawsze waluta kwotowana" zanizalo
     # koszt wejscia o dwa rzedy wielkosci i zawyzalo ilosc w dzienniku.
     prowizja_w: str | None = None
+    # POWOD ODRZUCENIA, gdy `status == 'rejected'`. `None` znaczy "gielda go
+    # nie podala", a nie "nie ma powodu" — do 2026-09-26 kolumna
+    # `exec.order.reject_reason` byla NULL przy KAZDYM odrzuceniu, bo adapter
+    # czytal z odpowiedzi status i ilosci, a pole z powodem pomijal.
+    powod_odmowy: PowodOdmowy | None = None
 
     @property
     def czesciowe(self) -> bool:

@@ -59,7 +59,8 @@ import httpx
 
 from .base import (
     AuthError, Balance, BladIpKlucza, BookLevel, Candle, ConnectionCheck, ExchangeError,
-    KontoZamrozone, OdmowaGieldy, OrderBook, StanZlecenia, SymbolNieListowany,
+    KontoZamrozone, OdmowaGieldy, OrderBook, PowodOdmowy, StanZlecenia,
+    SymbolNieListowany,
     Wypelnienie, ZlozoneZlecenie,
 )
 
@@ -164,6 +165,80 @@ _STATUSY = {
 
 def _status_bybita(status: str) -> str:
     return _STATUSY.get(status, f"nieznany:{status}")
+
+
+# ------------------------------------------------- powod odrzucenia po przyjeciu
+#
+# Bybit podaje `rejectReason` w `/v5/order/realtime` i `/v5/order/history` —
+# czyli w TEJ SAMEJ odpowiedzi, z ktorej `stan_zlecenia` czyta status i ilosci.
+# Do 2026-09-26 pole bylo pomijane, wiec `exec.order.reject_reason` byl NULL na
+# WSZYSTKICH odrzuceniach w calej historii produkcji (zlecenia 55, 57, 58).
+# Zapisanie go nie kosztuje ani jednego dodatkowego zapytania.
+#
+# ODRZUCENIE PO PRZYJECIU TO INNA SCIEZKA NIZ `retCode != 0`. Tamta (kody
+# 170131 itd., `_blad_z_kodu` nizej) znaczy "zlecenie nie powstalo". Tutaj
+# zlecenie POWSTALO — `orderId` jest nadany — i zostalo odrzucone dopiero przez
+# silnik dopasowan. Dlatego `OdmowaGieldy` sie tu nie nadaje: nie ma wyjatku do
+# podniesienia, jest wiersz zlecenia do opisania.
+
+# Wartosci, ktorymi Bybit mowi "NIE BYLO ODMOWY". Pole przychodzi takze przy
+# zleceniu wypelnionym, wiec bez tego zbioru kazde wypelnienie dostawaloby
+# powod odrzucenia — czyli dziennik klamalby w druga strone.
+_BEZ_ODMOWY = {"", "EC_NoError", "0", "None", "null"}
+
+# MAPOWANIE JEST KROTKIE CELOWO.
+#
+# Wpis w tej tablicy to zdanie "wiemy, co ta wartosc znaczy" — a wartosc,
+# ktorej znaczenia nie potwierdzilismy ani na produkcji, ani w dokumentacji
+# gieldy, ma wyjsc jako 'nierozpoznane' z kodem przepisanym doslownie. Kod
+# nierozpoznany da sie zdiagnozowac; kod podstawiony pod zla kategorie wyglada
+# jak diagnoza i konczy sledztwo w zlym miejscu.
+#
+# DOLOZENIE WPISU WYMAGA DOWODU, nie pamieci: wartosci zaobserwowanej w `raw`
+# na produkcji albo cytatu z dokumentacji API. Do tego czasu 'nierozpoznane'
+# jest uczciwsze i NIE JEST ciche — `gielda_exec` zapisuje je z adnotacja.
+POWODY_ODMOWY: dict[str, tuple[str, str]] = {
+    # Jedyna wartosc, ktora ten projekt POTRAFI wskazac u siebie: egzekucja
+    # wysyla `timeInForce: PostOnly` (patrz `zloz_zlecenie`), a cena limitu to
+    # zamkniecie swiecy sprzed kilkudziesieciu minut. Gdy rynek zszedl ponizej
+    # tej ceny, kupno przecina spread — i PostOnly kaze gieldzie je odrzucic
+    # ZAMIAST wypelnic takerem. To jest zachowanie ZAMOWIONE, nie awaria.
+    "EC_PostOnlyWillTakeLiquidity": (
+        "postonly",
+        "zlecenie przecielo spread, a `timeInForce: PostOnly` zabrania "
+        "wypelnienia takerem — gielda odrzucila je ZAMIAST zaplacic wyzsza "
+        "prowizje. To zachowanie ZAMOWIONE (symulacja zaklada makera po cenie "
+        "limitu), a nie awaria: cena limitu byla po prostu po zlej stronie "
+        "rynku w chwili wyslania"),
+}
+
+
+def _powod_odmowy(surowy) -> PowodOdmowy | None:
+    """`rejectReason` giełdy -> (surowa wartość + nasza interpretacja).
+
+    `None` znaczy "giełda nie podała powodu". Wartość nieznana NIE jest
+    podstawiana pod najbliższą znaną kategorię — wychodzi jako
+    `rodzaj='nierozpoznane'` z kodem przepisanym dosłownie.
+    """
+    if surowy is None:
+        return None
+    kod = str(surowy).strip()
+    if kod in _BEZ_ODMOWY:
+        return None
+    znane = POWODY_ODMOWY.get(kod)
+    if znane is None:
+        return PowodOdmowy(
+            kod=kod, rodzaj="nierozpoznane",
+            # KOD W OPISIE, nie tylko w polu obok. Opis trafia do
+            # `exec.order.reject_reason`, po ktorym szuka sie gremem — bez
+            # doslownej wartosci w tresci nie da sie znalezc drugiego
+            # wystapienia tej samej odmowy.
+            opis=(f"giełda odrzuciła zlecenie z powodem {kod!r}, którego NIE "
+                  f"ROZPOZNAJEMY — wartość zapisana DOSŁOWNIE, bez podstawiania "
+                  f"pod żadną znaną kategorię. Sprawdź ją w dokumentacji API "
+                  f"giełdy i dopisz do `POWODY_ODMOWY`, jeśli się powtarza"))
+    rodzaj, opis = znane
+    return PowodOdmowy(kod=kod, rodzaj=rodzaj, opis=f"{opis} [rejectReason={kod}]")
 
 
 # --------------------------------------------------------------- kody bledow
@@ -979,6 +1054,12 @@ class BybitAdapter:
                     # i uzgodnienie z niego korzysta; sciezka egzekucji czytala
                     # sama kwote i zapisywala ja jako USDC.
                     prowizja_w=o.get("feeCurrency") or None,
+                    # POWOD ODMOWY Z TEJ SAMEJ ODPOWIEDZI. Nie jest to nowe
+                    # zapytanie — `rejectReason` lezy w tym samym wierszu, co
+                    # `orderStatus`, ktory czytamy linie wyzej. Pomijanie go
+                    # zostawialo `exec.order.reject_reason` NULL-em przy kazdym
+                    # odrzuceniu i kazdy z nich wygladal identycznie.
+                    powod_odmowy=_powod_odmowy(o.get("rejectReason")),
                 )
         return None
 
