@@ -49,13 +49,32 @@ kill-switchu zwraca `block` bez żądania kolejnego.
 ZNANE OGRANICZENIE: OSOBNY PROCES TO JESZCZE NIE OSOBNY POMIAR
 
 Ten proces jest niezależny od silnika jako PROCES, ale nie jest od niego
-niezależny jako POMIAR. Krzywą `exec.equity_point` zapisuje wyłącznie
-`loop.update_equity` — czyli pętla, którą dozorca ma nadzorować. Zawieszona
-pętla (pod żyje, cykl nie chodzi) zamraża krzywą, a dozorca oceniałby tę samą
-zamrożoną liczbę co minutę i meldował `allow` — z bijącym własnym pulsem.
-Byłby to ten sam kształt błędu, przed którym broni docstring wyżej, przesunięty
-o jeden poziom niżej: nadzorca dzielący z nadzorowanym nie proces, tylko źródło
-liczby.
+niezależny jako POMIAR. Krzywą `exec.equity_point` dla silnika `crypto` —
+jedynego, który ten dozorca nadzoruje (`--engine crypto`, values.yaml) —
+zapisuje `loop.update_equity`, czyli pętla, którą dozorca ma nadzorować.
+Zawieszona pętla (pod żyje, cykl nie chodzi) zamraża krzywą, a dozorca
+oceniałby tę samą zamrożoną liczbę co minutę i meldował `allow` — z bijącym
+własnym pulsem. Byłby to ten sam kształt błędu, przed którym broni docstring
+wyżej, przesunięty o jeden poziom niżej: nadzorca dzielący z nadzorowanym nie
+proces, tylko źródło liczby.
+
+DO 2026-09-22 STAŁO TU „zapisuje wyłącznie `loop.update_equity`" — BEZ
+ZASTRZEŻENIA O SILNIKU, i to zdanie było nieprawdą od dodania
+`services/engine/kapital_gieldy.py`. Do tej tabeli piszą TRZY procesy z trzema
+różnymi definicjami kapitału (patrz `stan_kapitalu`, sekcja ZRODLA), a od
+2026-09-26 obowiązuje zasada JEDEN PISARZ NA SERIĘ
+(`stan_kapitalu.KRZYWA_Z_KSIAG_GIELDY`): dla `equity` krzywą piszą KSIĘGI
+GIEŁDY, nie pętla. Dwa fałszywe zdania w komentarzach (tutaj i przy
+`risk.POMIAR_STARY_PO_MIN`) są jedynym powodem, dla którego rozjazd trzech
+definicji przeleżał trzy tygodnie niezauważony — komentarz mówił, że pisarz
+jest jeden, więc nikt nie sprawdzał, czy jest.
+
+Dla `equity` nie istnieje ZA TO żaden dozorca: ten proces chodzi z
+`--engine crypto`, domyślna wartość też jest `crypto`, więc kill-switcha
+silnika giełdowego nie ma kto zwolnić poza
+`POST /api/risk/killswitch/{id}/release`. To osobna decyzja, nie poprawka
+przy okazji — nazwana tutaj, bo właśnie ona czyniła wadę z ustalenia 12
+nieodwracalną bez udziału człowieka.
 
 Od 2026-09-09 ten układ nie jest już cichy: wiek pomiaru jest warunkiem handlu
 (`risk.POMIAR_STARY_PO_MIN`), więc stara krzywa daje `block` zamiast `allow`,

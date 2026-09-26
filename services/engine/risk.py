@@ -84,10 +84,9 @@ def sprawdz_komplet(limity: dict) -> list[str]:
 
 # Ile moze miec pomiar kapitalu, zanim przestaniemy nazywac go POMIAREM.
 #
-# NIKT NIE PYTAL, ILE LAT MA TA LICZBA. `exec.equity_point` pisze wylacznie
-# `loop.update_equity` na koncu cyklu, a wszyscy trzej czytelnicy (ten kernel,
-# dozorca ryzyka i `wznowienie.stan_konta`) brali ostatni wiersz bez patrzenia
-# na `event_time`. Zapytanie "ostatni punkt krzywej" odpowiada tak samo chetnie
+# NIKT NIE PYTAL, ILE LAT MA TA LICZBA. Wszyscy trzej czytelnicy `exec.equity_point`
+# (ten kernel, dozorca ryzyka i `wznowienie.stan_konta`) brali ostatni wiersz bez
+# patrzenia na `event_time`. Zapytanie "ostatni punkt krzywej" odpowiada tak samo chetnie
 # dla punktu sprzed pieciu minut, jak dla punktu sprzed trzech dni - i bez wieku
 # tych dwoch przypadkow NIE DA SIE odroznic. To ten sam blad, ktory po stronie
 # ceny naprawia `cena_odniesienia` w loop.py, tyle ze o poziom wyzej: tam
@@ -113,6 +112,25 @@ def sprawdz_komplet(limity: dict) -> list[str]:
 #
 # Prog, ktory miga, konczy tak samo jak czujka, ktora miga - ktos ja podniesie,
 # zeby przestala przeszkadzac.
+#
+# KTO PISZE KRZYWA - I DLACZEGO TEN PROG NIE OBOWIAZUJE OBU SILNIKOW JEDNAKOWO.
+#
+# Do 2026-09-22 stalo tu zdanie "`exec.equity_point` pisze wylacznie
+# `loop.update_equity`". Przestalo byc prawda tego dnia i to zdanie wlasnie
+# usypialo wade z ustalenia 12: pisarzy jest TRZECH, kazdy z inna definicja
+# kapitalu (patrz `stan_kapitalu`, sekcja ZRODLA), a od 2026-09-26 obowiazuje
+# zasada JEDEN PISARZ NA SERIE (`stan_kapitalu.KRZYWA_Z_KSIAG_GIELDY`).
+#
+# Dla `crypto` pisze petla co 300 s, wiec 15 minut to nadal trzy pominiete
+# cykle i rachunek wyzej obowiazuje bez zmian.
+#
+# Dla `equity` pisze `kapital-equity` co 900 s (values.yaml), czyli JEDEN
+# pominiety cykl wystarcza, zeby pomiar byl "stary". Prog nie jest wiec dla
+# tego silnika trzykrotnym zapasem, tylko granica. Stan ten ISTNIEJE OD
+# 2026-09-22, a nie od decyzji o jednym pisarzu - ale decyzja czyni go trwalym
+# i dlatego jest tu nazwany, zamiast czekac, az objawi sie jako `block`
+# w przypadkowej minucie. Prog wieku pomiaru per silnik to osobna decyzja
+# (razem z brakiem dozorcy dla `engine='equity'`), nie poprawka przy okazji.
 POMIAR_STARY_PO_MIN = 15
 
 

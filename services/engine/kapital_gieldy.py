@@ -38,6 +38,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import psycopg  # noqa: E402
 from psycopg.rows import dict_row  # noqa: E402
 
+from services.engine import stan_kapitalu  # noqa: E402
 from services.engine.loop import START_EQUITY, przeplywy  # noqa: E402
 from services.exchanges.fabryka import adapter_danych  # noqa: E402
 from services.ingest import puls  # noqa: E402
@@ -73,7 +74,32 @@ ZGADNIETA_ODCHYLKA_MAX = Decimal("0.20")
 
 def zapisz_punkt(cur, engine: str, mode: str, stan: dict, unrealized: Decimal,
                  as_of: datetime | None = None) -> dict:
-    """Jeden punkt krzywej z odczytu konta. CZYSTA arytmetyka + INSERT."""
+    """Jeden punkt krzywej z odczytu konta. CZYSTA arytmetyka + INSERT.
+
+    ODMAWIA SILNIKOWI, KTORY LICZY KRZYWA SAM - i to jest drugi koniec
+    poprawki z 2026-09-26 (pierwszy jest w `loop.seed_equity`).
+
+    `--engine` przyjmuje dowolny napis bez `choices=`, wiec `--engine crypto`
+    wycelowalby ten proces w serie, ktora pisze `loop.update_equity` z naszego
+    dziennika wypelnien. Dostalaby wtedy DWIE definicje kapitalu naraz, a
+    czytelnicy (`RiskKernel`, dozorca ryzyka, `wznowienie`) biora z niej `max`,
+    ostatni punkt i punkt sprzed doby BEZ pytania, kto zapisal - wiec rozjazd
+    nie objawilby sie bledem, tylko obsunieciem liczonym miedzy dwiema roznymi
+    ksiegowosciami. Dokladnie ta wada usypiala trzy tygodnie na serii
+    equity/demo, tylko z drugiej strony.
+
+    BLAD, A NIE CICHE POMINIECIE - w odroznieniu od `seed_equity`. Tam brak
+    zasiewu jest stanem normalnym; tutaj proces zostal URUCHOMIONY po to, zeby
+    pisac krzywa, wiec cykl bez zapisu bilby puls i wygladalby na udany, nie
+    robiac tego jednego, do czego istnieje.
+    """
+    if engine not in stan_kapitalu.KRZYWA_Z_KSIAG_GIELDY:
+        raise RuntimeError(
+            f"krzywej silnika {engine!r} nie pisza ksiegi gieldy, tylko "
+            f"loop.update_equity - dopisanie do niej punktu z ksiag dalo by "
+            f"DWIE definicje kapitalu w jednej serii. Silniki z krzywa z ksiag: "
+            f"{sorted(stan_kapitalu.KRZYWA_Z_KSIAG_GIELDY)} "
+            f"(stan_kapitalu.KRZYWA_Z_KSIAG_GIELDY)")
     as_of = (as_of or datetime.now(timezone.utc)).replace(second=0, microsecond=0)
     wplaty, units = przeplywy(cur, engine, mode)
     zgadniete = False
@@ -97,11 +123,12 @@ def zapisz_punkt(cur, engine: str, mode: str, stan: dict, unrealized: Decimal,
     nav = (equity / units) if units > 0 else Decimal(1)
     cur.execute(
         "INSERT INTO exec.equity_point (engine, mode, event_time, equity, cash, unrealized,"
-        " realized_cum, exposure, nav, units, wplaty_netto)"
-        " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)"
+        " realized_cum, exposure, nav, units, wplaty_netto, zrodlo)"
+        " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)"
         " ON CONFLICT (engine, mode, event_time) DO NOTHING",
         (engine, mode, as_of, equity, Decimal(stan["cash"]), unrealized, realized,
-         Decimal(stan["ekspozycja"]), nav, units, wplaty))
+         Decimal(stan["ekspozycja"]), nav, units, wplaty,
+         stan_kapitalu.ZRODLO_KSIEGI_GIELDY))
     return {"equity": equity, "nav": nav, "realized": realized, "unrealized": unrealized,
             "ekspozycja": Decimal(stan["ekspozycja"]),
             "zapisany": getattr(cur, "rowcount", 1) > 0}

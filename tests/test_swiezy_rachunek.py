@@ -27,25 +27,49 @@ import pytest
 
 from services.engine.risk import RiskKernel
 from services.engine.risk_rules import RiskState, evaluate_account
+from services.engine.stan_kapitalu import ZRODLO_KSIEGI_GIELDY, ZRODLO_ZASIEW
 
 
 # ------------------------------------------------------- atrapa krzywej kapitału
 
 class KursorKrzywej:
     """Atrapa kursora znająca DOKŁADNIE te warunki, o które chodzi w teście:
-    filtr wieku (`24 hours`), filtr `nav IS NOT NULL` i kierunek sortowania.
+    filtr wieku (`24 hours`), filtr `nav IS NOT NULL`, kierunek sortowania
+    i — od migracji 0058 — ŹRÓDŁO punktu.
 
     Atrapa oddająca zawsze ten sam wiersz nie odróżniłaby zapytania o punkt
     sprzed doby od zapytania o punkt bieżący — czyli byłaby ślepa na jedyną
     rzecz, którą ten plik ma sprawdzać.
+
+    ŹRÓDŁO NIE JEST TU OZDOBĄ. `SQL_NAV_AGREGAT` i `SQL_EQUITY_SZCZYT` liczą
+    szczyt po serii, POMIJAJĄC punkty zasiane, gdy ta sama seria ma pisarza
+    z księgów giełdy (patrz `stan_kapitalu._ZASIEW_NIE_NALEZY`). Atrapa, która
+    tej reguły nie odtwarza, przepuściłaby jej usunięcie bez jednego czerwonego
+    testu — a to jest dokładnie ta reguła, przez której brak zasiane
+    `nav = 1.0` zostawało szczytem `equity/demo` NA ZAWSZE.
     """
 
     def __init__(self, punkty: list[dict]):
-        # punkty: [{"wiek_h": float, "equity": ..., "nav": ..., "wplaty": ...}]
+        # punkty: [{"wiek_h": float, "equity": ..., "nav": ..., "wplaty": ...,
+        #           "zrodlo": str | None}]
         # posortowane rosnąco po czasie (najstarszy pierwszy)
         self.punkty = sorted(punkty, key=lambda p: -p["wiek_h"])
         self.zapisy: list[tuple] = []
         self._wynik: list[dict] = []
+
+    # --------------------------------------------- reguła szczytu z migracji 0058
+    def _do_szczytu(self) -> list[dict]:
+        """Punkty, które mają prawo być szczytem tej serii.
+
+        Odtwarza `_ZASIEW_NIE_NALEZY`: punkt zasiany wchodzi do szczytu, DOPÓKI
+        seria nie ma punktu z księgów giełdy. `zrodlo IS NULL` (wiersz sprzed
+        migracji 0058) wchodzi ZAWSZE — wykluczenie go zaniżałoby obsunięcie
+        jednostronnie, tak jak brak wstecznego `nav` po migracji 0031.
+        """
+        z_ksiag = any(p.get("zrodlo") == ZRODLO_KSIEGI_GIELDY for p in self.punkty)
+        if not z_ksiag:
+            return list(self.punkty)
+        return [p for p in self.punkty if p.get("zrodlo") != ZRODLO_ZASIEW]
 
     def execute(self, sql: str, params=None):
         s = " ".join(sql.split())
@@ -68,11 +92,12 @@ class KursorKrzywej:
         wiersze = list(self.punkty)
         if "nav IS NOT NULL" in s:
             wiersze = [p for p in wiersze if p.get("nav") is not None]
-        if "max(equity)" in s:
-            self._wynik = [{"peak": max((p["equity"] for p in wiersze), default=None)}]
+        if "max(s.equity)" in s:
+            self._wynik = [{"peak": max((p["equity"] for p in self._do_szczytu()),
+                                        default=None)}]
             return self
-        if "max(nav)" in s:
-            nav = [p["nav"] for p in self.punkty if p.get("nav") is not None]
+        if "max(s.nav)" in s:
+            nav = [p["nav"] for p in self._do_szczytu() if p.get("nav") is not None]
             self._wynik = [{"szczyt": max(nav) if nav else None,
                             "bez_nav": sum(1 for p in self.punkty
                                            if p.get("nav") is None)}]
