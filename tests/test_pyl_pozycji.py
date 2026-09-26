@@ -33,7 +33,7 @@ from services.engine.egzekucja import rozlicz_prowizje
 from services.engine.gielda_exec import rozstrzygnij_plan
 from services.engine.loop import zapisz_wyjscie
 from services.engine.zlecenia import Filtry, czy_zamykalna, sprawdz_zlecenie
-from services.exchanges.base import StanZlecenia
+from services.exchanges.base import ExchangeError, StanZlecenia
 
 # ADAUSDC, reguły tak, jak oddaje je giełda do `ref.instrument`.
 ADAUSDC = Filtry(krok_ilosci=D("0.1"), krok_ceny=D("0.0001"),
@@ -125,6 +125,18 @@ class Gielda:
 
     async def cena_odniesienia(self, symbol, kategoria=None):
         return None
+
+    async def fetch_order_book(self, symbol, depth=50, *, ksiega_egzekucji=True):
+        """Arkusz NIEODCZYTANY — i to jest w tym pliku decyzja, nie brak.
+
+        `zloz_plan` czyta arkusz księgi egzekucji, żeby cena limitu pochodziła
+        z chwili wysyłki. Ten plik mierzy co innego (POWÓD odmowy giełdy),
+        a podstawienie arkusza podmieniałoby cenę wysyłaną i mieszało dwa
+        pomiary w jednej asercji. Atrapa MUSI jednak tę metodę mieć: bez niej
+        produkcyjne wywołanie kończy się `AttributeError`, który wygląda jak
+        błąd testu, a nie jak luka w atrapie.
+        """
+        raise ExchangeError("arkusz nieczytelny (atrapa)")
 
 
 # =========================================================== rachunek pętli

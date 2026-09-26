@@ -109,6 +109,18 @@ class Gielda:
         # jest przedmiotem tego pliku i podstawianie go tu mierzyloby co innego.
         return None
 
+    async def fetch_order_book(self, symbol, depth=50, *, ksiega_egzekucji=True):
+        """Arkusz NIEODCZYTANY — i to jest w tym pliku decyzja, nie brak.
+
+        `zloz_plan` czyta arkusz księgi egzekucji, żeby cena limitu pochodziła
+        z chwili wysyłki. Ten plik mierzy co innego (POWÓD odmowy giełdy),
+        a podstawienie arkusza podmieniałoby cenę wysyłaną i mieszało dwa
+        pomiary w jednej asercji. Atrapa MUSI jednak tę metodę mieć: bez niej
+        produkcyjne wywołanie kończy się `AttributeError`, który wygląda jak
+        błąd testu, a nie jak luka w atrapie.
+        """
+        raise ExchangeError("arkusz nieczytelny (atrapa)")
+
     async def stan_zlecenia(self, id_wlasne, kategoria="spot"):
         return self._stan
 

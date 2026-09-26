@@ -32,12 +32,20 @@ księgi. Księga podmiotu unijnego jest dla naszych par kilkukrotnie płytsza ni
 globalna (docs/03), więc przejechanie przez nią jest realną stratą, a w dzienniku
 wygląda jak zwykła transakcja. Stąd PASMO CENY — patrz `ocena_pasma`.
 
-PASMO NIE JEST JEDNAK ODPOWIEDZIĄ NA PYTANIE WYJŚCIA. Wejściu wystarczy, że
-zła cena nie pójdzie na giełdę — pozycji wtedy po prostu nie ma. Wyjście musi
-się WYPEŁNIĆ, bo inaczej pozycja zostaje otwarta wbrew decyzji, a zlecenia
-idą jako `PostOnly`: cena zbyt daleko od rynku leży bezczynnie, a cena
-przecinająca spread jest odrzucana. Dlatego wyjście nie dostaje granicy
-tolerancji, tylko cenę z księgi docelowej — patrz `cena_makera`.
+PASMO NIE JEST JEDNAK ODPOWIEDZIĄ NA PYTANIE WYKONALNOŚCI. Zlecenia idą jako
+`PostOnly`: cena zbyt daleko od rynku leży bezczynnie, a cena przecinająca
+spread jest ODRZUCANA. Pasmo o tym nie mówi nic — 10,5% nad rynkiem mieści się
+w nim bez problemu. Odpowiedzią jest cena wzięta z księgi docelowej W CHWILI
+WYSYŁKI, po pasywnej stronie spreadu — patrz `cena_makera` i `Oferty`.
+
+I DOTYCZY TO OBU RÓL, choć różne rzeczy nimi ryzykujemy. Wyjście MUSI się
+wypełnić, bo inaczej pozycja zostaje otwarta wbrew decyzji, więc nie dostaje
+żadnej granicy tolerancji. Wejście dostaje ją — `prog_zwloki` — bo jego
+odrzucenie kosztuje tylko okazję, a wejście po cenie odjechanej od ceny
+decyzyjnej jest zakładem, którego nikt nie zatwierdzał. Do 2026-09-26 wejście
+nie dostawało ANI podmiany ceny, ANI progu: jechało z ceną zamknięcia świecy
+sprzed 71–82 minut i to ona jest przyczyną wszystkich trzech odrzuceń PostOnly
+w historii produkcji.
 """
 from __future__ import annotations
 
@@ -287,11 +295,200 @@ def ocena_pasma(cena: Decimal, odniesienie: Decimal | None,
     )
 
 
+# ------------------------------------------------- cena z CHWILI WYSYLKI
+#
+# CENA LIMITU POWSTAWALA NA ZAMKNIECIU SWIECY, A ZLECENIE SZLO 71-82 MINUT POZNIEJ.
+#
+# Zmierzone na produkcji (journal.pominiecie + exec.order, 25-26.09.2026):
+#
+#     bar 2026-09-25 08:00 -> za_malo_cech 12:01, niepelne_sygnaly 12:11,
+#                             decyzja 13:11:48  (+71 min od zamkniecia swiecy)
+#     bar 2026-09-25 20:00 -> decyzja 01:21:16  (+81 min)
+#     bar 2026-09-26 00:00 -> decyzja 05:21:52  (+82 min)
+#
+# W tym czasie SOL zszedl o 13-18 centow, wiec limit kupna zostawal NAD askiem.
+# Egzekucja wysyla `timeInForce: PostOnly` (`bybit.zloz_zlecenie`), a zlecenie
+# przecinajace spread PostOnly ODRZUCA - to zachowanie zamowione, nie awaria
+# gieldy. Wszystkie trzy odrzucenia w historii produkcji (zlecenia 55, 57, 58)
+# to dokladnie ten przypadek; oba wypelnione zlecenia (54, 56) mialy limit po
+# stronie pasywnej. Separacja zupelna: 3/3 kontra 2/2.
+#
+# Wyjscie tego nie mialo, bo `sprawdz_zlecenie` podmienialo mu cene na
+# `cena_makera` z odczytu Z CHWILI WYSYLKI. Wejscie takiej podmiany nie
+# dostawalo - i to jest cala roznica miedzy tymi dwiema sciezkami.
+
+
+@dataclass(frozen=True)
+class Oferty:
+    """Najlepsze oferty z ksiegi EGZEKUCJI, odczytane W CHWILI WYSYLKI.
+
+    DLACZEGO BID I ASK, A NIE OSTATNIA CENA. `cena_odniesienia` oddaje
+    `lastPrice`, czyli cene ostatniej TRANSAKCJI - a ta nie musi lezec miedzy
+    dzisiejszym bidem i askiem. Zmierzone na zleceniu 54 (SOLUSDC, sprzedaz):
+    limit wyszedl 114,55 przy arkuszu 114,39 / 114,43, czyli `lastPrice`
+    bylo JEDENASCIE tickow NAD askiem. Tym razem skonczylo sie zleceniem
+    lezacym dalej od rynku niz trzeba; w druga strone (ksiega odjechala do
+    gory po ostatniej transakcji) ta sama arytmetyka daje sprzedaz PONIZEJ
+    bidu, czyli cene przecinajaca spread - i odrzucenie przez PostOnly.
+
+    Pytanie "po ktorej stronie spreadu lezy moje zlecenie" ma odpowiedz
+    wylacznie w arkuszu. Ostatnia transakcja jest jej przyblizeniem o bledzie
+    rzedu spreadu i to przyblizenie zawodzi dokladnie wtedy, gdy rynek sie
+    rusza.
+    """
+    bid: Decimal
+    ask: Decimal
+
+    @property
+    def kompletne(self) -> bool:
+        # ASK NIE MOZE LEZEC PONIZEJ BIDU. Arkusz odwrocony nie jest arkuszem
+        # ciasnym - jest odczytem zepsutym, a podstawienie go dawaloby cene
+        # po ZLEJ stronie ksiegi przy zachowaniu wszystkich pozostalych regul.
+        return self.bid > 0 and self.ask > 0 and self.ask >= self.bid
+
+    def pasywna(self, *, kupno: bool) -> Decimal:
+        """Strona ksiegi, po ktorej NASZE zlecenie moze lezec bezczynnie."""
+        return self.bid if kupno else self.ask
+
+
+# ILE RAZY ATR WOLNO PRZEJSC CENIE MIEDZY DECYZJA A WYSYLKA.
+#
+# ZMIERZONE, NIE DOBRANE. Rozklad bezwzglednego dryfu ceny przez 75 minut
+# (dokladnie tyle, ile wynosi zwloka na produkcji) policzony z `market.candle`
+# 1m za 30 dni, dla calego uniwersum `active AND tradeable`, obok mediany
+# `atr_pct__4h` z `feat.feature_value` za ten sam okres:
+#
+#     symbol     n      dryf p90   dryf p99   ATR 4h med   p99 / ATR
+#     ADAUSDC   31600     1,55%      3,25%       2,58%        1,26
+#     ARBUSDC   31600     3,08%      7,70%       5,22%        1,48
+#     BTCUSDC   31600     0,58%      1,49%       1,13%        1,32
+#     DOGEUSDC  31600     1,33%      3,11%       2,07%        1,50
+#     ETHUSDC   31600     0,79%      2,13%       1,53%        1,39
+#     LINKUSDC  31599     1,36%      3,14%       2,04%        1,54
+#     NEARUSDC  31599     3,10%      5,84%       3,91%        1,49
+#     SOLUSDC   31599     1,00%      2,34%       1,85%        1,26
+#     SUIUSDC   31599     1,85%      4,22%       2,67%        1,58
+#     XRPUSDC   31599     1,27%      3,00%       2,08%        1,44
+#
+# Ostatnia kolumna mieszka w przedziale 1,26-1,58 dla WSZYSTKICH DZIESIECIU
+# instrumentow, rozniacych sie zmiennoscia pieciokrotnie (BTC 1,13% wobec ARB
+# 5,22%). To jest cala podstawa tej stalej: 1,5 x ATR to p98-p99,5 zmierzonego
+# dryfu 75-minutowego na kazdej z tych par. Prog odmawia wiec okolo jednego
+# wejscia na sto - tych, w ktorych rynek przeszedl wiecej niz w 99 ze 100
+# porownywalnych okien.
+#
+# DLACZEGO NIE STALY PROCENT. Mediana dryfu 75-minutowego to 0,17% dla BTC
+# i 1,02% dla NEAR - szesciokrotnie. Jedna liczba bylaby albo krzykliwa dla
+# BTC, albo bezuzyteczna dla NEAR; ten sam antywzorzec, ktory ten plik opisuje
+# przy `KROTNOSC_PASMA`.
+#
+# DLACZEGO NIE PROG SKALOWANY SAMA ZWLOKA (atr * sqrt(zwloka / swieca)). Te
+# same dane pasuja do obu postaci rownie dobrze, bo dla ustalonej zwloki 75 min
+# sqrt(75/240) jest stalym czynnikiem (wtedy krotnosc wychodzi 2,25-2,83).
+# Roznia sie zachowaniem, gdy potok cech sie pogorszy: postac ze zwloka
+# ROZSZERZA tolerancje dokladnie wtedy, gdy decyzja jest bardziej przestarzala.
+# Ta postac tego nie robi - dluzsza zwloka znaczy wiecej odmow, czyli nacisk
+# w strone naprawy potoku, a nie w strone przyzwyczajenia sie do niego.
+#
+# DLACZEGO PROG JEST SYMETRYCZNY, choc kazda strona boli inaczej:
+#
+#   * rynek POSZEDL W GORE po decyzji o kupnie - kupujemy drozej, niz liczyl
+#     risk kernel. `qty` zostaje z planu (zmiana ilosci byla by zmiana decyzji,
+#     nie ceny), wiec wartosc pozycji przekracza zatwierdzona dokladnie o ten
+#     dryf. Prog na dryfie JEST wiec zarazem sufitem na to przekroczenie;
+#   * rynek POSZEDL W DOL - kupujemy taniej, ale cechy, z ktorych powstal
+#     sygnal, opisuja rynek, ktorego juz nie ma. Wejscie po tej cenie jest nowym
+#     zakladem, ktorego nikt nie zatwierdzil.
+KROTNOSC_ZWLOKI = Decimal("1.5")
+
+# PROG AWARYJNY, GDY ZMIENNOSCI NIE ZNAMY. `1,5 x mediana ATR uniwersum`
+# (2,08% z tabeli wyzej) zaokraglone do 3%. Nie jest to pomiar tej pary - jest
+# to zdanie "nie wiemy, ile ta para chodzi, wiec bierzemy pare typowa". Brak
+# cechy nie moze ani wylaczac progu (bo wtedy awaria danych otwiera furtke),
+# ani zatrzymywac handlu (bo `zloz_oczekujace` sciaga ATR bez ograniczenia
+# wieku i pojedynczy brak wpisu wstrzymalby wszystkie wejscia).
+PROG_ZWLOKI_BEZ_ATR = Decimal("0.03")
+
+# SUFIT. Najwyzszy prog policzony ze zmierzonych ATR-ow to ARBUSDC 7,8%, wiec
+# 10% NIE WIAZE dla zadnej pary z uniwersum - wiaze dopiero dla ATR ponad
+# 6,67% na swiecy 4h, czyli dla wartosci, ktora sama jest podejrzana. Ten sam
+# powod co przy `SUFIT_PASMA`: jesli ATR wyszedl tak duzy, to prawdopodobnie
+# policzono go z zepsutych swiec, a prog liczony z zepsutej liczby nie jest
+# progiem.
+SUFIT_ZWLOKI = Decimal("0.10")
+
+
+def prog_zwloki(atr_pct: float | None) -> Decimal:
+    """Wzgledny prog dryfu ceny miedzy decyzja a wysylka. CZYSTA FUNKCJA.
+
+    `atr_pct` w PROCENTACH ceny, tak jak w `feat.feature_value`
+    (`features.atr_pct` mnozy przez 100) i tak samo jak w `prog_pasma`.
+    """
+    if not _zmiennosc_znana(atr_pct):
+        return PROG_ZWLOKI_BEZ_ATR
+    return min(KROTNOSC_ZWLOKI * Decimal(str(atr_pct)) / 100, SUFIT_ZWLOKI)
+
+
+@dataclass(frozen=True)
+class Zwloka:
+    """Ile cena odjechala od ceny DECYZYJNEJ. Dane, nie decyzja."""
+    cena_decyzji: Decimal
+    cena_wysylki: Decimal
+    prog: Decimal
+    odchylenie: Decimal
+    ze_zmiennosci: bool
+
+    @property
+    def poza(self) -> bool:
+        return self.odchylenie > self.prog
+
+    def opis(self) -> str:
+        skad = ("1,5×ATR pary" if self.ze_zmiennosci
+                else "prog awaryjny (ATR nieznany)")
+        return (f"cena odjechala od ceny decyzyjnej o "
+                f"{self.odchylenie * 100:.2f}% przy dopuszczalnych "
+                f"{self.prog * 100:.2f}% [{skad}]; decyzja stala na "
+                f"{self.cena_decyzji}, arkusz w chwili wysylki daje "
+                f"{self.cena_wysylki} — wejscie po tej cenie nie jest tym, "
+                f"co decyzja popierala")
+
+
+def ocena_zwloki(cena_decyzji: Decimal, cena_wysylki: Decimal | None,
+                 atr_pct: float | None) -> Zwloka | None:
+    """Czy cena z chwili wysylki jest jeszcze ta, ktora decyzja popierala.
+
+    POROWNUJEMY CENE, KTORA NAPRAWDE POJDZIE NA GIELDE - czyli to, co oddalo
+    `sprawdz_zlecenie` - z cena, na ktorej stanela DECYZJA. Nie mid i nie sam
+    bid: mid jest wielkoscia, ktorej nikt nie placi, a pytanie brzmi "o ile
+    odjechala cena, po ktorej wejdziemy".
+
+    DLATEGO TA FUNKCJA NIE PYTA, SKAD WZIELA SIE CENA WYSYLKI. Jest ona albo
+    z arkusza, albo z ostatniej ceny tej samej ksiegi - i w obu przypadkach
+    porownanie jest dokladnie to samo. Gdyby funkcja przyjmowala `Oferty`,
+    sciezka zapasowa (ostatnia cena) zostawalaby BEZ progu, czyli bez
+    zabezpieczenia, i nic by tego nie pokazalo.
+
+    Zwraca None, gdy ceny z chwili wysylki nie ma - BRAK ODCZYTU TO LUKA,
+    NIE ZGODA. Co wtedy zrobic z wejsciem, rozstrzyga `gielda_exec.zloz_plan`;
+    tutaj nie ma czego porownywac.
+    """
+    if cena_wysylki is None or cena_wysylki <= 0 or cena_decyzji <= 0:
+        return None
+    return Zwloka(
+        cena_decyzji=cena_decyzji,
+        cena_wysylki=cena_wysylki,
+        prog=prog_zwloki(atr_pct),
+        odchylenie=abs(cena_wysylki - cena_decyzji) / cena_decyzji,
+        ze_zmiennosci=_zmiennosc_znana(atr_pct),
+    )
+
+
 def sprawdz_zlecenie(ilosc: Decimal, cena: Decimal, f: Filtry, *,
                      kupno: bool, wyjscie: bool,
                      cena_odniesienia: Decimal | None = None,
                      atr_pct: float | None = None,
-                     bary: float = BARY_ZYCIA_PLANU) -> tuple[Decimal, Decimal, str | None]:
+                     bary: float = BARY_ZYCIA_PLANU,
+                     najlepsze: Oferty | None = None) -> tuple[Decimal, Decimal, str | None]:
     """Zwraca (ilosc, cena, powod_odmowy). `powod_odmowy is None` znaczy: wolno.
 
     `kupno` i `wyjscie` SĄ ROZDZIELONE CELOWO. Kusi, żeby wyprowadzić jedno
@@ -305,18 +502,23 @@ def sprawdz_zlecenie(ilosc: Decimal, cena: Decimal, f: Filtry, *,
     czytelna jako zdarzenie krytyczne już w treści, a nie dopiero w kodzie,
     który ją odbiera.
 
-    PRZY CENIE ODNIESIENIA `wyjscie` zmienia coś więcej — samą reakcję, i to
-    jest jedyne miejsce w tym module, w którym tak jest. Pasmo i odniesienie
-    służą tu do dwóch różnych rzeczy:
+    PRZY CENIE ODNIESIENIA `wyjscie` zmienia coś więcej — samą reakcję na cenę
+    ABSURDALNĄ. Pasmo i cena z chwili wysyłki służą tu do dwóch różnych rzeczy:
 
-      * WEJŚCIE poza pasmem → ODMOWA. Kosztuje okazję, czyli nic, czego byśmy
-        już nie stracili, gdyby ceny nie było w ogóle. Pasmo jest tu OBRONĄ
-        PRZED ABSURDALNĄ CENĄ i niczym więcej.
-      * WYJŚCIE → CENA Z KSIĘGI DOCELOWEJ, o jeden krok po naszej stronie
-        rynku (`cena_makera`). Odmowa zostawiłaby otwartą pozycję wbrew
-        decyzji — dokładnie ten skutek, przed którym ostrzega docstring modułu —
-        więc wyjściu nie jest potrzebna granica tolerancji, tylko cena, po
-        której da się dziś WYJŚĆ.
+      * PASMO odpowiada na pytanie „czy cena z planu to jeszcze cena, czy już
+        awaria danych". Przy WEJŚCIU poza pasmem → ODMOWA; kosztuje okazję,
+        czyli nic, czego byśmy już nie stracili, gdyby ceny nie było w ogóle.
+        Przy WYJŚCIU pasmo nie odmawia niczego, bo odmowa zostawiłaby otwartą
+        pozycję wbrew decyzji — dokładnie ten skutek, przed którym ostrzega
+        docstring modułu.
+      * CENA Z CHWILI WYSYŁKI (`najlepsze`, a zapasowo `pasmo.odniesienie`)
+        odpowiada na pytanie „po ile da się dziś złożyć zlecenie, żeby PostOnly
+        je przyjął". Dostają ją OBIE role i to jest poprawka z 2026-09-26.
+
+    GRANICĘ TOLERANCJI DLA WEJŚCIA STAWIA `gielda_exec.zloz_plan`, nie ta
+    funkcja — `ocena_zwloki` na cenie, którą tu zwracamy. Tu jej nie ma, bo ta
+    funkcja nie wie, czy wywołujący pytał giełdy; gdyby zgadywała, `czy_zamykalna`
+    i `proba_egzekucji` dostałyby próg liczony z ceny, której nikt nie odczytał.
 
     DLACZEGO NIE KRAWĘDŹ PASMA, choć tak to tu kiedyś działało. Półszerokość
     pasma to `ROZJAZD_GIELD + 6×ATR×√2`, czyli 10,5% przy ATR 1% i 25% przy ATR
@@ -331,14 +533,14 @@ def sprawdz_zlecenie(ilosc: Decimal, cena: Decimal, f: Filtry, *,
     nie ma. Krawędź pasma nie jest ceną, po której ktoś handluje; jest granicą
     tego, co jeszcze uznajemy za nie-awarię.
 
-    DLACZEGO WYJŚCIE DOSTAJE TĘ CENĘ ZAWSZE, A NIE DOPIERO POZA PASMEM. Pasmo
-    mierzy, czy cena jest SENSOWNA, a nie czy jest WYKONALNA; wyjście wewnątrz
-    pasma potrafi stać osiem procent od rynku i leżeć dokładnie tak samo.
-    Cena limitu wyjścia nie niesie zresztą żadnej intencji poza „wyjść":
-    `loop.zaplanuj` dostaje dla wejścia i wyjścia tę samą `mark_price` z księgi
-    GLOBALNEJ sprzed maks. dwóch świec. Skoro znamy ostatnią cenę z księgi,
-    w której zlecenie naprawdę wyląduje, to ona jest lepszą odpowiedzią na
-    pytanie „po ile da się teraz wyjść".
+    DLACZEGO PODMIANA ZAWSZE, A NIE DOPIERO POZA PASMEM. Pasmo mierzy, czy cena
+    jest SENSOWNA, a nie czy jest WYKONALNA; zlecenie wewnątrz pasma potrafi
+    stać osiem procent od rynku i leżeć bezczynnie do wygaśnięcia planu albo —
+    po drugiej stronie — przecinać spread i wracać jako odrzucone. Cena z planu
+    nie niesie zresztą żadnej intencji poza kierunkiem: `loop.zaplanuj` dostaje
+    dla wejścia i wyjścia tę samą cenę zamknięcia świecy z księgi GLOBALNEJ.
+    Skoro znamy dzisiejszy arkusz księgi, w której zlecenie naprawdę wyląduje,
+    to on jest lepszą odpowiedzią na pytanie „po ile da się teraz złożyć".
 
     ZEPSUTE ODNIESIENIE NIE KUPUJE NAM ZŁEGO WYPEŁNIENIA. Gdyby cena z księgi
     docelowej była nieprawdziwa, wyjście albo poleży (za daleko od rynku), albo
@@ -365,19 +567,46 @@ def sprawdz_zlecenie(ilosc: Decimal, cena: Decimal, f: Filtry, *,
     c = cena_do_kroku(cena, f.krok_ceny, kupno=kupno)
 
     pasmo = ocena_pasma(c, cena_odniesienia, atr_pct, bary=bary)
-    if pasmo is not None:
-        if not wyjscie:
-            if pasmo.poza:
-                return i, c, f"{rola}: {pasmo.opis()}"
-        else:
-            # Podmiana ceny ZANIM policzymy min_wartosc - inaczej sprawdzalibysmy
-            # minimum na cenie, ktorej i tak nie wyslemy.
-            rynkowa = cena_makera(pasmo.odniesienie, f.krok_ceny, kupno=kupno)
-            # Krok ceny wiekszy od samej ceny to regula bez sensu dla tego
-            # instrumentu; cena zero lub ujemna nie jest lepsza od planowej,
-            # a o wartosci zlecenia wypowiada sie ponizej minimum wartosci.
-            if rynkowa > 0:
-                c = rynkowa
+    if pasmo is not None and not wyjscie and pasmo.poza:
+        return i, c, f"{rola}: {pasmo.opis()}"
+
+    # CENA Z CHWILI WYSYLKI ZASTEPUJE CENE Z PLANU - I DOTYCZY TO TAKZE WEJSCIA.
+    #
+    # Do 2026-09-26 podmiane dostawalo WYLACZNIE wyjscie, a wejscie jechalo
+    # z cena zamkniecia swiecy - starsza o 71-82 minuty (pomiary w naglowku
+    # sekcji "cena z CHWILI WYSYLKI"). Wszystkie trzy odrzucenia PostOnly
+    # w historii produkcji to wejscia; oba wypelnienia mialy limit po stronie
+    # pasywnej. Asymetria nie miala uzasadnienia: PostOnly odrzuca cene
+    # przecinajaca spread niezaleznie od tego, czy wchodzimy, czy wychodzimy.
+    #
+    # PODMIANA IDZIE ZANIM POLICZYMY min_wartosc - inaczej sprawdzalibysmy
+    # minimum na cenie, ktorej i tak nie wyslemy.
+    #
+    # KOLEJNOSC ZRODEL JEST KOLEJNOSCIA JAKOSCI, nie wygody:
+    #   1. arkusz ksiegi EGZEKUCJI (`najlepsze`) - bid i ask, czyli wprost
+    #      odpowiedz na pytanie "po ktorej stronie spreadu stanie zlecenie",
+    #   2. ostatnia cena z tej samej ksiegi (`pasmo.odniesienie`) - przyblizenie
+    #      o bledzie rzedu spreadu. Zmierzone na zleceniu 54: `lastPrice` lezalo
+    #      11 tickow NAD askiem, wiec to przyblizenie zawodzi wlasnie wtedy, gdy
+    #      rynek sie rusza. Zostaje jako zapasowe, bo awaria JEDNEGO endpointu
+    #      nie ma zatrzymywac handlu.
+    #
+    # CZEGO TU NIE MA: decyzji, co robic, gdy nie ma ANI JEDNEGO z tych zrodel.
+    # Ta funkcja nie wie, czy wolajacy w ogole pytal gieldy (`czy_zamykalna`
+    # i `proba_egzekucji` nie pytaja i nie musza) - rozstrzyga to
+    # `gielda_exec.zloz_plan`, ktory jako jedyny zna wynik odczytow.
+    if najlepsze is not None and najlepsze.kompletne:
+        rynkowa = cena_makera(najlepsze.pasywna(kupno=kupno), f.krok_ceny,
+                              kupno=kupno)
+    elif pasmo is not None:
+        rynkowa = cena_makera(pasmo.odniesienie, f.krok_ceny, kupno=kupno)
+    else:
+        rynkowa = None
+    # Krok ceny wiekszy od samej ceny to regula bez sensu dla tego instrumentu;
+    # cena zero lub ujemna nie jest lepsza od planowej, a o wartosci zlecenia
+    # wypowiada sie ponizej minimum wartosci.
+    if rynkowa is not None and rynkowa > 0:
+        c = rynkowa
 
     if i <= 0:
         return i, c, (f"{rola}: ilość {ilosc} po zaokrągleniu do kroku "

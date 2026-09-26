@@ -18,8 +18,8 @@ from decimal import Decimal as D
 import pytest
 
 from services.engine.zlecenia import (
-    ROZJAZD_GIELD, SUFIT_PASMA, Filtry, cena_makera, ocena_pasma, prog_pasma,
-    sprawdz_zlecenie,
+    ROZJAZD_GIELD, SUFIT_PASMA, Filtry, Oferty, cena_makera, ocena_pasma,
+    prog_pasma, sprawdz_zlecenie,
 )
 
 PELNE = Filtry(krok_ilosci=D("0.001"), min_ilosc=D("0.001"),
@@ -238,12 +238,70 @@ def test_WEJSCIE_poza_pasmem_nadal_ODMAWIA_zamiast_dostac_cene_rynkowa():
     assert c == D("200")                        # ceny wejscia nikt nie ruszal
 
 
-def test_WEJSCIE_w_pasmie_idzie_po_SWOJEJ_cenie():
-    """Cena wejścia niesie decyzję modelu („kupuj, ale nie drożej niż"),
-    więc podmiana jej na rynkową kupowałaby po każdej cenie, jaką akurat
-    pokazuje księga."""
+def test_WEJSCIE_W_PASMIE_TEZ_dostaje_cene_z_chwili_wysylki():
+    """ODWRÓCENIE WCZEŚNIEJSZEGO ZAŁOŻENIA — i powód, dla którego to nie jest
+    rozluźnienie reguły.
+
+    Do 2026-09-26 stało tu „cena wejścia niesie decyzję modelu (kupuj, ale nie
+    drożej niż), więc podmiana jej na rynkową kupowałaby po każdej cenie, jaką
+    akurat pokazuje księga". Zdanie jest słuszne, a wniosek był odwrotny do
+    skutku: cena z planu to zamknięcie świecy sprzed 71–82 minut, więc
+    „nie drożej niż" odnosiło się do rynku, którego już nie było. Wszystkie
+    trzy odrzucenia PostOnly w historii produkcji to wejścia z tą ceną (kupno
+    SOLUSDC nad askiem), a oba wypełnienia miały limit po stronie pasywnej.
+    Cena z planu nie chroniła więc przed złym wykonaniem — ona je uniemożliwiała.
+
+    „NIE DROŻEJ NIŻ" ZOSTAJE, tylko nie w tej funkcji: pilnuje tego
+    `ocena_zwloki` w `gielda_exec.zloz_plan`, z progiem 1,5×ATR pary. Tutaj
+    sprawdzamy sam fakt podmiany — i to, że wychodzi ona PO STRONIE PASYWNEJ
+    (kupno poniżej odniesienia), bo to jest warunek przyjęcia przez PostOnly.
+    """
     _, c, powod = sprawdz_zlecenie(D("1"), D("103"), PELNE, kupno=True,
                                    wyjscie=False, cena_odniesienia=KSIEGA,
                                    atr_pct=1.0)
     assert powod is None
-    assert c == D("103")
+    assert c == D("99.99")
+    assert c < KSIEGA
+
+
+def test_WEJSCIE_bierze_BID_z_arkusza_gdy_arkusz_jest():
+    """ARKUSZ WYGRYWA Z OSTATNIĄ CENĄ, bo odpowiada na zadane pytanie.
+
+    `lastPrice` leży *gdzieś* między bidem a askiem — ale nie musi: zmierzone
+    na zleceniu 54 (SOLUSDC) było JEDENAŚCIE tików NAD askiem. Kupno liczone
+    od niego stoi wtedy powyżej najlepszej sprzedaży, czyli przecina spread,
+    czyli wraca odrzucone. Bid i ask są w arkuszu i tylko tam.
+    """
+    o = Oferty(bid=D("99.50"), ask=D("99.52"))
+    _, c, powod = sprawdz_zlecenie(D("1"), D("103"), PELNE, kupno=True,
+                                   wyjscie=False, cena_odniesienia=KSIEGA,
+                                   atr_pct=1.0, najlepsze=o)
+    assert powod is None
+    assert c == D("99.49")                  # bid - krok, nie 99,99 z lastPrice
+    assert c < o.ask, "cena przecinająca spread wróciłaby jako odrzucona"
+
+
+def test_SPRZEDAZ_bierze_ASK_a_nie_bid():
+    """Strona ma znaczenie i pomyłka jest cicha: sprzedaż postawiona od bidu
+    leży PONIŻEJ najlepszego kupna, czyli przecina spread i wraca odrzucona.
+    Ten sam błąd w drugą stronę co przy kupnie od asku."""
+    o = Oferty(bid=D("99.50"), ask=D("99.52"))
+    _, c, powod = sprawdz_zlecenie(D("1"), D("97"), PELNE, kupno=False,
+                                   wyjscie=False, cena_odniesienia=KSIEGA,
+                                   atr_pct=1.0, najlepsze=o)
+    assert powod is None
+    assert c == D("99.53")
+    assert c > o.bid
+
+
+def test_ARKUSZ_ODWROCONY_nie_jest_arkuszem_ciasnym():
+    """Ask poniżej bidu to odczyt ZEPSUTY, nie księga bez spreadu. Podstawienie
+    go dawałoby cenę po złej stronie rynku przy zachowaniu wszystkich
+    pozostałych reguł — czyli błąd wyglądający na poprawne zlecenie. Wracamy
+    wtedy do ostatniej ceny, która jest odczytem innym i niezależnym."""
+    o = Oferty(bid=D("99.52"), ask=D("99.50"))
+    assert o.kompletne is False
+    _, c, _ = sprawdz_zlecenie(D("1"), D("103"), PELNE, kupno=True,
+                               wyjscie=False, cena_odniesienia=KSIEGA,
+                               atr_pct=1.0, najlepsze=o)
+    assert c == D("99.99")                  # z lastPrice, nie z zepsutego arkusza

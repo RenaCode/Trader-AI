@@ -37,6 +37,13 @@ import pytest
 
 KORZEN = Path(__file__).resolve().parents[1]
 LOOP = KORZEN / "services" / "engine" / "loop.py"
+# DRUGI PISARZ TEJ TABELI. Od 2026-09-26 pominięcie zapisuje także egzekucja:
+# odmowa WYSŁANIA wejścia, gdy cena odjechała od ceny decyzyjnej albo gdy
+# z giełdy nie da się odczytać żadnej ceny z chwili wysyłki. Szukanie powodów
+# tylko w `loop.py` zostawiałoby te dwa poza porównaniem z CHECK-iem — czyli
+# dokładnie tam, gdzie rozjazd kodu ze schematem wywraca cykl na produkcji,
+# a test świeci na zielono.
+PISARZE = (LOOP, KORZEN / "services" / "engine" / "gielda_exec.py")
 MIGRACJA = KORZEN / "db" / "migrations" / "0041_pominiete_instrumenty.sql"
 
 # Nazwa funkcji zapisującej ślad i nazwa słownika liczników. Wyciągnięte do
@@ -176,17 +183,25 @@ def _check_powodow() -> set[str]:
 
 
 def _powody_w_kodzie() -> set[str]:
-    """Wartości `powod` faktycznie przekazywane do `zapisz_pominiecie`."""
-    drzewo = ast.parse(LOOP.read_text(encoding="utf-8"))
+    """Wartości `powod` faktycznie przekazywane do `zapisz_pominiecie`.
+
+    Czytamy WSZYSTKICH pisarzy tej tabeli (`PISARZE`), a nie sam `loop.py`.
+    Plik pominięty w tej liście jest luką cichą w jedną stronę: jego powody nie
+    trafiają do porównania z CHECK-iem, więc powód dopisany tam bez migracji
+    wywraca cykl dopiero na produkcji.
+    """
     powody = set()
-    for wezel in ast.walk(drzewo):
-        if isinstance(wezel, ast.Call) and isinstance(wezel.func, ast.Name) \
-                and wezel.func.id == ZAPIS:
-            # sygnatura: (cur, engine, mode, instrument_id, bar_start, powod, szczegol)
-            arg = wezel.args[5]
-            assert isinstance(arg, ast.Constant), \
-                "`powod` musi być stałą — inaczej CHECK w bazie sprawdza się dopiero na produkcji"
-            powody.add(arg.value)
+    for plik in PISARZE:
+        assert plik.exists(), f"pisarz {plik} nie istnieje"
+        drzewo = ast.parse(plik.read_text(encoding="utf-8"))
+        for wezel in ast.walk(drzewo):
+            if isinstance(wezel, ast.Call) and isinstance(wezel.func, ast.Name) \
+                    and wezel.func.id == ZAPIS:
+                # sygnatura: (cur, engine, mode, instrument_id, bar_start, powod, szczegol)
+                arg = wezel.args[5]
+                assert isinstance(arg, ast.Constant), \
+                    "`powod` musi być stałą — inaczej CHECK w bazie sprawdza się dopiero na produkcji"
+                powody.add(arg.value)
     return powody
 
 

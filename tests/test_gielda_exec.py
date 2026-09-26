@@ -8,15 +8,23 @@ import pytest
 from services.engine.gielda_exec import id_zlecenia, rozstrzygnij_plan, zloz_plan
 from services.engine.horizons import get as get_horizon
 from services.engine.zlecenia import Filtry
-from services.exchanges.base import ExchangeError, StanZlecenia, ZlozoneZlecenie
+from services.exchanges.base import (
+    BookLevel, ExchangeError, OrderBook, StanZlecenia, ZlozoneZlecenie)
 
 F = Filtry(krok_ilosci=D("0.01"), min_ilosc=D("0.01"),
            min_wartosc=D("5"), krok_ceny=D("0.01"))
 BEZ_REGUL = Filtry()
 
+# ŚWIECA DECYZYJNA JAKO PRAWDZIWY ZNACZNIK CZASU, a nie "x". Odmowa wysłania
+# wejścia zapisuje wiersz w `journal.pominiecie`, którego kluczem jest
+# (instrument, ŚWIECA, powód) — czyli ta sama wielkość, po której
+# `decided_for_bar` rozstrzyga, czy decyzja dla świecy zapadła. Atrapa z "x"
+# przepuszczałaby kod, który tej daty w ogóle nie czyta.
+BAR = "2026-09-25T08:00:00+00:00"
+
 PLAN = {"id": 42, "decision_id": 7, "instrument_id": 3, "side": "buy",
         "qty": D("10"), "limit_price": D("100"), "symbol": "SOLUSDC",
-        "quote_ccy": "USDC", "trigger": {"rodzaj": "wejscie", "bar": "x"}}
+        "quote_ccy": "USDC", "trigger": {"rodzaj": "wejscie", "bar": BAR}}
 
 
 # Ograniczenia z db/migrations/0005_decisions_and_execution.sql i 0032.
@@ -108,12 +116,37 @@ class Kursor:
         return [(s, p) for s, p in self.sql if fragment in s]
 
 
+def arkusz(bid="100", ask="100.01", *, wiek_s=0.0) -> OrderBook:
+    """Arkusz księgi EGZEKUCJI z chwili wysyłki — jedno poziom po każdej stronie.
+
+    `wiek_s` liczony wobec `now()`, bo `zloz_plan` tak właśnie mierzy wiek
+    odczytu. Stały znacznik czasu w atrapie starzałby się z każdą minutą od
+    napisania testu i test padałby „sam z siebie" — a przy progu 60 s stałoby
+    się to tego samego dnia.
+    """
+    import datetime as _dt
+    teraz = _dt.datetime.now(_dt.timezone.utc)
+    return OrderBook(event_time=teraz - _dt.timedelta(seconds=wiek_s),
+                     bids=[BookLevel(D(bid), D("10"))],
+                     asks=[BookLevel(D(ask), D("10"))])
+
+
 class Gielda:
     def __init__(self, *, zlozenie=None, stan=None, blad_zlozenia=None,
-                 blad_anulowania=None, odniesienie=None, rejestr=()):
+                 blad_anulowania=None, odniesienie=None, rejestr=(),
+                 ksiega=None, blad_ksiegi=None):
         self._rejestr = rejestr
         self.pytano_o_wypelnienia = []
         self._odniesienie = odniesienie
+        # ATRAPA MUSI MIEC `fetch_order_book`, BO PRODUKCJA JA WOLA. Atrapa bez
+        # metody, ktora kod produkcyjny wywoluje, opisuje INNY adapter niz ten
+        # w produkcji - a `AttributeError` w tescie wyglada jak blad testu,
+        # nie jak brak w atrapie. Domyslnie arkusz stoi tam, gdzie limit
+        # w `PLAN` (100), zeby podmiana ceny nie ruszala tych testow, ktore
+        # o cene nie pytaja.
+        self._ksiega = arkusz() if ksiega is None else ksiega
+        self._blad_ksiegi = blad_ksiegi
+        self.pytano_o_arkusz = []
         self._zlozenie = zlozenie
         self._stan = stan
         self._blad_zlozenia = blad_zlozenia
@@ -141,6 +174,19 @@ class Gielda:
     async def cena_odniesienia(self, symbol, kategoria=None):
         """Cena z ksiegi PODMIOTU. None znaczy „nie da sie odczytac"."""
         return self._odniesienie
+
+    async def fetch_order_book(self, symbol, depth=50, *, ksiega_egzekucji=True):
+        """Arkusz. `ksiega_egzekucji` ZAPAMIETUJEMY, bo to nie szczegol.
+
+        Host publiczny i host egzekucji to dwie rozne ksiegi (zmierzony rozjazd
+        zamkniec: mediana 5,9 pb, p90 28,4 pb). Odczyt z niewlasciwej odpowiada
+        na inne pytanie niz zadane, a odpowiada POPRAWNIE wygladajaca liczba.
+        """
+        self.pytano_o_arkusz.append({"symbol": symbol, "depth": depth,
+                                     "ksiega_egzekucji": ksiega_egzekucji})
+        if self._blad_ksiegi:
+            raise self._blad_ksiegi
+        return self._ksiega
 
     async def anuluj_zlecenie(self, **kw):
         if self._blad_anulowania:
@@ -658,16 +704,64 @@ def test_cena_w_pasmie_przechodzi():
     assert len(gielda.zlozone) == 1
 
 
-def test_brak_odczytu_ksiegi_NIE_zatrzymuje_handlu():
+def test_padniecie_JEDNEGO_endpointu_nie_zatrzymuje_handlu():
     """Awaria jednego endpointu, która wstrzymuje handel, jest gorszym
-    lekarstwem niż choroba. Brak odniesienia wyłącza samo pasmo, a nie
-    zlecenie — ale zostawia to widoczne w opisie."""
+    lekarstwem niż choroba — dlatego cena z chwili wysyłki ma DWA źródła.
+
+    Tu pada odczyt ostatniej ceny (`cena_odniesienia`), czyli wyłącza się samo
+    pasmo. Arkusz księgi egzekucji żyje, więc cena limitu nadal powstaje
+    z chwili wysyłki i zlecenie idzie normalnie. Test sprawdza jedno i drugie:
+    że poszło ORAZ że poszło po cenie z arkusza, a nie z planu.
+    """
     plan = dict(PLAN, atr_pct=1.0)
-    g = Gielda(odniesienie=None)
-    _, gielda, ok, _ = _zloz(plan=dict(plan, limit_price=D("200")), gielda=g)
+    g = Gielda(odniesienie=None, ksiega=arkusz("99.50", "99.52"))
+    _, gielda, ok, _ = _zloz(plan=plan, gielda=g)
 
     assert ok is True
     assert len(gielda.zlozone) == 1
+    # Bid 99,50 minus krok: zlecenie lezy po stronie pasywnej, a nie na 100
+    # z planu (co przy asku 99,52 przecinaloby spread i PostOnly by je odbil).
+    assert gielda.zlozone[0]["cena_limitu"] == D("99.49")
+
+
+def test_padniecie_OBU_zrodel_ceny_NIE_WYSYLA_wejscia():
+    """Kanarek w drugą stronę. Bez ANI JEDNEGO odczytu z chwili wysyłki jedyną
+    ceną, jaką mamy, jest zamknięcie świecy sprzed 71–82 minut — a `PostOnly`
+    odrzuca cenę przecinającą spread. Wysłanie jej jest zakładem o kierunek
+    rynku przez tę godzinę, nie wykonaniem decyzji.
+
+    Wyjście tego progu NIE dostaje (osobny test niżej): tam odmowa zostawia
+    otwartą pozycję wbrew decyzji, czyli kosztuje pieniądze, a nie okazję.
+    """
+    plan = dict(PLAN, atr_pct=1.0, trigger={"rodzaj": "wejscie", "bar": BAR})
+    g = Gielda(odniesienie=None, blad_ksiegi=ExchangeError("timeout arkusza"))
+    cur, gielda, ok, msg = _zloz(plan=plan, gielda=g)
+
+    assert ok is False
+    assert gielda.zlozone == []
+    assert "brak ceny z chwili wysyłki" in msg
+    powody = [p[4] for _, p in cur.zapytania("INSERT INTO journal.pominiecie")]
+    assert powody == ["brak_ceny_wysylki"], (
+        "odmowa bez wiersza w journal.pominiecie nie odpowiada na pytanie "
+        "o to, czemu dla tej świecy nie weszliśmy - a to jest pytanie, "
+        "które naprawdę się zadaje: %s" % (powody,))
+
+
+def test_padniecie_OBU_zrodel_ceny_NIE_ZATRZYMUJE_wyjscia():
+    """Symetria byłaby tu błędem. Wyjście, którego nie wysłaliśmy, zostawia
+    pozycję otwartą wbrew decyzji, a risk kernel liczy z niej ekspozycję —
+    więc brak świeżej ceny NIE MOŻE go wstrzymać. Cena zostaje planowa,
+    dokładnie tak jak przed poprawką."""
+    wyjscie = dict(PLAN, id=46, side="sell", atr_pct=1.0,
+                   trigger={"rodzaj": "wyjscie", "bar": BAR, "position_id": 1})
+    g = Gielda(odniesienie=None, blad_ksiegi=ExchangeError("timeout arkusza"))
+    cur = Kursor([{"id": 1, "qty": D("10"), "avg_price": D("100")}])
+    ok, _ = asyncio.run(zloz_plan(cur, g, wyjscie, F, engine="crypto",
+                                  mode="demo", kategoria="spot"))
+
+    assert ok is True
+    assert g.zlozone[0]["cena_limitu"] == D("100")
+    assert not cur.zapytania("INSERT INTO journal.pominiecie")
 
 
 def test_WYJSCIE_poza_pasmem_jest_PRZYCIAGANE_a_nie_odrzucane():
