@@ -12,15 +12,18 @@ z okna testowego, ktorego optymalizacja nigdy nie widziala. Zwykla walidacja
 krzyzowa jest tu niewazna, bo tasowanie szeregu czasowego wpuszcza przyszlosc
 do treningu.
 
-Kazda sprawdzona konfiguracja laduje w learn.hypothesis_trial, a licznik z tej
-tabeli wchodzi do DEFLOWANEGO SHARPE'A (`statystyka.deflowany_sharpe`), ktory od
-2026-09-26 jest warunkiem bramki promocji - patrz `status_walidacji`. Im wiecej
-konfiguracji sie przetestuje, tym latwiej trafic dobry wynik czystym przypadkiem,
-wiec sam Sharpe bez liczby prob obok nie mowi o przewadze nic.
+DEFLOWANY SHARPE jest od 2026-09-26 warunkiem bramki promocji - patrz
+`status_walidacji` i `werdykt_dsr`. Liczy sie PO koszcie, ktorego symulacja nie
+nalicza (`Karta.doplata_poza_symulacja`), a jego N to liczba ROZROZNIALNYCH
+KONFIGURACJI z `learn.model_version` - NIE licznik `learn.hypothesis_trial`,
+mimo ze migracja 0006 tak go zapowiadala. Uzasadnienie przy `n_konfiguracji`:
+kandydaci z tego licznika byli oceniani in-sample, a walk-forward juz za nich
+zaplacil, liczac wynik poza oknem wyboru.
 
-CZEGO LICZNIK NIE JEST: `count(*)` po tabeli z `UNIQUE (model_id, config_hash)`
-i INSERT-em `ON CONFLICT DO NOTHING` to liczba ROZNYCH WEKTOROW WAG, a nie prob.
-Pelny opis rozjazdu w `docs/01-data-architecture.md`, sekcja 6.
+Kazda sprawdzona konfiguracja nadal laduje w learn.hypothesis_trial i licznik
+jest podawany w raporcie jako KONTEKST. Im wiecej konfiguracji sie przetestuje,
+tym latwiej trafic dobry wynik czystym przypadkiem, wiec sam Sharpe bez liczby
+konfiguracji obok nie mowi o przewadze nic.
 
 Uzycie:
     DATABASE_URL=... python services/engine/train.py --days 90 --trials 40
@@ -525,6 +528,106 @@ def przewaga_dsr(zwroty: list[float], n_prob: int) -> dict:
     return deflowany_sharpe(zwroty, n_prob)
 
 
+def n_konfiguracji(cur, model_id: int) -> int:
+    """Ile ROZROZNIALNYCH konfiguracji tego modelu kiedykolwiek policzono.
+
+    `SELECT count(DISTINCT params) FROM learn.model_version WHERE model_id=%s`.
+    To jest N deflacji. Zmierzone na produkcji 2026-09-26: tor 4h ma 143 wersje
+    i 57 roznych `params`; caly projekt - 180 wersji i 86 roznych.
+
+    DLACZEGO NIE `learn.hypothesis_trial`, CHOC TO ON MIAL BYC TYM LICZNIKIEM
+
+    Bo policzylby te sama kare dwa razy. Kandydaci z `argmax` sa oceniani
+    `ocen(..., train_slices, cache_tr)`, czyli WYLACZNIE na oknie treningowym,
+    a raportowany Sharpe pochodzi z okna testowego, ktorego selekcja nigdy nie
+    widziala. Walk-forward JUZ za te kandydatow zaplacil - tym, ze wynik liczy
+    sie poza oknem wyboru. Doliczenie ich jeszcze do poprzeczki deflacji
+    odejmowaloby klatwe zwyciezcy, ktora ten protokol wlasnie usunal.
+
+    (Licznik ma 12 613 wierszy dla toru 4h, z czego - przy 143 przebiegach po
+    najwyzej 40 okien, czyli sufitcie 5 720 z wariantu `ic` - co najmniej 6 893
+    pochodza z realnego losowego przeszukiwania `argmax`. Nie jest wiec prawda,
+    ze ten licznik rosnie samym kalendarzem; nieprawdziwy jest jego STATUS
+    mianownika, nie jego pochodzenie.)
+
+    DLACZEGO WLASNIE `model_version.params`
+
+    Bo kazdy taki wiersz to jedna konfiguracja, ktorej wynik OUT-OF-SAMPLE ktos
+    zobaczyl i na tej podstawie zdecydowal, co dalej. To jest dokladnie ta
+    mnogosc, ktora zawyza raportowany wynik: wybor wariantu, `ENTER_PCTL`,
+    swieca, sklad uniwersum, cennik.
+
+    TA LICZBA JEST DOLNA GRANICA I TRZEBA TAK JA PODAWAC
+
+    Do 2026-09-26 `params` nie zapisywalo `kind` ani `limit`, wiec przebiegi
+    roznce sie samym cennikiem zlewaly sie w jedna konfiguracje. Historycznych
+    wierszy to nie naprawia - 57 zostaje dolna granica dla przeszlosci.
+    Prawdziwe N jest WIEKSZE, a wieksze N daje MNIEJSZY DSR, wiec blad tej
+    liczby dziala na korzysc strategii.
+    """
+    cur.execute("SELECT count(DISTINCT params) AS n FROM learn.model_version"
+                " WHERE model_id = %s", (model_id,))
+    return cur.fetchone()["n"]
+
+
+def opis_zrodla_n(n: int, trials_kumulatywnie: int) -> str:
+    """Skad wzielo sie N - w tym samym zdaniu, co N.
+
+    Bez tego 57 czyta sie jak pomiar zamkniety, a jest dolna granica. I bez
+    tego nikt nie wie, ze 12 613 z `hypothesis_trial` NIE jest ta liczba -
+    a wlasnie ten licznik komentarz przy migracji 0006 wskazywal jako zrodlo.
+    """
+    return (f"N = {n} rozróżnialnych konfiguracji z learn.model_version "
+            f"(count(DISTINCT params)) — DOLNA GRANICA: `kind` i `limit` nie "
+            f"były zapisywane do 2026-09-26, więc przebiegi różniące się samym "
+            f"cennikiem zlewały się w jedną. Licznik learn.hypothesis_trial "
+            f"({trials_kumulatywnie} wektorów wag) NIE jest tu mianownikiem: "
+            f"jego kandydaci byli oceniani in-sample, a walk-forward już za nich "
+            f"zapłacił, licząc wynik poza oknem wyboru.")
+
+
+def opis_kosztu_dsr(doplata: float, nieznane: tuple[str, ...]) -> str:
+    """Przy jakim koszcie policzono DSR. ZAWSZE, takze gdy doplata to zero.
+
+    „DSR 0,96" bez tego zdania czyta sie jak wynik po kosztach. Jest po tych
+    kosztach, ktore ktos ZMIERZYL - a lista `nieznane` mowi, czego nadal nie ma.
+    """
+    if doplata > 0:
+        czesc = (f"DSR policzony PO doliczeniu {doplata * 1e4:.2f} pb na rundę, "
+                 f"których symulacja nie nalicza")
+    else:
+        czesc = ("DSR policzony przy dopłacie ZERO — nie zmierzono ani jednego "
+                 "składnika kosztu poza tymi, które nalicza symulacja")
+    if nieznane:
+        return czesc + (f"; nadal NIE ZMIERZONO: {', '.join(nieznane)}, więc ta "
+                        f"liczba jest GÓRNYM oszacowaniem.")
+    return czesc + "; karta kosztu jest pełna."
+
+
+def werdykt_dsr(zwroty: list[float], *, doplata: float, n: int,
+                trials_kumulatywnie: int,
+                nieznane: tuple[str, ...]) -> tuple[bool, str]:
+    """CALA decyzja DSR jednym wywolaniem - to jest to, co wola `train()`.
+
+    Istnieje jako osobna funkcja po to, zeby dalo sie przetestowac SKLAD: ze
+    DSR liczy sie po DOPLACIE, ze N bierze sie z konfiguracji, a nie z licznika
+    hipotez, i ze obie liczby razem z ich pochodzeniem trafiaja do opisu.
+    `bramka_dsr` sam tego nie upilnuje - nie ma jak sprawdzic, czym go
+    nakarmiono.
+
+    DOPLATA JEST TU NAJWAZNIEJSZA. Zmierzony spread 5,85 pb zbija Sharpe
+    z +0,0952 na +0,0823, a to wystarcza, zeby DSR nie przeszedl progu przy
+    ZADNYM N - takze przy najlagodniejszym. Rozstrzyga wiec koszt, nie selekcja,
+    i dlatego werdykt liczony na zwrotach PRZED doplata bylby wada w kierunku
+    latwiejszej bramki, niezaleznie od tego, jak dobrze policzono N.
+    """
+    po = [r - doplata for r in zwroty]
+    wynik = przewaga_dsr(po, n)
+    ok, opis = bramka_dsr(wynik)
+    return ok, " ".join([opis, opis_kosztu_dsr(doplata, nieznane),
+                         opis_zrodla_n(n, trials_kumulatywnie)])
+
+
 def bramka_dsr(wynik: dict) -> tuple[bool, str]:
     """Czy deflowany Sharpe pozwala promowac. FAIL-CLOSED. CZYSTA FUNKCJA.
 
@@ -548,7 +651,8 @@ def bramka_dsr(wynik: dict) -> tuple[bool, str]:
                        f"najlepszym z wielu prób.")
     opis = (f"Deflowany Sharpe {dsr:.4f} przy progu {PROG_DSR:.2f} "
             f"(Sharpe {wynik['sharpe']:+.4f} z {n} transakcji, "
-            f"{n_prob} przetestowanych konfiguracji, poprzeczka selekcji "
+            f"{n_prob} przetestowanych konfiguracji — N SELEKCJI tego "
+            f"przebiegu, nie licznik kumulatywny; poprzeczka selekcji "
             f"{wynik['prog']:+.4f}, skośność {wynik['skosnosc']:+.3f}, "
             f"kurtoza {wynik['kurtoza']:.3f}).")
     if dsr >= PROG_DSR:
@@ -1194,10 +1298,22 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
         " VALUES (%s,%s,'training',%s,%s,%s,%s,%s,%s)"
         " RETURNING id",
         (model_id, version,
+         # `kind` I `limit` MUSZA TU BYC, BO `params` JEST TERAZ MIANOWNIKIEM.
+         #
+         # Liczba roznych `params` tego modelu jest N deflacji (patrz
+         # `n_konfiguracji`). Do 2026-09-26 brakowalo tu rodzaju instrumentu
+         # i trybu egzekucji, wiec dwa przebiegi roznce sie WYLACZNIE cennikiem
+         # (`--kind spot` taker 0,100% wobec `spot_eu` 0,250%) mialy IDENTYCZNE
+         # `params` i liczyly sie jako jedna konfiguracja. N bylo przez to
+         # zanizone, a zanizone N podnosi DSR - czyli bramka byla latwiejsza.
+         #
+         # `--days` nie trzeba dopisywac: odtwarza sie z `trained_to -
+         # trained_from`, ktore i tak sa w tym samym wierszu.
          json.dumps({"bar": h.bar, "train_days": h.train_days, "test_days": h.test_days,
                      "step_days": h.step_days, "min_trades": h.min_trades,
                      "trials_per_window": trials_per_window, "seed": SEED,
-                     "wybor": wybor,
+                     "wybor": wybor, "kind": kind,
+                     "limit": bool((egzekucja or Egzekucja()).limit),
                      "sygnaly_eksperymentalne": eksperymenty}),
          feature_ids, signal_ids, now - timedelta(days=days), now, sha_kodu()))
     mv_id = cur.fetchone()["id"]
@@ -1773,8 +1889,24 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
     # jest rozklad zwrotow - a oba te braki dzialaja na korzysc strategii.
     #
     # PROBA TO ZLACZONE TRANSAKCJE, nie Sharpe'y okien - patrz `przewaga_dsr`.
-    wynik_dsr = przewaga_dsr(wszystkie_zwroty, trials)
-    dsr_ok, opis_dsr = bramka_dsr(wynik_dsr)
+    #
+    # DWIE RZECZY, KTORE MUSZA BYC TU DOKLADNIE TAKIE:
+    #
+    # 1. DOPLATA. DSR liczy sie na zwrotach PO doliczeniu tej czesci karty
+    #    kosztu, ktorej symulacja NIE nalicza (`doplata_poza_symulacja` -
+    #    dzis spread, gdy podano pomiar, i niewypelnienie przy limicie).
+    #    Liczony przed nia byl by miara innego, tanszego swiata, a wada
+    #    szlaby w strone LATWIEJSZEJ bramki. To jest wielkosc rozstrzygajaca:
+    #    zmierzone 5,85 pb zbija DSR pod prog przy KAZDYM N.
+    #
+    # 2. N. Pierwsza wersja tej zmiany podstawiala tu `trials`, czyli `count(*)`
+    #    po `hypothesis_trial`. Jest to zle, bo liczyloby te sama kare dwa razy
+    #    - uzasadnienie w `n_konfiguracji`. `trials` zostaje w opisie jako
+    #    kontekst i nie dotyka werdyktu.
+    dsr_ok, opis_dsr = werdykt_dsr(
+        wszystkie_zwroty, doplata=karta.doplata_poza_symulacja,
+        n=n_konfiguracji(cur, model_id), trials_kumulatywnie=trials,
+        nieznane=karta.nieznane)
 
     # Prog dobrany do miary NA TRANSAKCJE, nie anualizowanej. 0,05 oznacza,
     # ze sredni zwrot z transakcji to 5% jej wlasnego odchylenia - skromnie,

@@ -48,8 +48,10 @@ import pytest
 from services.engine.statystyka import (
     PROG_DSR, deflowany_sharpe, kurtoza, oczekiwany_maksymalny_sharpe, skosnosc,
 )
+from services.engine.koszty import karta_rundy
 from services.engine.train import (
-    MIN_WINDOWS_FOR_VALIDATION, bramka_dsr, przewaga_dsr, status_walidacji,
+    MIN_WINDOWS_FOR_VALIDATION, bramka_dsr, n_konfiguracji, przewaga_dsr,
+    status_walidacji, werdykt_dsr,
 )
 
 
@@ -389,8 +391,8 @@ def test_bramka_w_trenerze_JEST_podlaczona_do_DSR():
     Tak wygladal caly ten blad: `trials` bylo liczone, zapisywane i wystawiane
     przez API, a do bramki nie wchodzilo w niczym.
     """
-    assert "dsr_ok, opis_dsr = bramka_dsr(wynik_dsr)" in ZRODLO_TRENERA
-    assert "wynik_dsr = przewaga_dsr(wszystkie_zwroty, trials)" in ZRODLO_TRENERA
+    assert "dsr_ok, opis_dsr = werdykt_dsr(" in ZRODLO_TRENERA
+    assert "wszystkie_zwroty, doplata=karta.doplata_poza_symulacja" in ZRODLO_TRENERA
     assert ("status = status_walidacji(total, positive, median, "
             "bije_odniesienie, dsr_ok)") in ZRODLO_TRENERA
 
@@ -463,3 +465,188 @@ def test_zlaczona_proba_DSR_pochodzi_z_tej_samej_symulacji_co_koszt():
     assert "kind=kind" in oos[:400], (
         "symulacja OOS nie dostaje `kind`, więc stawka prowizji nie dochodzi "
         "do próby, z której liczy się DSR")
+
+
+# ===================== SKAD BIERZE SIE N — I DLACZEGO NIE Z hypothesis_trial
+#
+# Zmierzone na produkcji 2026-09-26 (ssh renacode, psql, tylko SELECT):
+#
+#   learn.model_version, tor crypto_signal_weighting_4h:
+#       143 wersje | 57 roznych `params` | 2026-08-27 .. 2026-09-26
+#   learn.model_version, calosc: 180 wersji | 86 roznych `params`
+#   learn.hypothesis_trial, tor 4h: 12 613 | `oos_sharpe` wypelnione: 0
+#
+# Licznik hipotez NIE jest N, i nie dlatego, ze rosnie kalendarzem — 143
+# przebiegi po najwyzej 40 okien daja sufit 5 720 wierszy z wariantu `ic`,
+# wiec co najmniej 6 893 z 12 613 pochodzi z realnego przeszukiwania `argmax`.
+# Powod jest mocniejszy: kandydaci `argmax` byli oceniani IN-SAMPLE
+# (`ocen(..., train_slices, ...)`), a raportowany Sharpe pochodzi z okna
+# testowego, ktorego selekcja nie widziala. Walk-forward juz za nich zaplacil.
+# Doliczenie ich do poprzeczki deflacji liczy te sama kare dwa razy.
+#
+# N to liczba ROZROZNIALNYCH KONFIGURACJI, ktorych wynik OOS ktos zobaczyl —
+# czyli `count(DISTINCT params)` po `learn.model_version`.
+
+
+class KursorKonfiguracji:
+    """Kursor oddajacy podlozona liczbe i zapamietujacy SQL.
+
+    Atrapa oddaje tylko to, o co zapytano — wiec zapytanie o inna tabele niz
+    `model_version` nie dostanie tu nic i test padnie, tak jak padlby pomiar.
+    """
+
+    def __init__(self, ile: int):
+        self.ile, self.sql = ile, ""
+
+    def execute(self, sql, params=None):
+        self.sql = sql
+
+    def fetchone(self):
+        if "learn.model_version" in self.sql and "DISTINCT params" in self.sql:
+            return {"n": self.ile}
+        return {}
+
+
+def test_N_liczy_ROZNE_params_z_model_version():
+    kur = KursorKonfiguracji(57)
+    assert n_konfiguracji(kur, 1) == 57
+    assert "count(DISTINCT params)" in kur.sql, (
+        "N liczone bez DISTINCT to liczba PRZEBIEGOW, nie konfiguracji — "
+        "tor 4h ma 143 wersje i 57 roznych params")
+    assert "learn.model_version" in kur.sql
+    assert "hypothesis_trial" not in kur.sql
+
+
+def test_zmierzone_N_57_NIE_PRZEPUSZCZA_wyniku_ktory_przy_17_przechodzil():
+    """Sedno pomiaru. Przy N=17 (zla wielkosc: liczba wersji w bazie
+    deweloperskiej) DSR przechodzil prog; przy zmierzonych 57 nie przechodzi
+    i nie jest to przypadek na granicy."""
+    zwroty = _zwroty_o_sharpe(0.0952, n=1462)
+    assert przewaga_dsr(zwroty, 17)["dsr"] > PROG_DSR
+    assert przewaga_dsr(zwroty, 57)["dsr"] < PROG_DSR
+    assert przewaga_dsr(zwroty, 86)["dsr"] < przewaga_dsr(zwroty, 57)["dsr"]
+
+
+def test_params_zapisuja_kind_i_limit_bo_bez_nich_N_jest_zanizone():
+    """Dwa przebiegi roznce sie WYLACZNIE cennikiem (`--kind spot` taker 0,100%
+    wobec `spot_eu` 0,250%) mialy identyczne `params` i liczyly sie jako jedna
+    konfiguracja. Zanizone N podnosi DSR, czyli ulatwia bramke."""
+    wstawka = re.search(r"INSERT INTO learn\.model_version.*?sha_kodu\(\)\)\)",
+                        ZRODLO_TRENERA, re.S)
+    assert wstawka, "nie znaleziono zapisu wersji modelu"
+    for klucz in ('"kind": kind', '"limit": bool('):
+        assert klucz in wstawka.group(0), (
+            f"`params` nie zapisuje {klucz} — dwa różne cenniki zlewają się "
+            f"w jedną konfigurację i N jest zaniżone")
+
+
+# ================================= KANARKI NA NOWE ZACHOWANIE BRAMKI
+
+def _sprawa(sharpe_docelowy: float, n_transakcji: int = 1462,
+            odchylenie: float = 0.045) -> list[float]:
+    """Proba o zadanym Sharpe i realnej skali zwrotu, zeby doplata w punktach
+    bazowych znaczyla to samo co na produkcji."""
+    return [x * odchylenie for x in _zwroty_o_sharpe(sharpe_docelowy, n=n_transakcji)]
+
+
+def test_KANAREK_narosniecie_hypothesis_trial_NIE_RUSZA_werdyktu():
+    """Bramka nie czyta tego licznika, wiec jego wzrost nie moze niczego zmienic.
+
+    Gdyby czytala, po roku przy ~27 000 wierszy nie przeszlaby ZADNA przewaga,
+    choćby w pelni realna — a bramka, ktorej nie da sie przejsc, jest
+    wylacznikiem, nie pomiarem.
+
+    Druga polowa dowodzi, ze test nie jest tautologiczny: poprzednie
+    podlaczenie (licznik jako N) na tych samych danych ZMIENIA werdykt.
+    """
+    zwroty = _sprawa(0.12)
+    licznik = (40, 12613, 27000)
+
+    nowe = [werdykt_dsr(zwroty, doplata=0.0, n=17, trials_kumulatywnie=k,
+                        nieznane=("spread",)) for k in licznik]
+    assert [ok for ok, _ in nowe] == [True, True, True], [ok for ok, _ in nowe]
+    dsry = {re.search(r"Deflowany Sharpe (\d\.\d+)", opis).group(1)
+            for _, opis in nowe}
+    assert len(dsry) == 1, f"sam DSR tez sie rusza z licznikiem: {dsry}"
+
+    poprzednie = [bramka_dsr(przewaga_dsr(zwroty, k))[0] for k in licznik]
+    assert poprzednie == [True, False, False], (
+        f"poprzednie podlaczenie mialo zmieniac werdykt przy {licznik}, a dalo "
+        f"{poprzednie} — jesli nie zmienia, ten test nie pilnuje niczego")
+
+
+def test_KANAREK_doliczenie_ZMIERZONEGO_KOSZTU_ZMIENIA_werdykt():
+    """NAJWAZNIEJSZY kanarek w tym pliku: koszt jest wielkoscia rozstrzygajaca.
+
+    Ta sama proba, to samo N. Rozni sie wylacznie to, czy doliczono zmierzone
+    5,85 pb spreadu, ktorych symulacja nie nalicza:
+
+        Sharpe +0,0952 -> DSR ponad progiem
+        Sharpe +0,0822 -> DSR pod progiem
+
+    Gdyby bramka patrzyla na zwroty PRZED doplata, mierzylaby tanszy swiat niz
+    ten, w ktorym sklada zlecenia — i bylaby o to latwiejsza.
+    """
+    zwroty = _sprawa(0.0952)
+    przed, o_przed = werdykt_dsr(zwroty, doplata=0.0, n=17,
+                                 trials_kumulatywnie=12613, nieznane=("spread",))
+    po, o_po = werdykt_dsr(zwroty, doplata=5.85e-4, n=17,
+                           trials_kumulatywnie=12613, nieznane=())
+    assert przed is True and po is False, (o_przed, o_po)
+    assert "PO doliczeniu 5.85 pb" in o_po
+    assert "dopłacie ZERO" in o_przed
+
+
+def test_koszt_rozstrzyga_przy_KAZDYM_N_takze_najlagodniejszym():
+    """Dlaczego precyzja N przestaje byc ciezarem bramki: po doliczeniu
+    zmierzonego spreadu DSR nie przechodzi przy zadnym wiarygodnym N."""
+    po_koszcie = [r - 5.85e-4 for r in _sprawa(0.0952)]
+    for n in (17, 22, 57, 86, 12613):
+        d = przewaga_dsr(po_koszcie, n)["dsr"]
+        assert d < PROG_DSR, f"N={n} przepuszcza wynik po koszcie: DSR {d:.4f}"
+
+
+def test_doplata_bierze_sie_z_KARTY_a_nie_z_liczby_wpisanej_w_trenerze():
+    """Karta jest jedynym zrodlem prawdy o koszcie. `doplata_poza_symulacja`
+    odejmuje WYLACZNIE to, czego symulacja nie naliczyla — odjecie
+    `policzone` liczyloby prowizje dwa razy."""
+    bez = karta_rundy("spot")
+    ze_spreadem = karta_rundy("spot", spread_bps=5.85)
+    assert bez.doplata_poza_symulacja == 0.0
+    assert ze_spreadem.doplata_poza_symulacja == pytest.approx(5.85e-4)
+    # prowizja + poslizg SA w symulacji, wiec nie wchodza do doplaty
+    assert ze_spreadem.policzone > ze_spreadem.doplata_poza_symulacja
+    assert "spread" in bez.nieznane and not ze_spreadem.nieznane
+
+
+def test_spread_z_OBCEJ_ksiegi_tez_wchodzi_do_doplaty_ale_nie_domyka_karty():
+    """Podloga z cudzej ksiegi jest liczba prawdziwa o czyms innym. Wchodzi do
+    doplaty, bo to kierunek OSTROZNY, i zostawia karte niepelna, bo pytanie
+    o nasz spread zostaje otwarte."""
+    k = karta_rundy("spot", spread_bps=5.85, spread_nasza_ksiega=False)
+    assert k.doplata_poza_symulacja == pytest.approx(5.85e-4)
+    assert "spread" in k.nieznane and not k.pelna
+
+
+def test_bramka_w_trenerze_liczy_DSR_PO_koszcie_i_z_N_z_konfiguracji():
+    """Kanarek na samo podlaczenie, zrodlowo — dwie rzeczy naraz."""
+    wywolanie = re.search(r"dsr_ok, opis_dsr = werdykt_dsr\((.*?)\n\n",
+                          ZRODLO_TRENERA, re.S)
+    assert wywolanie, "train() nie wola `werdykt_dsr` — DSR nie dochodzi do bramki"
+    arg = wywolanie.group(1)
+    assert "doplata=karta.doplata_poza_symulacja" in arg, (
+        "DSR liczony na zwrotach PRZED kosztem, ktorego symulacja nie nalicza")
+    assert "n=n_konfiguracji(cur, model_id)" in arg, (
+        "N nie pochodzi z liczby rozroznialnych konfiguracji")
+    assert "trials_kumulatywnie=trials" in arg
+    assert "przewaga_dsr(wszystkie_zwroty, trials)" not in ZRODLO_TRENERA, (
+        "licznik hipotez znow jest N deflacji — patrz `n_konfiguracji`")
+
+
+def test_opis_podaje_ZRODLO_N_i_zastrzezenie_o_dolnej_granicy():
+    """Liczba bez pochodzenia czyta sie jak pomiar zamkniety. 57 nim nie jest."""
+    _, opis = werdykt_dsr(_sprawa(0.0952), doplata=5.85e-4, n=57,
+                          trials_kumulatywnie=12613, nieznane=())
+    assert "N = 57 rozróżnialnych konfiguracji z learn.model_version" in opis
+    assert "DOLNA GRANICA" in opis
+    assert "12613" in opis and "NIE jest tu mianownikiem" in opis

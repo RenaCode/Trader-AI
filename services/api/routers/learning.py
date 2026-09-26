@@ -116,9 +116,11 @@ async def state(engine: Silnik):
         "max_drawdown": row["max_drawdown"],
         "calibration_error": row["calibration_error"],
         "max_psi": row["max_psi"],
-        # Licznik przetestowanych konfiguracji. Od 2026-09-26 wchodzi do
-        # deflowanego Sharpe'a (`statystyka.deflowany_sharpe`), ktory jest
-        # warunkiem bramki promocji - do tego dnia licznik byl tylko wystawiany.
+        # Licznik wektorow wag. NIE jest N deflowanego Sharpe'a, choc komentarz
+        # przy migracji 0006 tak go zapowiadal: jego kandydaci byli oceniani
+        # in-sample, a walk-forward juz za nich zaplacil, liczac wynik poza
+        # oknem wyboru. N bierze sie z `count(DISTINCT params)` po
+        # `learn.model_version` - patrz `train.n_konfiguracji`.
         #
         # CZEGO TA LICZBA NIE JEST, a co trzeba wiedziec, zeby ja czytac:
         # `learn.hypothesis_trial` ma `UNIQUE (model_id, config_hash)`, a jedyny

@@ -124,10 +124,12 @@ Odpowiedź w schemacie:
 
 - `learn.wf_window` + `learn.wf_metric` — metryki **wyłącznie out-of-sample**, per okno
   walk-forward. Nie ma miejsca na zapis „wyniku backtestu" jako liczby do pokazania.
-- `learn.hypothesis_trial` — **licznik konfiguracji**, z hashem konfiguracji. Wchodzi do
-  deflowanego Sharpe'a (`services/engine/statystyka.py`), który od 2026-09-26 jest warunkiem
-  bramki promocji modelu — bez niego bramka nie odróżniałaby wyniku osiągniętego raz od
-  najlepszego z jedenastu tysięcy prób.
+- `learn.hypothesis_trial` — licznik wektorów wag, z hashem konfiguracji. **NIE jest N
+  deflowanego Sharpe'a**, mimo że komentarz przy migracji 0006 tak go zapowiadał. Powód:
+  jego kandydaci (`argmax`) byli oceniani **in-sample**, a walk-forward już za nich
+  zapłacił, licząc wynik poza oknem wyboru — doliczenie ich do poprzeczki deflacji liczy
+  tę samą karę dwa razy. N bierze się z `count(DISTINCT params)` po `learn.model_version`
+  (patrz `train.n_konfiguracji`); licznik hipotez zostaje w raporcie jako kontekst.
 
   **Czego ten licznik NIE jest — i nie da się tego naprawić rachunkiem.** Tabela ma
   `UNIQUE (model_id, config_hash)`, a jedyny INSERT (`train.py`) kończy się
