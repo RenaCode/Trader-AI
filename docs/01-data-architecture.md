@@ -124,8 +124,30 @@ Odpowiedź w schemacie:
 
 - `learn.wf_window` + `learn.wf_metric` — metryki **wyłącznie out-of-sample**, per okno
   walk-forward. Nie ma miejsca na zapis „wyniku backtestu" jako liczby do pokazania.
-- `learn.hypothesis_trial` — **licznik wszystkich przetestowanych konfiguracji**, z hashem
-  konfiguracji. Bez niego deflated Sharpe jest nieobliczalny, a my sami się oszukamy selekcją.
+- `learn.hypothesis_trial` — licznik wektorów wag, z hashem konfiguracji. **NIE jest N
+  deflowanego Sharpe'a**, mimo że komentarz przy migracji 0006 tak go zapowiadał. Powód:
+  jego kandydaci (`argmax`) byli oceniani **in-sample**, a walk-forward już za nich
+  zapłacił, licząc wynik poza oknem wyboru — doliczenie ich do poprzeczki deflacji liczy
+  tę samą karę dwa razy. N bierze się z `count(DISTINCT params)` po `learn.model_version`
+  (patrz `train.n_konfiguracji`); licznik hipotez zostaje w raporcie jako kontekst.
+
+  **Czego ten licznik NIE jest — i nie da się tego naprawić rachunkiem.** Tabela ma
+  `UNIQUE (model_id, config_hash)`, a jedyny INSERT (`train.py`) kończy się
+  `ON CONFLICT DO NOTHING`, więc `count(*)` to liczba **różnych wektorów wag** kiedykolwiek
+  zapisanych dla tego modelu. Stąd trzy rozjazdy z „liczbą prób":
+  - dwa przebiegi tej samej konfiguracji dokładają tylko te wektory, które się zmieniły —
+    przy `--wybor ic` (domyślnym) jest to jeden wektor na okno i zmienia się co noc, bo
+    granice okien się przesuwają, więc licznik rośnie o ~40 na dobę **niezależnie od tego,
+    czy czegokolwiek szukano**;
+  - `--sucho` nie zapisuje nic, więc porównania wariantów są **próbami niepoliczonymi**;
+  - `purge_demo.py` czyści tę tabelę w całości (`TRUNCATE`), więc licznik po czyszczeniu
+    zaczyna od zera, choć konfiguracje zostały przetestowane.
+
+  Kolumny `oos_sharpe` i `n_windows` są **martwe**: INSERT podaje `n_windows=1` na sztywno
+  i nigdy nie wypełnia `oos_sharpe`. To jest jedyna przyczyna, dla której `V[{SR_n}]`
+  z pracy Baileya i Lópeza de Prado nie jest w tym projekcie mierzalne i deflowany Sharpe
+  liczy się z wariancji **samego estymatora** — co jest założeniem działającym na korzyść
+  strategii, opisanym wprost w docstringu `deflowany_sharpe`.
 - `learn.calibration_bin` — czy pewność 70% oznacza trafność ~70%.
 - `learn.drift_metric` — PSI / KS między rozkładem treningowym a bieżącym.
 - `learn.learning_state` — jawny status silnika: `warmup` → `learning` → `validated` → `degraded`.

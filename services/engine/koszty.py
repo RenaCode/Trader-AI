@@ -249,6 +249,15 @@ class Skladnik:
     # (patrz INNY_RYNEK). Skladnik wchodzi wtedy do sumy, ale karta zostaje
     # niepelna - inaczej cudza ksiega ogloszilaby rachunek zamknietym.
     wiarygodny: bool = True
+    # Czy SYMULACJA JUZ TEN KOSZT NALICZYLA w zwrocie z transakcji (`res.trades`
+    # -> `"ret"`), a nie tylko w krzywej kapitalu. Rozroznienie jest tu po to,
+    # zeby dalo sie policzyc DOPLATE - czesc rachunku, ktorej w zmierzonym
+    # Sharpie jeszcze nie ma - BEZ dopasowywania nazw skladnikow tekstem.
+    #
+    # Nazwa skladnika jako kryterium byla by cicha pulapka: przemianowanie
+    # „poslizg" albo dolozenie nowej pozycji zmienialoby po cichu doplate,
+    # a wiec i werdykt bramki promocji, bez zadnego objawu.
+    w_symulacji: bool = False
 
 
 @dataclass(frozen=True)
@@ -271,6 +280,30 @@ class Karta:
         """
         return tuple(s.nazwa for s in self.skladniki
                      if s.zrodlo == NIEZMIERZONE or not s.wiarygodny)
+
+    @property
+    def doplata_poza_symulacja(self) -> float:
+        """Suma skladnikow, ktore MAJA wartosc, a symulacja ich NIE naliczyla.
+
+        DLACZEGO TA WIELKOSC ISTNIEJE OSOBNO OD `policzone`
+
+        `policzone` to koszt calej rundy - razem z prowizja i poslizgiem, ktore
+        `simulate_portfolio` juz odjela od `ret`. Odjecie `policzone` od zwrotu
+        liczyloby prowizje DWA RAZY. A zero w tym miejscu znaczyloby, ze koszt
+        poza symulacja nie istnieje.
+
+        To jest liczba, ktora trzeba odjac od zwrotu z transakcji, zeby Sharpe
+        (a przez niego deflowany Sharpe i bramka promocji) mowil o kosztach,
+        ktore SA ZMIERZONE - a nie tylko o tych, ktore symulacja umie naliczyc.
+        Zmierzony spread 5,85 pb zbija Sharpe/transakcje z +0,0952 na +0,0823
+        i to wystarcza, zeby DSR przestal przechodzic prog przy KAZDYM N.
+
+        CZEGO TA LICZBA NADAL NIE ZAWIERA: skladnikow bez wartosci. Te zostaja
+        w `nieznane` i musza byc wypisane slowami, bo doplata ich nie widzi -
+        patrz `koszt_progowy` i drabina wrazliwosci w `train.opis_przewagi`.
+        """
+        return sum(s.wartosc for s in self.skladniki
+                   if s.wartosc is not None and not s.w_symulacji)
 
     @property
     def pelna(self) -> bool:
@@ -333,7 +366,8 @@ def karta_rundy(kind: str, maker: bool = False, *,
     s: list[Skladnik] = [Skladnik(
         "prowizja", 2 * (k.maker if maker else k.taker), TARYFA,
         "stawka odczytana z gieldy; cztery produkcyjne wypelnienia daja "
-        "fee/qty rowne stawce makera co do cyfry")]
+        "fee/qty rowne stawce makera co do cyfry",
+        w_symulacji=True)]
 
     if maker:
         s.append(Skladnik(
@@ -344,7 +378,8 @@ def karta_rundy(kind: str, maker: bool = False, *,
     else:
         s.append(Skladnik(
             "poslizg", 2 * POSLIZG_TAKER, ZALOZENIE,
-            "stala 4 pb; zmierzona na n=0 wypelnieniach zleceniem rynkowym"))
+            "stala 4 pb; zmierzona na n=0 wypelnieniach zleceniem rynkowym",
+            w_symulacji=True))
 
     if spread_bps is None:
         # Flaga opisuje liczbe, ktorej nie ma - nie ma wiec czego opisywac
@@ -424,7 +459,8 @@ def karta_rundy(kind: str, maker: bool = False, *,
             f"placone co {INTERWAL_FINANSOWANIA_H} h niezaleznie od wyniku "
             f"pozycji, wiec zalezy od CZASU TRZYMANIA, a nie od liczby zlecen - "
             f"stala rundy nie istnieje. Naliczane od 2026-09-24 w "
-            f"`portfolio.simulate_portfolio` z cechy `funding_rate`"))
+            f"`portfolio.simulate_portfolio` z cechy `funding_rate`",
+            w_symulacji=True))
     return Karta(tuple(s))
 
 

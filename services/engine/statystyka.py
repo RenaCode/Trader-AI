@@ -235,3 +235,189 @@ def przedzial_sredniej(xs: list[float]) -> tuple[float, float] | None:
     m = statistics.fmean(xs)
     polowa = t95(n - 1) * statistics.stdev(xs) / math.sqrt(n)
     return (m - polowa, m + polowa)
+
+
+# ------------------------------------------------- deflowany Sharpe (DSR)
+#
+# Stala Eulera-Mascheroniego. Wchodzi do wzoru na OCZEKIWANE MAKSIMUM z N
+# probek rozkladu normalnego - to jest przyblizenie Bailey'a i Lopeza de Prado
+# (2014), a nie stala dobrana pod wynik.
+GAMMA_EULERA = 0.5772156649015329
+
+# Prog, powyzej ktorego DSR mozna czytac jako „wynik nie jest artefaktem
+# selekcji". 0,95 to ten sam poziom, na ktorym stoi kazdy inny przedzial w tym
+# module (`wilson`, `t95`) - nie osobna konwencja dla tej jednej miary.
+PROG_DSR = 0.95
+
+_N01 = statistics.NormalDist()
+
+
+def _momenty(xs: list[float]) -> tuple[float, float, float] | None:
+    """Drugi, trzeci i czwarty moment centralny, dzielone przez n (nie n-1)."""
+    n = len(xs)
+    if n < 2:
+        return None
+    m = statistics.fmean(xs)
+    d = [x - m for x in xs]
+    m2 = sum(t * t for t in d) / n
+    if m2 < MIN_ROZRZUT * MIN_ROZRZUT:
+        return None
+    m3 = sum(t ** 3 for t in d) / n
+    m4 = sum(t ** 4 for t in d) / n
+    return m2, m3, m4
+
+
+def skosnosc(xs: list[float]) -> float | None:
+    """Skosnosc proby - MOMENTOWA (dzielona przez n), nie nieobciazona.
+
+    Ta wersja, a nie poprawka Fishera na obciazenie, bo wzor na deflowany
+    Sharpe jest wyprowadzony dla momentow rozkladu i taka wlasnie wielkosc
+    w nim stoi. Przy probach rzedu tysiaca transakcji roznica miedzy wersjami
+    jest ulamkiem procenta; przy n rzedu dziesieciu byla by istotna i dlatego
+    ta funkcja NIE jest przeznaczona do malych prob.
+
+    None, gdy proba jest jednoelementowa albo stala - ta sama zasada, co
+    w `sharpe`: brak pomiaru musi wygladac inaczej niz pomiar.
+    """
+    mm = _momenty(xs)
+    if mm is None:
+        return None
+    m2, m3, _ = mm
+    return m3 / m2 ** 1.5
+
+
+def kurtoza(xs: list[float]) -> float | None:
+    """Kurtoza proby - NIE NADWYZKOWA. Rozklad normalny ma tu 3, nie 0.
+
+    NAZWA JEST MYLACA I TRZEBA TO POWIEDZIEC WPROST, dokladnie jak przy
+    `sharpe`. Wieksza czesc bibliotek (scipy, pandas) zwraca pod nazwa
+    „kurtosis" NADWYZKE nad rozkladem normalnym, czyli liczbe o 3 mniejsza.
+    Wzor na deflowany Sharpe potrzebuje surowej kurtozy: podstawienie
+    nadwyzki zamienia czlon `(g4 - 1) / 4` na `(g4 - 4) / 4`, czyli przy
+    rozkladzie normalnym z +0,5 na -0,25 - a to ODWRACA znak poprawki i czyni
+    bramke LATWIEJSZA do przejscia, bez zadnego objawu.
+    """
+    mm = _momenty(xs)
+    if mm is None:
+        return None
+    m2, _, m4 = mm
+    return m4 / (m2 * m2)
+
+
+def oczekiwany_maksymalny_sharpe(n_prob: int,
+                                odchylenie_prob: float) -> float | None:
+    """Oczekiwane MAKSIMUM Sharpe'a z `n_prob` prob, gdy zadna nie ma przewagi.
+
+    To jest poprzeczka, ktora deflowany Sharpe podstawia w miejsce zera:
+    najlepsza z N konfiguracji wyjdzie dodatnia sama z siebie, i tym wyzej,
+    im wieksze N. Przyblizenie Bailey'a i Lopeza de Prado (2014):
+
+        E[max SR] ~ sd * ( (1-g) * F^-1(1 - 1/N) + g * F^-1(1 - 1/(N*e)) )
+
+    gdzie `g` to stala Eulera-Mascheroniego, `F^-1` to odwrotna dystrybuanta
+    rozkladu normalnego standardowego, a `sd` to ODCHYLENIE Sharpe'ow miedzy
+    probami (pierwiastek z V[{SR_n}] u Bailey'a).
+
+    N = 1 oddaje ZERO, a nie liczbe: przy jednej probie nie bylo z czego
+    wybierac, wiec nie ma czego odejmowac. Wzor sam by tu nie przeszedl -
+    `F^-1(1 - 1/1) = F^-1(0)` nie istnieje.
+
+    None, gdy N < 1 albo odchylenie nie jest dodatnie. Zero podstawione
+    w miejsce nieznanego odchylenia dawaloby poprzeczke na wysokosci zera,
+    czyli zdejmowaloby cala poprawke na wielokrotne testowanie - i robiloby to
+    po cichu, w strone LATWIEJSZEJ bramki.
+    """
+    if n_prob < 1:
+        return None
+    if n_prob == 1:
+        return 0.0
+    if odchylenie_prob <= 0:
+        return None
+    return odchylenie_prob * (
+        (1 - GAMMA_EULERA) * _N01.inv_cdf(1 - 1 / n_prob)
+        + GAMMA_EULERA * _N01.inv_cdf(1 - 1 / (n_prob * math.e)))
+
+
+def deflowany_sharpe(zwroty: list[float], n_prob: int,
+                     odchylenie_prob: float | None = None) -> dict:
+    """Deflowany Sharpe (Bailey, Lopez de Prado 2014). CZYSTA FUNKCJA.
+
+    Odpowiada na pytanie, na ktore sam Sharpe nie odpowiada: jakie jest
+    prawdopodobienstwo, ze PRAWDZIWA przewaga jest dodatnia, skoro ten wynik
+    jest NAJLEPSZYM z `n_prob` przetestowanych konfiguracji i skoro zwroty nie
+    sa normalne.
+
+    Dwie poprawki naraz, obie w strone ostrozniejsza:
+
+      1. POPRZECZKA NIE JEST ZEREM, a oczekiwanym maksimum z N prob pod
+         hipoteza zerowa (`oczekiwany_maksymalny_sharpe`). Sharpe +0,10
+         wybrany z jednej proby i ten sam +0,10 wybrany z jedenastu tysiecy
+         to dwa rozne wyniki, a dzisiejsza bramka nie odroznia ich niczym.
+      2. MIANOWNIK LICZY SKOSNOSC I KURTOZE, a nie zaklada normalnosci:
+
+             z = (SR - SR*) * sqrt(T - 1) / sqrt(1 - g3*SR + (g4-1)/4 * SR^2)
+
+         `g3` to skosnosc, `g4` KURTOZA SUROWA (3 dla normalnego). Przy
+         ujemnej skosnosci - typowej dla strategii z krotkim ogonem zyskow
+         i dlugim strat - mianownik ROSNIE, wiec DSR spada. Pominiecie tych
+         dwoch momentow jest wiec zalozeniem dzialajacym na korzysc strategii.
+
+    `odchylenie_prob` TO JEDYNA WIELKOSC, KTOREJ TEN PROJEKT NIE MIERZY
+
+    Bailey liczy V[{SR_n}] jako rozrzut Sharpe'ow POMIEDZY probami.
+    `learn.hypothesis_trial` ma na to kolumne `oos_sharpe` i nigdy nie zostala
+    wypelniona (jedyny INSERT, train.py, podaje wylacznie `model_id`,
+    `config_hash`, `params` i `n_windows=1`), wiec rozrzutu nie da sie odczytac.
+
+    Pominiecie argumentu wstawia w to miejsce WARIANCJE SAMEGO ESTYMATORA pod
+    hipoteza zerowa: gdy zadna proba nie ma przewagi, Sharpe'y roznia sie
+    wylacznie bledem pomiaru, czyli sd = sqrt(1 - g3*SR + (g4-1)/4*SR^2) /
+    sqrt(T-1). Trzeba powiedziec wprost, w ktora strone to sie myli:
+    konfiguracje roznia sie nie tylko szumem, wiec PRAWDZIWY rozrzut jest
+    WIEKSZY, poprzeczka WYZSZA, a prawdziwy DSR NIZSZY niz ten liczony tutaj.
+    Ta droga jest wiec OPTYMISTYCZNA i domkniecie jej wymaga zapisywania
+    `oos_sharpe` przy kazdej probie - nie da sie tego obejsc rachunkiem.
+
+    Zwraca SLOWNIK ZAWSZE, z `dsr = None` i wypelnionym `powod`, gdy nie ma
+    czego liczyc. Bramka ma wtedy WSTRZYMAC promocje, a nie przepuscic ja -
+    patrz `train.bramka_dsr`.
+    """
+    wynik = {"dsr": None, "sharpe": None, "prog": None, "skosnosc": None,
+             "kurtoza": None, "n_obserwacji": len(zwroty), "n_prob": n_prob,
+             "odchylenie_prob": odchylenie_prob, "powod": ""}
+    if n_prob < 1:
+        wynik["powod"] = ("licznik przetestowanych konfiguracji jest zerowy — "
+                          "nie wiadomo, z ilu prób ten wynik jest maksimum")
+        return wynik
+    sr = sharpe(zwroty)
+    if sr is None:
+        wynik["powod"] = ("Sharpe ze złączonej próby nie istnieje (mniej niż "
+                          "dwie transakcje albo zerowy rozrzut)")
+        return wynik
+    g3, g4 = skosnosc(zwroty), kurtoza(zwroty)
+    if g3 is None or g4 is None:
+        wynik["powod"] = "skośność i kurtoza nieobliczalne na tej próbie"
+        return wynik
+    wynik.update({"sharpe": sr, "skosnosc": g3, "kurtoza": g4})
+
+    # Mianownik PSR. Moze wyjsc niedodatni przy duzym Sharpe i duzej skosnosci -
+    # wtedy wzor nie ma zastosowania i oddajemy brak, a nie liczbe.
+    wariancja = 1 - g3 * sr + (g4 - 1) / 4 * sr * sr
+    if wariancja <= 0:
+        wynik["powod"] = (f"mianownik PSR niedodatni ({wariancja:+.4f}) — wzór "
+                          f"nie ma zastosowania przy tej skośności i kurtozie")
+        return wynik
+    sigma = math.sqrt(wariancja)
+
+    if odchylenie_prob is None:
+        odchylenie_prob = sigma / math.sqrt(len(zwroty) - 1)
+        wynik["odchylenie_prob"] = odchylenie_prob
+    prog = oczekiwany_maksymalny_sharpe(n_prob, odchylenie_prob)
+    if prog is None:
+        wynik["powod"] = ("rozrzut Sharpe'ów między próbami nie jest dodatni — "
+                          "poprzeczki na wielokrotne testowanie nie ma z czego "
+                          "policzyć")
+        return wynik
+    wynik["prog"] = prog
+    wynik["dsr"] = _N01.cdf((sr - prog) * math.sqrt(len(zwroty) - 1) / sigma)
+    return wynik

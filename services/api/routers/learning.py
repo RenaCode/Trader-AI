@@ -116,8 +116,18 @@ async def state(engine: Silnik):
         "max_drawdown": row["max_drawdown"],
         "calibration_error": row["calibration_error"],
         "max_psi": row["max_psi"],
-        # Licznik przetestowanych konfiguracji. Bez niego deflated Sharpe jest
-        # nieobliczalny i sami siebie oszukamy selekcja.
+        # Licznik wektorow wag. NIE jest N deflowanego Sharpe'a, choc komentarz
+        # przy migracji 0006 tak go zapowiadal: jego kandydaci byli oceniani
+        # in-sample, a walk-forward juz za nich zaplacil, liczac wynik poza
+        # oknem wyboru. N bierze sie z `count(DISTINCT params)` po
+        # `learn.model_version` - patrz `train.n_konfiguracji`.
+        #
+        # CZEGO TA LICZBA NIE JEST, a co trzeba wiedziec, zeby ja czytac:
+        # `learn.hypothesis_trial` ma `UNIQUE (model_id, config_hash)`, a jedyny
+        # INSERT (train.py) konczy sie `ON CONFLICT DO NOTHING`. Liczy wiec
+        # ROZNE WEKTORY WAG kiedykolwiek zapisane dla tego modelu, a nie proby:
+        # dwa przebiegi tej samej konfiguracji dokladaja tylko te wektory,
+        # ktore sie zmienily, a `purge_demo.py` czysci tabele w calosci.
         "trials_run": row["trials_run"],
     }
 

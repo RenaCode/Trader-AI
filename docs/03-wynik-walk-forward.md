@@ -730,6 +730,90 @@ Kryterium wymaga uzupełnienia o warunek przewagi nad odniesieniem, zanim
 `validated` zacznie cokolwiek znaczyć. Do tego czasu tryb live pozostaje
 zablokowany w API (`credentials.py:79`) niezależnie od statusu.
 
+### Drugie uzupełnienie: deflowany Sharpe wszedł do bramki (2026-09-26)
+
+Warunek `pct >= 70 and median > 0,05 and bije_odniesienie` nie uwzględniał ani
+**liczby przetestowanych konfiguracji**, ani rozkładu zwrotów, ani kosztów, których
+symulacja nie nalicza. Teraz DSR jest warunkiem bramki, **fail-closed**:
+nieobliczalny DSR wstrzymuje promocję.
+
+#### Co jest N — i dlaczego NIE `learn.hypothesis_trial`
+
+Licznik `hypothesis_trial` istniał od migracji 0006 właśnie po to, żeby DSR dało się
+policzyć, i **nie jest właściwym N**. Nie dlatego, że rośnie kalendarzem — to jest
+argument za słaby: 143 przebiegi po najwyżej 40 okien dają sufit 5 720 wierszy
+z wariantu `ic`, a licznik toru 4h ma 12 613, więc co najmniej 6 893 wiersze
+pochodzą z realnego przeszukiwania `argmax`.
+
+Właściwy powód jest mocniejszy: **kandydaci `argmax` byli oceniani in-sample**
+(`ocen(..., train_slices, ...)`), a raportowany Sharpe pochodzi z okna testowego,
+którego selekcja nigdy nie widziała. Walk-forward już za nich zapłacił — tym, że
+wynik liczy się poza oknem wyboru. Doliczenie ich do poprzeczki deflacji odejmowałoby
+klątwę zwycięzcy, którą ten protokół właśnie usuwa: **ta sama kara dwa razy**.
+
+N to liczba **rozróżnialnych konfiguracji, których wynik OOS ktoś zobaczył**:
+`count(DISTINCT params)` po `learn.model_version`. Zmierzone 2026-09-26:
+
+```
+crypto_signal_weighting_4h:  143 wersje | 57 roznych params | 2026-08-27..2026-09-26
+calosc projektu:             180 wersji | 86 roznych params | 5 modeli
+hypothesis_trial (tor 4h):   12 613     | oos_sharpe wypelnione: 0
+```
+
+**57 jest DOLNĄ GRANICĄ.** Do 26.09 `params` nie zapisywało `kind` ani `limit`, więc
+dwa przebiegi różniące się wyłącznie cennikiem (`spot` taker 0,100% wobec `spot_eu`
+0,250%) zlewały się w jedną konfigurację. Od teraz zapisuje; historycznych wierszy to
+nie naprawia. Zaniżone N podnosi DSR, więc błąd tej liczby działa **na korzyść
+strategii**.
+
+#### Wynik przy zmierzonym N
+
+T = 1462, γ₃ = 0, γ₄ = 3:
+
+| N | poprzeczka selekcji | DSR przy SR +0,0952 | DSR po spreadzie 5,85 pb (SR +0,0823) |
+|---|---|---|---|
+| 17 | +0,0478 | 0,9646 przechodzi | **0,9058 nie** |
+| 22 | +0,0508 | 0,9547 przechodzi | **0,8852 nie** |
+| **57** (zmierzone) | +0,0609 | **0,9049 nie** | **0,7934 nie** |
+| 86 | +0,0648 | 0,8768 nie | 0,7478 nie |
+| 12 613 | +0,1025 | 0,3907 nie | 0,2207 nie |
+
+Tabela policzona `services/engine/statystyka.py`. Druga, niezależna implementacja
+(napisana od zera) daje te same liczby z rozbieżnością poniżej 0,004 na całym
+zakresie N — czyli zgodność, która nie zmienia ani jednego werdyktu.
+
+Dwa wnioski:
+
+1. **Przy zmierzonym N werdykt nie jest na granicy** — 0,9040, i spada dalej, bo 57 to
+   dolna granica. Nie trzeba więc rozstrzygać sporu o księgowanie hipotez, żeby
+   odpowiedzieć na pytanie „czy przewaga przeżywa poprawkę na selekcję". Nie przeżywa.
+2. **Po doliczeniu zmierzonego spreadu DSR nie przechodzi przy ŻADNYM N, także przy
+   najłagodniejszym.** Rozstrzyga więc **koszt**, nie selekcja — i to zdejmuje z bramki
+   ciężar bycia precyzyjną w N.
+
+#### DSR liczy się PO koszcie, z tej samej symulacji, z której bierze się koszt
+
+To był najważniejszy element tej zmiany. `Karta.doplata_poza_symulacja` sumuje
+wyłącznie te składniki, które **mają wartość, a symulacja ich nie naliczyła** — dziś
+spread (gdy podano pomiar) i niewypełnienie przy limicie. Odjęcie całego `policzone`
+liczyłoby prowizję dwa razy; odjęcie zera twierdziłoby, że kosztu poza symulacją nie
+ma. Rozróżnienie stoi w polu `Skladnik.w_symulacji`, a nie w dopasowywaniu nazw
+tekstem — przemianowanie składnika zmieniałoby inaczej werdykt bramki bez żadnego
+objawu.
+
+#### Trzy zastrzeżenia, bez których ta liczba byłaby ładniejsza niż jest
+
+1. `V[{SR_n}]` z pracy Baileya i Lópeza de Prado — rozrzut Sharpe'ów **między
+   próbami** — nie jest mierzalny: `learn.hypothesis_trial.oos_sharpe` jest wypełnione
+   w **0 z 12 613** wierszy. Wstawiamy wariancję samego estymatora pod hipotezą zerową,
+   a to **zawyża DSR**.
+2. Transakcje krypto nie są niezależne, więc efektywne `T` jest mniejsze niż licznik
+   transakcji — co również zawyża DSR.
+3. N = 57 jest dolną granicą (patrz wyżej) — co znów zawyża DSR.
+
+Wszystkie trzy błędy idą w tę samą stronę i wszystkie na korzyść strategii. Liczby
+w tabeli są więc **górnym** oszacowaniem, a nie pomiarem zamkniętym.
+
 ---
 
 # Sprostowanie: miara, na której stoi cały ten dokument, była liczona przed prowizją
