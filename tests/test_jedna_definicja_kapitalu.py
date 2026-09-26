@@ -354,8 +354,6 @@ def test_zasiew_nie_podnosi_szczytu_TAKZE_w_pieniadzach():
     a `max(equity)` ma dokładnie ten sam brak ograniczenia czasowego. Zasiane
     100 000 byłoby wtedy trwałym szczytem w pieniądzach.
     """
-    from services.engine.risk import RiskKernel  # noqa: F401  (czytelność importu)
-
     seria = [_p(100, 100_000, "1.0", ZRODLO_ZASIEW),
              _p(80, 95_000, "0.95", ZRODLO_KSIEGI_GIELDY),
              _p(0, 92_000, "0.92", ZRODLO_KSIEGI_GIELDY)]
