@@ -28,13 +28,14 @@ wyszło — łącznie z tym, że nie wyszło nic.
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 from services.engine.egzekucja import co_z_wypelnieniem, rozlicz_prowizje
 from services.engine.loop import (
-    trwale_niesprzedawalna, zapisz_wejscie, zapisz_wyjscie)
-from services.engine.zlecenia import Filtry, sprawdz_zlecenie
+    trwale_niesprzedawalna, zapisz_pominiecie, zapisz_wejscie, zapisz_wyjscie)
+from services.engine.zlecenia import (
+    Filtry, Oferty, ocena_zwloki, sprawdz_zlecenie)
 from services.exchanges.base import ExchangeError, OdmowaGieldy
 # `recv_window` to jedyna liczba, ktora opisuje dopuszczalny rozjazd naszego
 # zegara z zegarem gieldy — ta sama, ktorej pilnuje `BybitAdapter.dryf_zegara`.
@@ -227,6 +228,85 @@ async def prowizja_z_rejestru(adapter, *, symbol: str, id_wlasne: str,
     return sum((w.prowizja for w in wyp), Decimal(0)), waluty.pop(), None
 
 
+# ILE MOZE MIEC ARKUSZ, ZANIM PRZESTANIE BYC "CENA Z CHWILI WYSYLKI".
+#
+# ZMIERZONE, nie przyjete. Roznica miedzy znacznikiem oferty a chwila zapisu
+# (`market.book_snapshot`: ingested_at - event_time), 3 dni, cale uniwersum
+# `active AND tradeable`, ~3200 migawek na instrument:
+#
+#     mediana |roznicy|   0,07 s
+#     p99                 1,1-3,5 s (zaleznie od pary)
+#     skrajnosci          od -13,0 s do +3,9 s
+#
+# Znak ujemny to znacznik gieldy PRZED naszym zegarem, czyli rozjazd zegarow -
+# i dlatego wiek liczymy z modulu. 60 s to ponad czterokrotnosc zmierzonej
+# skrajnosci, a jednoczesnie cena, ktora w tym czasie zdazy odjechac, to dla
+# SOL-a okolo 0,04% (mediana dryfu 75-minutowego 0,33%, skalowana pierwiastkiem
+# czasu), czyli jedna piata rundy kosztowej.
+#
+# DLACZEGO PROG MUSI BYC LUZNY, A NIE CIASNY. On nie chroni przed niczym
+# realnym przy 30 s zamiast 60 s - on ma odciac odczyt ZEPSUTY: `ts` rowne zero
+# (znacznik 1970) albo arkusz zamrozony przez posrednika. Prog ciasny
+# zatrzymywalby handel na szumie zegara, czyli zamienialby wade w awarie.
+#
+# ZASTRZEZENIE DLA SILNIKA GIELDOWEGO - ten sam, ktory stoi przy
+# `loop.CENA_STARA_PO_MIN`. Prog zaklada rynek dzialajacy bez przerwy.
+# `AlpacaAdapter.fetch_order_book` bierze `event_time` ze znacznika OFERTY
+# (`/v2/stocks/quotes/latest`), wiec poza sesja kazdy arkusz bedzie tu starszy
+# niz 60 s i wejscia silnika `equity` beda odmawiane. Jest to bezpieczny
+# kierunek (zlecenie zlozone po cenie z zamkniecia sesji i tak nie ma z czym
+# sie skojarzyc), ale zanim silnik `equity` ruszy, prog musi pochodzic
+# z kalendarza sesji, a nie z tej stalej.
+WIEK_ARKUSZA_MAX_S = 60
+
+
+async def arkusz_wysylki(adapter, symbol: str, kategoria: str, teraz: datetime
+                         ) -> tuple[Oferty | None, str]:
+    """Najlepsze oferty z ksiegi EGZEKUCJI w chwili wysylki. Zwraca (oferty, skad).
+
+    `ksiega_egzekucji=True` NIE JEST TU DOMYSLNA WYGODA, TYLKO CALY SENS
+    ODCZYTU. Host publiczny (api.bybit.com) i host egzekucji (api.bybit.eu
+    z `ref.venue`) to dwie rozne ksiegi; zmierzony rozjazd ich zamkniec to
+    mediana 5,9 pb i p90 28,4 pb (patrz `zlecenia.ROZJAZD_GIELD`), czyli rzad
+    calej rundy kosztowej. Pytanie brzmi "po ktorej stronie SPREADU, w ktorym
+    zlecenie wyladuje, stanie nasza cena" - na to odpowiada wylacznie arkusz
+    tej ksiegi. `fetch_order_book` pilnuje przy tym, ze host ten symbol
+    naprawde LISTUJE: api.bybit.eu oddaje pelny arkusz takze dla BTCUSDT,
+    ktorego nie prowadzi (patrz `bybit.fetch_order_book`).
+
+    GLEBOKOSC 1, bo pytamy o najlepsza oferte po kazdej stronie i o nic wiecej.
+    Glebszy arkusz opisywalby poslizg zlecenia rynkowego, a nasze zlecenia
+    z definicji rynkowe nie sa.
+
+    BRAK ODCZYTU ODDAJEMY JAKO None RAZEM Z POWODEM, a nie jako wyjatek.
+    Wywolujacy ma dwie rozne reakcje zaleznie od roli zlecenia (wyjscia nie
+    wolno zatrzymac, wejscia nie wolno wyslac po cenie sprzed godziny), wiec
+    decyzje o tym podejmuje on, a nie ten odczyt.
+    """
+    try:
+        ksiega = await adapter.fetch_order_book(symbol, 1, ksiega_egzekucji=True)
+    except ExchangeError as e:
+        # `SymbolNieListowany` wpada tutaj jako podklasa i to jest poprawne:
+        # z punktu widzenia CENY oba stany znacza to samo - arkusza nie ma.
+        # Rozniaca je trwalosc ma znaczenie dla workera rynku, nie dla nas.
+        return None, f"arkusz księgi egzekucji NIEODCZYTANY ({e})"
+    if not ksiega.bids or not ksiega.asks:
+        return None, "arkusz księgi egzekucji przyszedł BEZ ofert po jednej ze stron"
+    wiek = abs((teraz - ksiega.event_time).total_seconds())
+    if wiek > WIEK_ARKUSZA_MAX_S:
+        # SWIEZA CENA Z ODCZYTU SPRZED GODZINY TO TEN SAM BLAD W NOWYM MIEJSCU.
+        return None, (f"arkusz księgi egzekucji ma {wiek:.0f} s "
+                      f"(granica {WIEK_ARKUSZA_MAX_S} s) — znacznik oferty "
+                      f"{ksiega.event_time:%Y-%m-%d %H:%M:%S}, to nie jest "
+                      f"cena z chwili wysyłki")
+    oferty = Oferty(bid=ksiega.bids[0].price, ask=ksiega.asks[0].price)
+    if not oferty.kompletne:
+        return None, (f"arkusz księgi egzekucji ODWRÓCONY albo zerowy "
+                      f"(bid {oferty.bid}, ask {oferty.ask}) — odczyt zepsuty")
+    return oferty, (f"arkusz księgi egzekucji {oferty.bid}/{oferty.ask} "
+                    f"(wiek {wiek:.1f} s)")
+
+
 async def zloz_plan(cur, adapter, plan: dict, f: Filtry, *, engine: str,
                     mode: str, kategoria: str) -> tuple[bool, str]:
     """Składa jeden plan na giełdzie. Zwraca (czy_zlozono, komunikat).
@@ -234,6 +314,24 @@ async def zloz_plan(cur, adapter, plan: dict, f: Filtry, *, engine: str,
     ODMOWA ZŁOŻENIA JEST ZAPISYWANA, nie pomijana. Plan, który nie poszedł na
     giełdę, musi mieć w dzienniku powód — inaczej jedyną różnicą między
     „giełda odrzuciła" a „nikt nie próbował" jest cisza.
+
+    CENA LIMITU POCHODZI Z CHWILI WYSYŁKI, NIE Z ZAMKNIĘCIA ŚWIECY (2026-09-26)
+
+    `journal.planned_order.limit_price` to cena zamknięcia świecy decyzyjnej
+    (`loop.run_once`: `price = swieca_dec["close"]` → `zaplanuj`). Zlecenie idzie
+    na giełdę 71–82 minuty później, bo pętla czeka na komplet cech, a przez te
+    godzinę rynek się rusza — zmierzona mediana dryfu 75-minutowego to 0,33% na
+    SOL-u wobec 20 pb całej rundy kosztowej. Egzekucja wysyła
+    `timeInForce: PostOnly`, więc cena przecinająca spread MUSI zostać
+    odrzucona: wszystkie trzy odrzucenia w historii produkcji (55, 57, 58) to
+    kupna SOLUSDC z limitem nad askiem, a oba wypełnienia (54, 56) miały limit
+    po stronie pasywnej. Separacja zupełna, 3/3 kontra 2/2.
+
+    Dlatego ta funkcja czyta arkusz księgi egzekucji (`arkusz_wysylki`) i cena
+    limitu powstaje z NIEGO, po pasywnej stronie spreadu. Decyzja się przy tym
+    NIE ZMIENIA — zmienia się cena, po której ją wykonujemy. Wyjątkiem jest
+    jawny próg: gdy cena odjechała od ceny decyzyjnej dalej niż 1,5×ATR pary
+    (`zlecenia.prog_zwloki`), wejścia NIE składamy i zapisujemy pominięcie.
     """
     wyjscie = plan["trigger"]["rodzaj"] == "wyjscie"
     kupno = plan["side"] == "buy"
@@ -252,11 +350,80 @@ async def zloz_plan(cur, adapter, plan: dict, f: Filtry, *, engine: str,
     odniesienie = await adapter.cena_odniesienia(plan["symbol"], kategoria)
     atr = float(plan["atr_pct"]) if plan.get("atr_pct") is not None else None
 
+    # ARKUSZ Z CHWILI WYSYLKI - DRUGI ODCZYT, BO ODPOWIADA NA INNE PYTANIE.
+    #
+    # `cena_odniesienia` oddaje `lastPrice`, czyli cene ostatniej TRANSAKCJI.
+    # Do pasma to wystarcza (pasmo pyta o rzad wielkosci), ale do pytania "po
+    # ktorej stronie spreadu stanie nasza cena" - nie: zmierzone na zleceniu 54
+    # `lastPrice` lezalo 11 tickow NAD askiem. Bid i ask sa w arkuszu i tylko
+    # tam.
+    #
+    # DWA ODCZYTY, DWIE NIEZALEZNE AWARIE - I TO JEST CELOWE. Padniecie
+    # arkusza zostawia nam `lastPrice`, padniecie obu zatrzymuje WEJSCIA
+    # (nizej), ale nie wyjscia. Jeden odczyt na wszystko znaczylby, ze awaria
+    # jednego endpointu wstrzymuje handel - gorsze lekarstwo niz choroba.
+    oferty, skad_ceny = await arkusz_wysylki(
+        adapter, plan["symbol"], kategoria, datetime.now(timezone.utc))
+
     ilosc, cena, powod = sprawdz_zlecenie(
         Decimal(plan["qty"]), Decimal(plan["limit_price"]), f,
         kupno=kupno, wyjscie=wyjscie,
-        cena_odniesienia=odniesienie, atr_pct=atr)
+        cena_odniesienia=odniesienie, atr_pct=atr, najlepsze=oferty)
+
+    # GRANICA, ZA KTORA NIE WCHODZIMY - I SLAD PO NIEJ W DZIENNIKU.
+    #
+    # Powyzsze podmienilo cene na te z chwili wysylki. Zostaje pytanie, czy po
+    # TEJ cenie decyzja nadal cokolwiek popiera - i dotyczy ono wylacznie
+    # WEJSCIA. Wyjscia nie wolno zatrzymac zadnym progiem: odmowa zostawia
+    # pozycje otwarta wbrew decyzji, czyli kosztuje pieniadze, a nie okazje
+    # (patrz naglowek `zlecenia.py`).
+    #
+    # POWODY SPRAWDZENIA KSZTALTU MAJA PIERWSZENSTWO. Zlecenie, ktorego ilosc
+    # znika po zaokragleniu, nie ma ceny do porownania - a komunikat o dryfie
+    # zamiast o zerowej ilosci kierowalby szukanie w zla strone.
+    #
+    # KTORE Z DWOCH POMINIEC ZAPISAC. Wartosc trzyma nazwe powodu, a nie
+    # gotowe wywolanie, bo `powod` w `zapisz_pominiecie` MUSI byc literalem:
+    # `test_slad_pominiecia` porownuje zbior literalow z kodu ze zbiorem
+    # z CHECK-a w migracji, a powod zlozony ze zmiennej sprawdzilby sie
+    # dopiero na produkcji - wywracajac caly cykl.
+    pominiecie: str | None = None
+    if not powod and not wyjscie:
+        if oferty is None and odniesienie is None:
+            # ZADNEGO ODCZYTU Z CHWILI WYSYLKI. Cena w `plan["limit_price"]` to
+            # zamkniecie swiecy sprzed 71-82 minut (zmierzone, patrz
+            # `zlecenia.py`), a PostOnly odrzuca cene przecinajaca spread.
+            # Wyslanie jej jest wiec zakladem o kierunek rynku przez te
+            # godzine, a nie wykonaniem decyzji. NIE WYSYLAMY.
+            powod = (f"wejście: brak ceny z chwili wysyłki — {skad_ceny}, "
+                     f"a ostatnia cena z księgi egzekucji też nie przyszła; "
+                     f"cena z planu {plan['limit_price']} pochodzi z zamknięcia "
+                     f"świecy {plan['trigger'].get('bar')} i PostOnly odrzuci ją, "
+                     f"jeśli w międzyczasie rynek przeszedł na drugą stronę")
+            pominiecie = "brak_ceny_wysylki"
+        else:
+            zwloka = ocena_zwloki(Decimal(plan["limit_price"]), cena, atr)
+            if zwloka is not None and zwloka.poza:
+                powod = f"wejście: {zwloka.opis()} [{skad_ceny}]"
+                pominiecie = "cena_odjechala"
+
     if powod:
+        # ODMOWA WEJSCIA Z POWODU CENY ZOSTAWIA WIERSZ W `journal.pominiecie`.
+        #
+        # `exec.order` dostanie ten sam powod nizej, ale odpowiada na pytanie
+        # "co sie stalo z tym zleceniem". Pytanie, ktore zadaje sie naprawde,
+        # brzmi "czemu dla swiecy 08:00 nie weszlismy w SOLUSDC" - i na nie
+        # odpowiada wylacznie tabela kluczowana (instrument, swieca, powod),
+        # po ktorej da sie zlaczyc odmowe z decyzja, ktora ja zrodzila
+        # (patrz migracja 0041).
+        if pominiecie is not None:
+            bar = datetime.fromisoformat(plan["trigger"]["bar"])
+            if pominiecie == "brak_ceny_wysylki":
+                zapisz_pominiecie(cur, engine, mode, plan["instrument_id"], bar,
+                                  "brak_ceny_wysylki", powod)
+            else:
+                zapisz_pominiecie(cur, engine, mode, plan["instrument_id"], bar,
+                                  "cena_odjechala", powod)
         # NAJPIERW PYTAMY GIELDE, CZY TO ZLECENIE JUZ U NIEJ NIE LEZY.
         #
         # Odmowa przed wysłaniem zapisuje plan jako `rejected`, a wiersz
