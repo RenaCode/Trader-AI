@@ -641,6 +641,35 @@ async def rozstrzygnij_plan(cur, adapter, plan: dict, f: Filtry, *, engine: str,
             "ulamek_wypelnienia": str(r.ulamek), "rodzaj": r.rodzaj,
             "status_gieldy": stan.status, "venue_order_id": stan.id_gieldy}
 
+    # POWOD ODMOWY GIELDY: SUROWY OBOK NASZEJ INTERPRETACJI.
+    #
+    # Do 2026-09-26 zlecenie odrzucone nie zapisywalo powodu ANI RAZU:
+    # `exec.order.reject_reason` byl NULL na wszystkich trzech odrzuceniach
+    # w historii produkcji (55, 57, 58), a `raw` mowil tylko `"rodzaj": "brak"`
+    # i `"status_gieldy": "rejected"` — czyli "nie weszlo, giełda odmowila",
+    # bez jednego slowa o tym, DLACZEGO. Trzy identyczne wiersze, zero wiedzy.
+    #
+    # SUROWA WARTOSC ZOSTAJE W `raw` NAWET GDY NASZE MAPOWANIE JEST DOBRE.
+    # Interpretacja moze sie pomylic albo zmienic — wtedy jedynym punktem
+    # zaczepienia jest to, co gielda POWIEDZIALA, a nie to, co z tego
+    # zrozumielismy. Dlatego `powod_odmowy_gieldy` trzyma kod doslownie,
+    # `powod_odmowy_rodzaj` naszą kategorię (albo 'nierozpoznane'), i zadne
+    # z nich nie zastepuje drugiego.
+    odmowa = stan.powod_odmowy
+    powod_odrzucenia: str | None = None
+    if odmowa is not None:
+        meta["powod_odmowy_gieldy"] = odmowa.kod
+        meta["powod_odmowy_rodzaj"] = odmowa.rodzaj
+        powod_odrzucenia = odmowa.opis
+    elif stan.status == "rejected":
+        # NIEWIEDZA NAZWANA NIEWIEDZA, a nie NULL. Kolumna pusta nie odrozni
+        # "gielda nie podala powodu" od "nie zapytalismy o powod" — a to sa dwa
+        # rozne zadania do zrobienia i tylko jedno z nich jest po naszej stronie.
+        meta["powod_odmowy_gieldy"] = None
+        meta["powod_odmowy_rodzaj"] = "nie_podany"
+        powod_odrzucenia = ("giełda odrzuciła zlecenie i NIE PODAŁA powodu "
+                            "(brak `rejectReason` w odpowiedzi o stan zlecenia)")
+
     if r.rodzaj == "brak":
         if anulowanie_padlo is not None:
             # PLAN NIE WYGASA, DOPOKI ZLECENIE LEZY W ARKUSZU.
@@ -667,7 +696,12 @@ async def rozstrzygnij_plan(cur, adapter, plan: dict, f: Filtry, *, engine: str,
                 "UPDATE exec.order SET status=%s, updated_at=%s, reject_reason=%s,"
                 " raw = raw || %s WHERE planned_order_id=%s",
                 (stan.status, teraz,
-                 f"anulowanie przy rozstrzygnięciu nie powiodło się: {anulowanie_padlo}",
+                 # POWOD ODMOWY DOPISANY, A NIE ZASTAPIONY. Nieudane anulowanie
+                 # i powod odrzucenia to dwa osobne fakty o tym samym zleceniu;
+                 # zapisanie tylko jednego z nich kasuje drugi bezpowrotnie, bo
+                 # kolumna jest jedna.
+                 f"anulowanie przy rozstrzygnięciu nie powiodło się: {anulowanie_padlo}"
+                 + (f" | {powod_odrzucenia}" if powod_odrzucenia else ""),
                  json.dumps(dict(meta, anulowanie="nie_powiodlo_sie",
                                  plan="pozostaje pending — ponowimy w następnym cyklu")),
                  plan["id"]))
@@ -681,13 +715,19 @@ async def rozstrzygnij_plan(cur, adapter, plan: dict, f: Filtry, *, engine: str,
         # otwarte, ktorego juz nie ma: kill-switch probowalby je co raz zdejmowac,
         # a czujka zdrowia egzekucji liczylaby je jako przyjete i wiszace.
         cur.execute(
-            "UPDATE exec.order SET status=%s, updated_at=%s, raw = raw || %s"
+            "UPDATE exec.order SET status=%s, updated_at=%s,"
+            # `COALESCE`, zeby zapis bez powodu (zwykle wygasniecie limitu,
+            # ktore anulowalismy sami) nie kasowal powodu wpisanego wczesniej
+            # np. przez kill-switch albo sprzatanie.
+            " reject_reason = COALESCE(%s, reject_reason), raw = raw || %s"
             " WHERE planned_order_id=%s",
             (stan.status if stan.status in ("cancelled", "rejected") else "cancelled",
-             teraz, json.dumps(dict(meta, anulowanie="zdjete" if anulowano
+             teraz, powod_odrzucenia,
+             json.dumps(dict(meta, anulowanie="zdjete" if anulowano
                                     else f"niepotrzebne (giełda: {stan.status})")),
              plan["id"]))
-        return r.rodzaj, r.powod
+        return r.rodzaj, (r.powod + (f" — {powod_odrzucenia}"
+                                     if powod_odrzucenia else ""))
 
     cena = stan.srednia_cena or Decimal(plan["limit_price"])
     prowizja = stan.prowizja
@@ -875,7 +915,12 @@ async def rozstrzygnij_plan(cur, adapter, plan: dict, f: Filtry, *, engine: str,
     cur.execute("UPDATE exec.order SET status=%s, updated_at=%s,"
                 " reject_reason = COALESCE(%s, reject_reason), raw = raw || %s"
                 " WHERE planned_order_id=%s",
-                (status_koncowy, teraz, uwaga,
+                # `uwaga` (anomalia) ma pierwszenstwo, ale gdy jej nie ma,
+                # a gielda podala powod odmowy — zapisujemy powod. Zlecenie
+                # odrzucone PO czesciowym wypelnieniu przechodzi wlasnie tu
+                # i bez tego zostawaloby bez powodu, tak samo jak wczesniej
+                # zlecenie odrzucone bez wypelnienia.
+                (status_koncowy, teraz, uwaga or powod_odrzucenia,
                  json.dumps(dict(meta, status_po_anulowaniu=status_koncowy)
                             if anulowano else meta),
                  plan["id"]))
@@ -1369,8 +1414,17 @@ async def posprzataj_zlecenia(cur, adapter, *, engine: str, mode: str,
                           f"{stan.wypelniono}/{stan.ilosc}, poza dziennikiem "
                           f"{niezaksiegowane}")
             else:
-                cur.execute("UPDATE exec.order SET status=%s, updated_at=now()"
-                            " WHERE id=%s", (stan.status, o["id"]))
+                # POWOD ODMOWY TAKZE TUTAJ. Sprzatanie dochodzi do zlecen,
+                # ktorych rozstrzyganie juz nie dotknie (plan nie jest
+                # 'pending'), wiec bez tego zapisu zlecenie odrzucone,
+                # zamkniete ta gałęzią, zostawaloby z `reject_reason` NULL —
+                # ta sama cisza, tylko w drugim miejscu.
+                odmowa = stan.powod_odmowy
+                cur.execute("UPDATE exec.order SET status=%s, updated_at=now(),"
+                            " reject_reason = COALESCE(%s, reject_reason)"
+                            " WHERE id=%s",
+                            (stan.status, odmowa.opis if odmowa else None,
+                             o["id"]))
                 st["domkniete"] += 1
             continue
 
