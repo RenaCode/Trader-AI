@@ -643,3 +643,19 @@ kursCron:
   enabled: true
   schedule: "13 */6 * * *"   # co 6 h, w minucie nieuzywanej przez inne zadania
   dni: 400                   # zapas ponad rok, zeby backfill mial z czego liczyc
+
+# POMIARY ROZSTRZYGAJACE PRZEWAGE - zadania ZAWIESZONE, uruchamiane recznie.
+#
+# `enabled: true` nie znaczy "chodzi", tylko "istnieje w klastrze i da sie
+# uruchomic jednym poleceniem". Oba CronJoby maja `suspend: true` i harmonogram
+# ich nie odpala - patrz naglowek `templates/diagnostyka-cron.yaml`.
+#
+#     kubectl create job -n default --from=cronjob/trader-diagnostyka pomiar-1
+#
+# `false` wycofuje je z klastra; kod pomiarowy zostaje w obrazie, wiec nic nie
+# ginie - znika tylko gotowe polecenie.
+diagnostykaCron:
+  enabled: true
+  resources:
+    limits:   { cpu: 2000m, memory: 2Gi }
+    requests: { cpu: 200m,  memory: 512Mi }

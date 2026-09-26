@@ -1,0 +1,94 @@
+{{- if .Values.diagnostykaCron.enabled }}
+# POMIARY WYMAGAJACE TRENERA - OSOBNE ZADANIE, BO ZOSTAWIAJA SLAD.
+#
+# `train.py --sucho` NIE JEST trybem tylko-do-odczytu i nie wolno go za taki
+# uznac. Sprawdzone w kodzie: nawet z ta flaga trener wykonuje i COMMITUJE wpis
+# do `learn.model`, `learn.model_version` (status utyka na `training`) oraz
+# `learn.training_run`. Czego `--sucho` faktycznie broni, to blok na koncu:
+# aktualizacja parametrow wersji, BRAMKA PROMOCJI, nadpisanie
+# `learn.learning_state` i log - te wykonuja sie wylacznie `if not sucho`.
+#
+# Czyli: pomiar NIE zmieni modelu, ktorym handluje produkcja, ale ZOSTAWI
+# wiersze-sieroty. Po odczytaniu wyniku warto je sprzatnac:
+#
+#   DELETE FROM learn.training_run  WHERE status = 'running' AND started_at < now() - interval '1 hour';
+#   DELETE FROM learn.model_version WHERE status = 'training' AND created_at < now() - interval '1 hour';
+#
+# DLACZEGO OSOBNE ZADANIE. Gdyby te dwa pomiary siedzialy w zadaniu wyzej,
+# caly przebieg musialby chodzic rola z prawem zapisu - i trzy pomiary, ktore
+# NAPRAWDE sa tylko odczytem, stracilyby jedyna twarda gwarancje, jaka maja.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: trader-diagnostyka-trener
+  labels: {{- include "trader.labels" . | nindent 4 }}
+spec:
+  schedule: "0 0 31 2 *"
+  suspend: true
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 1
+  # `Forbid` i oba limity NIE DOTYCZA sciezki recznej: Job utworzony przez
+  # `kubectl create job --from=cronjob/...` jest osobnym obiektem i polityka
+  # wspolbieznosci CronJoba go nie obowiazuje. Stoja tu, zeby manifest byl
+  # poprawny takze wtedy, gdy ktos kiedys zdejmie `suspend` - inaczej pierwszy
+  # zawieszony przebieg po cichu pochlonalby kazdy kolejny termin, a po stu
+  # pominieciach kontroler przestalby planowac zadanie CALKOWICIE.
+  startingDeadlineSeconds: 300
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: 5400
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: diagnostyka-trener
+              image: "{{ .Values.api.image.repository }}:{{ .Values.api.image.tag }}"
+              imagePullPolicy: {{ .Values.api.image.pullPolicy }}
+              command:
+                - sh
+                - -c
+                - |
+                  set -u
+                  RC=0
+                  for D in 1400 1397 1394 1391; do
+                    echo ""
+                    echo "=============== OKNO $D DNI ==============="
+                    # P0-4: czy spread NASZEJ ksiegi miesci sie w koszcie
+                    # progowym. 5.85 pb to wartosc zmierzona po wdrozeniu
+                    # `7ed0795`, gdy arkusz zaczal isc z gieldy, na ktorej
+                    # skladamy zlecenia. Nocny trener NIE dostaje tej flagi,
+                    # wiec jego karta kosztu jest co noc niepelna.
+                    # Obala: koszt progowy ponizej 5,85 pb.
+                    echo "--- P0-4 koszt progowy wobec spreadu 5,85 pb ---"
+                    python services/engine/train.py \
+                      --bar 4h --days "$D" --kind spot_eu --limit \
+                      --sucho --spread-bps 5.85 || RC=$?
+                    # P0-5: czy ekspozycja okna jest ujemnie skorelowana
+                    # ze zwrotem kup-i-trzymaj. Trener wypisuje obie liczby
+                    # obok siebie w kazdym oknie - wystarczy je zestawic.
+                    # Obala: korelacja Spearmana w (-0,3; +0,3) - i wtedy teza,
+                    # ze model jest w calosci modelem powrotu do sredniej,
+                    # jest falszywa.
+                    echo "--- P0-5 ekspozycja wobec zwrotu odniesienia ---"
+                    python services/engine/train.py \
+                      --bar 4h --days "$D" --kind spot_eu --limit \
+                      --sucho --wybor ic || RC=$?
+                  done
+                  echo ""
+                  echo "RC=$RC"
+                  exit $RC
+              env:
+                # Rola `silnik`, bo `--sucho` mimo nazwy zapisuje - patrz
+                # komentarz nad tym zadaniem. To jest powod, dla ktorego te dwa
+                # pomiary nie moga isc razem z trzema wyzej.
+                {{- include "trader.rolaDbEnv" (dict "ctx" $ "rola" "silnik") | nindent 16 }}
+                - name: SECRETS_KEY
+                  valueFrom:
+                    secretKeyRef: { name: {{ .Values.secretName }}, key: SECRETS_KEY }
+                - name: PYTHONUNBUFFERED
+                  value: "1"
+              resources:
+                {{- toYaml .Values.diagnostykaCron.resources | nindent 16 }}
+{{- end }}

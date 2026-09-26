@@ -1,0 +1,129 @@
+{{- if .Values.diagnostykaCron.enabled }}
+# POMIARY ROZSTRZYGAJACE, CZY STRATEGIA MA PRZEWAGE.
+#
+# Oba zadania nizej sa ZAWIESZONE (`suspend: true`) i nigdy nie odpala ich
+# harmonogram. Istnieja po to, zeby pomiar dal sie uruchomic JEDNYM poleceniem,
+# bez wstrzykiwania manifestu z boku:
+#
+#     kubectl create job -n default --from=cronjob/trader-diagnostyka pomiar-1
+#     kubectl logs -n default job/pomiar-1 -f
+#     kubectl delete job -n default pomiar-1        # po odczytaniu wyniku
+#
+# DLACZEGO TAK, A NIE `kubectl apply` WLASNEGO MANIFESTU. Ten klaster jest
+# sterowany przez ArgoCD i to jest jedyny mechanizm wdrozen. Manifest wstrzykniety
+# recznie nie istnieje w gicie, wiec nikt go pozniej nie znajdzie, nie wie, kto go
+# uruchomil ani z jakimi flagami - a wynik pomiaru bez zapisanej metody nie jest
+# pomiarem, tylko liczba. Tutaj polecenie stoi w repozytorium obok kodu, ktory
+# mierzy, i zmienia sie razem z nim.
+#
+# DLACZEGO ZAWIESZONE, A NIE HARMONOGRAM. Te przebiegi licza sie kilkanascie minut
+# i obciazaja baze, ktora obsluguje handel. Maja chodzic wtedy, gdy ktos pyta,
+# a nie co noc "na wszelki wypadek" - inaczej dolozylyby staly koszt do systemu,
+# ktory dopiero sprawdza, czy w ogole zarabia.
+#
+# CZEGO TE POMIARY DOTYCZA. Stan na 2026-09-26: model crypto/4h ma status
+# `learning` (26/38 okien), dryf cech 2,56 przy progu 1,0 i rosnie, a karta kosztu
+# konczy sie zdaniem "ta liczba jest dolnym oszacowaniem, nie kosztem". Jedyny
+# pomiar na plus porownuje strategie skoncentrowana w 43% swiec z odniesieniem
+# rozlozonym na CALE okno - czyli porownuje dwie rozne rzeczy. Ponizsze pomiary
+# odpowiadaja na pytanie "czy to przypadek", ktorego tamten nie zadaje.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: trader-diagnostyka
+  labels: {{- include "trader.labels" . | nindent 4 }}
+spec:
+  # NIGDY z harmonogramu - patrz naglowek. Data jest atrapa wymagana przez API.
+  schedule: "0 0 31 2 *"
+  suspend: true
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 1
+  # `Forbid` i oba limity NIE DOTYCZA sciezki recznej: Job utworzony przez
+  # `kubectl create job --from=cronjob/...` jest osobnym obiektem i polityka
+  # wspolbieznosci CronJoba go nie obowiazuje. Stoja tu, zeby manifest byl
+  # poprawny takze wtedy, gdy ktos kiedys zdejmie `suspend` - inaczej pierwszy
+  # zawieszony przebieg po cichu pochlonalby kazdy kolejny termin, a po stu
+  # pominieciach kontroler przestalby planowac zadanie CALKOWICIE.
+  startingDeadlineSeconds: 300
+  jobTemplate:
+    spec:
+      # Bez ponawiania: pomiar, ktory sie nie policzyl, ma zostac nieudany.
+      # Powtorzenie dalo by druga liczbe z tego samego przebiegu i nikt by nie
+      # wiedzial, ktora jest ta wlasciwa.
+      backoffLimit: 0
+      # Godzina. Piec przebiegow po cztery przesuniecia okna to kilkanascie minut
+      # kazde; limit ma zabic ZAWIESZENIE, nie prace.
+      activeDeadlineSeconds: 3600
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: diagnostyka
+              image: "{{ .Values.api.image.repository }}:{{ .Values.api.image.tag }}"
+              imagePullPolicy: {{ .Values.api.image.pullPolicy }}
+              command:
+                - sh
+                - -c
+                - |
+                  set -u
+                  RC=0
+                  # CZTERY PRZESUNIECIA OKNA, NIE JEDNO.
+                  #
+                  # Pojedynczy przebieg mowi, jak wypadlo TO okno, a nie czy
+                  # strategia ma przewage. Migracja 0023 ustalila ten wzorzec
+                  # przy przejsciu na uniwersum USDC: cztery przesuniecia,
+                  # wniosek tylko wtedy, gdy zgadzaja sie wszystkie cztery.
+                  for D in 1400 1397 1394 1391; do
+                    echo ""
+                    echo "=============== OKNO $D DNI ==============="
+                    # P0-1: czy strategia ma trafnosc MOMENTU wejscia.
+                    # Obala: percentyl w przedziale 50 +/- 9,2 - wtedy wejscia
+                    # sa nieodroznialne od losowych i projekt nie ma zadnej
+                    # zmierzonej przewagi.
+                    echo "--- P0-1 trafnosc momentu wejscia (--losuj czas) ---"
+                    python services/engine/diagnose_timing.py \
+                      --bar 4h --days "$D" --kind spot_eu --limit \
+                      --wagi ic --losuj czas || RC=$?
+                    # P0-2: czy przewaga siedzi w regule WYJSCIA.
+                    # Trafnosc 53% przy PF 1,76 wskazuje na wyjscie, a testu
+                    # czasu to nie widzi - stad drugi wariant losowania.
+                    echo "--- P0-2 regula wyjscia (--losuj dlugosc) ---"
+                    python services/engine/diagnose_timing.py \
+                      --bar 4h --days "$D" --kind spot_eu --limit \
+                      --wagi ic --losuj dlugosc || RC=$?
+                  done
+                  echo ""
+                  echo "=============== WARTOSC STRONY KROTKIEJ ==============="
+                  # P0-3: czy strona krotka ma dodatnia wartosc TERAZ, gdy
+                  # finansowanie jest naliczane (luka zamknieta 2026-09-24).
+                  # To jest odpowiedz na pytanie, czy marnujemy polowe
+                  # informacji: na uniwersum spot ~80% sygnalow ponad progiem
+                  # to shorty, ktorych konto nie moze wykonac.
+                  # Obala: przedzial bootstrapowy obejmujacy zero przy
+                  # KTORYMKOLWIEK poslizgu.
+                  for N in 400 397 394 391; do
+                    echo "--- P0-3 okno $N dni ---"
+                    python services/engine/wartosc_krotkiej.py \
+                      --bar 4h --dni "$N" --baza spot_eu --limit || RC=$?
+                  done
+                  echo ""
+                  echo "RC=$RC"
+                  exit $RC
+              env:
+                # ROLA TYLKO DO ODCZYTU - i to jest sedno tego zadania.
+                #
+                # Wszystkie trzy skrypty wyzej wykonuja wylacznie SELECT
+                # (sprawdzone w kodzie: `diagnose_timing` ma jedno `cur.execute`,
+                # `wartosc_krotkiej` dwa, wszystkie czytajace). Ale "sprawdzone
+                # w kodzie" jest twierdzeniem, ktore starzeje sie przy pierwszej
+                # zmianie tych plikow. Rola `czujka` (migracja 0034) nie ma prawa
+                # zapisu, wiec gwarancji pilnuje BAZA, a nie czyjas lektura -
+                # proba zapisu konczy sie bledem, zamiast po cichu zmienic stan
+                # systemu, ktory ten pomiar ma opisac.
+                {{- include "trader.rolaDbEnv" (dict "ctx" $ "rola" "czujka") | nindent 16 }}
+                - name: PYTHONUNBUFFERED
+                  value: "1"
+              resources:
+                {{- toYaml .Values.diagnostykaCron.resources | nindent 16 }}
+{{- end }}
