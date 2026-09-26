@@ -730,6 +730,51 @@ Kryterium wymaga uzupełnienia o warunek przewagi nad odniesieniem, zanim
 `validated` zacznie cokolwiek znaczyć. Do tego czasu tryb live pozostaje
 zablokowany w API (`credentials.py:79`) niezależnie od statusu.
 
+### Drugie uzupełnienie: deflowany Sharpe wszedł do bramki (2026-09-26)
+
+Warunek `pct >= 70 and median > 0,05 and bije_odniesienie` nie uwzględniał
+**liczby przetestowanych konfiguracji**. Licznik `learn.hypothesis_trial` istniał
+od migracji 0006 wyłącznie po to, żeby dało się policzyć deflowany Sharpe —
+i nie został policzony ani razu. Teraz jest policzony i jest warunkiem bramki,
+**fail-closed**: DSR nieobliczalny wstrzymuje promocję.
+
+Skala poprawki, licząc przy złączonej próbie 1432 transakcji i Sharpe +0,0952:
+
+| liczba prób | poprzeczka selekcji | DSR | werdykt przy progu 0,95 |
+|---|---|---|---|
+| 1 | +0,0000 | 0,9998 | przechodzi |
+| 17 | +0,0483 | 0,9616 | przechodzi |
+| 131 | +0,0694 | 0,8352 | **nie przechodzi** |
+| 8 700 | +0,1012 | 0,4111 | **nie przechodzi** |
+| 11 460 | +0,1029 | 0,3852 | **nie przechodzi** |
+
+Dwie skrajne liczby są z tego dokumentu: 8 700 to „przetestowanych konfiguracji"
+z piątej iteracji, 11 460 to stan licznika przed przejściem na wariant `ic`.
+Ten sam Sharpe, te same transakcje — i przeciwne werdykty. **Sam Sharpe bez
+liczby prób obok nie mówi o przewadze nic**, dlatego `reason` i wydruk podają
+teraz DSR razem z N i liczbą prób, tak jak odsetek okien podaje się z przedziałem
+ufności.
+
+Doliczenie zmierzonego spreadu 5,85 pb zbija Sharpe do +0,0822 i DSR (przy
+17 próbach) z 0,9619 do 0,9002 — czyli **zmierzony koszt sam przestawia werdykt
+bramki**, choć Sharpe zmienia się o 1,3 punktu trzeciego miejsca po przecinku.
+
+**Trzy zastrzeżenia, bez których ta liczba byłaby ładniejsza niż jest.**
+
+1. `V[{SR_n}]` z pracy Baileya i Lópeza de Prado — rozrzut Sharpe'ów **między
+   próbami** — nie jest w tym projekcie mierzalny: `learn.hypothesis_trial`
+   ma na to kolumnę `oos_sharpe` i nikt jej nie wypełnia. Wstawiamy w to miejsce
+   wariancję samego estymatora pod hipotezą zerową, a to **zawyża DSR**, bo
+   konfiguracje różnią się nie tylko szumem.
+2. Transakcje krypto nie są niezależne (komentarz przy `n_trades` w `train.py`),
+   więc efektywne `T` jest mniejsze niż licznik transakcji — co również zawyża DSR.
+3. Licznik prób jest **dolnym oszacowaniem**: `--sucho` nie zapisuje nic,
+   `purge_demo.py` czyści tabelę w całości, a `UNIQUE (model_id, config_hash)`
+   scala powtórzone wektory wag. Zaniżony licznik obniża poprzeczkę selekcji,
+   czyli znów **zawyża DSR**.
+
+Wszystkie trzy błędy idą w tę samą stronę i wszystkie na korzyść strategii.
+
 ---
 
 # Sprostowanie: miara, na której stoi cały ten dokument, była liczona przed prowizją

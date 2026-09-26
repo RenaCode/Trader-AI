@@ -12,10 +12,15 @@ z okna testowego, ktorego optymalizacja nigdy nie widziala. Zwykla walidacja
 krzyzowa jest tu niewazna, bo tasowanie szeregu czasowego wpuszcza przyszlosc
 do treningu.
 
-Kazda sprawdzona konfiguracja laduje w learn.hypothesis_trial. Bez tego licznika
-deflated Sharpe jest nieobliczalny, a im wiecej konfiguracji sie przetestuje, tym
-latwiej trafic dobry wynik czystym przypadkiem. Licznik jest po to, zeby nie dalo
-sie oszukac samego siebie selekcja.
+Kazda sprawdzona konfiguracja laduje w learn.hypothesis_trial, a licznik z tej
+tabeli wchodzi do DEFLOWANEGO SHARPE'A (`statystyka.deflowany_sharpe`), ktory od
+2026-09-26 jest warunkiem bramki promocji - patrz `status_walidacji`. Im wiecej
+konfiguracji sie przetestuje, tym latwiej trafic dobry wynik czystym przypadkiem,
+wiec sam Sharpe bez liczby prob obok nie mowi o przewadze nic.
+
+CZEGO LICZNIK NIE JEST: `count(*)` po tabeli z `UNIQUE (model_id, config_hash)`
+i INSERT-em `ON CONFLICT DO NOTHING` to liczba ROZNYCH WEKTOROW WAG, a nie prob.
+Pelny opis rozjazdu w `docs/01-data-architecture.md`, sekcja 6.
 
 Uzycie:
     DATABASE_URL=... python services/engine/train.py --days 90 --trials 40
@@ -52,7 +57,8 @@ from services.engine.portfolio import (
 )
 from services.engine.koszty import Karta, karta_rundy, opis_karty
 from services.engine.statystyka import (
-    profit_factor, rozklad, sharpe as sharpe_proby, spearman, wilson,
+    PROG_DSR, deflowany_sharpe, profit_factor, rozklad,
+    sharpe as sharpe_proby, spearman, wilson,
 )
 from services.engine.uniwersum import odcisk
 from services.engine.signals import (
@@ -494,6 +500,85 @@ def podsumowanie_przewagi(zwroty: list[float], sharpe_okien: list[float],
         # a nie to, co z niego zostalo po doliczeniu czesci z nich.
         "koszt_progowy": statistics.fmean(zwroty) if zwroty else None,
     }
+
+
+def przewaga_dsr(zwroty: list[float], n_prob: int) -> dict:
+    """Deflowany Sharpe dla ZLACZONEJ proby transakcji OOS. CZYSTA FUNKCJA.
+
+    Cienka warstwa nad `statystyka.deflowany_sharpe` - istnieje, zeby w jednym
+    miejscu stalo, KTORA probe i KTORY licznik podstawiamy:
+
+      * `zwroty` to te same transakcje, z ktorych liczy sie `sharpe_zbiorczy`
+        w `podsumowanie_przewagi` - czyli zlaczona proba, a NIE Sharpe'y okien.
+        Sharpe ze sredniej po oknach nie ma sensownego T do wzoru na PSR:
+        „liczba obserwacji" byla by wtedy liczba okien, a koszt placi kazda
+        transakcja z osobna.
+      * `n_prob` to `learn.hypothesis_trial` policzone dla tego modelu.
+        CZEGO TA LICZBA NIE JEST, jest opisane w `docs/01-data-architecture.md`
+        i warto to miec przed oczami przy czytaniu wyniku: tabela ma
+        `UNIQUE (model_id, config_hash)` i INSERT `ON CONFLICT DO NOTHING`,
+        wiec liczy ROZNE WEKTORY WAG, a nie proby. Dwa przebiegi tej samej
+        konfiguracji dokladaja tyle wierszy, ile wektorow sie zmienilo -
+        a przy `--wybor ic` (domyslnym) jest to jeden na okno i zmienia sie
+        co noc, bo granice okien sie przesuwaja.
+    """
+    return deflowany_sharpe(zwroty, n_prob)
+
+
+def bramka_dsr(wynik: dict) -> tuple[bool, str]:
+    """Czy deflowany Sharpe pozwala promowac. FAIL-CLOSED. CZYSTA FUNKCJA.
+
+    BRAK WIEDZY WSTRZYMUJE PROMOCJE, NIE PRZEPUSZCZA JEJ. `dsr = None` znaczy
+    „nie dalo sie policzyc" - za malo transakcji, zerowy licznik prob,
+    nieobliczalna skosnosc. Kazdy z tych stanow jest POWODEM, zeby nie
+    promowac: wynik, o ktorym nie wiadomo, czy nie jest artefaktem selekcji,
+    nie rozni sie w skutkach od wyniku, ktory nim jest.
+
+    DSR PODAWANY ZAWSZE Z N I LICZBA PROB, z tego samego powodu, dla ktorego
+    odsetek dodatnich okien idzie zawsze z przedzialem ufnosci (patrz
+    `statystyka.wilson`). Samo „DSR 0,96" jest nieczytelne: ta sama liczba przy
+    17 probach i przy 11 460 opisuje dwa zupelnie rozne wyniki, bo poprzeczka,
+    ktora DSR odejmuje, rosnie z liczba prob.
+    """
+    dsr, n, n_prob = wynik["dsr"], wynik["n_obserwacji"], wynik["n_prob"]
+    if dsr is None:
+        return False, (f"Deflowany Sharpe NIEOBLICZALNY ({wynik['powod']}) — "
+                       f"promocja wstrzymana. Brak tej liczby nie jest wynikiem "
+                       f"neutralnym: bez niej nie wiadomo, czy wynik nie jest "
+                       f"najlepszym z wielu prób.")
+    opis = (f"Deflowany Sharpe {dsr:.4f} przy progu {PROG_DSR:.2f} "
+            f"(Sharpe {wynik['sharpe']:+.4f} z {n} transakcji, "
+            f"{n_prob} przetestowanych konfiguracji, poprzeczka selekcji "
+            f"{wynik['prog']:+.4f}, skośność {wynik['skosnosc']:+.3f}, "
+            f"kurtoza {wynik['kurtoza']:.3f}).")
+    if dsr >= PROG_DSR:
+        return True, opis
+    return False, opis + (" Po uwzględnieniu liczby prób wynik nie jest "
+                          "odróżnialny od najlepszego z tylu losowych — "
+                          "promocja wstrzymana.")
+
+
+def status_walidacji(total: int, positive: int, median: float | None,
+                     bije_odniesienie: bool, dsr_ok: bool) -> str:
+    """Werdykt bramki jako CZYSTA FUNKCJA - zeby dal sie sprawdzic testem.
+
+    Do 2026-09-26 ten warunek byl wyrazeniem wpisanym w srodek `train()`
+    dlugiego na dziewiecset linii, wiec nie istnial test, ktory by go dotykal.
+    Warunki sa KONIUNKCJA i kazdy z nich moze tylko ODEBRAC `validated`:
+
+      * `total >= MIN_WINDOWS_FOR_VALIDATION` - dosc okien, zeby cokolwiek orzec,
+      * `pct >= 70` - odsetek okien dodatnich,
+      * `median > 0,05` - skala wyniku w typowym oknie,
+      * `bije_odniesienie` - przewaga nad kup-i-trzymaj przy TEJ SAMEJ ekspozycji,
+      * `dsr_ok` - deflowany Sharpe powyzej progu, patrz `bramka_dsr`.
+    """
+    if total < MIN_WINDOWS_FOR_VALIDATION:
+        return "learning"
+    pct = positive / total * 100
+    if (pct >= 70 and median is not None and median > 0.05
+            and bije_odniesienie and dsr_ok):
+        return "validated"
+    return "degraded" if pct < 40 else "learning"
 
 
 def prog_pokrycia(pokrycie: dict[str, int]) -> int:
@@ -1372,6 +1457,7 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
         # uczciwym pomiarem tego, czy losowe przeszukiwanie cokolwiek wnosi.
         if wybor == "bazowe":
             best_w = bazowe
+            zapisz_hipoteze(bazowe)
         elif wybor == "ic":
             best_w = ic_weights(train_slices, cache_tr, martwe)
             zapisz_hipoteze(best_w)
@@ -1388,6 +1474,13 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
             # Zalozenia poczatkowe tez sa kandydatem - jesli losowanie nie potrafi ich
             # pobic na oknie treningowym, to znaczy, ze nie ma czego kalibrowac.
             base_score = ocen(bazowe, train_slices, cache_tr)["sharpe"]
+            # ZALOZENIA POCZATKOWE TEZ SA PROBA I TEZ MUSZA BYC POLICZONE.
+            # `ocen` wlasnie je przetestowal i wynik bierze udzial w wyborze,
+            # a `zapisz_hipoteze` bylo tu jedynym pominietym wywolaniem - przez
+            # co licznik ZANIZAL liczbe prob. Zanizony licznik podnosi deflowany
+            # Sharpe (mniejsza poprzeczka selekcji), czyli ulatwia bramke: nie
+            # jest to zaniedbanie kosmetyczne, tylko w zla strone.
+            zapisz_hipoteze(bazowe)
             if base_score > best_score:
                 best_w, best_score = bazowe, base_score
 
@@ -1670,6 +1763,19 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
     cur.execute("SELECT count(*) AS n FROM learn.hypothesis_trial WHERE model_id=%s", (model_id,))
     trials = cur.fetchone()["n"]
 
+    # DEFLOWANY SHARPE - LICZONY TU, BO BEZ NIEGO BRAMKA NIE MIERZY SELEKCJI.
+    #
+    # Licznik `trials` istnieje od migracji 0006 WYLACZNIE po to, zeby te liczbe
+    # dalo sie policzyc (komentarz przy tabeli mowi wprost: "bez tego licznika
+    # deflated Sharpe jest nieobliczalny i sami siebie oszukamy selekcja"),
+    # i do 2026-09-26 nikt jej nie policzyl. Do bramki wchodzila mediana
+    # Sharpe'ow okien, ktora nie wie ANI ile konfiguracji sprawdzono, ANI jaki
+    # jest rozklad zwrotow - a oba te braki dzialaja na korzysc strategii.
+    #
+    # PROBA TO ZLACZONE TRANSAKCJE, nie Sharpe'y okien - patrz `przewaga_dsr`.
+    wynik_dsr = przewaga_dsr(wszystkie_zwroty, trials)
+    dsr_ok, opis_dsr = bramka_dsr(wynik_dsr)
+
     # Prog dobrany do miary NA TRANSAKCJE, nie anualizowanej. 0,05 oznacza,
     # ze sredni zwrot z transakcji to 5% jej wlasnego odchylenia - skromnie,
     # ale mierzalnie powyzej zera po kosztach.
@@ -1727,11 +1833,10 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
         status = "learning"
         reason = (f"Za mało informatywnych okien: {total} z wymaganych "
                   f"{MIN_WINDOWS_FOR_VALIDATION}. Strategia zawiera zbyt mało transakcji, "
-                  f"żeby cokolwiek orzec — to nie jest wynik ujemny, to brak wyniku.")
+                  f"żeby cokolwiek orzec — to nie jest wynik ujemny, to brak wyniku. "
+                  + opis_dsr)
     else:
-        status = ("validated" if pct >= 70 and median and median > 0.05
-                  and bije_odniesienie
-                  else "degraded" if pct < 40 else "learning")
+        status = status_walidacji(total, positive, median, bije_odniesienie, dsr_ok)
         # Przedzial podajemy ZAWSZE razem z odsetkiem. Sam odsetek zacheca do
         # czytania roznicy dwoch punktow jako sygnalu, a przy 40 oknach
         # przedzial ma szerokosc okolo 30 punktow procentowych.
@@ -1762,6 +1867,11 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
         skala = (f" Średnia ekspozycja {srednia_eksp:.2%} kapitału przy limicie "
                  f"{_limit_ekspozycji_pct():.0%}; "
                  f"suma zwrotów z {porownywalne} okien {suma_zwrotow:+.1f}%.")
+        # DSR IDZIE DO `reason` PRZY KAZDYM STATUSIE, a nie tylko gdy blokuje.
+        # `reason` jest tym, co widzi czlowiek w panelu i w powiadomieniu
+        # `dozor.py`; mediana Sharpe'a bez DSR obok czyta sie jak wynik, ktory
+        # uwzglednia liczbe prob, a nie uwzglednia jej w niczym.
+        skala += " " + opis_dsr
         reason = {
             "validated": f"Dodatnie {positive}/{total} okien out-of-sample ({pct:.0f}%).{ci}"
                          f" Kryteria spełnione — strategia ma przewagę NA JEDNOSTKĘ "
@@ -1909,6 +2019,10 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
     print(f"Okna: {total}, dodatnie: {positive} ({pct:.1f}%)"
           f"   przedział ufności 95%: {ci_lo:.1%}–{ci_hi:.1%}")
     print(f"Mediana Sharpe (OOS): {median:+.3f}" if median is not None else "Mediana Sharpe: —")
+    # DSR ZAWSZE RAZEM Z N I LICZBA PROB - `bramka_dsr` sklada to w jedno zdanie
+    # i to samo zdanie idzie do `reason`, zeby wydruk i baza nie mowily dwoch
+    # roznych rzeczy o tym samym pomiarze.
+    print(f"Deflowany Sharpe: {opis_dsr}")
     print(f"Najgorsze obsunięcie: {worst_dd:.2f}%")
     for linia in opis_przewagi(wszystkie_zwroty, all_sharpes, karta,
                                zwroty_okien_transakcje):

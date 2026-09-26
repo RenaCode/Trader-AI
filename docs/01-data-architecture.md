@@ -124,8 +124,28 @@ Odpowiedź w schemacie:
 
 - `learn.wf_window` + `learn.wf_metric` — metryki **wyłącznie out-of-sample**, per okno
   walk-forward. Nie ma miejsca na zapis „wyniku backtestu" jako liczby do pokazania.
-- `learn.hypothesis_trial` — **licznik wszystkich przetestowanych konfiguracji**, z hashem
-  konfiguracji. Bez niego deflated Sharpe jest nieobliczalny, a my sami się oszukamy selekcją.
+- `learn.hypothesis_trial` — **licznik konfiguracji**, z hashem konfiguracji. Wchodzi do
+  deflowanego Sharpe'a (`services/engine/statystyka.py`), który od 2026-09-26 jest warunkiem
+  bramki promocji modelu — bez niego bramka nie odróżniałaby wyniku osiągniętego raz od
+  najlepszego z jedenastu tysięcy prób.
+
+  **Czego ten licznik NIE jest — i nie da się tego naprawić rachunkiem.** Tabela ma
+  `UNIQUE (model_id, config_hash)`, a jedyny INSERT (`train.py`) kończy się
+  `ON CONFLICT DO NOTHING`, więc `count(*)` to liczba **różnych wektorów wag** kiedykolwiek
+  zapisanych dla tego modelu. Stąd trzy rozjazdy z „liczbą prób":
+  - dwa przebiegi tej samej konfiguracji dokładają tylko te wektory, które się zmieniły —
+    przy `--wybor ic` (domyślnym) jest to jeden wektor na okno i zmienia się co noc, bo
+    granice okien się przesuwają, więc licznik rośnie o ~40 na dobę **niezależnie od tego,
+    czy czegokolwiek szukano**;
+  - `--sucho` nie zapisuje nic, więc porównania wariantów są **próbami niepoliczonymi**;
+  - `purge_demo.py` czyści tę tabelę w całości (`TRUNCATE`), więc licznik po czyszczeniu
+    zaczyna od zera, choć konfiguracje zostały przetestowane.
+
+  Kolumny `oos_sharpe` i `n_windows` są **martwe**: INSERT podaje `n_windows=1` na sztywno
+  i nigdy nie wypełnia `oos_sharpe`. To jest jedyna przyczyna, dla której `V[{SR_n}]`
+  z pracy Baileya i Lópeza de Prado nie jest w tym projekcie mierzalne i deflowany Sharpe
+  liczy się z wariancji **samego estymatora** — co jest założeniem działającym na korzyść
+  strategii, opisanym wprost w docstringu `deflowany_sharpe`.
 - `learn.calibration_bin` — czy pewność 70% oznacza trafność ~70%.
 - `learn.drift_metric` — PSI / KS między rozkładem treningowym a bieżącym.
 - `learn.learning_state` — jawny status silnika: `warmup` → `learning` → `validated` → `degraded`.
