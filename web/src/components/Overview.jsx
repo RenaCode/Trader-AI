@@ -49,7 +49,12 @@ export default function Overview({ engine }) {
   // Dead-man switch: brak heartbeatu > 5 min traktujemy jako silnik nieżywy,
   // niezależnie od tego, co deklaruje kolumna status — ale NIE gdy jest
   // zatrzymany świadomie.
-  const beatStale = !beatHalted && (beatMissing || (beatAge != null && beatAge > 300));
+  // TRZY CYKLE, NIE JEDEN. 900 s = 3 x `--interval 300` silnika, czyli ta sama
+  // regula, ktora `dozor.py:203` zapisal dla `MARTWY_PO_MIN = 15` minut: prog
+  // dwoch lezy na gornej granicy normalnego wahania. Do 2026-09-26 stalo tu 300,
+  // czyli DOKLADNIE jeden cykl - panel malowal na czerwono kazde pojedyncze
+  // opoznienie, a alarm, ktory zapala sie przy normalnej pracy, uczy go pomijac.
+  const beatStale = !beatHalted && (beatMissing || (beatAge != null && beatAge > 900));
 
   return (
     <div className="grid" style={{ gap: 16 }}>
