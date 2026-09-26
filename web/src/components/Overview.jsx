@@ -130,8 +130,9 @@ export default function Overview({ engine }) {
                 </div>
               ) : beatStale && (
                 <div className="row-body" style={{ color: 'var(--danger-light)' }}>
-                  Silnik nie zgłosił się od ponad 5 minut. Dead-man switch wstrzymuje
-                  nowe zlecenia do czasu przywrócenia sygnału.
+                  Silnik nie zgłosił się od ponad 5 minut. Nic tego NIE ZATRZYMUJE
+                  automatycznie: zlecenia nie są wstrzymywane, a ten wiersz jest
+                  jedynym sygnałem. Sprawdź, czy pętla decyzyjna żyje.
                 </div>
               )}
             </div>
