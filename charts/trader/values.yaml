@@ -120,14 +120,6 @@ db:
     size: 20Gi
     storageClass: local-path
 
-redis:
-  image:
-    repository: redis
-    tag: "7-alpine"
-  persistence:
-    size: 1Gi
-    storageClass: local-path
-
 # Sekrety NIE trafiaja do gita. Utworz raz recznie:
 #   kubectl create secret generic trader-secret \
 #     --from-literal=POSTGRES_PASSWORD=... \

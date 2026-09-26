@@ -49,8 +49,6 @@ spec:
             {{- include "trader.appDbPasswordEnv" . | nindent 12 }}
             - name: DATABASE_URL
               value: {{ include "trader.appDatabaseUrl" . | quote }}
-            - name: REDIS_URL
-              value: "redis://{{ include "trader.fullname" . }}-redis:6379/0"
             # Klucz do szyfrowania kluczy API gield i sekretow TOTP w bazie.
             - name: SECRETS_KEY
               valueFrom:
@@ -96,7 +94,7 @@ spec:
             periodSeconds: 10
             timeoutSeconds: 5
           # ZYWOTNOSC pyta wylacznie o to, czy PROCES zyje - `/api/zywy`
-          # (services/api/main.py) nie dotyka bazy ani Redisa.
+          # (services/api/main.py) nie dotyka bazy ani zadnej innej uslugi.
           #
           # Do 2026-09-22 stalo tu `/api/health` bez `timeoutSeconds`, czyli
           # z domyslna 1 s, i bez `failureThreshold`, czyli z domyslnymi trzema
