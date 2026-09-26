@@ -37,6 +37,7 @@ import psycopg
 from psycopg.rows import dict_row
 
 from services.engine.horizons import DEFAULT_BAR, HORIZONS, Horizon, get as get_horizon
+from services.engine import stan_kapitalu
 from services.engine.risk import RiskKernel
 from services.engine.sesja import StanSesji, stan_sesji
 from services.ingest.features import wklady_newsow
@@ -474,19 +475,49 @@ class BrakKapitalu(RuntimeError):
 
 
 def seed_equity(cur, engine: str, mode: str) -> None:
-    # ZASIEW TYLKO DLA DEMO. Na zywym rachunku wpisanie 100 000 jako punktu
-    # wyjscia jest fikcja, od ktorej liczone sa potem wszystkie limity
-    # procentowe i cale obsuniecie.
+    """Punkt zerowy krzywej kapitalu - TYLKO dla silnika, ktory liczy ja SAM.
+
+    ZASIEW TYLKO DLA DEMO. Na zywym rachunku wpisanie 100 000 jako punktu
+    wyjscia jest fikcja, od ktorej liczone sa potem wszystkie limity procentowe
+    i cale obsuniecie.
+
+    I ZASIEW TYLKO DLA SILNIKA, KTOREGO KRZYWEJ NIE PISZE NIKT INNY. To jest
+    poprawka z 2026-09-26 i powod, dla ktorego ta funkcja ma docstring.
+
+    Do tego dnia zasiew wykonywal sie dla KAZDEGO silnika w trybie demo, w tym
+    dla `equity` - ktorego krzywa od 2026-09-22 pisze `kapital_gieldy` z ksiag
+    konta paper Alpaki. Seria dostawala wiec dwoch pisarzy z dwiema roznymi
+    definicjami kapitalu, a `seed_equity` stoi w `run_once` PRZED bramka
+    `--wymagaj-modelu`, wiec dzialal takze wtedy, gdy silnik nie mial prawa
+    zawrzec ani jednej transakcji. Zasiane `nav = 1.0` wchodzilo do `max(nav)`
+    liczonego bez ograniczenia czasowego, czyli zostawalo szczytem NA ZAWSZE -
+    i przy `max_drawdown` 10% dawalo kill-switcha z arytmetyki, ktorego dla
+    equity nie ma kto zwolnic (dozorca chodzi z `--engine crypto`).
+
+    WYSCIG, KTORY CZYNIL TO NIEPRZEWIDYWALNYM: warunek "seria jest pusta"
+    rozstrzygal sie miedzy dwoma procesami. Pierwszy cykl silnika po czystej
+    bazie zasiewal, a `kapital-equity` co 900 s dopisywal odczyty do tej samej
+    serii - albo odwrotnie. To, ktora definicja zaklada krzywa, zalezalo wiec
+    od kolejnosci startu podow.
+
+    MILCZY, NIE PADA. Brak zasiewu jest tu stanem NORMALNYM (krzywa pisze
+    ksiegi), a nie awaria - wyjatek zatrzymalby cykl silnika za to, ze wszystko
+    jest w porzadku.
+    """
     if mode != "demo":
+        return
+    # Nie nasza krzywa - patrz `stan_kapitalu.KRZYWA_Z_KSIAG_GIELDY`.
+    if engine in stan_kapitalu.KRZYWA_Z_KSIAG_GIELDY:
         return
     cur.execute("SELECT 1 FROM exec.equity_point WHERE engine=%s AND mode=%s LIMIT 1",
                 (engine, mode))
     if not cur.fetchone():
         cur.execute(
             "INSERT INTO exec.equity_point (engine, mode, event_time, equity, cash,"
-            " unrealized, realized_cum, exposure, nav, units, wplaty_netto)"
-            " VALUES (%s,%s, now(), %s, %s, 0, 0, 0, 1.0, %s, %s)",
-            (engine, mode, START_EQUITY, START_EQUITY, START_EQUITY, START_EQUITY))
+            " unrealized, realized_cum, exposure, nav, units, wplaty_netto, zrodlo)"
+            " VALUES (%s,%s, now(), %s, %s, 0, 0, 0, 1.0, %s, %s, %s)",
+            (engine, mode, START_EQUITY, START_EQUITY, START_EQUITY, START_EQUITY,
+             stan_kapitalu.ZRODLO_ZASIEW))
 
 
 def przeplywy(cur, engine: str, mode: str) -> tuple[Decimal, Decimal]:
@@ -710,14 +741,34 @@ def update_equity(cur, engine: str, mode: str, as_of: datetime,
     # w bezpieczniku, tylko klamal wlascicielowi, i dlatego nie wolno go bylo
     # zostawic jako "nieszkodliwy": kafelek "gotowka" jest jedynym miejscem,
     # w ktorym czlowiek sprawdza, czy rachunek zgadza sie z giełdą.
-    cur.execute(
-        "INSERT INTO exec.equity_point (engine, mode, event_time, equity, cash, unrealized,"
-        " realized_cum, exposure, nav, units, wplaty_netto)"
-        " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)"
-        " ON CONFLICT (engine, mode, event_time) DO NOTHING",
-        (engine, mode, as_of.replace(second=0, microsecond=0),
-         equity, equity - w.exposure_netto, unrealized, realized, exposure,
-         nav, units, wplaty))
+    # TRZECI PISARZ TEJ SAMEJ SERII - I DLATEGO TEN WARUNEK.
+    #
+    # Dla silnika, ktorego krzywa idzie z ksiag gieldy, ta rekonstrukcja jest
+    # DRUGA definicja kapitalu w jednej serii: liczy `wplaty + zrealizowany +
+    # niezrealizowany` z NASZEGO dziennika, a ksiegi licza to samo po stronie
+    # gieldy i te dwie liczby nie musza sie zgadzac (prowizje, korporacyjne
+    # zdarzenia, czesciowe wypelnienia znane gieldzie wczesniej niz nam).
+    # Czytelnicy biora `max` i ostatni punkt bez pytania o zrodlo, wiec rozjazd
+    # nie objawilby sie bledem - objawilby sie obsunieciem liczonym miedzy
+    # dwiema roznymi ksiegowosciami.
+    #
+    # WYCENA ZOSTAJE POLICZONA I ZWROCONA. Wolajacy potrzebuje `Wycena`
+    # (ekspozycja per instrument, braki swiezych cen) do decyzji i do limitow -
+    # to nie jest krzywa kapitalu i nie ma powodu tego pomijac. Pomijamy sam
+    # INSERT, czyli dokladnie to, co tworzy druga definicje.
+    #
+    # DOTYCZY TO TAKZE PRZYSZLOSCI, nie tylko dzisiejszego braku handlu: gdy
+    # equity kiedys zacznie handlowac, ksiegi Alpaki beda zawierac te transakcje
+    # z definicji, wiec rekonstrukcja nadal nie bedzie miala co dolozyc.
+    if engine not in stan_kapitalu.KRZYWA_Z_KSIAG_GIELDY:
+        cur.execute(
+            "INSERT INTO exec.equity_point (engine, mode, event_time, equity, cash,"
+            " unrealized, realized_cum, exposure, nav, units, wplaty_netto, zrodlo)"
+            " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)"
+            " ON CONFLICT (engine, mode, event_time) DO NOTHING",
+            (engine, mode, as_of.replace(second=0, microsecond=0),
+             equity, equity - w.exposure_netto, unrealized, realized, exposure,
+             nav, units, wplaty, stan_kapitalu.ZRODLO_PETLA))
     return w
 
 

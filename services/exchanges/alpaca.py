@@ -48,7 +48,8 @@ import httpx
 
 from services.exchanges.base import (
     AuthError, Balance, BookLevel, Candle, ConnectionCheck, ExchangeError,
-    KontoZamrozone, OrderBook, StanZlecenia, Wypelnienie, ZlozoneZlecenie,
+    KontoZamrozone, OdmowaGieldy, OrderBook, StanZlecenia, Wypelnienie,
+    ZlozoneZlecenie,
 )
 
 HOSTS = {
@@ -141,8 +142,49 @@ class Zegar:
     nastepne_zamkniecie: datetime
 
 
+# Odmowa DOTYCZACA JEDNEGO SYMBOLU, ktorej nie wolno zglosic jako blokady konta.
+#
+# Alpaca odpowiada `403 "position is not shortable"` albo
+# `"asset is not shortable"`, gdy tego JEDNEGO papieru nie da sie sprzedac
+# krotko (brak pozyczki, lista trudno dostepnych, ETF bez shortu). Do
+# 2026-09-26 wpadalo to w `KontoZamrozone` z `wymaga_czlowieka=True`
+# i komunikatem "KONTO ZABLOKOWANE PO STRONIE GIELDY (compliance / wsparcie)",
+# czyli odmowa dla jednego symbolu byla zglaszana jako blokada CALEGO konta.
+NIESHORTOWALNE = ("not shortable", "not easy to borrow", "htb")
+
+
 def _blad_z_odpowiedzi(r: httpx.Response) -> ExchangeError:
-    """HTTP Alpaki -> wyjatek, ktory MOWI, CO ZROBIC (ta sama rodzina co Bybit)."""
+    """HTTP Alpaki -> wyjatek, ktory MOWI, CO ZROBIC (ta sama rodzina co Bybit).
+
+    ODMOWA ZLOZENIA JEST ODPOWIEDZIA, NIE JEJ BRAKIEM - i to jest cala tresc
+    poprawki z 2026-09-26.
+
+    Do tego dnia ta funkcja NIE PODNOSILA `OdmowaGieldy` ANI RAZU (`bybit.py`
+    podnosi ja trzy razy), wiec kazde 4xx poza 401/403-zamrozeniem wracalo jako
+    `ExchangeError(retryable=False)`. W `gielda_exec.zloz_plan` wpada to
+    w `except ExchangeError` i zapisuje `status='unknown'` z etapem
+    `odpowiedz_nie_dotarla`. Dla zerwanego polaczenia to jedyna uczciwa
+    odpowiedz; dla `HTTP 422 "qty must be integer"` jest to zapisanie NIEPRAWDY
+    o stanie, ktory znamy dokladnie.
+
+    CO Z TEGO WYNIKALO NAPRAWDE - i czego NIE, zeby nie uzasadniac tej poprawki
+    rzeczami, ktore sie nie potwierdzaja:
+
+      * plan NIE zostawal `pending`. `rozstrzygnij_plan` (gielda_exec.py:585-590)
+        ustawia `expired`, gdy gielda nie zna zlecenia.
+      * czujka NIE milczala. `posprzataj_zlecenia` zapisuje `cancelled`
+        z `venue_order_id IS NULL`, a `dozor.py:1694-1701` liczy `bez_kontaktu`
+        bez filtra po silniku i zapala alarm od pierwszej sztuki.
+
+    REALNA SZKODA TO BRAK ADAPTACJI. `odmowa_gieldy` (gielda_exec.py:423+) pyta
+    gielde o saldo i przeplanowuje z ilościa, ktora gielda potwierdza. Sciezka
+    `ExchangeError` tego nie robi, a odmowa za parametr jest deterministyczna -
+    wiec system wysylalby TE SAMA niepoprawna ilosc co swiece, bez konca.
+    Druga szkoda: alarm `bez_kontaktu` mowi "gielda ich nie widziala", co dla
+    422 jest falszem - widziala i odmowila. Wlasciciel dostaje codziennie alarm
+    o zlej przyczynie, czyli dokladnie ten ksztalt, ktory uczy ignorowac cala
+    kategorie.
+    """
     # `code` wyjatku to STATUS HTTP, nie kod wewnetrzny Alpaki (np. 40010001):
     # to po statusie wolajacy rozroznia "nie zna zlecenia" (404) od "duplikat"
     # (422). Kod Alpaki idzie do tresci, zeby nie zginal.
@@ -154,19 +196,54 @@ def _blad_z_odpowiedzi(r: httpx.Response) -> ExchangeError:
             msg = f"{msg} [alpaca {tresc['code']}]"
     except ValueError:
         msg = r.text[:200]
+    niski = msg.lower()
     if r.status_code in (401,):
         return AuthError(f"Alpaca odrzucila klucz ({r.status_code}): {msg}", code=kod)
     if r.status_code == 403:
-        # 403 to u Alpaki albo konto zablokowane/ograniczone, albo brak srodkow
-        # na zlecenie ("insufficient buying power"). Drugie nie wymaga czlowieka
-        # w panelu - wymaga mniejszego zlecenia - wiec rozrozniamy po tresci.
-        if "buying power" in msg.lower() or "insufficient" in msg.lower():
-            return ExchangeError(f"Alpaca: {msg}", code=kod, retryable=False)
+        # 403 to u Alpaki trzy rozne rzeczy i kazda wymaga innej reakcji.
+        #
+        # BRAK SRODKOW -> `OdmowaGieldy(rodzaj='saldo')`, dokladnie jak kody
+        # 170131 u Bybita. Do 2026-09-26 bylo to golym `ExchangeError`, czyli
+        # "nie wiemy, czy weszlo" - a wiemy, ze nie weszlo, i wiemy dlaczego.
+        # To `rodzaj='saldo'` wlacza w `odmowa_gieldy` zapytanie o stan
+        # rachunku i zlozenie ilosci POTWIERDZONEJ przez gielde.
+        if "buying power" in niski or "insufficient" in niski:
+            return OdmowaGieldy(
+                f"Alpaca ODMOWILA: za malo srodkow ({msg}). Zlecenie NIE WESZLO "
+                f"i powtorzenie tej samej ilosci da to samo. Nasze ksiegi podaja "
+                f"wiecej, niz gielda potwierdza - przy WYJSCIU znaczy to, ze "
+                f"pozycji nie da sie zamknac w calosci, dopoki roznica nie "
+                f"zostanie wyjasniona.",
+                code=kod, rodzaj="saldo")
+        # NIESHORTOWALNY PAPIER -> odmowa PER SYMBOL, nigdy `KontoZamrozone`.
+        # `rodzaj='parametr'`, bo powtorzenie tego samego zlecenia da to samo:
+        # zmienic musi sie strona albo instrument, nie ilosc.
+        if any(f in niski for f in NIESHORTOWALNE):
+            return OdmowaGieldy(
+                f"Alpaca ODMOWILA KROTKIEJ SPRZEDAZY TEGO PAPIERU ({msg}). "
+                f"Dotyczy JEDNEGO instrumentu, nie konta: klucz dziala, konto "
+                f"handluje, tego papieru nie da sie pozyczyc. Zlecenie NIE "
+                f"WESZLO; powtorzenie bez zmiany strony albo instrumentu da to "
+                f"samo. NIE IDZ DO WSPARCIA GIELDY.",
+                code=kod, rodzaj="parametr")
         return KontoZamrozone(f"Alpaca: konto zablokowane lub ograniczone: {msg}", code=kod)
     if r.status_code == 429:
         return ExchangeError(f"Alpaca: limit zapytan ({msg})", code=kod, retryable=True)
     if r.status_code >= 500:
         return ExchangeError(f"Alpaca {r.status_code}: {msg}", code=kod, retryable=True)
+    if r.status_code == 422:
+        # 422 to u Alpaki odmowa WALIDACJI: krok ilosci, precyzja ceny, minimum,
+        # `qty must be integer`, duplikat `client_order_id`. W kazdym z tych
+        # przypadkow gielda ODPOWIEDZIALA i zlecenia NIE MA.
+        #
+        # DUPLIKAT `client_order_id` JEST TU NADAL WIDOCZNY. `zloz_zlecenie`
+        # rozpoznaje go po `e.code == "422"` i tresci, a `OdmowaGieldy` niesie
+        # `code` bez zmian i jest podklasa `ExchangeError`, wiec ta galaz
+        # (i `anuluj_zlecenie`, ktore lapie samo `422`) dziala jak dotad.
+        return OdmowaGieldy(
+            f"Alpaca ODMOWILA: zlecenie lamie jej regule ({msg}). Zlecenie NIE "
+            f"WESZLO; ponowienie bez zmiany liczb da to samo.",
+            code=kod, rodzaj="parametr")
     return ExchangeError(f"Alpaca {r.status_code}: {msg}", code=kod, retryable=False)
 
 

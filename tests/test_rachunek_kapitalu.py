@@ -46,7 +46,7 @@ class Kursor:
             if "INSERT INTO exec.equity_point" in sql:
                 kolumny = ("engine", "mode", "event_time", "equity", "cash",
                            "unrealized", "realized_cum", "exposure",
-                           "nav", "units", "wplaty_netto")
+                           "nav", "units", "wplaty_netto", "zrodlo")
                 return dict(zip(kolumny, params))
         raise AssertionError("update_equity nie zapisał punktu kapitału")
 
