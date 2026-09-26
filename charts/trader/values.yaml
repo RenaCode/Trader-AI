@@ -385,6 +385,57 @@ workers:
   # albo odrzuci zlecenie - nie z wlasnego kalendarza, ktory moglby sie z nia
   # rozjechac. Zegar nieodpowiadajacy NIE jest otwarciem: cykl konczy sie wtedy
   # bledem i po pieciu pod rzad proces sie konczy, zeby restart byl WIDOCZNY.
+  #
+  # ============================================================================
+  # TA PETLA ZOSTAJE WLACZONA - decyzja 2026-09-26, rozwazana i odrzucona
+  # ============================================================================
+  #
+  # Rozwazano jej zatrzymanie i trzeba zapisac, dlaczego NIE, bo argument za
+  # byl mocny, dopoki nie naprawiono czegos innego.
+  #
+  # NAJPIERW FAKT, KTORY LATWO POMYLIC: `engine-equity` NIE JEST POTOKIEM DANYCH.
+  # Nie zbiera niczego. Dane zbieraja cztery inne workery - `market-equity`
+  # (swiece 1m), `history-equity` (1h, okno 3 dni), `features-equity` (cechy)
+  # i `kapital-equity` (krzywa kapitalu z ksiag Alpaki). Zatrzymanie tej petli
+  # NIE DOTYKA ani jednego z nich, wiec NIE DOTYKA rowniez 2,5 roku historii
+  # godzinowej (94 625 swiec od 2024-04) ani 723 147 policzonych wartosci cech.
+  # Ta historia nie odtworzy sie sama: `history-equity` chodzi z `--days 3`,
+  # czyli UTRZYMUJE okno, a nie poglebia je.
+  #
+  # ARGUMENT ZA ZATRZYMANIEM, KTORY OBOWIAZYWAL DO 2026-09-26: jedynym skutkiem
+  # ubocznym tej petli przy pustym uniwersum i bramce modelu byl `seed_equity`
+  # (loop.py, PRZED bramka `--wymagaj-modelu`), ktory dopisywal do serii
+  # `equity/demo` punkt z `nav = 1.0` wpisanym na sztywno - obok punktow, ktore
+  # do tej samej serii pisze `kapital-equity` z ksiag Alpaki. Zasiane 1.0
+  # zostawalo szczytem NA ZAWSZE (`max(nav)` bez ograniczenia czasowego), czyli
+  # lamalo `max_drawdown` trwale, a dla `engine='equity'` nie ma procesu
+  # zdolnego zwolnic kill-switcha.
+  #
+  # DLACZEGO TEN ARGUMENT JUZ NIE OBOWIAZUJE: przyczyna zostala usunieta
+  # u zrodla. `seed_equity` nie zasiewa silnika, ktorego krzywa pisza ksiegi
+  # (stan_kapitalu.KRZYWA_Z_KSIAG_GIELDY, migracja 0058). Zatrzymanie petli
+  # bylo tanią ALTERNATYWA dla tej naprawy, a nie dodatkiem do niej.
+  #
+  # DLACZEGO NIE ZATRZYMUJEMY "NA WSZELKI WYPADEK": bramka `--wymagaj-modelu`
+  # zostala SWIADOMIE postawiona PO `check_account` (commit 24443ed,
+  # loop.py:1926-1930), zeby bezpiecznik mierzyl limity konta TAKZE bez modelu.
+  # Czujka `--co ryzyko` zglosila brak tego pomiaru przy pierwszym cyklu silnika
+  # equity. Zatrzymanie petli odwraca tamta decyzje i kasuje jedyny proces,
+  # ktory dla equity zapisuje slad pomiaru limitow - a to NIE jest zamiana
+  # ryzyka na brak ryzyka, tylko na brak widoku.
+  #
+  # CO TA PETLA ROBI DZIS, dokladnie: bije puls, mierzy limity konta na serii
+  # `equity/demo` (juz jednorodnej) i konczy cykl na bramce modelu. Nie decyduje,
+  # nie sklada zlecen, nie dotyka pozycji - uniwersum decyzyjne jest puste
+  # (`tradeable = false` dla wszystkich spolek, migracja 0047) i nie ma aktywnej
+  # wersji modelu.
+  #
+  # ODNOTOWANE, NIE NAPRAWIONE: `risk.POMIAR_STARY_PO_MIN` = 15 min dobrano dla
+  # petli budzacej sie co 300 s ("trzy pominiete cykle"), a krzywa equity pisze
+  # teraz `kapital-equity` co 900 s - jeden pominiety cykl wystarcza, zeby
+  # pomiar byl "stary", czyli zeby `check_account` dal `block`. Dla toru bez
+  # otwartych pozycji nie kosztuje to niczego, ale prog wieku pomiaru per silnik
+  # (razem z brakiem dozorcy dla `engine='equity'`) jest osobna decyzja.
   engine-equity:
     enabled: true
     command: ["sh", "-c", "sleep 90; python services/engine/loop.py --engine equity --bar 1h --sprawdz && exec python services/engine/loop.py --engine equity --bar 1h --interval 300 --kind stock --limit --wymagaj-modelu --egzekucja gielda --mode demo"]
