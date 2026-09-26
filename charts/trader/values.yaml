@@ -591,6 +591,41 @@ trainerCron:
   schedule: "40 4 * * *"        # codziennie 04:40 czasu lokalnego, po kopii zapasowej
   bar: "4h"
   days: 1400
+
+  # ZMIERZONY SPREAD, KTOREGO SYMULACJA NIE NALICZA.
+  #
+  # `simulate_portfolio` wchodzi i wychodzi po `close`, wiec w zwrocie SA
+  # prowizja, poslizg (przez ceny) i finansowanie, a NIE MA spreadu ani
+  # niewypelnienia. Do 2026-09-26 trener nie dostawal spreadu w ogole, wiec
+  # deflowany Sharpe w bramce promocji liczyl sie przy doplacie ZERO - czyli
+  # przy koszcie, o ktorym wiadomo, ze jest zanizony.
+  #
+  # 5.85 to POMIAR (polowa spreadu na noge razy dwie nogi, w punktach bazowych
+  # na runde), nie liczba "na oko" - zrodlo: `market.book_snapshot` / cecha
+  # `book_spread_bps`. Zmierzone 2026-09-25.
+  #
+  # DLACZEGO TO JEST STALA, A NIE ODCZYT Z BAZY: `book_spread_bps` jest cecha
+  # per instrument per swieca i nie ma dla niej gotowego agregatu. Zlozenie go
+  # wymaga rozstrzygniecia, ktora statystyka opisuje koszt rundy - a od tej
+  # liczby zalezy werdykt "czy strategia ma przewage". Odczyt z bazy jest
+  # WLASCIWA poprawka i osobnym zadaniem; ta stala jest migawka, ktora trzeba
+  # przemierzyc, gdy zmieni sie uniwersum albo cennik gieldy.
+  # DOTYCZY WYLACZNIE TORU CRYPTO (Bybit spot). Tor equity ma wlasny klucz
+  # nizej i swiadomie go NIE MA - patrz `trainerCron.equity.spreadBps`.
+  spreadBps: 5.85
+  # OKNO SIEGA PRZED 24.09.2026, WIEC POMIAR JEST OSZACOWANIEM.
+  #
+  # Od 2026-09-24 arkusz idzie z gieldy, na ktorej skladamy zlecenia, a od
+  # 2026-09-25 dotyczy to instrumentow `tradeable`. Ale `days: 1400` to prawie
+  # cztery lata, wiec wieksza czesc szeregu `book_spread_bps` pochodzi z hosta
+  # referencyjnego. Dokumentacja `--spread-obca-ksiega` mowi wprost, ze flaga
+  # jest potrzebna dla takich okien: liczba wchodzi do rachunku jako
+  # OSZACOWANIE, karta kosztu ZOSTAJE NIEPELNA, a raport podaje krotnosc
+  # spreadu, przy ktorej przewaga schodzi do zera.
+  #
+  # Zdjecie tej flagi twierdzeniem "karta jest pelna" bez przemierzenia szeregu
+  # na wlasnym arkuszu byloby cichym zawyzeniem wiedzy o kosztach.
+  spreadObcaKsiega: true
   trials: 60
   # Cennik podmiotu UNIJNEGO - tam stoi konto (patrz migracja 0018). Taker
   # kosztuje tam 0,250% zamiast 0,100%, wiec runda zleceniem rynkowym rosnie
@@ -637,6 +672,21 @@ trainerCron:
     horyzonty: ["1h"]
     kind: "stock"
     limit: true
+    # SPREAD DLA AKCJI: NIE ZMIERZONY, I DLATEGO GO TU NIE MA.
+    #
+    # 5.85 pb z `trainerCron.spreadBps` to pomiar z Bybita spot (krypto).
+    # Wpisanie tej liczby dla akcji na Alpace byloby falszywa precyzja:
+    # inna gielda, inny cennik, inna mikrostruktura. Karta kosztu equity
+    # konczy sie dzis zdaniem "razem CO NAJMNIEJ 0.000% rundy - bez
+    # niewypelnienie, spread, oplaty regulacyjne", i to jest UCZCIWY stan:
+    # brak pomiaru opisany jako brak pomiaru.
+    #
+    # Zeby to wypelnic, trzeba zmierzyc spread na WLASNYM arkuszu Alpaki
+    # (`market.book_snapshot` dla instrumentow equity) - `history-equity`
+    # chodzi z `--depth 1`, wiec arkusz jest zbierany. Do tego czasu klucz
+    # zostaje nieustawiony, a `--spread-bps` nie idzie do trenera equity.
+    # spreadBps: <zmierz, nie zgaduj>
+    # spreadObcaKsiega: true
   # Limity dobrane do ZMIERZONEGO zuzycia (388 MB przy pelnym przebiegu na
   # 24 instrumentach), nie do zapasu "na wszelki wypadek". Wezel ma 7,8 GB
   # i dzieli je z trzema innymi projektami; limit 3 GB dla zadania, ktore
