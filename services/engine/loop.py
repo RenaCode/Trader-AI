@@ -2527,9 +2527,36 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
 
     if limit and gielda is not None:
         from services.engine.gielda_exec import zloz_oczekujace
+
+        # STAN SESJI CZYTAMY PONOWNIE, TU, NA KONCU PRZEBIEGU.
+        #
+        # BRAMKA 1 wyzej pyta o sesje na POCZATKU cyklu, a wysylka dzieje sie na
+        # jego koncu - miedzy jednym a drugim mija caly przebieg dla calego
+        # uniwersum. Sesja zamknieta w tym czasie nie byla przez nikogo
+        # zauwazana: cykl wystartowany 15:59 czasu Nowego Jorku przechodzil
+        # bramke jako "otwarta" i wysylal zlecenia po 16:00, gdy arkusz jest juz
+        # zamrozony. Prog wieku arkusza tego nie lapie, bo drugie zrodlo ceny
+        # (`cena_odniesienia`) nie ma znacznika czasu i poza sesja SIE UDAJE -
+        # wiec zlecenie szlo po cenie zamkniecia, a Alpaca kolejkowala je `day`
+        # do nastepnego otwarcia (patrz `gielda_exec.zloz_plan`).
+        #
+        # KOSZT: jedno zapytanie `/v2/clock` na cykl dla equity i ZERO dla
+        # krypto - `stan_sesji` konczy pytanie na `is_24_7`, nie siegajac po
+        # zegar. To ten sam rachunek, ktory stoi w migracji 0055.
+        #
+        # STAN NIEZNANY NIE PRZERYWA TU CYKLU (inaczej niz przed `run_once`,
+        # gdzie podnosi sie do wyjatku): decyzje sa juz zapisane, a `zloz_plan`
+        # wstrzymuje na tym stanie WEJSCIA i przepuszcza WYJSCIA. Przerwanie
+        # zabralo by wyjsciom wysylke, czyli wiezilo pozycje przy awarii odczytu
+        # zegara.
+        sesja_wysylki = await stan_sesji(cur, engine, gielda)
+        if verbose and not sesja_wysylki.wolno_decydowac:
+            print(f"  wysyłka: {sesja_wysylki.opis()} — wejścia WSTRZYMANE, "
+                  f"wyjścia idą dalej")
         stats.update(await zloz_oczekujace(
             cur, gielda, engine=engine, mode=mode, kategoria=kategoria, h=h,
-            verbose=verbose, tylko_wyjscia=wejscia_wstrzymane))
+            verbose=verbose, tylko_wyjscia=wejscia_wstrzymane,
+            sesja=sesja_wysylki))
         conn.commit()
 
     # LICZBA POZYCJI BEZ SWIEZEJ CENY IDZIE DO HEARTBEATU.

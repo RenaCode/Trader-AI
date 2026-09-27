@@ -32,6 +32,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 from services.engine.egzekucja import co_z_wypelnieniem, rozlicz_prowizje
+from services.engine.sesja import StanSesji
 from services.engine.loop import (
     trwale_niesprzedawalna, zapisz_pominiecie, zapisz_wejscie, zapisz_wyjscie)
 from services.engine.zlecenia import (
@@ -308,7 +309,8 @@ async def arkusz_wysylki(adapter, symbol: str, kategoria: str, teraz: datetime
 
 
 async def zloz_plan(cur, adapter, plan: dict, f: Filtry, *, engine: str,
-                    mode: str, kategoria: str) -> tuple[bool, str]:
+                    mode: str, kategoria: str,
+                    sesja: StanSesji | None = None) -> tuple[bool, str]:
     """Składa jeden plan na giełdzie. Zwraca (czy_zlozono, komunikat).
 
     ODMOWA ZŁOŻENIA JEST ZAPISYWANA, nie pomijana. Plan, który nie poszedł na
@@ -388,6 +390,61 @@ async def zloz_plan(cur, adapter, plan: dict, f: Filtry, *, engine: str,
     # z CHECK-a w migracji, a powod zlozony ze zmiennej sprawdzilby sie
     # dopiero na produkcji - wywracajac caly cykl.
     pominiecie: str | None = None
+
+    # BRAMKA SESJI STOI PRZED BRAMKAMI CENY, BO ODPOWIADA NA WCZESNIEJSZE PYTANIE.
+    #
+    # Prog wieku arkusza (`WIEK_ARKUSZA_MAX_S`) mierzy, czy odczyt jest SWIEZY.
+    # Poza sesja gieldowa to pytanie nie ma dobrej odpowiedzi: arkusz akcji jest
+    # wtedy z definicji stary, bo ostatnia oferta pochodzi z zamkniecia - a to
+    # nie awaria, tylko rynek, ktory spi.
+    #
+    # PROG WIEKU SAM NIE WYSTARCZA, I TO JEST ZMIERZONE. `brak_ceny_wysylki`
+    # wymaga, zeby zawiodly OBA odczyty ceny, a prog oslania tylko `arkusz_wysylki`.
+    # Drugie zrodlo, `adapter.cena_odniesienia`, oddaje goly `Decimal` BEZ
+    # znacznika czasu (oba adaptery), wiec jego wieku nie da sie sprawdzic - i poza
+    # sesja ten odczyt SIE UDAJE, oddajac cene zamkniecia. Bez tej bramki wejscie
+    # idzie wiec na gielde po cenie sprzed godzin, Alpaca kolejkuje zlecenie `day`
+    # do nastepnego otwarcia (patrz naglowek `alpaca.py`) i pozycja powstaje
+    # nazajutrz przez luke nocna, bez decyzji, ktora by ja popierala. Prog wieku
+    # fail-open przez nieoslonione zrodlo zapasowe.
+    #
+    # DOTYCZY WYLACZNIE WEJSCIA. Wyjscia nie wolno zatrzymac zadnym progiem -
+    # odmowa zostawia pozycje otwarta wbrew decyzji, czyli kosztuje pieniadze,
+    # a nie okazje. Poza sesja zlecenie `day` czeka do otwarcia i dla wyjscia
+    # jest to skutek pozadany.
+    #
+    # RYNEK CIAGLY NIE PRZECHODZI TU NICZEGO NOWEGO. `stan_sesji` konczy pytanie
+    # na `is_24_7` i oddaje `otwarta=True`, wiec tor krypto nie dostaje ani
+    # luzniejszego progu, ani jednego dodatkowego zapytania.
+    #
+    # `sesja is None` ZNACZY "WOLAJACY NIE PYTAL", nie "otwarte". Tak wchodza tu
+    # `proba_egzekucji` i testy ksztaltu zlecenia, ktore o rynek nie pytaja
+    # i nie musza; petla decyzyjna przekazuje stan zawsze (`loop.run_once`).
+    if not powod and not wyjscie and sesja is not None and not sesja.wolno_decydowac:
+        if sesja.otwarta is False:
+            # TRZY STANY, TRZY MIEJSCA - a nie jeden powod na wszystko.
+            # `brak_ceny_wysylki` w dzienniku czyta sie jak problem z gieldą,
+            # wiec czujka alarmowalaby co noc na stan NORMALNY i nauczylaby
+            # odklikiwac cala kategorie (ten wzorzec opisuje `dozor.py` przy
+            # kill-switchu).
+            powod = (f"wejście: rynek instrumentu jest ZAMKNIĘTY w chwili "
+                     f"wysyłki — {sesja.opis()}. To NIE JEST AWARIĄ giełdy ani "
+                     f"brakiem ceny; wejścia po godzinach nie składamy, bo "
+                     f"zlecenie `day` czeka wtedy do otwarcia i wypełniłoby się "
+                     f"po cenie, której decyzja dla świecy "
+                     f"{plan['trigger'].get('bar')} już nie popiera")
+            pominiecie = "rynek_zamkniety"
+        else:
+            # BRAK WIEDZY WSTRZYMUJE WEJSCIE, a nie przepuszcza go - ta sama
+            # regula, ktora `sesja.wolno_decydowac` stosuje w petli. Domysl
+            # "pewnie otwarte" zamienialby awarie odczytu zegara w zlecenia
+            # skladane po godzinach.
+            powod = (f"wejście: NIE WIEM, czy rynek instrumentu jest otwarty — "
+                     f"{sesja.opis()}. Brak wiedzy wstrzymuje wejście przy "
+                     f"operacji nieodwracalnej; to JEST usterka odczytu i "
+                     f"wymaga reakcji, w odróżnieniu od rynku zamkniętego")
+            pominiecie = "sesja_nieznana"
+
     if not powod and not wyjscie:
         if oferty is None and odniesienie is None:
             # ZADNEGO ODCZYTU Z CHWILI WYSYLKI. Cena w `plan["limit_price"]` to
@@ -421,6 +478,12 @@ async def zloz_plan(cur, adapter, plan: dict, f: Filtry, *, engine: str,
             if pominiecie == "brak_ceny_wysylki":
                 zapisz_pominiecie(cur, engine, mode, plan["instrument_id"], bar,
                                   "brak_ceny_wysylki", powod)
+            elif pominiecie == "rynek_zamkniety":
+                zapisz_pominiecie(cur, engine, mode, plan["instrument_id"], bar,
+                                  "rynek_zamkniety", powod)
+            elif pominiecie == "sesja_nieznana":
+                zapisz_pominiecie(cur, engine, mode, plan["instrument_id"], bar,
+                                  "sesja_nieznana", powod)
             else:
                 zapisz_pominiecie(cur, engine, mode, plan["instrument_id"], bar,
                                   "cena_odjechala", powod)
@@ -1097,7 +1160,8 @@ async def rozstrzygnij_plan(cur, adapter, plan: dict, f: Filtry, *, engine: str,
 
 async def zloz_oczekujace(cur, adapter, *, engine: str, mode: str,
                           kategoria: str, h, verbose: bool = True,
-                          tylko_wyjscia: bool = False) -> dict:
+                          tylko_wyjscia: bool = False,
+                          sesja: StanSesji | None = None) -> dict:
     """Wysyła na giełdę plany, które jeszcze tam nie poszły.
 
     ROZPOZNANIE PO BRAKU WIERSZA ZLECENIA, nie po fladze na planie. Flaga
@@ -1160,7 +1224,8 @@ async def zloz_oczekujace(cur, adapter, *, engine: str, mode: str,
             print(f"  UWAGA: {plan['symbol']} — brak {nazwa_atr} w feat."
                   f"feature_value; pasmo ceny będzie AWARYJNE (szersze)")
         ok, msg = await zloz_plan(cur, adapter, plan, f, engine=engine,
-                                  mode=mode, kategoria=kategoria)
+                                  mode=mode, kategoria=kategoria,
+                                  sesja=sesja)
         st["zlozone" if ok else "odrzucone"] += 1
         if verbose:
             print(f"  [{'złożone' if ok else 'ODRZUCONE'}] {plan['symbol']} "
