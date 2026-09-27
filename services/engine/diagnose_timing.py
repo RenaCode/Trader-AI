@@ -64,7 +64,7 @@ from services.engine.portfolio import Egzekucja, precompute_panels, simulate_por
 from services.engine.risk_rules import MIN_CONFIDENCE
 from services.engine.train import (
     DEFAULT_WEIGHTS, MIN_INSTRUMENTS, _bez_martwych, atr_threshold, ic_weights, load_panel,
-    martwe_sygnaly, score_threshold,
+    bramki_okna, martwe_sygnaly,
 )
 from services.engine.uniwersum import SQL_UNIWERSUM_DECYZYJNE, odcisk
 
@@ -185,8 +185,11 @@ def main() -> int:
         martwe = martwe_sygnaly(cache_tr)
         bazowe = _bez_martwych(DEFAULT_WEIGHTS, martwe)
         wagi = ic_weights(trening, cache_tr, martwe) if args.wagi == "ic" else bazowe
-        gates = {s: score_threshold(trening[s], bazowe, prog[s], h, cache_tr[s])
-                 for s in test}
+        # PROGI PER REZIM, z tej samej funkcji, ktorej uzywa trener - inaczej
+        # diagnostyka mierzylaby prog wspolny, ktorego produkcja od 2026-09-27
+        # nie stosuje.
+        gates = bramki_okna({s: trening[s] for s in test}, bazowe, prog, h,
+                            {s: cache_tr[s] for s in test})
         cache_te = precompute_panels(test, prog, h)
 
         res = simulate_portfolio(test, wagi, prog, gates, h, MIN_CONFIDENCE,

@@ -273,13 +273,16 @@ def main() -> None:
             sys.exit(
                 "brak AKTYWNEJ wersji modelu — pomiar na wagach zastępczych "
                 "mierzyłby inną strategię niż ta, która podjęła tamte 135 decyzji")
-        print(f"\nModel: wersja {model['version']}, próg wejścia "
-              f"{model['enter']:.4f}, wyjścia {model['exit']:.4f}, "
-              f"min. pewność {model.get('min_conf', MIN_CONFIDENCE):.2f}")
+        print(f"\nModel: wersja {model['version']}, min. pewność "
+              f"{model.get('min_conf', MIN_CONFIDENCE):.2f}")
+        # PROGI PER REZIM, ta sama wielkosc, ktora stosuje petla decyzyjna.
+        # Jedna liczba w tym miejscu mierzylaby strategie, ktorej produkcja
+        # od 2026-09-27 nie wykonuje.
+        print(f"Progi wejścia: {model['bramki'].opis()}")
 
         dane = zbuduj_panele(cur, args.engine, h, od, do)
 
-    gates = {s: (model["enter"], model["exit"]) for s in dane["panele"]}
+    gates = model["bramki"]
     egz = Egzekucja(limit=args.limit)
     print(f"\nEgzekucja: zlecenia {'z limitem' if args.limit else 'rynkowe'}, "
           f"{len(dane['panele'])} instrumentów, okno {od:%Y-%m-%d}..{do:%Y-%m-%d}")

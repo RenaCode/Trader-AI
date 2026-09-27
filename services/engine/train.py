@@ -54,9 +54,12 @@ from services.engine.risk_rules import (
     DEFAULT_LIMITS, MIN_CONFIDENCE, START_EQUITY, wartosc_limitu,
 )
 from services.engine.horizons import DEFAULT_BAR, HORIZONS, Horizon, get as get_horizon
+from services.engine.bramki import (
+    EXIT_RATIO, MIN_PROB_PROGU, PROG_WEJSCIA_POCZATKOWY, Bramki, bramki_z_prob,
+)
 from services.engine.portfolio import (
     Egzekucja, kup_i_trzymaj, metrics as portfolio_metrics, precompute_panels,
-    simulate_portfolio,
+    simulate_portfolio, udzial_powtornych_wejsc,
 )
 from services.engine.koszty import Karta, karta_rundy, opis_karty
 from services.engine.spread import opis_pomiaru, zmierz_spread
@@ -83,7 +86,8 @@ from services.engine.wersja import sha_kodu
 # 2 transakcje na okno testowe - za malo, by cokolwiek zmierzyc. Percentyl
 # przenosi sie miedzy horyzontami sam.
 ENTER_PCTL = 0.88
-EXIT_RATIO = 0.45          # wyjscie przy spadku sily sygnalu do 45% progu wejscia
+# EXIT_RATIO i minimum proby stoja w `services/engine/bramki.py` razem
+# z polityka malej proby - tutaj byly by druga kopia tej samej liczby.
 # Prog pewnosci przychodzi z risk_rules - ta sama liczba, ktora stosuje petla
 # decyzyjna. Zdefiniowany tu osobno oznaczalby, ze trener kalibruje wagi przy
 # innym progu, niz produkcja potem stosuje.
@@ -999,31 +1003,61 @@ def atr_threshold(panel: list[dict]) -> float | None:
 
 
 # ------------------------------------------------------------------ symulacja
-def score_threshold(panel: list[dict], weights: dict[str, dict[str, float]],
-                    atr_p80: float | None, h: Horizon,
-                    cache: list[tuple] | None = None) -> tuple[float, float]:
-    """Progi wejscia i wyjscia z rozkladu |wyniku| na TYM panelu.
+def proby_wynikow(panels: dict[str, list[dict]],
+                  weights: dict[str, dict[str, float]],
+                  atr_thresholds: dict[str, float | None], h: Horizon,
+                  cache: dict[str, list[tuple]] | None = None,
+                  ) -> dict[str, list[float]]:
+    """`abs(wynik)` z okna, POGRUPOWANE PO REZIMIE, ze wszystkich instrumentow.
 
-    Wolno to policzyc wylacznie na oknie treningowym. Policzone na testowym
-    byloby zagladaniem w przyszlosc - prog znalby wtedy rozklad, ktorego
-    w tamtym momencie nie dalo sie znac.
+    Liczone wylacznie na oknie TRENINGOWYM. Policzone na testowym byloby
+    zagladaniem w przyszlosc - prog znalby rozklad, ktorego w tamtym momencie
+    nie dalo sie znac.
+
+    DLACZEGO POPULACJA JEST WSPOLNA DLA INSTRUMENTOW, A OSOBNA DLA REZIMOW.
+    Skale wyniku rozsuwaja WAGI, a wagi sa per rezim i identyczne dla wszystkich
+    instrumentow (`weights.get(regime)`) - to rezim jest wymiarem, wzdluz
+    ktorego percentyl przestaje znaczyc to samo. Roznice miedzy instrumentami
+    w obrebie rezimu ida dopiero przez rozklady cech i sa o rzad mniejsze.
+    Sa jeszcze dwa powody, oba o pomiarze:
+      * probek na prog jest 5-30 razy wiecej, a percentyl 0,88 z 50 obserwacji
+        stoi na szostej od gory - czyli sam jest szumem;
+      * do 2026-09-27 trener symulowal okno progami PER INSTRUMENT, a produkcja
+        dostawala MEDIANE z nich (`prod_enter`). Trening mierzyl wiec strategie,
+        ktorej produkcja nie wykonuje. Jedna populacja na rezim znosi ten
+        rozjazd: symulacja i produkcja porownuja z ta sama liczba.
     """
-    scores = []
-    for i, row in enumerate(panel):
-        if cache is not None:
-            regime, sygnaly = cache[i]
-            sc, conf, _ = combine(sygnaly, regime, weights.get(regime), with_contributions=False)
-        else:
-            regime, _ = classify_regime(row["f"], atr_p80)
-            sc, conf, _ = evaluate(row["f"], regime, weights.get(regime), h)
-        if conf >= MIN_CONF:
-            scores.append(abs(sc))
-    if len(scores) < 50:
-        return 0.25, 0.12
-    scores.sort()
-    enter = scores[min(len(scores) - 1, int(len(scores) * ENTER_PCTL))]
-    enter = max(enter, 1e-4)
-    return enter, enter * EXIT_RATIO
+    proby: dict[str, list[float]] = {}
+    for sym, panel in panels.items():
+        wpisy = cache.get(sym) if cache is not None else None
+        for i, row in enumerate(panel):
+            if wpisy is not None:
+                regime, sygnaly = wpisy[i]
+                sc, conf, _ = combine(sygnaly, regime, weights.get(regime),
+                                      with_contributions=False)
+            else:
+                regime, _ = classify_regime(row["f"], atr_thresholds.get(sym))
+                sc, conf, _ = evaluate(row["f"], regime, weights.get(regime), h)
+            # Prog pewnosci odsiewa TAK SAMO jak w produkcji - inaczej percentyl
+            # liczylby sie na populacji szerszej niz ta, ktora go potem mija.
+            if conf >= MIN_CONF:
+                proby.setdefault(regime, []).append(abs(sc))
+    return proby
+
+
+def bramki_okna(panels: dict[str, list[dict]],
+                weights: dict[str, dict[str, float]],
+                atr_thresholds: dict[str, float | None], h: Horizon,
+                cache: dict[str, list[tuple]] | None = None,
+                per_rezim: bool = True) -> Bramki:
+    """Progi wejscia i wyjscia dla CALEGO okna, po jednym na rezim.
+
+    `per_rezim=False` liczy jeden prog ze zlaczonej proby, czyli arytmetyke
+    sprzed 2026-09-27 - do pomiaru roznicy na tych samych oknach (`--progi`).
+    Uzasadnienie zmiany i polityka malej proby: `services/engine/bramki.py`.
+    """
+    return bramki_z_prob(proby_wynikow(panels, weights, atr_thresholds, h, cache),
+                         ENTER_PCTL, per_rezim=per_rezim)
 
 
 def martwe_sygnaly(cache: dict[str, list[tuple]], prog: float = 0.01) -> set[str]:
@@ -1301,7 +1335,8 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
           zakladane_pozycje: int | None = None,
           zgoda_na_promocje: bool = False,
           spread_bps: float | None = None,
-          spread_nasza_ksiega: bool = True) -> None:
+          spread_nasza_ksiega: bool = True,
+          progi_per_rezim: bool = True) -> None:
     cur = conn.cursor()
     rng = random.Random(SEED)
     now = datetime.now(timezone.utc)
@@ -1532,6 +1567,12 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
                      "step_days": h.step_days, "min_trades": h.min_trades,
                      "trials_per_window": trials_per_window, "seed": SEED,
                      "wybor": wybor, "kind": kind,
+                     # SPOSOB LICZENIA PROGU JEST CZESCIA KONFIGURACJI, nie
+                     # szczegolem wykonania: ten sam zestaw wag przy progu
+                     # wspolnym i przy progach per rezim to dwie rozne
+                     # strategie i nie wolno ich liczyc jako jednej proby.
+                     "progi": "per_rezim" if progi_per_rezim else "wspolny",
+
                      "limit": bool((egzekucja or Egzekucja()).limit),
                      "sygnaly_eksperymentalne": eksperymenty}),
          feature_ids, signal_ids, now - timedelta(days=days), now, sha_kodu()))
@@ -1632,7 +1673,15 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
 
     idx = 0
     positive = 0
-    gate_history: list[float] = []
+    # HISTORIA PROGOW PER REZIM: rezim -> lista progow z kolejnych okien.
+    # Produkcja dostaje z tego MEDIANE OSOBNO DLA KAZDEGO REZIMU. Jedna
+    # wspolna lista (tak bylo do 2026-09-27) mieszala progi z rozlacznych
+    # skal i jej mediana nie byla percentylem zadnego z nich.
+    historia_bramek: dict[str, list[float]] = {}
+    # W ilu oknach rezim NIE dostal progu, bo proba byla za mala. Liczba
+    # potrzebna w podsumowaniu: rezim bez progu nie handluje, a to musi byc
+    # widoczne jako decyzja, nie jako cisza.
+    okna_bez_progu: dict[str, int] = {}
     weight_history: list[dict] = []
     # Rownolegla do weight_history: ktore sygnaly byly martwe w danym oknie.
     # Bez tego zero po martwym sygnale nie da sie odroznic od zera zmierzonego.
@@ -1759,9 +1808,12 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
         # ~120, co nie bylo zmiana strategii, tylko rozjazdem miedzy progiem
         # a tym, co go przekracza.
         bazowe = _bez_martwych(DEFAULT_WEIGHTS, martwe)
-        gates = {s: score_threshold(train_slices[s], bazowe, thresholds[s], h,
-                                    cache_tr[s])
-                 for s in aktywne}
+        gates = bramki_okna({s: train_slices[s] for s in aktywne}, bazowe,
+                            thresholds, h, cache_tr, per_rezim=progi_per_rezim)
+        if idx == 0:
+            rodzaj = "per reżim" if progi_per_rezim else "WSPÓLNY dla reżimów"
+            print(f"  progi wejścia ({rodzaj}, percentyl {ENTER_PCTL:.2f}, "
+                  f"min. {MIN_PROB_PROGU} próbek): {gates.opis()}")
 
         # --- dobor wag WYLACZNIE na oknie treningowym ------------------------
         # Celem jest Sharpe CALEGO PORTFELA, nie srednia z Sharpe'ow liczonych
@@ -1885,6 +1937,17 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
         informative = not oos_m.get("insufficient")
         agg = {k: oos_m[k] for k in
                ("sharpe", "sortino", "max_dd", "hit_rate", "avg_r", "profit_factor")}
+        # SIODMA MIARA NA OKNO: odsetek transakcji bedacych POWROTEM w ten sam
+        # instrument ponizej trzech swiec po wyjsciu z niego. NIE jest to
+        # czestotliwosc handlu - patrz `portfolio.udzial_powtornych_wejsc`.
+        #
+        # Liczona dla KAZDEGO okna, nie tylko dla `range`: bez wartosci
+        # w pozostalych rezimach nie ma z czym porownac i liczba nie rozstrzyga
+        # niczego. Przy oknie bez transakcji NIE zapisujemy zera - zero znaczy
+        # "zmierzono i wyszlo zero", a tu nie ma czego mierzyc.
+        powtorne = udzial_powtornych_wejsc(oos_res.trades, h.bar_minutes)
+        if powtorne is not None:
+            agg["udzial_powtornych_wejsc"] = powtorne
         if informative:
             all_sharpes.append(agg["sharpe"])
             worst_dd = min(worst_dd, agg["max_dd"])
@@ -1944,7 +2007,16 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
                 [(w_id, k, round(v, 4)) for k, v in agg.items()])
             conn.commit()
 
-        gate_history.extend(g[0] for g in gates.values())
+        for rezim in REGIMES:
+            prog_rezimu = gates.wejscie(rezim)
+            if prog_rezimu is None:
+                # Rezim, ktory w tym oknie WYSTAPIL, ale nie uzbieral proby.
+                # Rezim, ktorego w oknie nie bylo wcale, nie jest brakiem
+                # kalibracji i do tego licznika nie wchodzi.
+                if gates.prob.get(rezim):
+                    okna_bez_progu[rezim] = okna_bez_progu.get(rezim, 0) + 1
+                continue
+            historia_bramek.setdefault(rezim, []).append(prog_rezimu)
         weight_history.append(best_w)
         martwe_w_oknie.append(martwe)
 
@@ -2306,9 +2378,40 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
                         f"Strategia nie wykazuje przewagi.{skala}",
         }[status]
 
-    # Progi obowiazujace produkcje - mediana z okien. Petla decyzyjna czyta je
-    # z rejestru, zeby nie ustalac ich wlasna, rownolegla logika.
-    prod_enter = round(statistics.median(gate_history), 6) if gate_history else 0.25
+    # Progi obowiazujace produkcje - mediana z okien, OSOBNO DLA KAZDEGO REZIMU.
+    # Petla decyzyjna czyta je z rejestru, zeby nie ustalac ich wlasna,
+    # rownolegla logika.
+    #
+    # REZIM, KTORY NIE DOSTAL PROGU W ZADNYM OKNIE, NIE TRAFIA DO PARAMETROW -
+    # i przez to produkcja nie bedzie w nim wchodzic. To jest wybor, nie
+    # przeoczenie: patrz `bramki.MIN_PROB_PROGU`. Zeby nie bylo cichy, idzie
+    # do `reason` stanu nauki, czyli do jedynego pola, ktore czyta czlowiek.
+    prod_progi = {rezim: round(statistics.median(lista), 6)
+                  for rezim, lista in historia_bramek.items()}
+    prod_okien = {rezim: len(lista) for rezim, lista in historia_bramek.items()}
+    # `enter_threshold` zostaje, ale MA JUZ INNE ZNACZENIE: jest progiem
+    # zapasowym WYJSCIA dla rezimow bez kalibracji i wartoscia dla starszych
+    # czytnikow (`/learning/wagi`, migracja 0040). Wejsc nim nie wolno - tego
+    # pilnuje `bramki.Bramki.wejscie`, ktore dla rezimu bez progu oddaje None.
+    wszystkie_progi = [v for lista in historia_bramek.values() for v in lista]
+    prod_enter = (round(statistics.median(wszystkie_progi), 6) if wszystkie_progi
+                  else PROG_WEJSCIA_POCZATKOWY)
+    if okna_bez_progu:
+        opis_brakow = ", ".join(f"{r}: {n}" for r, n in sorted(okna_bez_progu.items()))
+        print(f"  reżimy bez progu wejścia (próba poniżej {MIN_PROB_PROGU} "
+              f"obserwacji), liczba okien — {opis_brakow}")
+    bez_progu_w_produkcji = [r for r in REGIMES
+                             if r not in prod_progi and okna_bez_progu.get(r)]
+    # PROGI OBOWIAZUJACE PRODUKCJE WYPISUJEMY WPROST, z liczba okien. Do
+    # 2026-09-27 nie bylo ich w logu wcale: jedyna liczba, ktora przebieg
+    # podawal, byla mediana progu wspolnego - czyli nie ta, ktora produkcja
+    # przykladala do wyniku w konkretnym rezimie.
+    if prod_progi:
+        opis_progow = ", ".join(
+            f"{r}={prod_progi[r]:.4f} ({prod_okien[r]} okien)"
+            for r in REGIMES if r in prod_progi)
+        print(f"\nProgi wejścia dla produkcji (mediana po oknach, percentyl "
+              f"{ENTER_PCTL:.2f}): {opis_progow}")
 
     # WAGI DLA PRODUKCJI.
     #
@@ -2354,6 +2457,12 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
             "UPDATE learn.model_version SET params = params || %s::jsonb WHERE id = %s",
             (json.dumps({"enter_threshold": prod_enter,
                          "exit_threshold": round(prod_enter * EXIT_RATIO, 6),
+                         # PROGI, KTORYMI PRODUKCJA NAPRAWDE WCHODZI.
+                         "enter_threshold_per_regime": prod_progi,
+                         # Ile okien stoi za kazda z tych median. Prog z dwoch
+                         # okien i prog z czterdziestu wygladaja w JSON-ie
+                         # identycznie, a nie sa tym samym pomiarem.
+                         "enter_threshold_windows": prod_okien,
                          "min_confidence": MIN_CONF,
                          "weights": prod_weights}), mv_id))
 
@@ -2373,6 +2482,15 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
         # NUMER WERSJI PODAJEMY WPROST z tego samego powodu. `learning_state`
         # wskazuje wersje z OSTATNIEGO przebiegu, wiec po wstrzymaniu promocji
         # zakladka nazywa model, ktorym produkcja wlasnie nie handluje.
+        # REZIMY BEZ PROGU IDA DO `reason`. Produkcja nie bedzie w nich wchodzic,
+        # a silnik bez wejsc wyglada tak samo jak silnik na spokojnym rynku -
+        # wiec jesli tego nie napisze zakladka stanu nauki, nie napisze tego nic.
+        if bez_progu_w_produkcji:
+            reason += (" BEZ WEJŚĆ w reżimach: "
+                       + ", ".join(bez_progu_w_produkcji)
+                       + f" — próba poniżej {MIN_PROB_PROGU} obserwacji w każdym "
+                         f"oknie, w którym reżim wystąpił, więc próg wejścia nie "
+                         f"został skalibrowany.")
         if docelowy != "active":
             reason += (f" PROMOCJA WSTRZYMANA ({powod_bramki}); produkcja handluje "
                        + (f"wersją {zostaje}." if zostaje
@@ -2538,6 +2656,16 @@ def main() -> int:
                          "ic = wylacznie wagi wyliczone z IC, "
                          "bazowe = wylacznie zalozenia poczatkowe. "
                          "Warianty inne niz domyslny wymagaja --sucho")
+    ap.add_argument("--progi", default="per-rezim",
+                    choices=("per-rezim", "wspolny"),
+                    help="na jakiej populacji liczy sie percentyl progu wejscia: "
+                         "per-rezim = osobny rozklad |wyniku| dla kazdego rezimu "
+                         "(od 2026-09-27 produkcja), wspolny = jeden rozklad dla "
+                         "wszystkich rezimow (do 2026-09-27). Wariant `wspolny` "
+                         "sluzy WYLACZNIE do zmierzenia roznicy na tych samych "
+                         "oknach i wymaga --sucho; zmierzono, ze przepuszczal "
+                         "7,0%% sygnalow w `range` i 34,0%% w `high_vol` przy "
+                         "zamiarze 12%%")
     ap.add_argument("--zakladane-pozycje", type=int, default=0,
                     dest="zakladane_pozycje",
                     help="ile pozycji JEDNOCZESNIE zaklada budzet na pozycje. "
@@ -2566,6 +2694,10 @@ def main() -> int:
     # I ten sam: wielkosc pozycji jest decyzja o ryzyku, nie parametrem przebiegu.
     if args.zakladane_pozycje and not args.sucho:
         sys.exit("--zakladane-pozycje zmienia wielkosc pozycji i wymaga --sucho")
+    # I ten sam: prog wspolny to arytmetyka sprzed 2026-09-27. Wolno nim
+    # ZMIERZYC roznice, nie wolno nim wytrenowac modelu do handlu.
+    if args.progi != ap.get_default("progi") and not args.sucho:
+        sys.exit(f"--progi inne niz {ap.get_default('progi')} wymaga --sucho")
 
     url = os.environ.get("DATABASE_URL")
     if not url:
@@ -2593,6 +2725,7 @@ def main() -> int:
                   f"pozycji jednocześnie (wariant, nie produkcja)")
         train(conn, args.engine, args.days, args.trials, h, args.kind, egz,
               sucho=args.sucho, wybor=args.wybor, tylko=tylko or None,
+              progi_per_rezim=(args.progi == "per-rezim"),
               zakladane_pozycje=args.zakladane_pozycje or None,
               zgoda_na_promocje=args.zgoda_na_promocje,
               spread_bps=args.spread_bps,
