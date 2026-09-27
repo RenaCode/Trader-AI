@@ -114,7 +114,14 @@ def test_test_permutacyjny_umie_mierzyc_STRATEGIE_PRODUKCYJNA():
     assert "martwe = martwe_sygnaly(cache_tr)" in TIMING
     assert "bazowe = _bez_martwych(DEFAULT_WEIGHTS, martwe)" in TIMING
     assert "ic_weights(trening, cache_tr, martwe)" in TIMING
-    assert "score_threshold(trening[s], bazowe," in TIMING, "bramki z wag BAZOWYCH jak w trenerze"
+    # Bramki z wag BAZOWYCH i PER REZIM - dokladnie jak w trenerze. Od
+    # 2026-09-27 prog liczy sie osobno dla kazdego rezimu (`bramki_okna`);
+    # `score_threshold` liczylo jeden prog dla wszystkich i gdyby diagnostyka
+    # zostala przy nim, mierzylaby strategie, ktorej produkcja nie wykonuje.
+    assert "bramki_okna(" in TIMING and "bazowe, prog, h," in TIMING, (
+        "bramki z wag BAZOWYCH i per reżim jak w trenerze")
+    assert "score_threshold" not in TIMING, (
+        "diagnostyka wróciła do jednego progu wspólnego dla reżimów")
     assert "simulate_portfolio(test, wagi," in TIMING
 
 

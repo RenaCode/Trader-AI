@@ -209,7 +209,25 @@ async def weights(engine: Silnik, bar: str = Query("4h")):
         "wersja_modelu": row["version"] if row else None,
         "wyuczone": wyuczone is not None,
         "promowany": row["promoted_at"].isoformat() if row and row["promoted_at"] else None,
+        # JEDNA LICZBA ZOSTAJE, ale od 2026-09-27 nie jest tym, czym silnik
+        # wchodzi: prog liczy sie per rezim (`services/engine/bramki.py`).
+        # Pokazywanie samej zbiorczej wartosci znaczyloby, ze zakladka mowi
+        # o innej wielkosci niz ta, ktora rozstrzyga decyzje.
         "prog_wejscia": (row["params"] or {}).get("enter_threshold") if row else None,
+        "prog_wejscia_per_rezim": (row["params"] or {}).get(
+            "enter_threshold_per_regime") if row else None,
+        # Ile OKIEN walk-forward stoi za mediana progu w kazdym rezimie. Prog
+        # z dwoch okien i prog z czterdziestu wygladaja identycznie i nie sa
+        # tym samym pomiarem.
+        "prog_wejscia_okien": (row["params"] or {}).get(
+            "enter_threshold_windows") if row else None,
+        # Rezimy, w ktorych silnik NIE WCHODZI, bo progu nie udalo sie
+        # skalibrowac. Bez tej listy brak wejsc w rezimie wyglada na zakladce
+        # tak samo jak spokojny rynek.
+        "rezimy_bez_progu": sorted(
+            r for r in DEFAULT_WEIGHTS
+            if r not in ((row["params"] or {}).get("enter_threshold_per_regime") or {})
+        ) if row and (row["params"] or {}).get("enter_threshold_per_regime") else [],
         "trenowany_od": row["trained_from"].isoformat() if row and row["trained_from"] else None,
         "trenowany_do": row["trained_to"].isoformat() if row and row["trained_to"] else None,
         "rezimy": rezimy,

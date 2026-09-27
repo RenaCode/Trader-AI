@@ -49,6 +49,9 @@ from services.engine.risk_rules import (
     position_budget, udzial_budzetu,
 )
 from services.engine.zlecenia import Filtry, do_kroku_w_dol
+from services.engine.bramki import (
+    PROG_WEJSCIA_POCZATKOWY, PROG_WYJSCIA_POCZATKOWY, bramki_z_modelu,
+)
 from services.engine.signals import (SIGNALS, classify_regime, evaluate,
                                      pokrycie_wag)
 
@@ -56,8 +59,10 @@ from services.engine.signals import (SIGNALS, classify_regime, evaluate,
 # Docelowo pochodza z rejestru (learn.model_version.params), gdzie zapisuje je
 # trener, wyliczone z rozkladu wynikow na oknach treningowych. Trzymanie ich
 # w dwoch miejscach bylo pewna droga do rozjazdu trening-produkcja.
-ENTER_THRESHOLD = 0.25
-EXIT_THRESHOLD = 0.12
+# Same liczby stoja w `services/engine/bramki.py` razem z polityka progow -
+# tutaj byly by druga kopia, a dwie kopie tej samej liczby sie rozjezdzaja.
+ENTER_THRESHOLD = PROG_WEJSCIA_POCZATKOWY
+EXIT_THRESHOLD = PROG_WYJSCIA_POCZATKOWY
 # MIN_CONFIDENCE i START_EQUITY: patrz risk_rules. Byly tu zdefiniowane
 # po raz drugi, obok tych samych wartosci w symulacji i w trenerze.
 
@@ -169,6 +174,9 @@ OPIS_POWODU_HOLDU = {
     "trzyma_pozycje": "Trzymamy otwartą pozycję: sygnał nadal w jej stronę "
                       "i powyżej progu wyjścia.",
     "wstrzymanie_ryzykiem": "Nie wchodzimy: wejścia wstrzymane przez ryzyko.",
+    "rezim_bez_progu": "Nie wchodzimy: w tym reżimie próg wejścia NIE ZOSTAŁ "
+                       "SKALIBROWANY — próba na oknach treningowych była za "
+                       "mała, żeby percentyl cokolwiek znaczył.",
 }
 
 
@@ -202,12 +210,18 @@ def active_model(cur, engine: str, h: Horizon) -> dict:
     row = cur.fetchone()
     if not row or not (row["params"] or {}).get("weights"):
         return {"weights": None, "enter": ENTER_THRESHOLD, "exit": EXIT_THRESHOLD,
+                "bramki": bramki_z_modelu(None),
                 "min_conf": MIN_CONFIDENCE, "version": None}
     p = row["params"]
     return {
         "weights": p["weights"],
+        # `enter` i `exit` ZOSTAJA, ale sa juz tylko liczbami zbiorczymi do logu
+        # i do starszych czytnikow. O wejsciu rozstrzyga `bramki`, bo prog
+        # zalezy od rezimu - jedna liczba nie wyraza jednego percentyla na
+        # kilku skalach wyniku (patrz `services/engine/bramki.py`).
         "enter": float(p.get("enter_threshold", ENTER_THRESHOLD)),
         "exit": float(p.get("exit_threshold", EXIT_THRESHOLD)),
+        "bramki": bramki_z_modelu(p),
         "min_conf": float(p.get("min_confidence", MIN_CONFIDENCE)),
         "version": row["version"],
         "model_version_id": row["id"],
@@ -1897,6 +1911,12 @@ def nowe_stats(**flagi) -> dict:
              # klucza znaczyl wtedy jednoczesnie "zadnego shorta nie odrzucono"
              # i "ten silnik w ogole tego nie liczy", czyli nie znaczyl nic.
              "short_niewykonalny": 0,
+             # Ile decyzji zapadlo w REZIMIE BEZ SKALIBROWANEGO PROGU wejscia.
+             # Ten sam powod, co przy liczniku wyzej: bez niego rezim wypadniety
+             # z handlu wyglada w pulsie tak samo jak rezim, w ktorym nic sie nie
+             # dzialo. A wypadniecie jest tu decyzja projektowa (patrz
+             # `services/engine/bramki.py`), wiec musi byc widoczne z zewnatrz.
+             "rezim_bez_progu": 0,
              # POMINIECIA Z ROZBICIEM NA POWOD. Obie te sciezki konczyly sie
              # samym `continue`: instrument wypadal z przebiegu, nie zostawiajac
              # ani wiersza, ani liczby. Tu odpowiadaja na pytanie "ile pominieto
@@ -2195,8 +2215,21 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
     bar_start = current_bar(now, h)
     model = active_model(cur, engine, h)
     if verbose:
-        print(f"  wagi: {'wersja modelu ' + str(model['version']) if model['version'] else 'założenia początkowe (brak zwalidowanego modelu)'}"
-              f", próg wejścia {model['enter']:.4f}")
+        print(f"  wagi: {'wersja modelu ' + str(model['version']) if model['version'] else 'założenia początkowe (brak zwalidowanego modelu)'}")
+        print(f"  progi wejścia: {model['bramki'].opis()}")
+    # KOMUNIKAT BEZ `verbose`, bo mowi o rozjezdzie wersji, nie o przebiegu.
+    #
+    # Wersja modelu zapisana przed 2026-09-27 nie ma progow per rezim i dostaje
+    # DAWNE zachowanie: jeden prog dla wszystkich rezimow. Zmierzylismy, ze taki
+    # prog przepuszcza 7,0% sygnalow w `range` i 34,0% w `high_vol` przy
+    # zamiarze 12%, wiec silnik handluje wtedy inna czestotliwoscia niz
+    # zaprojektowana - i musi to powiedziec, a nie zrobic po cichu.
+    if model["bramki"].powod == "wersja_modelu_bez_progow_per_rezim":
+        print(f"  UWAGA: wersja modelu {model['version']} NIE MA progów per reżim "
+              f"(wytrenowana przed 2026-09-27). Obowiązuje jeden próg "
+              f"{model['enter']:.4f} dla wszystkich reżimów — zamierzone 12% "
+              f"najsilniejszych sygnałów NIE JEST dotrzymane w żadnym z nich. "
+              f"Naprawia to dopiero kolejny trening.")
     stats = nowe_stats()
     # WYNIK LIKWIDACJI IDZIE DO PULSU. Bez tego jedynym sladem po zamknieciu
     # calej ekspozycji zleceniem rynkowym bylaby linia w logu poda, a logu poda
@@ -2417,15 +2450,27 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
         # PRZED galezia ryzyka. Powod jest wiec czescia WYBORU AKCJI, a nie
         # czescia werdyktu ryzyka, i musi powstawac tutaj, w tym samym `if`.
         powod_holdu = None
+        # PROGI TEGO REZIMU. `None` przy wejsciu znaczy "reżim bez skalibrowanego
+        # progu" i jest odpowiedzia inna niz jakakolwiek liczba - patrz
+        # `services/engine/bramki.py`. Prog WYJSCIA jest zawsze liczba.
+        prog_wejscia_rezimu = model["bramki"].wejscie(regime)
+        prog_wyjscia_rezimu = model["bramki"].wyjscie(regime)
         if position:
             same_way = (position["side"] == "long" and score > 0) or \
                        (position["side"] == "short" and score < 0)
-            if not same_way or abs(score) < model["exit"]:
+            if not same_way or abs(score) < prog_wyjscia_rezimu:
                 action = "exit"
             else:
                 action = "hold"
                 powod_holdu = "trzyma_pozycje"
-        elif abs(score) >= model["enter"] and confidence >= model["min_conf"]:
+        elif prog_wejscia_rezimu is None:
+            # REZIM BEZ PROGU NIE HANDLUJE. Gałąź stoi PRZED porownaniem
+            # z progiem, bo nie ma z czym porownywac; `slaby_wynik` bylby tu
+            # zdaniem nieprawdziwym - wynik moze byc dowolnie mocny.
+            action = "hold"
+            powod_holdu = "rezim_bez_progu"
+            stats["rezim_bez_progu"] += 1
+        elif abs(score) >= prog_wejscia_rezimu and confidence >= model["min_conf"]:
             action = "enter_long" if score > 0 else "enter_short"
             # Krotkiej pozycji na spocie nie da sie zajac bez pozyczki marzowej.
             # Silnik podejmowal je swobodnie - 8 z 12 pozycji w dzienniku to byly
@@ -2434,7 +2479,7 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
                 action = "hold"
                 powod_holdu = "short_niewykonalny"
                 stats["short_niewykonalny"] += 1
-        elif abs(score) < model["enter"]:
+        elif abs(score) < prog_wejscia_rezimu:
             # SLABY WYNIK MA PIERWSZENSTWO PRZED NISKA PEWNOSCIA.
             #
             # Warunek wyzej laczy oba progi jednym `and`, wiec sama akcja nie
@@ -2500,7 +2545,14 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
                               price, confidence, regime, features, verdict,
                               rationale, contributions, signal_ids, latency,
                               model.get("model_version_id"), pokrycie,
-                              powod_holdu, model["enter"], model["exit"],
+                              # DO DZIENNIKA IDA PROGI TEGO REZIMU, nie liczby
+                              # zbiorcze modelu: kolumny `prog_wejscia`
+                              # i `prog_wyjscia` sa jedynym sladem, po ktorym
+                              # da sie pozniej sprawdzic, z czym ten wynik
+                              # porownano. Przy rezimie bez progu zostaje NULL -
+                              # bo progu nie bylo, a 0,25 udawaloby, ze byl.
+                              powod_holdu, prog_wejscia_rezimu,
+                              prog_wyjscia_rezimu,
                               bar_start=bar_start)
 
         risk.record_usage(verdict.usage)

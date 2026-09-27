@@ -32,10 +32,26 @@ KORZEN = Path(__file__).resolve().parents[1]
 ZRODLO_PETLI = KORZEN / "services/engine/loop.py"
 MIGRACJA = KORZEN / "db/migrations/0040_powod_holdu.sql"
 
-# Zbiór powodów jest WPISANY W SCHEMAT (CHECK w migracji 0040). Trzymamy go tu
-# raz, a testy niżej pilnują, żeby kod, migracja i słownik opisów mówiły to samo.
+# Zbiór powodów jest WPISANY W SCHEMAT (CHECK założony w 0040, rozszerzony
+# w 0067 o `rezim_bez_progu`). Trzymamy go tu raz, a testy niżej pilnują, żeby
+# kod, migracja i słownik opisów mówiły to samo.
 POWODY = {"slaby_wynik", "niska_pewnosc", "short_niewykonalny",
-          "trzyma_pozycje", "wstrzymanie_ryzykiem"}
+          "trzyma_pozycje", "wstrzymanie_ryzykiem", "rezim_bez_progu"}
+
+
+def _migracja_definiujaca_check() -> Path:
+    """OSTATNIA migracja, która definiuje zbiór powodów - nie ta, która go
+    wprowadziła.
+
+    Wpisana na sztywno 0040 przestała opisywać bazę w chwili, w której 0067
+    dołożyło `rezim_bez_progu`: test czytał wtedy zbiór SPRZED zmiany i zielenił
+    się na rozjeździe z produkcją. Pytanie brzmi „co dopuszcza baza PO wszystkich
+    migracjach", więc odpowiada na nie ostatni plik, który ten CHECK przepisuje.
+    """
+    pliki = [x for x in sorted((KORZEN / "db/migrations").glob("*.sql"))
+             if "powod_holdu IN (" in x.read_text(encoding="utf-8")]
+    assert pliki, "żadna migracja nie definiuje zbioru powodów holdu"
+    return pliki[-1]
 
 
 def _drzewo_petli() -> ast.Module:
@@ -82,10 +98,10 @@ def test_kazda_galaz_konczaca_sie_holdem_ustawia_powod():
                 f"zbioru dopuszczonego przez CHECK w migracji 0040")
     # Bez tego licznika test przechodzi także wtedy, gdy CAŁY blok wyboru akcji
     # zniknie z pliku - czyli nie sprawdza niczego.
-    assert holdy == 5, (
-        f"gałęzi kończących się holdem jest {holdy}, a nie 5 - jeśli to celowa "
-        f"zmiana, popraw liczbę i sprawdź, czy CHECK w migracji 0040 nadal "
-        f"pokrywa wszystkie powody")
+    assert holdy == 6, (
+        f"gałęzi kończących się holdem jest {holdy}, a nie 6 - jeśli to celowa "
+        f"zmiana, popraw liczbę i sprawdź, czy CHECK w migracji (0040, ostatnio "
+        f"przepisany w 0067) nadal pokrywa wszystkie powody")
 
 
 def test_powody_w_kodzie_migracji_i_opisach_to_ten_sam_zbior():
@@ -98,7 +114,8 @@ def test_powody_w_kodzie_migracji_i_opisach_to_ten_sam_zbior():
             if isinstance(p.value, ast.Constant) and isinstance(p.value.value, str):
                 w_kodzie.add(p.value.value)
 
-    tresc = MIGRACJA.read_text(encoding="utf-8")
+    ostatnia = _migracja_definiujaca_check()
+    tresc = ostatnia.read_text(encoding="utf-8")
     w_check = set(re.findall(r"'([a-z_]+)'", tresc.split("powod_holdu IN (", 1)[1]
                              .split(")", 1)[0]))
 
@@ -157,8 +174,14 @@ def test_petla_podaje_progi_z_aktywnego_modelu():
     zrodlo = ZRODLO_PETLI.read_text(encoding="utf-8")
     wywolanie = zrodlo.split("did = record_decision(", 1)[1].split("\n\n", 1)[0]
     assert "powod_holdu" in wywolanie, "pętla nie przekazuje powodu do dziennika"
-    assert 'model["enter"]' in wywolanie and 'model["exit"]' in wywolanie, (
+    # OD 2026-09-27 PROGI SA PER REZIM. Dziennik musi dostac prog TEGO rezimu,
+    # bo zbiorcze `model["enter"]` nie jest liczba, z ktora porownano ten wynik -
+    # zapisanie go opisywaloby decyzje wielkoscia, ktorej nie uzyto.
+    assert "prog_wejscia_rezimu" in wywolanie and "prog_wyjscia_rezimu" in wywolanie, (
         "pętla nie przekazuje progów - dziennik zostanie zależny od learn.model_version")
+    assert 'model["enter"]' not in wywolanie and 'model["exit"]' not in wywolanie, (
+        "pętla zapisuje zbiorczy próg modelu zamiast progu reżimu, w którym "
+        "zapadła decyzja")
 
 
 def test_migracja_dodaje_kolumny_i_przywraca_wyzwalacz():

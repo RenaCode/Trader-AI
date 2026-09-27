@@ -37,6 +37,7 @@ from services.engine.risk_rules import (
     START_EQUITY, udzial_budzetu,
     DEFAULT_LIMITS, RiskState, evaluate_account, evaluate_limits, position_budget,
 )
+from services.engine.bramki import Bramki, bramki_z_pary
 from services.engine.signals import classify_regime, combine, evaluate, precompute
 
 # Parametry egzekucji. Prowizja i poslizg pochodza z services/engine/koszty.py,
@@ -139,6 +140,9 @@ class PortfolioResult:
     niewypelnione_wejscia: int = 0
     niewypelnione_wyjscia: int = 0
     pominiete_shorty: int = 0
+    # Ile razy sygnal ponad progiem NIE MIAL PROGU - czyli wypadl w rezimie
+    # bez kalibracji. Kanarek na ciche zniknięcie rezimu z handlu.
+    pominiete_bez_progu: int = 0
     # Stawki faktycznie zastosowane - do sprawdzenia z zewnatrz, ze symulacja
     # policzyla te koszty, ktore deklaruje.
     prowizja: float = 0.0
@@ -238,7 +242,7 @@ def _sizing(score: float, price: float, baza: float) -> tuple[float, float]:
 def simulate_portfolio(panels: dict[str, list[dict]],
                        weights: dict[str, dict[str, float]],
                        atr_thresholds: dict[str, float | None],
-                       gates: dict[str, tuple[float, float]],
+                       gates: "Bramki | dict[str, tuple[float, float] | Bramki]",
                        h: Horizon,
                        min_conf: float,
                        limits: dict | None = None,
@@ -254,6 +258,13 @@ def simulate_portfolio(panels: dict[str, list[dict]],
     nie moze zostac wykonana po cenie tej samej swiecy.
     """
     limits = limits or DEFAULT_LIMITS
+    # PROGI SA PER REZIM. Jeden obiekt `Bramki` na okno albo - dla wolaczy,
+    # ktorzy podaja progi sami - para liczb, ktora `bramki_z_pary` rozklada na
+    # wszystkie rezimy. Nie ma tu wariantu "jedna liczba dla wszystkiego" bez
+    # nazwy: `Bramki.powod` zawsze mowi, skad prog pochodzi.
+    bram = (dict.fromkeys(panels, gates) if isinstance(gates, Bramki)
+            else {s: (g if isinstance(g, Bramki) else bramki_z_pary(*g))
+                  for s, g in gates.items()})
     egz = egzekucja or Egzekucja()
     k = koszty(kind)
     fee = k.maker if egz.limit else k.taker
@@ -446,7 +457,10 @@ def simulate_portfolio(panels: dict[str, list[dict]],
             regime, sygnaly = cache[sym][cur["idx"]]
             score, _conf, _ = combine(sygnaly, regime, weights.get(regime), with_contributions=False)
             pos = positions[sym]
-            enter_gate, exit_gate = gates[sym]
+            # PROG WYJSCIA Z REZIMU, W KTORYM POZYCJA JEST TERAZ, nie z tego,
+            # w ktorym powstala - i ZAWSZE liczba: rezim bez kalibracji progu
+            # wejscia nie moze uniemozliwiac zamkniecia pozycji.
+            exit_gate = bram[sym].wyjscie(regime)
             same = (pos.side > 0 and score > 0) or (pos.side < 0 and score < 0)
             if same and abs(score) >= exit_gate:
                 continue
@@ -560,7 +574,13 @@ def simulate_portfolio(panels: dict[str, list[dict]],
                 continue
             regime, sygnaly = cache[sym][cur["idx"]]
             score, conf, _ = combine(sygnaly, regime, weights.get(regime), with_contributions=False)
-            enter_gate, _exit_gate = gates[sym]
+            enter_gate = bram[sym].wejscie(regime)
+            if enter_gate is None:
+                # Rezim bez skalibrowanego progu: NIE WCHODZIMY. Liczymy to
+                # jawnie, bo inaczej "brak kalibracji" wyglada w wyniku
+                # dokladnie tak samo jak "slabe sygnaly".
+                res.pominiete_bez_progu += 1
+                continue
             if abs(score) < enter_gate or conf < min_conf:
                 continue
             kandydaci.append((abs(score), sym, cur, score, conf))
@@ -697,7 +717,8 @@ def metrics(res: PortfolioResult, min_trades: int) -> dict:
             "blocked": res.blocked, "downsized": res.downsized,
             "killswitch": res.killswitch_reason,
             "niewypelnione": res.niewypelnione_wejscia + res.niewypelnione_wyjscia,
-            "pominiete_shorty": res.pominiete_shorty}
+            "pominiete_shorty": res.pominiete_shorty,
+            "pominiete_bez_progu": res.pominiete_bez_progu}
     if len(rets) < min_trades:
         return base | {"sharpe": 0.0, "sortino": 0.0, "hit_rate": 0.0, "avg_r": 0.0,
                        "profit_factor": 0.0, "insufficient": True}
@@ -714,6 +735,52 @@ def metrics(res: PortfolioResult, min_trades: int) -> dict:
         "avg_r": round(mean * 100, 4),
         "profit_factor": round(gains / losses, 4) if losses > 0 else 0.0,
     }
+
+
+POWTORNE_WEJSCIE_SWIEC = 3
+
+
+def udzial_powtornych_wejsc(trades: list[dict], bar_minutes: int,
+                            swiece: int = POWTORNE_WEJSCIE_SWIEC) -> float | None:
+    """Odsetek transakcji, ktore sa POWROTEM w ten sam instrument tuz po wyjsciu.
+
+    NIE JEST TO CZESTOTLIWOSC HANDLU. Licznik pyta o jedna, waska rzecz: ile
+    transakcji otwarto w instrumencie, z ktorego wyszlismy mniej niz `swiece`
+    swiec wczesniej. Okno o dwustu transakcjach na dwudziestu instrumentach
+    moze miec tu zero, a okno o trzydziestu - polowe.
+
+    PO CO. Hipoteza postawiona 2026-09-27 mowi, ze zaobserwowany spadek zwrotu
+    na transakcje w gestych oknach `range` bierze sie z `EXIT_RATIO = 0.45`:
+    wyjscie przy 0,126 po wejsciu na 0,280 zamyka pozycje przy kazdym
+    oscylowaniu wyniku i natychmiast otwiera ja z powrotem, a kazda taka runda
+    lapie coraz mniejszy wycinek tego samego ruchu. Sygnatura zjawiska to
+    NIEZMIENIONA TRAFNOSC przy zalamanym zwrocie na transakcje - dokladnie to,
+    co widac w danych - i tego wlasnie nie da sie odroznic od "prog przepuszcza
+    gorsze sygnaly" bez tej jednej liczby.
+    Warunek rozstrzygajacy ustalony PRZED pomiarem: w oknach `range` z >= 55
+    transakcjami odsetek ponad 40% przy jednoczesnie ponizej 15% w oknach
+    z < 55 potwierdza hipoteze; podobne wartosci w obu kubelkach ja obalaja.
+
+    Odstep liczymy w SWIECACH tego horyzontu (`bar_minutes`), nie w minutach:
+    ten sam kod liczy tor 4-godzinny i godzinowy, a "3 swiece" znaczy w nich
+    dwanascie i trzy godziny.
+
+    None przy braku transakcji - zero znaczyloby "zmierzone i wyszlo zero",
+    a nie ma czego mierzyc.
+    """
+    if not trades:
+        return None
+    prog = timedelta(minutes=bar_minutes * swiece)
+    wg_symbolu: dict[str, list[dict]] = {}
+    for t in trades:
+        wg_symbolu.setdefault(t["symbol"], []).append(t)
+    powtorne = 0
+    for lista in wg_symbolu.values():
+        lista.sort(key=lambda t: t["opened_at"])
+        for poprzednia, kolejna in zip(lista, lista[1:]):
+            if kolejna["opened_at"] - poprzednia["closed_at"] < prog:
+                powtorne += 1
+    return powtorne / len(trades)
 
 
 def kup_i_trzymaj(panels: dict[str, list[dict]], kind: str = "spot") -> float:
