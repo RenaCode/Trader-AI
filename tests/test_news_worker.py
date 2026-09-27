@@ -609,13 +609,34 @@ def _sciezka_do(obiekt, cel, glebokosc=4):
 
 
 class _PolaczenieBezSekretow:
-    """Baza bez wpisanych kluczy — `_klucz` spadnie wtedy na środowisko."""
+    """Baza bez wpisanych kluczy — `_klucz` spadnie wtedy na środowisko.
+
+    ODDAJE KURSOR, bo od 2026-09-27 `_klucz` woła `conn.cursor(row_factory=...)`,
+    a nie `conn.execute`. Zmiana była naprawą realnej awarii: `conn.execute`
+    bierze fabrykę wierszy z POŁĄCZENIA, więc ta sama funkcja oddawała krotki
+    wołana z `news_worker` i słowniki wołana z `postmortem` — a `row[0]` na
+    słowniku rzuca `KeyError: 0`. Nocny przebieg `trader-postmortem` padał na
+    tym co dobę.
+
+    Atrapa, która nie ma metody wołanej przez kod produkcyjny, opisuje inny
+    obiekt niż produkcja — i objawia się `AttributeError`, który wygląda jak
+    błąd testu, a nie jak rozjazd atrapy z rzeczywistością.
+    """
 
     def execute(self, sql, params=None):
         return self
 
+    def cursor(self, row_factory=None):
+        return self
+
     def fetchone(self):
         return None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        return False
 
 
 def test_dostawca_NIE_TRZYMA_polaczenia_z_ktoregos_cyklu():
