@@ -1016,6 +1016,45 @@ To luka w modelu, którą trzeba domknąć, zanim ktokolwiek wróci do tematu
 perpetuałów — stawki finansowania są w bazie (39 tys. wierszy w `market`),
 więc naliczanie ich jest wykonalne, a nie hipotetyczne.
 
+## Werdykt promocji jest rzutem monetą o położenie okna (2026-09-27)
+
+`--days` liczy się od `now()`, więc granice okien przesuwają się z zegarem. Pięć
+przebiegów toru 4h różniących się **tylko** przesunięciem o jeden dzień
+(`--sucho`, poza tym identyczne nastawy):
+
+| `--days` | status | DSR | Sharpe/transakcję | okien dodatnich |
+|---|---|---|---|---|
+| 1400 | **validated** | 0,9524 | +0,1016 | 27/38 (71%) |
+| 1399 | **validated** | 0,9732 | +0,1078 | 28/38 (74%) |
+| 1398 | learning | 0,9342 | +0,0975 | 31/40 (78%) |
+| 1397 | learning | 0,9362 | +0,0978 | 28/39 (72%) |
+| 1396 | **validated** | 0,9790 | +0,1095 | 29/39 (74%) |
+
+Trzy razy `validated`, dwa razy `learning`. **Poprzeczka selekcji jest we
+wszystkich pięciu identyczna (+0,0611)**, więc nie chodzi o liczbę prób — cała
+zmiana siedzi w Sharpe'ie, który chodzi w przedziale 0,0120, czyli sd 0,0056.
+To **0,22 błędu standardowego** samego Sharpe'a (1/√1500 = 0,0258).
+
+Dwie rzeczy są tu warte osobnego zdania:
+
+1. **Bramka rozstrzyga różnice pięć razy drobniejsze od szumu własnego
+   pomiaru**, a jej wyjście jest binarne i czyta się jak ustalenie o strategii.
+2. **Kryteria przeczą sobie w kierunku:** przesunięcie 1398 ma najlepszy odsetek
+   okien z całej piątki (78%) i mimo to nie przechodzi, bo DSR wypada 0,9342.
+
+Nie jest to wada DSR — DSR poprawnie mówi, że przewaga jest nieodróżnialna od
+progu. Wadą było podawanie werdyktu bez tej informacji. Od 2026-09-27 `reason`
+zawiera zdanie **ODPORNOŚĆ WERDYKTU**: ile Sharpe'a brakuje (albo zostaje) do
+progu, wyrażone w błędach standardowych, a poniżej jednego błędu — wprost, że
+werdykt nie jest odporny, wraz z tą tabelą. Liczbę oblicza
+`statystyka.sharpe_dla_dsr`, przez bisekcję po przesunięciu próby: przesunięcie
+zmienia **tylko** średnią, bo odchylenie, skośność i kurtoza są momentami
+centralnymi, więc nie ma tu drugiej kopii wzoru Baileya.
+
+Błąd 1/√T jest **zaniżony** i tak trzeba go czytać: to błąd Sharpe'a przy
+zwrotach niezależnych, a te nie są niezależne. Prawdziwy błąd jest większy,
+czyli werdykt jest **mniej** odporny, niż mówi ta liczba.
+
 ## Luka DOMKNIĘTA, pytanie ROZSTRZYGNIĘTE (2026-09-27)
 
 Finansowanie jest naliczane od 2026-09-24 (`koszty.py`, w zwrocie z transakcji,

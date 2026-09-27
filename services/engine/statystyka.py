@@ -480,6 +480,79 @@ def deflowany_sharpe(zwroty: list[float], n_prob: int,
     wynik["dsr"] = _N01.cdf((sr - prog) * math.sqrt(len(zwroty) - 1) / sigma)
     return wynik
 
+def sharpe_dla_dsr(zwroty: list[float], n_prob: int, cel: float,
+                   odchylenie_prob: float | None = None) -> float | None:
+    """Jaki Sharpe/transakcje dalby DSR rowny `cel` na TEJ SAMEJ probie.
+
+    PO CO. Sam werdykt "DSR 0,9524 przy progu 0,95" nie mowi, jak blisko progu
+    stoi - a przy tej strategii stoi TAK blisko, ze przesuniecie okna o jeden
+    dzien przewraca go w obie strony. Zmierzone 2026-09-27, tor 4h, piec
+    przesuniec `--days` 1400..1396:
+
+        --days  status      DSR    Sharpe   okien dodatnich
+          1400  validated  0,9524  +0,1016   27/38 (71%)
+          1399  validated  0,9732  +0,1078   28/38 (74%)
+          1398  learning   0,9342  +0,0975   31/40 (78%)
+          1397  learning   0,9362  +0,0978   28/39 (72%)
+          1396  validated  0,9790  +0,1095   29/39 (74%)
+
+    Trzy razy `validated`, dwa razy `learning`, poprzeczka selekcji IDENTYCZNA
+    (+0,0611) we wszystkich pieciu - cala zmiana siedzi w Sharpe'ie, ktory chodzi
+    w przedziale 0,0120, czyli sd = 0,0056. To **0,22 bledu standardowego**
+    samego Sharpe'a (1/sqrt(1500) = 0,0258). Bramka rozstrzyga wiec roznice
+    PIEC RAZY DROBNIEJSZE od szumu wlasnego pomiaru, a jej wyjscie jest binarne
+    i czyta sie jak fakt o strategii. Zauwaz tez odwrotnosc: przesuniecie 1398
+    ma NAJLEPSZY odsetek okien (78%) i mimo to nie przechodzi na DSR.
+
+    JAK TO LICZY, I DLACZEGO NIE DRUGI RAZ TYM SAMYM WZOREM. Przesuwamy cala
+    probe o stala `delta`: zmienia to WYLACZNIE srednia, bo odchylenie, skosnosc
+    i kurtoza sa momentami CENTRALNYMI, a `T` i poprzeczka selekcji nie zaleza
+    od wartosci zwrotow. Bisekcja po `delta` wola `deflowany_sharpe`, wiec nie
+    ma tu drugiej kopii wzoru Baileya - a kopia wlasnie tutaj byla by najgorsza,
+    bo klamalaby o odleglosci od progu, ktory sama liczy.
+
+    Oddaje None, gdy DSR nie da sie policzyc na tej probie (za malo obserwacji,
+    zerowe odchylenie, nieobliczalna skosnosc) - te same przypadki, w ktorych
+    `deflowany_sharpe` oddaje `dsr = None`.
+    """
+    baza = deflowany_sharpe(zwroty, n_prob, odchylenie_prob)
+    if baza["dsr"] is None or baza["sharpe"] is None:
+        return None
+    sd = statistics.stdev(zwroty)
+    if sd <= 0:
+        return None
+
+    def dsr_po(delta: float) -> float | None:
+        return deflowany_sharpe([z + delta for z in zwroty], n_prob,
+                                odchylenie_prob)["dsr"]
+
+    # Widelki: szukamy delty, przy ktorej DSR przechodzi przez `cel`. Rozszerzamy
+    # je, dopoki cel nie znajdzie sie miedzy koncami - zamiast zgadywac zakres.
+    lo, hi = -2.0 * sd, 2.0 * sd
+    for _ in range(60):
+        d_lo, d_hi = dsr_po(lo), dsr_po(hi)
+        if d_lo is None or d_hi is None:
+            return None
+        if d_lo <= cel <= d_hi:
+            break
+        lo, hi = lo * 2, hi * 2
+    else:
+        return None
+    for _ in range(200):
+        mid = (lo + hi) / 2
+        d = dsr_po(mid)
+        if d is None:
+            return None
+        if d < cel:
+            lo = mid
+        else:
+            hi = mid
+        if hi - lo < 1e-12 * max(1.0, abs(hi)):
+            break
+    srodek = (lo + hi) / 2
+    return baza["sharpe"] + srodek / sd
+
+
 # Ile konfiguracji z policzonym Sharpe'em OOS musi byc w bazie, zeby ich rozrzut
 # WOLNO bylo podstawic pod V[{SR_n}] Baileya. Nizej zostaje podstawienie
 # z hipotezy zerowej, opisane jako podstawienie.

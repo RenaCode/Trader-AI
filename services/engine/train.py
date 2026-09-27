@@ -65,7 +65,7 @@ from services.engine.koszty import Karta, karta_rundy, opis_karty
 from services.engine.spread import opis_pomiaru, zmierz_spread
 from services.engine.statystyka import (
     MIN_PROB_ROZRZUTU, PROG_DSR, deflowany_sharpe, profit_factor, rozklad,
-    rozrzut_sharpeow, sharpe as sharpe_proby, spearman, wilson,
+    rozrzut_sharpeow, sharpe as sharpe_proby, sharpe_dla_dsr, spearman, wilson,
 )
 from services.engine.uniwersum import odcisk
 from services.engine.signals import (
@@ -1038,14 +1038,84 @@ def werdykt_dsr(zwroty: list[float], *, doplata: float, n: int,
     """
     po = [r - doplata for r in zwroty]
     wynik = przewaga_dsr(po, n, odchylenie_prob)
-    ok, opis = bramka_dsr(wynik)
+    # PROBA IDZIE DO BRAMKI, bo bez niej odleglosc od progu da sie podac tylko
+    # w DSR - a DSR nie ma skali, w ktorej czlowiek umie ocenic "blisko".
+    # `po` to te SAME liczby, z ktorych policzono werdykt (juz po doplacie);
+    # podanie tu `zwroty` przed doplata liczylo by odpornosc innej proby.
+    ok, opis = bramka_dsr(wynik, po)
     czesci = [opis, opis_kosztu_dsr(doplata, nieznane),
               opis_zrodla_n(n, trials_kumulatywnie),
               opis_zrodla_odchylenia(wynik, konfiguracji_z_oos)]
     return ok, " ".join(c for c in czesci if c)
 
 
-def bramka_dsr(wynik: dict) -> tuple[bool, str]:
+def opis_odpornosci_werdyktu(wynik: dict, zwroty: list[float] | None = None) -> str:
+    """Jak blisko progu stoi werdykt - w BLEDACH STANDARDOWYCH, nie w DSR.
+
+    DLACZEGO TO MUSI STAC PRZY WERDYKCIE
+
+    "Deflowany Sharpe 0,9524 przy progu 0,95" czyta sie jak fakt o strategii,
+    a jest rozstrzygnieciem o ziarnie drobniejszym od szumu wlasnego pomiaru.
+    Zmierzone 2026-09-27 na produkcji, tor 4h, piec przesuniec okna o jeden
+    dzien (`--days` 1400..1396, `--sucho`, poza tym IDENTYCZNE nastawy):
+
+        --days  status      DSR    Sharpe   okien dodatnich
+          1400  validated  0,9524  +0,1016   27/38 (71%)
+          1399  validated  0,9732  +0,1078   28/38 (74%)
+          1398  learning   0,9342  +0,0975   31/40 (78%)
+          1397  learning   0,9362  +0,0978   28/39 (72%)
+          1396  validated  0,9790  +0,1095   29/39 (74%)
+
+    Trzy razy `validated`, dwa razy `learning`. Poprzeczka selekcji jest we
+    wszystkich pieciu IDENTYCZNA (+0,0611), wiec nie chodzi o liczbe prob - cala
+    zmiana siedzi w Sharpe'ie, ktory chodzi w przedziale 0,0120, czyli sd
+    0,0056. To 0,22 bledu standardowego samego Sharpe'a (1/sqrt(1500) = 0,0258).
+    Zauwaz odwrotnosc przy 1398: NAJLEPSZY odsetek okien (78%) i mimo to brak
+    promocji.
+
+    MIARA JEST Z GORY ZANIZONA i tak trzeba ja czytac: 1/sqrt(T) to blad
+    standardowy Sharpe'a przy zwrotach NIEZALEZNYCH, a te nie sa niezalezne
+    (nakladajace sie pozycje, te same swiece). Prawdziwy blad jest wiekszy, czyli
+    werdykt jest MNIEJ odporny, niz mowi ta liczba - nie bardziej.
+
+    CZEGO TA FUNKCJA NIE ROBI: nie przesuwa progu i nie zmienia werdyktu.
+    Bramka zostaje tam, gdzie byla; dokladana jest wylacznie informacja o tym,
+    ile ten werdykt znaczy. Przy `zwroty=None` (czyli gdy wolajacy nie ma proby
+    pod reka) podaje sama odleglosc w DSR i mowi, ze brakuje przeliczenia na
+    blad standardowy - zamiast milczec.
+    """
+    dsr = wynik.get("dsr")
+    if dsr is None:
+        return ""
+    T = wynik.get("n_obserwacji") or 0
+    if T < 2:
+        return ""
+    blad = 1.0 / math.sqrt(T)
+    if zwroty:
+        cel = sharpe_dla_dsr(zwroty, wynik["n_prob"], PROG_DSR,
+                             wynik.get("odchylenie_prob"))
+        if cel is not None and wynik.get("sharpe") is not None:
+            luka = wynik["sharpe"] - cel
+            w_bledach = luka / blad
+            zdanie = (f" ODPORNOŚĆ WERDYKTU: do progu {PROG_DSR:.2f} "
+                      f"{'zostaje' if luka >= 0 else 'brakuje'} "
+                      f"{abs(luka):.4f} Sharpe'a na transakcję, czyli "
+                      f"{abs(w_bledach):.2f} błędu standardowego "
+                      f"(1/√{T} = {blad:.4f}).")
+            if abs(w_bledach) < 1.0:
+                zdanie += (" WERDYKT NIE JEST ODPORNY: to mniej niż jeden błąd "
+                           "standardowy, a zmierzone 2026-09-27 przesunięcie "
+                           "okna o jeden dzień przewracało go w obie strony "
+                           "(pięć przesunięć: DSR 0,9342–0,9790, trzy razy "
+                           "`validated`, dwa razy `learning`). Błąd 1/√T jest "
+                           "przy tym ZANIŻONY, bo zwroty nie są niezależne.")
+            return zdanie
+    return (f" ODPORNOŚĆ WERDYKTU: {abs(dsr - PROG_DSR):.4f} DSR od progu; "
+            f"przeliczenia na błąd standardowy NIE MA, bo próba nie została tu "
+            f"podana — patrz `opis_odpornosci_werdyktu`.")
+
+
+def bramka_dsr(wynik: dict, zwroty: list[float] | None = None) -> tuple[bool, str]:
     """Czy deflowany Sharpe pozwala promowac. FAIL-CLOSED. CZYSTA FUNKCJA.
 
     BRAK WIEDZY WSTRZYMUJE PROMOCJE, NIE PRZEPUSZCZA JEJ. `dsr = None` znaczy
@@ -1072,11 +1142,12 @@ def bramka_dsr(wynik: dict) -> tuple[bool, str]:
             f"przebiegu, nie licznik kumulatywny; poprzeczka selekcji "
             f"{wynik['prog']:+.4f}, skośność {wynik['skosnosc']:+.3f}, "
             f"kurtoza {wynik['kurtoza']:.3f}).")
+    odpornosc = opis_odpornosci_werdyktu(wynik, zwroty)
     if dsr >= PROG_DSR:
-        return True, opis
-    return False, opis + (" Po uwzględnieniu liczby prób wynik nie jest "
-                          "odróżnialny od najlepszego z tylu losowych — "
-                          "promocja wstrzymana.")
+        return True, opis + odpornosc
+    return False, opis + odpornosc + (
+        " Po uwzględnieniu liczby prób wynik nie jest odróżnialny od "
+        "najlepszego z tylu losowych — promocja wstrzymana.")
 
 
 def status_walidacji(total: int, positive: int, median: float | None,
