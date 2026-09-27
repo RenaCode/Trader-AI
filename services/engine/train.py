@@ -309,6 +309,76 @@ def _pb(x: float | None) -> str:
     return "—" if x is None else f"{x * 1e4:+.2f} pb"
 
 
+def opis_stron(trans: list[tuple[float, int, str]]) -> list[str]:
+    """Wynik strony DLUGIEJ osobno od KROTKIEJ, po rezimach. CZYSTA FUNKCJA.
+
+    DLACZEGO TO ISTNIEJE. Naglowek `portfolio.py` mowi wprost, ze audyt
+    zmierzyl 135 krotkich sygnalow na 180 ponad progiem i ze "nikt nie wie, ile
+    byly warte". To jest ta liczba. Bez niej caly wariant perp - jedyny powod,
+    dla ktorego krotkie w ogole istnieja - nie ma zadnej miary.
+
+    DRUGI POWOD JEST MOCNIEJSZY I DOTYCZY PROGU. Prog wejscia jest percentylem
+    `abs(score)`, czyli JEDNA liczba dla obu stron - a skala wyniku strony
+    dlugiej i krotkiej nie jest ta sama. Zmierzone 2026-09-27 na produkcji,
+    rezim `range`: p88 strony dlugiej 0,6205 wobec 0,0568 strony krotkiej,
+    czyli JEDENASCIOKROTNIE. Prog `range` = 0,3509 lezy wiec miedzy nimi: po
+    stronie dlugiej przepuszcza mniej wiecej zamierzone 12%, a po krotkiej
+    niemal nic. `range` jest przez to praktycznie JEDNOKIERUNKOWY i nikt tego
+    nie postanowil.
+
+    CZY TO WADA, ROZSTRZYGA DOPIERO WYNIK - i dlatego najpierw ta tabela,
+    a nie zmiana bramki. Jesli krotkie w `range` sa bezwartosciowe, dzisiejsze
+    zachowanie jest szczescliwym trafem, ktory warto zapisac jako regule;
+    jesli sa dobre, tracimy je przez skale, a nie przez decyzje.
+
+    `side` jest +1 dla dlugiej i -1 dla krotkiej (`portfolio.py`). Odtwarzanie
+    strony po znaku zwrotu jest NIEMOZLIWE - stratny long i stratny short
+    wygladaja identycznie - wiec bez tej kolumny pytania nie da sie zadac.
+    """
+    if not trans:
+        return []
+    linie = ["", "STRONA DŁUGA KONTRA KRÓTKA (złączona próba OOS, po kosztach):"]
+
+    def wiersz(etykieta: str, zwroty: list[float]) -> str:
+        n = len(zwroty)
+        if n < 2:
+            return (f"  {etykieta:<26} n={n:<5} — za mało transakcji, żeby "
+                    f"policzyć Sharpe'a")
+        sr = statistics.fmean(zwroty)
+        sd = statistics.stdev(zwroty)
+        # Sharpe NA TRANSAKCJE, ta sama miara co wszedzie indziej w tym raporcie.
+        sh = (sr / sd) if sd > 0 else 0.0
+        traf = sum(1 for r in zwroty if r > 0) / n
+        # BLAD STANDARDOWY, BO BEZ NIEGO ROZNICA STRON NIE ZNACZY NIC. Przy
+        # Sharpe rzedu 0,1 i n rzedu stu blad jest rzedu 0,1 - czyli tyle, ile
+        # cala miara. Brak tej kolumny zamienilby szum w "strona krotka jest
+        # gorsza".
+        se = 1.0 / math.sqrt(n)
+        return (f"  {etykieta:<26} n={n:<5} Sharpe/transakcję {sh:+.4f} "
+                f"±{se:.4f}  trafność {traf:.1%}  średnia {sr:+.4%}")
+
+    dlugie = [r for r, side, _ in trans if side > 0]
+    krotkie = [r for r, side, _ in trans if side < 0]
+    linie.append(wiersz("długa", dlugie))
+    linie.append(wiersz("krótka", krotkie))
+    udzial = len(krotkie) / len(trans)
+    linie.append(f"  udział krótkich w transakcjach: {udzial:.1%}")
+
+    rezimy = sorted({rez for _, _, rez in trans})
+    if len(rezimy) > 1:
+        linie.append("  po reżimach (reżim DOMINUJĄCY w oknie, nie w chwili wejścia):")
+        for rez in rezimy:
+            d = [r for r, side, x in trans if x == rez and side > 0]
+            k = [r for r, side, x in trans if x == rez and side < 0]
+            linie.append(f"    {rez}")
+            linie.append("  " + wiersz("długa", d))
+            linie.append("  " + wiersz("krótka", k))
+    linie.append("  RÓŻNICA STRON NIE JEST TU TESTEM: przedziały ±1/√n liczone "
+                 "na transakcjach, które NIE są niezależne (te same świece, te "
+                 "same okna). Liczba mówi, czy warto pytać dalej.")
+    return linie
+
+
 def opis_przewagi(zwroty: list[float], sharpe_okien: list[float],
                   karta: Karta,
                   zwroty_okien: list[list[float]] | None = None) -> list[str]:
@@ -1797,6 +1867,7 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
     # Zwroty WSZYSTKICH transakcji OOS, nie usrednione po oknach - patrz
     # `podsumowanie_przewagi`.
     wszystkie_zwroty: list[float] = []
+    transakcje_stron: list[tuple[float, int, str]] = []
     # To samo rozbite na okna: potrzebne, zeby przeliczyc srednia PO OKNACH
     # przy doliczonym koszcie. Sama lista Sharpe'ow tego nie pozwala.
     zwroty_okien_transakcje: list[list[float]] = []
@@ -2064,6 +2135,26 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
         regimes = [classify_regime(r["f"], thresholds[s])[0]
                    for s in aktywne for r in test_slices[s][::step]]
         dominant = max(set(regimes), key=regimes.count) if regimes else None
+
+        # STRONA I REZIM PRZY KAZDEJ TRANSAKCJI - material na `opis_stron`.
+        #
+        # STOI TU, A NIE WYZEJ PRZY `wszystkie_zwroty`, I TO JEST CALY POWOD:
+        # `dominant` powstaje dopiero w tej linii. Zebranie go razem ze
+        # zwrotami dawalo NameError na pierwszym oknie - a gdyby zmienna byla
+        # juz z czegos zdefiniowana, skutek bylby GORSZY i cichy: rezim
+        # POPRZEDNIEGO okna dopisany do transakcji tego.
+        #
+        # Strony nie da sie odtworzyc z `wszystkie_zwroty`: tamta lista to gole
+        # liczby, a stratny long i stratny short wygladaja identycznie.
+        #
+        # `informative` POWTORZONE CELOWO. Zlaczona proba w `wszystkie_zwroty`
+        # bierze wylacznie okna informatywne, a ta tabela ma opisywac TE SAMA
+        # probe - inaczej Sharpe stron nie skladalby sie do Sharpe'a calosci
+        # i dwie liczby w jednym raporcie mowilyby o dwoch roznych probach.
+        if informative:
+            transakcje_stron.extend(
+                (t["ret"], int(t.get("side", 1)), dominant or "(reżim nieznany)")
+                for t in oos_res.trades)
 
         if not sucho:
             cur.execute(
@@ -2650,6 +2741,8 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
     print(f"Najgorsze obsunięcie: {worst_dd:.2f}%")
     for linia in opis_przewagi(wszystkie_zwroty, all_sharpes, karta,
                                zwroty_okien_transakcje):
+        print(linia)
+    for linia in opis_stron(transakcje_stron):
         print(linia)
     if len(sharpe_grup) > 1:
         print("Sharpe/transakcję policzony OSOBNO dla grup, w tym samym przebiegu:")
