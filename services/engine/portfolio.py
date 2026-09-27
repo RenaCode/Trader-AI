@@ -761,6 +761,30 @@ def udzial_powtornych_wejsc(trades: list[dict], bar_minutes: int,
     transakcjami odsetek ponad 40% przy jednoczesnie ponizej 15% w oknach
     z < 55 potwierdza hipoteze; podobne wartosci w obu kubelkach ja obalaja.
 
+    WYNIK: HIPOTEZA OBALONA, 2026-09-27 wieczorem. Warunek nie zostal spelniony
+    ani w polowie, a pomiar poszedl na produkcyjnych nastawach, suchym
+    przebiegiem, na obu torach:
+
+        tor 4h, 37 okien   range >=55 transakcji: mediana 15% (zakres 7-18)
+                           range < 55           : mediana  6% (zakres 4-21)
+        tor 1h, 89 okien   range >=55           : mediana 10% (zakres 6-19)
+                           range < 55           : mediana  8% (zakres 5-15)
+
+    Progu 40% nie dotyka zadne okno. Korelacja odsetka powrotow z Sharpe'em na
+    transakcje: r = +0,053 po 37 oknach (4h) i -0,074 po 89 (1h), czyli zero
+    w obie strony. `EXIT_RATIO = 0,45` NIE wypycha nas z pozycji, w ktora zaraz
+    wracamy, i nie tlumaczy spadku zwrotu na transakcje w gestych oknach
+    `range`. Byla to ostatnia zyjaca hipoteza w tej sprawie: whipsaw (trafnosc
+    0,4664 -> 0,4731 przy zwrocie nizszym o 0,424 pp) i skala wyniku (iloraz
+    zmiennosci test/trening 0,8266 wobec 0,8278) odpadly wczesniej, a limit
+    czestotliwosci po poprawce na nakladanie okien zeszedl do +0,0084.
+
+    MIARA ZOSTAJE, mimo obalenia hipotezy, ktora ja zamowila. Jest tanio
+    liczona, idzie do `learn.wf_metric` i do wydruku okna, a pytanie "czy prog
+    wyjscia nie robi z nas kolowrotka" wroci przy kazdej zmianie `EXIT_RATIO`.
+    Usuniecie jej znaczylo by, ze nastepny raz trzeba zaczac od zera - i ze
+    ktos moze postawic te sama hipoteze nie wiedzac, ze zostala zmierzona.
+
     Odstep liczymy w SWIECACH tego horyzontu (`bar_minutes`), nie w minutach:
     ten sam kod liczy tor 4-godzinny i godzinowy, a "3 swiece" znaczy w nich
     dwanascie i trzy godziny.
