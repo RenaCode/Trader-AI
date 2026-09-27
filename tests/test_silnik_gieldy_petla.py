@@ -167,7 +167,21 @@ def test_run_once_oddaje_powod_blokady_a_nie_same_zera():
     from services.engine.loop import nowe_stats
     pelny, przerwany = nowe_stats(), nowe_stats(poza_sesja=True)
     assert set(pelny) <= set(przerwany)
-    assert all(przerwany[k] == 0 for k in pelny), "bramka nie ma prawa zmyślać liczników"
+    # LICZNIKI osobno od kluczy, ktore licznikami nie sa. `likwidacja` trzyma
+    # slownik albo `None` ("do likwidacji ten cykl nie doszedl"), a zero w tym
+    # miejscu czytaloby sie jako "likwidacja patrzyla i nie mialo czego zamykac"
+    # - czyli jako pomiar, ktorego nie bylo. Zamiana `== 0` na `== pelny[k]`
+    # jest przy tym twierdzeniem MOCNIEJSZYM: pilnuje, ze bramka oddaje
+    # DOKLADNIE wartosc zalozona, a nie tylko wartosc falszywa.
+    liczniki = [k for k, v in pelny.items() if isinstance(v, int)]
+    assert all(przerwany[k] == 0 for k in liczniki), \
+        "bramka nie ma prawa zmyślać liczników"
+    assert all(przerwany[k] == pelny[k] for k in pelny), \
+        "bramka oddaje inną wartość niż wartość założona"
+    assert pelny["likwidacja"] is None, (
+        "`likwidacja` w pulsie musi zaczynać się od None, nie od zera ani od "
+        "pustego słownika: zero znaczyłoby, że likwidacja ruszyła i nie miała "
+        "czego zamykać, a to jest INNY stan niż `nie doszło do niej`")
 
 
 # -------------------------------------------------------------- cennik equity

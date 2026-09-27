@@ -581,10 +581,11 @@ class AlpacaAdapter:
         return self._stan_z(o)
 
     async def zloz_zlecenie(self, *, symbol: str, strona: str, ilosc: Decimal,
-                            cena_limitu: Decimal, id_wlasne: str,
+                            cena_limitu: Decimal | None, id_wlasne: str,
                             kategoria: str = "spot",
-                            time_in_force: str = "day") -> ZlozoneZlecenie:
-        """Zlecenie z limitem, IDEMPOTENTNIE po `client_order_id`.
+                            time_in_force: str = "day",
+                            rynkowe: bool = False) -> ZlozoneZlecenie:
+        """Zlecenie z limitem albo RYNKOWE, IDEMPOTENTNIE po `client_order_id`.
 
         SPRAWDZ, POTEM SKLADAJ - jak u Bybita. Alpaca sama odrzuca duplikat
         `client_order_id` (422), wiec nawet wyscig dwoch procesow nie zlozy
@@ -592,15 +593,38 @@ class AlpacaAdapter:
         `time_in_force='day'` to swiadomy domysl: plan jest na jedna swiece,
         a zlecenie, ktore przezyloby noc, wypelniloby sie po cenie, ktorej
         zadna decyzja juz nie popiera.
+
+        SCIEZKA RYNKOWA JEST OSOBNA I NIE JEST WSPOLNA Z BYBITEM. Oba adaptery
+        maja wlasne `zloz_zlecenie` i wlasne cialo zapytania (inne API), wiec
+        dolozenie jej trzeba bylo zrobic DWA RAZY - to nie jest duplikacja do
+        usuniecia, to dwa rozne protokoly. Wspolny jest wylacznie KONTRAKT:
+        `rynkowe=True` wymaga `cena_limitu is None` i normalny handel go nie
+        uzywa (domysl `False`).
+
+        CZEGO TA SCIEZKA NIE ZALATWIA NA ALPACE: rynek akcji ma godziny.
+        Zlecenie rynkowe zlozone po zamknieciu jest ODRZUCANE (`market` nie
+        przyjmuje `extended_hours`), wiec likwidacja poza sesja zapisze odmowe,
+        a pozycja zostanie otwarta do otwarcia rynku. Jest to wlasnosc rynku,
+        nie tego kodu, i dlatego jest tu nazwana zamiast obejscia przez limit.
         """
+        if rynkowe and cena_limitu is not None:
+            raise ValueError(
+                f"zlecenie RYNKOWE nie ma ceny limitu, a podano {cena_limitu} - "
+                f"zapisanie jej jako `limit_price` byloby nieprawda o tym, co "
+                f"gielda dostala")
+        if not rynkowe and cena_limitu is None:
+            raise ValueError("zlecenie z limitem bez ceny limitu")
         istnieje = await self.stan_zlecenia(id_wlasne)
         if istnieje is not None:
             return ZlozoneZlecenie(id_wlasne=id_wlasne, id_gieldy=istnieje.id_gieldy,
                                    status=istnieje.status, juz_istnialo=True)
         body = {"symbol": symbol, "qty": str(ilosc),
                 "side": "buy" if strona.lower() == "buy" else "sell",
-                "type": "limit", "time_in_force": time_in_force,
-                "limit_price": str(cena_limitu), "client_order_id": id_wlasne}
+                "type": "market" if rynkowe else "limit",
+                "time_in_force": time_in_force,
+                "client_order_id": id_wlasne}
+        if not rynkowe:
+            body["limit_price"] = str(cena_limitu)
         try:
             r = await self._zapytaj("POST", "/v2/orders", json=body)
         except ExchangeError as e:

@@ -227,6 +227,42 @@ def test_zlecenia_ida_jako_PostOnly_a_nie_GTC():
     zrodlo = Path("services/exchanges/bybit.py").read_text(encoding="utf-8")
     kod = "\n".join(w for w in zrodlo.splitlines()
                     if not w.lstrip().startswith("#"))
-    fragment = kod.split("/v5/order/create")[1].split("})")[0]
-    assert '"timeInForce": "PostOnly"' in fragment
-    assert '"timeInForce": "GTC"' not in fragment
+    # DWA CIALA ZAPYTANIA OD 2026-09-27, wiec `split(...)[1]` przestal znaczyc
+    # "cialo zlecenia". Pierwsza galezia jest RYNKOWA (likwidacja po
+    # kill-switchu), druga - z limitem. Test bierze je po ZAWARTOSCI, a nie po
+    # kolejnosci: numer galezi zmienilby sie przy kazdej edycji adaptera, a
+    # wtedy to twierdzenie milczaloby o tej galezi, o ktora naprawde chodzi.
+    ciala = kod.split("/v5/order/create")[1:]
+    assert len(ciala) == 2, (
+        "adapter Bybita ma inną liczbę ścieżek składania zlecenia niż dwie "
+        "(rynkowa + z limitem) — ten test przestał wiedzieć, co mierzy")
+    ciala = [c.split("})")[0] for c in ciala]
+    z_limitem = [c for c in ciala if '"orderType": "Limit"' in c]
+    rynkowe = [c for c in ciala if '"orderType": "Market"' in c]
+    assert len(z_limitem) == 1 and len(rynkowe) == 1, ciala
+
+    # SCIEZKA NORMALNEGO HANDLU: maker zostaje makerem.
+    assert '"timeInForce": "PostOnly"' in z_limitem[0]
+    assert '"timeInForce": "GTC"' not in z_limitem[0]
+
+    # SCIEZKA RYNKOWA: ANI PostOnly, ANI ceny.
+    #
+    # `PostOnly` na zleceniu rynkowym jest sprzecznoscia, ktora gielda odrzuca,
+    # wiec likwidacja po kill-switchu nie wyszlaby wcale - i wygladaloby to na
+    # dzialajacy bezpiecznik. `price` na zleceniu rynkowym z kolei nie jest
+    # bledem gieldy, tylko naszym: cena wyladowalaby w `exec.order.limit_price`
+    # i pomiar poslizgu wzialby ja za cene odniesienia, choc gielda jej nie
+    # dostala.
+    assert '"timeInForce"' not in rynkowe[0], (
+        "zlecenie rynkowe z `timeInForce` — PostOnly jest tu sprzecznością, "
+        "którą giełda odrzuca, a odrzucona likwidacja wygląda jak działający "
+        "bezpiecznik")
+    assert '"price"' not in rynkowe[0], (
+        "zlecenie rynkowe z ceną — trafiłaby do `exec.order.limit_price` "
+        "i pomiar poślizgu wziąłby ją za cenę odniesienia")
+    # JEDNOSTKA ILOSCI JAWNIE. Na spocie Bybit liczy `qty` zlecenia rynkowego
+    # KUPNA w walucie kwotowanej, a sprzedazy w aktywie bazowym - odkup pozycji
+    # krotkiej na 1000 sztuk zamowilby 1000 USDC. Bez bledu i bez odmowy.
+    assert '"marketUnit": "baseCoin"' in rynkowe[0], (
+        "zlecenie rynkowe bez jawnej jednostki ilości — na spocie Bybita `qty` "
+        "przy kupnie znaczy KWOTĘ, a przy sprzedaży ILOŚĆ")

@@ -1919,7 +1919,16 @@ def nowe_stats(**flagi) -> dict:
              # liscie instrumentow - `tradeable` zdjete pomylkowo, migracja
              # w polowie - wyglada w heartbeacie identycznie jak przebieg,
              # w ktorym po prostu nie bylo czego robic: same zera.
-             "instrumenty": 0}
+             "instrumenty": 0,
+             # CO ZROBILA LIKWIDACJA PO KILL-SWITCHU. `None` znaczy "do
+             # likwidacji ten cykl nie doszedl" - bramka sesji, brak modelu,
+             # egzekucja papierowa albo wylaczony przelacznik - i jest to INNY
+             # stan niz slownik z zerami, ktory znaczy "likwidacja patrzyla
+             # i nie mialo czego zamykac". Klucz jest obecny w obu, bo
+             # `risk.engine_heartbeat.detail` jest nadpisywany co przebieg:
+             # brak klucza nie dalby sie odroznic od wersji, ktora tego nie
+             # liczy (ta sama zasada co przy licznikach wyzej).
+             "likwidacja": None}
     stats.update(flagi)
     return stats
 
@@ -1948,7 +1957,8 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
                    verbose: bool = True, h: Horizon | None = None,
                    gielda=None, kategoria: str = "spot",
                    wymagaj_modelu: bool = False,
-                   sesja: StanSesji | None = None) -> dict:
+                   sesja: StanSesji | None = None,
+                   likwiduj: bool = False) -> dict:
     """Jeden przebieg silnika.
 
     `gielda` PRZELACZA ZRODLO PRAWDY O WYPELNIENIU, a nie sposob decydowania.
@@ -1957,6 +1967,9 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
     egzekucja ma o nich stanowic.
     """
     h = h or get_horizon(DEFAULT_BAR)
+    # `None`, a nie pusty slownik: "likwidacja nie ruszyla w tym cyklu" to inny
+    # stan niz "ruszyla i nie miala o czym mowic". Patrz `nowe_stats`.
+    likwidacja_stat: dict | None = None
     cur = conn.cursor()
     signal_ids = ensure_signal_defs(cur, engine)
     seed_equity(cur, engine, mode)
@@ -2152,6 +2165,32 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
                   + (f", {wypelnione} było już wypełnionych — zostają "
                      f"do zaksięgowania" if wypelnione else ""))
 
+    # KILL-SWITCH LIKWIDUJE OTWARTE POZYCJE — ZLECENIEM RYNKOWYM.
+    #
+    # DLACZEGO TO NIE JEST TA SAMA BRAMKA CO `anuluj_wejscia` WYŻEJ.
+    # Tamta rusza na KAŻDYM powodzie wstrzymania wejść, w tym na powodach,
+    # które mijają same: stary pomiar kapitału, pozycja bez świeżej ceny, brak
+    # budżetu. Zdjęcie niewypełnionego zlecenia z arkusza jest wtedy tanie
+    # i odwracalne — złożymy je znowu, gdy stan minie. Zlikwidowanie pozycji
+    # NIE JEST odwracalne i kosztuje pełną rundę plus poślizg takera, więc
+    # wolno je wywołać wyłącznie temu jednemu stanowi, który opisuje stratę
+    # WYDARZONĄ i wymaga człowieka do zwolnienia: czynnemu kill-switchowi.
+    # Rozstrzyga o tym `likwidacja.ocen_zdarzenie`, czytając
+    # `risk.killswitch_event` — a nie lista `powody_wstrzymania`.
+    #
+    # PRZEŁĄCZNIK, NIE DOMYŚLNOŚĆ, i to z tego samego powodu co przy
+    # `--egzekucja gielda`: pierwsze prawdziwe uruchomienie ścieżki zlecenia
+    # rynkowego (`execution='gielda' AND order_type='market'` ma w tej bazie
+    # ZERO wierszy) ma być decyzją wpisaną w chart, a nie skutkiem wdrożenia
+    # obrazu. Domyślne `False` znaczy: kill-switch zachowuje się dokładnie tak,
+    # jak zachowywał się do 2026-09-27.
+    if likwiduj and gielda is not None:
+        from services.engine.likwidacja import likwiduj_po_killswitchu
+        likwidacja_stat = await likwiduj_po_killswitchu(
+            cur, gielda, engine=engine, mode=mode, kategoria=kategoria,
+            verbose=verbose)
+        conn.commit()
+
     now = datetime.now(timezone.utc)
     bar_start = current_bar(now, h)
     model = active_model(cur, engine, h)
@@ -2159,6 +2198,11 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
         print(f"  wagi: {'wersja modelu ' + str(model['version']) if model['version'] else 'założenia początkowe (brak zwalidowanego modelu)'}"
               f", próg wejścia {model['enter']:.4f}")
     stats = nowe_stats()
+    # WYNIK LIKWIDACJI IDZIE DO PULSU. Bez tego jedynym sladem po zamknieciu
+    # calej ekspozycji zleceniem rynkowym bylaby linia w logu poda, a logu poda
+    # nikt nie czyta o trzeciej w nocy. `None` zostaje, gdy likwidacja nie
+    # ruszyla - patrz `nowe_stats`.
+    stats["likwidacja"] = likwidacja_stat
 
     # ROZSTRZYGNIECIE PLANOW IDZIE PRZED OCENA, nie po niej.
     #
@@ -2672,6 +2716,26 @@ async def main() -> int:
     # ma byc decyzja wpisana w chart, a nie skutkiem przeoczenia flagi.
     ap.add_argument("--egzekucja", default="papier", choices=("papier", "gielda"),
                     help="papier: wypełnienie ze świecy; gielda: prawdziwe zlecenia")
+    # LIKWIDACJA POZYCJI PO KILL-SWITCHU — ZLECENIEM RYNKOWYM.
+    #
+    # DOMYSL `False` JEST CZESCIA ZABEZPIECZENIA, nie ostroznoscia na zapas.
+    # Sciezka zlecenia rynkowego na gielde nie zostala w tym systemie uzyta ANI
+    # RAZU (`execution='gielda' AND order_type='market'` to zero wierszy),
+    # a poslizg takera nie jest zmierzony (`POSLIZG_TAKER` ma n=0). Wlaczenie
+    # jej przez wdrozenie obrazu znaczyloby, ze pierwsze prawdziwe zlecenie
+    # rynkowe w historii tego systemu idzie bez wiedzy czlowieka, w nocy,
+    # na calej ekspozycji naraz. To ma byc linia w `values.yaml`, tak samo jak
+    # `--egzekucja gielda`.
+    #
+    # BEZ TEJ FLAGI KILL-SWITCH ROBI DOKLADNIE TO, CO ROBIL: wstrzymuje
+    # wejscia i zdejmuje niewypelnione wejscia z arkusza. Otwarte pozycje
+    # zostaja, a wyjscia ida `PostOnly` - czyli moga sie nie wypelnic.
+    ap.add_argument("--likwiduj-po-killswitchu", action="store_true",
+                    dest="likwiduj",
+                    help="po zadziałaniu kill-switcha zamknij otwarte pozycje "
+                         "ZLECENIEM RYNKOWYM (koszt: stawka taker plus "
+                         "NIEZMIERZONY poślizg); bez tej flagi kill-switch "
+                         "tylko wstrzymuje wejścia")
     args = ap.parse_args()
 
     url = os.environ.get("DATABASE_URL")
@@ -2705,6 +2769,21 @@ async def main() -> int:
               "(kupno gdy low ≤ limit, sprzedaż gdy high ≥ limit).\n")
     else:
         print()
+    # STAN TEGO PRZELACZNIKA WYPISUJEMY ZAWSZE, W OBIE STRONY. Kill-switch,
+    # ktory pozycji NIE zamyka, wyglada z zewnatrz identycznie jak ten, ktory
+    # zamyka i nie mial czego - a to rozstrzyga o tym, ile wlasciciel ryzykuje
+    # przez noc. Zdanie o wylaczeniu jest wiec rownie potrzebne jak o wlaczeniu.
+    if args.likwiduj:
+        print("KILL-SWITCH LIKWIDUJE POZYCJE: po jego zadziałaniu otwarte "
+              "pozycje idą ZLECENIEM RYNKOWYM\n  (stawka taker + poślizg, "
+              "który w tym systemie NIGDY nie został zmierzony). Próba "
+              "pożarowa\n  tego nie wyzwala — rozstrzyga znacznik "
+              "`risk.limit_def.proba_do`.\n")
+    else:
+        print("Kill-switch NIE zamyka otwartych pozycji (brak "
+              "--likwiduj-po-killswitchu):\n  wstrzymuje wejścia i zdejmuje "
+              "niewypełnione wejścia z arkusza, a wyjścia idą `PostOnly`,\n  "
+              "czyli mogą się NIE wypełnić.\n")
 
     # POLACZENIE NA KAZDY CYKL, NIE NA CALY PROCES.
     #
@@ -2741,7 +2820,7 @@ async def main() -> int:
                                    kind_kosztow=args.kind, limit=args.limit,
                                    verbose=not args.quiet, h=h, gielda=gielda,
                                    wymagaj_modelu=args.wymagaj_modelu,
-                                   sesja=sesja)
+                                   sesja=sesja, likwiduj=args.likwiduj)
             # CYKL ZABLOKOWANY BRAMKA MA WLASNA LINIE, NIE SAME ZERA.
             #
             # "rozwazone 0, wejscia 0, wyjscia 0..." przez cala noc wyglada

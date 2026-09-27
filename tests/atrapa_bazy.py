@@ -45,7 +45,13 @@ MIGRACJE = sorted((KORZEN / "db/migrations").glob("*.sql"))
 # Tabele, dla ktorych atrapa pilnuje ograniczen. Instrukcje dotyczace innych
 # tabel przechodza bez sprawdzenia - i to jest jawne, a nie milczace: test
 # `test_atrapa_zna_ograniczenia_tabel_egzekucji` pilnuje tej listy.
-TABELE = ("journal.planned_order", "exec.order", "exec.fill", "exec.position")
+TABELE = ("journal.planned_order", "exec.order", "exec.fill", "exec.position",
+          # Dziennik likwidacji po kill-switchu (0065). Jest tu, bo to na jego
+          # `CHECK (stan IN ...)` stoi rozroznienie szesciu wynikow likwidacji,
+          # a `UNIQUE (killswitch_event_id, position_id)` JEST mechanizmem
+          # idempotencji - literowka w nazwie stanu wywracalaby cykl silnika
+          # dokladnie w chwili, w ktorej bezpiecznik ma zamykac pozycje.
+          "exec.likwidacja")
 
 
 class NaruszenieBazy(AssertionError):

@@ -350,6 +350,20 @@ class Oferty:
         """Strona ksiegi, po ktorej NASZE zlecenie moze lezec bezczynnie."""
         return self.bid if kupno else self.ask
 
+    def agresywna(self, *, kupno: bool) -> Decimal:
+        """Strona ksiegi, ktora nasze zlecenie UDERZY, gdy jest rynkowe.
+
+        DRUGA STRONA NIZ `pasywna` I NIE JEST TO KOSMETYKA. To jest cena
+        odniesienia dla poslizgu TAKERA: kupno rynkowe zabiera najlepszy ask,
+        sprzedaz rynkowa oddaje najlepszy bid, wiec odleglosc ceny wypelnienia
+        od TEJ liczby jest dokladnie tym, co placimy za natychmiastowosc.
+        Uzycie tu strony pasywnej doliczaloby do poslizgu caly spread i kazdy
+        pomiar wychodzilby o jego szerokosc za duzy - przy rundzie kosztowej
+        20 pb i spreadzie rzedu 2-3 pb byloby to 10-15% mierzonej wielkosci,
+        czyli blad wygladajacy na wynik.
+        """
+        return self.ask if kupno else self.bid
+
 
 # ILE RAZY ATR WOLNO PRZEJSC CENIE MIEDZY DECYZJA A WYSYLKA.
 #

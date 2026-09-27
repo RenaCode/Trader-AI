@@ -1064,9 +1064,10 @@ class BybitAdapter:
         return None
 
     async def zloz_zlecenie(self, *, symbol: str, strona: str, ilosc: Decimal,
-                            cena_limitu: Decimal, id_wlasne: str,
-                            kategoria: str = "spot") -> ZlozoneZlecenie:
-        """Składa zlecenie z limitem. IDEMPOTENTNIE.
+                            cena_limitu: Decimal | None, id_wlasne: str,
+                            kategoria: str = "spot",
+                            rynkowe: bool = False) -> ZlozoneZlecenie:
+        """Składa zlecenie. Z limitem (domyślnie) albo RYNKOWE. IDEMPOTENTNIE.
 
         `id_wlasne` musi być wyprowadzone z decyzji, a NIE z czasu ani losowo -
         inaczej ponowienie tworzy nowy identyfikator i cała ochrona znika.
@@ -1077,14 +1078,69 @@ class BybitAdapter:
           * zna i wypełnione  -> nic nie robimy, zwracamy stan
           * zna i otwarte     -> nic nie robimy, zwracamy stan
           * nie zna           -> zlecenie nie weszło, wolno złożyć
+
+        `rynkowe=True` TO OSOBNA ŚCIEŻKA, KTÓREJ NORMALNY HANDEL NIE UŻYWA
+
+        Domyślnie `False` i to nie jest wygoda — to jest zabezpieczenie. Cena
+        limitu z `PostOnly` jest w tym systemie WARUNKIEM zgodności z symulacją:
+        `POSLIZG_MAKER = 0` jest poprawne dokładnie wtedy, gdy jesteśmy makerem
+        po naszej cenie albo nie handlujemy wcale, a projekt zmierzył, że przy
+        takerze Sharpe jest ujemny. Zlecenie rynkowe płaci spread i poślizg,
+        których symulacja nie modeluje i których ten system NIGDY nie zmierzył
+        (`POSLIZG_TAKER` = 4 pb, n=0). Jedynym wołającym z `rynkowe=True` jest
+        likwidacja po kill-switchu (`services/engine/likwidacja.py`), gdzie
+        NIEWYPEŁNIENIE kosztuje więcej niż poślizg.
+
+        `cena_limitu` MUSI być `None` przy zleceniu rynkowym i jest to
+        sprawdzane, nie zakładane. Przyjęcie ceny i zignorowanie jej kończy się
+        wierszem `exec.order`, który ma `order_type='market'` i `limit_price`
+        wypełnione — a to jest zapis nieprawdy o tym, co giełda dostała, i
+        DOKŁADNIE ta liczba trafiłaby potem do pomiaru poślizgu jako cena
+        odniesienia (`poslizg.cena_odniesienia`, źródło „zlecenie").
+
+        `marketUnit: "baseCoin"` JEST TU KONIECZNE, NIE OZDOBNE. Na spocie Bybit
+        interpretuje `qty` przy zleceniu rynkowym KUPNA jako kwotę w walucie
+        KWOTOWANEJ, a przy sprzedaży jako ilość aktywa bazowego. Ta asymetria
+        znaczy, że odkup pozycji krótkiej na 1000 jednostek zamówiłby 1000 USDC
+        zamiast 1000 sztuk — bez błędu, bez odmowy, z inną wielkością niż
+        zatwierdził risk kernel. Jawna jednostka usuwa różnicę między stronami.
         """
         # Giełda też sprawdza unikalność orderLinkId, ale dopiero PO przyjęciu
         # zapytania. Sprawdzenie u nas oszczędza jedno okrążenie i - co ważniejsze -
         # daje ten sam wynik, gdy poprzednia próba skończyła się timeoutem.
+        # SPRZECZNE ARGUMENTY SA BLEDEM WYWOLANIA, nie do cichego pogodzenia.
+        # Oba kierunki sa grozne z osobna: rynkowe z cena zapisuje limit,
+        # ktorego gielda nie dostala, a limit bez ceny wyslalby `"price": "None"`.
+        if rynkowe and cena_limitu is not None:
+            raise ValueError(
+                f"zlecenie RYNKOWE nie ma ceny limitu, a podano {cena_limitu} - "
+                f"zapisanie jej jako `limit_price` byloby nieprawda o tym, co "
+                f"gielda dostala, i weszloby do pomiaru poslizgu jako cena "
+                f"odniesienia")
+        if not rynkowe and cena_limitu is None:
+            raise ValueError("zlecenie z limitem bez ceny limitu")
+
         istniejace = await self.stan_zlecenia(id_wlasne, kategoria)
         if istniejace is not None:
             return ZlozoneZlecenie(id_wlasne=id_wlasne, id_gieldy=istniejace.id_gieldy,
                                    status=istniejace.status, juz_istnialo=True)
+
+        if rynkowe:
+            wynik = await self._post("/v5/order/create", {
+                "category": kategoria,
+                "symbol": symbol,
+                "side": _strona_bybita(strona),
+                "orderType": "Market",
+                "qty": str(ilosc),
+                # JEDNOSTKA ILOSCI JAWNIE - uzasadnienie w docstringu.
+                "marketUnit": "baseCoin",
+                # BEZ `price` I BEZ `timeInForce`. Zlecenie rynkowe jest z
+                # definicji IOC; dopisanie `PostOnly` byloby sprzecznoscia,
+                # ktora gielda odrzuca - czyli likwidacja nie wyszlaby wcale.
+                "orderLinkId": id_wlasne,
+            })
+            return ZlozoneZlecenie(id_wlasne=id_wlasne, id_gieldy=wynik.get("orderId"),
+                                   status="new")
 
         wynik = await self._post("/v5/order/create", {
             "category": kategoria,
