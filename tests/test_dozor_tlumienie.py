@@ -57,6 +57,13 @@ def _stend_swiezosci(*, wiek_min, ostatni, powiadomiono_po_ostatnim):
         # odpowiadałaby nie na to, o co zapytano.
         if "risk.engine_heartbeat" in p:
             return [{"poza": False}]
+        # RYNEK CIAGLY. `sprawdz_swiezosc` pyta o `ref.venue.is_24_7`, zeby
+        # wiedziec, czy wiek danych liczony wobec `now()` jest tu w ogole miara
+        # awarii potoku. Dla rynku z sesjami nie jest - po otwarciu najnowsza
+        # swieca pochodzi z poprzedniego zamkniecia - i czujka wtedy MILCZY,
+        # a te testy sa o tlumieniu ALARMU, wiec musza dostac rynek ciagly.
+        if "ref.venue" in p:
+            return [{"is_24_7": True}]
         if "market.candle" in p:
             return [
                 {"co": "market.candle (1h, źródło świecy 4h)",

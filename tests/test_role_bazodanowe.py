@@ -607,13 +607,30 @@ def test_migrator_ustawia_haslo_kazdej_roli(values):
 
 def test_dozorca_NIE_chodzi_rola_silnika(values):
     """Nadzorca zwalniający kill-switcha poświadczeniami nadzorowanego nie jest
-    nadzorcą — jest tą samą awarią o jeden poziom wyżej."""
-    assert values["workers"]["dozorca"]["dbRole"] == "dozorca"
+    nadzorcą — jest tą samą awarią o jeden poziom wyżej.
+
+    WARUNEK IDZIE PO KOMENDZIE, NIE PO NAZWIE WPISU (2026-09-27, drugi dozorca
+    dla toru `equity`). Poprzednia wersja wiązała rolę `dozorca` z wpisem
+    nazwanym dokładnie `dozorca`, więc KAŻDY kolejny dozorca musiałby tę rolę
+    stracić, żeby test przeszedł — test wymuszałby wadę, przed którą broni.
+
+    Wiązanie po komendzie jest przy tym MOCNIEJSZE w obie strony: łapie też
+    dozorcę, który zapomniał zadeklarować `dbRole` i chodziłby rolą silnika,
+    czyli poświadczeniami procesu, który handluje.
+    """
+    MODUL = "services/engine/dozorca.py"
+    dozorcy = [n for n, w in values["workers"].items()
+               if MODUL in " ".join(w["command"])]
+    assert dozorcy, "zniknął dozorca ryzyka — nie ma kto zwolnić kill-switcha"
+    for nazwa in dozorcy:
+        assert values["workers"][nazwa].get("dbRole") == "dozorca", (
+            f"worker {nazwa} uruchamia {MODUL}, a nie deklaruje roli `dozorca` "
+            f"— zwalniałby kill-switcha poświadczeniami nadzorowanego")
     for nazwa, w in values["workers"].items():
-        if nazwa != "dozorca":
+        if nazwa not in dozorcy:
             assert w.get("dbRole", "silnik") != "dozorca", (
                 f"worker {nazwa} dostał poświadczenia dozorcy, więc mógłby "
-                f"zwolnić kill-switcha")
+                f"zwolnić kill-switcha, a dozorcą nie jest")
 
 
 @pytest.mark.parametrize("plik,rola", [

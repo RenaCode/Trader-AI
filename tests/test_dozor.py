@@ -322,6 +322,18 @@ def _zywotnosc(wiersze, *, wyslane_po=None, **kw):
     async def fetch_all(sql, params=None):
         if "notify.notification" in sql:
             return [{"x": 1}] if params[0] in wyslane else []
+        # KTO POWINIEN BIC - pytanie osobne od tego, kto bije. Pusta lista
+        # znaczy tu "zadna para engine/mode nie ma wlaczonych limitow", czyli
+        # nie ma spodziewanego dozorcy; te testy pytaja o MARTWY puls, a nie
+        # o puls, ktory nigdy nie powstal (ten ma wlasny plik:
+        # tests/test_dozorca_dwa_tory.py). Bez tej galezi atrapa oddawalaby
+        # wiersze pulsow na pytanie o limity, czyli odpowiadalaby nie na to,
+        # o co zapytano.
+        if "risk.limit_def" in sql:
+            return []
+        if "SELECT nazwa FROM risk.dozorca_heartbeat" in sql:
+            return [{"nazwa": w["etykieta"]} for w in wiersze
+                    if w.get("mode") == "nadzor"]
         if "heartbeat" in sql:
             return wiersze
         if "is_active" in sql:
