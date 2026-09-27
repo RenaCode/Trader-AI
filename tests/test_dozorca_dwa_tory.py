@@ -325,7 +325,7 @@ def test_dziennik_wznowienia_jest_stanem_PROCESU_wiec_pody_MUSZA_byc_osobne():
 @pytest.mark.parametrize("rola", ["trader_dozorca", "trader_silnik"])
 @pytest.mark.parametrize("engine", ["crypto", "equity"])
 def test_KANAREK_ocena_konta_domyka_sie_na_WASKIEJ_ROLI(rola, engine):
-    """PADA PRZED MIGRACJĄ 0063, z komunikatem produkcyjnym z 2026-09-11.
+    """PADA PRZED MIGRACJĄ 0064, z komunikatem produkcyjnym z 2026-09-11.
 
         psycopg.errors.InsufficientPrivilege:
             permission denied for table limit_usage
@@ -403,25 +403,25 @@ def test_wznowienie_domyka_sie_na_roli_dozorcy_dla_OBU_torow(engine):
         "kill-switch czekałby na człowieka")
 
 
-def test_migracja_0063_nadaje_TYLKO_odczyt():
+def test_migracja_0064_nadaje_TYLKO_odczyt():
     """Poprawka uprawnień nie może być okazją do rozszczelnienia granicy.
 
     Migracja 0034 postawiła granicę świadomie: dozorca nie handluje, nie widzi
-    uzasadnień decyzji, nie ma kluczy giełdy i nie rusza limitów. 0063 dodaje
+    uzasadnień decyzji, nie ma kluczy giełdy i nie rusza limitów. 0064 dodaje
     ODCZYT tabeli, którą dozorca sam zapisuje — i nic więcej.
     """
-    pliki = list(MIGRACJE.glob("0063_*.sql"))
-    assert len(pliki) == 1, f"spodziewana dokładnie jedna migracja 0063: {pliki}"
+    pliki = list(MIGRACJE.glob("0064_*.sql"))
+    assert len(pliki) == 1, f"spodziewana dokładnie jedna migracja 0064: {pliki}"
     kod = "\n".join(
         w.split("--")[0] for w in pliki[0].read_text(encoding="utf-8").splitlines())
     nadania = re.findall(r"GRANT\s+([^;]+?)\s+ON\s+([^;]+?)\s+TO\s+([^;]+);",
                          kod, re.I | re.S)
-    assert nadania, "migracja 0063 nie nadaje niczego"
+    assert nadania, "migracja 0064 nie nadaje niczego"
     for prawa, tabela, role in nadania:
         assert prawa.strip().upper() == "SELECT", (
-            f"0063 nadaje {prawa!r} — to ma być sam odczyt")
+            f"0064 nadaje {prawa!r} — to ma być sam odczyt")
         assert tabela.strip() == "risk.limit_usage", (
-            f"0063 dotyka {tabela!r} — zakres to tabela pomiaru, nic więcej")
+            f"0064 dotyka {tabela!r} — zakres to tabela pomiaru, nic więcej")
     for zakazane in ("journal", "market", "app.api_credential", "learn"):
         assert zakazane not in kod, (
             f"0063 sięga do {zakazane} — granica z 0034 ma zostać granicą")
