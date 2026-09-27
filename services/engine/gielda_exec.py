@@ -250,14 +250,34 @@ async def prowizja_z_rejestru(adapter, *, symbol: str, id_wlasne: str,
 # (znacznik 1970) albo arkusz zamrozony przez posrednika. Prog ciasny
 # zatrzymywalby handel na szumie zegara, czyli zamienialby wade w awarie.
 #
-# ZASTRZEZENIE DLA SILNIKA GIELDOWEGO - ten sam, ktory stoi przy
-# `loop.CENA_STARA_PO_MIN`. Prog zaklada rynek dzialajacy bez przerwy.
-# `AlpacaAdapter.fetch_order_book` bierze `event_time` ze znacznika OFERTY
-# (`/v2/stocks/quotes/latest`), wiec poza sesja kazdy arkusz bedzie tu starszy
-# niz 60 s i wejscia silnika `equity` beda odmawiane. Jest to bezpieczny
-# kierunek (zlecenie zlozone po cenie z zamkniecia sesji i tak nie ma z czym
-# sie skojarzyc), ale zanim silnik `equity` ruszy, prog musi pochodzic
-# z kalendarza sesji, a nie z tej stalej.
+# TEN PROG JEST FAIL-OPEN, I TO NIE JEST TO, CO TU WCZESNIEJ STALO.
+#
+# Do 2026-09-27 stalo tu zdanie, ze poza sesja kazdy arkusz akcji bedzie
+# starszy niz 60 s, wiec wejscia silnika `equity` beda ODMAWIANE, i ze jest to
+# "bezpieczny kierunek". Oba twierdzenia byly FALSZYWE, a zapisane w tym
+# miejscu trafily tez do uzasadnienia migracji 0060.
+#
+# Falszywe, bo odmowa `brak_ceny_wysylki` wymaga, zeby zawiodly OBA odczyty
+# ceny (patrz `if oferty is None and odniesienie is None` w `zloz_plan`), a ten
+# prog oslania tylko PIERWSZY. Zrodlo zapasowe `adapter.cena_odniesienia`
+# oddaje goly `Decimal` BEZ ZNACZNIKA CZASU (`alpaca.py`: zwraca `t.get("p")`
+# z `/v2/stocks/trades/latest`), wiec jego wieku NIE DA SIE sprawdzic
+# strukturalnie - a poza sesja ten odczyt SIE UDAJE, oddajac cene zamkniecia.
+# Zmierzone: `zloz_plan` z arkuszem w wieku 120 s (dwukrotnosc progu) sklada
+# zlecenie po cenie ostatniej transakcji i NIE zapisuje pominiecia.
+#
+# Skutek dla silnika gieldowego zamyka bramka SESJI w `zloz_plan`, a nie ten
+# prog: `loop.run_once` czyta `stan_sesji` powtornie bezposrednio przed
+# `zloz_oczekujace` i wejscia sa wstrzymywane przy rynku zamknietym
+# (`rynek_zamkniety`) oraz przy stanie nieznanym (`sesja_nieznana`). Prog wieku
+# NIE musi wiec pochodzic z kalendarza sesji - i nie pochodzi.
+#
+# CO ZOSTAJE OTWARTE: `cena_odniesienia` nadal jest bez bramki wieku i nie da
+# sie jej dodac bez zmiany sygnatury adapterow (brak znacznika czasu w
+# odpowiedzi). Dla rynku ciaglego oznacza to, ze zamrozony arkusz przy zywym
+# `/trades/latest` przepusci cene, ktorej wieku nikt nie zna. Osobno: zatrzymanie
+# notowan (halt) w OTWARTEJ sesji zamraza arkusz przy `is_open=true`, wiec daje
+# `brak_ceny_wysylki` - poprawna odmowe, ktora w dzienniku czyta sie jak awaria.
 WIEK_ARKUSZA_MAX_S = 60
 
 
