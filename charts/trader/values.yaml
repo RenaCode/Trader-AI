@@ -591,41 +591,38 @@ trainerCron:
   schedule: "40 4 * * *"        # codziennie 04:40 czasu lokalnego, po kopii zapasowej
   bar: "4h"
   days: 1400
-
-  # ZMIERZONY SPREAD, KTOREGO SYMULACJA NIE NALICZA.
+  # SPREAD LICZY SIE Z BAZY, NIE STOI TUTAJ.
   #
-  # `simulate_portfolio` wchodzi i wychodzi po `close`, wiec w zwrocie SA
-  # prowizja, poslizg (przez ceny) i finansowanie, a NIE MA spreadu ani
-  # niewypelnienia. Do 2026-09-26 trener nie dostawal spreadu w ogole, wiec
-  # deflowany Sharpe w bramce promocji liczyl sie przy doplacie ZERO - czyli
-  # przy koszcie, o ktorym wiadomo, ze jest zanizony.
+  # Do 2026-09-27 bylo tu `spreadBps: 5.85` i `spreadObcaKsiega: true`. Liczba
+  # byla POMIAREM z 2026-09-25, ale nikt nie zapisal zapytania, ktore ja dalo -
+  # nie dalo sie jej ani odtworzyc, ani zauwazyc, ze zgnila. A zgnije sama:
+  # uniwersum decyzyjne zmienia sie migracja (10 par USDC zamiast 24 USDT),
+  # plynnosc i cennik gieldy zmieniaja sie bez zadnej migracji.
   #
-  # 5.85 to POMIAR (polowa spreadu na noge razy dwie nogi, w punktach bazowych
-  # na runde), nie liczba "na oko" - zrodlo: `market.book_snapshot` / cecha
-  # `book_spread_bps`. Zmierzone 2026-09-25.
+  # Od 2026-09-27 `services/engine/train.py` liczy spread SAM, z cechy
+  # `book_spread_bps`, na TYM SAMYM uniwersum (`active AND tradeable`) i w TYM
+  # SAMYM oknie (`--days`), ktore trenuje - patrz `services/engine/spread.py`.
+  # Ta sama sciezka obsluguje oba silniki, wiec tor equity nie potrzebuje juz
+  # osobnego klucza i nie dostanie liczby z krypto (uzasadnienie nizej).
   #
-  # DLACZEGO TO JEST STALA, A NIE ODCZYT Z BAZY: `book_spread_bps` jest cecha
-  # per instrument per swieca i nie ma dla niej gotowego agregatu. Zlozenie go
-  # wymaga rozstrzygniecia, ktora statystyka opisuje koszt rundy - a od tej
-  # liczby zalezy werdykt "czy strategia ma przewage". Odczyt z bazy jest
-  # WLASCIWA poprawka i osobnym zadaniem; ta stala jest migawka, ktora trzeba
-  # przemierzyc, gdy zmieni sie uniwersum albo cennik gieldy.
-  # DOTYCZY WYLACZNIE TORU CRYPTO (Bybit spot). Tor equity ma wlasny klucz
-  # nizej i swiadomie go NIE MA - patrz `trainerCron.equity.spreadBps`.
-  spreadBps: 5.85
-  # OKNO SIEGA PRZED 24.09.2026, WIEC POMIAR JEST OSZACOWANIEM.
+  # Pomiar sam ustawia tez "obca ksiega": wie, czy okno siega przed 2026-09-24
+  # (arkusz z hosta globalnego) i czy wszystkie instrumenty byly `tradeable`.
+  # Flaga wpisana rekami twierdzilaby to samo, tylko bez sprawdzenia.
   #
-  # Od 2026-09-24 arkusz idzie z gieldy, na ktorej skladamy zlecenia, a od
-  # 2026-09-25 dotyczy to instrumentow `tradeable`. Ale `days: 1400` to prawie
-  # cztery lata, wiec wieksza czesc szeregu `book_spread_bps` pochodzi z hosta
-  # referencyjnego. Dokumentacja `--spread-obca-ksiega` mowi wprost, ze flaga
-  # jest potrzebna dla takich okien: liczba wchodzi do rachunku jako
-  # OSZACOWANIE, karta kosztu ZOSTAJE NIEPELNA, a raport podaje krotnosc
-  # spreadu, przy ktorej przewaga schodzi do zera.
+  # OBA KLUCZE ZOSTAJA JAKO AWARYJNE NADPISANIE i sa celowo ZAKOMENTOWANE.
+  # Odkomentowanie `spreadBps` WYLACZA pomiar z bazy dla toru crypto i podstawia
+  # podana liczbe - sluzy do policzenia wariantu ("ile wynosi przewaga przy
+  # spreadzie dwa razy szerszym"), nie do codziennego przebiegu. Wtedy trzeba
+  # tez rozstrzygnac `spreadObcaKsiega` recznie, bo o liczbie podanej z zewnatrz
+  # pomiar nie wie nic.
   #
-  # Zdjecie tej flagi twierdzeniem "karta jest pelna" bez przemierzenia szeregu
-  # na wlasnym arkuszu byloby cichym zawyzeniem wiedzy o kosztach.
-  spreadObcaKsiega: true
+  # ZMIERZONE 2026-09-27 na uniwersum decyzyjnym crypto (10 par USDC, 4h, 1370
+  # swiec): srednia 8,62 pb na runde, mediana 4,46 pb, q3 9,59 pb, p90 22,98 pb.
+  # Trener bierze SREDNIA, bo koszt placi kazda transakcja, a nie kazda swieca -
+  # mediana zanizylaby runde o czynnik 1,93. Rozklad wypisuje sie w logu
+  # przebiegu, wiec kolejna migawka w tym pliku nie jest do niczego potrzebna.
+  # spreadBps: <tylko wariant; domyslnie pomiar z bazy>
+  # spreadObcaKsiega: true
   trials: 60
   # Cennik podmiotu UNIJNEGO - tam stoi konto (patrz migracja 0018). Taker
   # kosztuje tam 0,250% zamiast 0,100%, wiec runda zleceniem rynkowym rosnie
@@ -672,20 +669,34 @@ trainerCron:
     horyzonty: ["1h"]
     kind: "stock"
     limit: true
-    # SPREAD DLA AKCJI: NIE ZMIERZONY, I DLATEGO GO TU NIE MA.
+    # SPREAD DLA AKCJI: DANE SA, POMIARU NADAL NIE MA - I DLATEGO GO TU NIE MA.
     #
-    # 5.85 pb z `trainerCron.spreadBps` to pomiar z Bybita spot (krypto).
-    # Wpisanie tej liczby dla akcji na Alpace byloby falszywa precyzja:
-    # inna gielda, inny cennik, inna mikrostruktura. Karta kosztu equity
-    # konczy sie dzis zdaniem "razem CO NAJMNIEJ 0.000% rundy - bez
-    # niewypelnienie, spread, oplaty regulacyjne", i to jest UCZCIWY stan:
-    # brak pomiaru opisany jako brak pomiaru.
+    # Sprawdzone 2026-09-27: `book_spread_bps` ISTNIEJE dla equity - 560 swiec
+    # 1h, 20 spolek uniwersum, 2026-09-22..2026-09-25 (cztery sesje; 26.09 to
+    # sobota). `history-equity --depth 1` zbiera wiec arkusz, jak zapowiadano.
     #
-    # Zeby to wypelnic, trzeba zmierzyc spread na WLASNYM arkuszu Alpaki
-    # (`market.book_snapshot` dla instrumentow equity) - `history-equity`
-    # chodzi z `--depth 1`, wiec arkusz jest zbierany. Do tego czasu klucz
-    # zostaje nieustawiony, a `--spread-bps` nie idzie do trenera equity.
-    # spreadBps: <zmierz, nie zgaduj>
+    # Te wartosci NIE SA JEDNAK SPREADEM, KTORY BYSMY ZAPLACILI. Mediana po
+    # spolkach to 41 pb, a dla JNJ 479 pb, czyli 4,8% ceny. Zrodlem jest
+    # `/v2/stocks/quotes/latest` z feedu IEX (`services/exchanges/alpaca.py`) -
+    # JEDNEJ gieldy z kilkunastu - a zlecenie Alpaca kieruje na caly rynek.
+    #
+    # Dowod, ze to artefakt, nie rynek, nie wymaga zadnej wiedzy o cenniku:
+    # w 257 z 560 przypadkow kwotowany spread jest SZERSZY niz caly zakres
+    # high-low tej samej swiecy, a mediana ilorazu to 0,84. Kwotowanie
+    # bracketuje kazda transakcje wydrukowana w tym oknie. Kontrola na crypto,
+    # tym samym zapytaniem: mediana ilorazu 0,033, czyli 25x mniej.
+    #
+    # `services/engine/spread.py` odrzuca taki pomiar sam (bramka spojnosci,
+    # prog 0,5) i wypisuje powod, wiec trener equity nadal konczy karte zdaniem
+    # "razem CO NAJMNIEJ ... - bez niewypelnienie, spread, oplaty regulacyjne".
+    # To jest ten sam UCZCIWY stan co wczesniej, tylko teraz wynika z pomiaru,
+    # a nie z braku klucza w tym pliku.
+    #
+    # ZAMKNIE TO DOPIERO feed SIP (plan platny) albo kolumna oplat z `exec.fill`
+    # po pierwszych sprzedazach equity na koncie paper. Do tego czasu klucz
+    # zostaje ZAKOMENTOWANY - odkomentowany wylaczylby bramke spojnosci i wpisal
+    # do karty liczbe, ktora zabija kazda strategie na artefakcie danych.
+    # spreadBps: <tylko wariant; feed IEX NIE jest pomiarem naszego spreadu>
     # spreadObcaKsiega: true
   # Limity dobrane do ZMIERZONEGO zuzycia (388 MB przy pelnym przebiegu na
   # 24 instrumentach), nie do zapasu "na wszelki wypadek". Wezel ma 7,8 GB

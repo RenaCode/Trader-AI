@@ -362,29 +362,39 @@ def deflowany_sharpe(zwroty: list[float], n_prob: int,
          i dlugim strat - mianownik ROSNIE, wiec DSR spada. Pominiecie tych
          dwoch momentow jest wiec zalozeniem dzialajacym na korzysc strategii.
 
-    `odchylenie_prob` TO JEDYNA WIELKOSC, KTOREJ TEN PROJEKT NIE MIERZY
+    `odchylenie_prob` - POMIAR ALBO PODSTAWIENIE, I WYNIK MOWI KTORE
 
-    Bailey liczy V[{SR_n}] jako rozrzut Sharpe'ow POMIEDZY probami.
-    `learn.hypothesis_trial` ma na to kolumne `oos_sharpe` i nigdy nie zostala
-    wypelniona (jedyny INSERT, train.py, podaje wylacznie `model_id`,
-    `config_hash`, `params` i `n_windows=1`), wiec rozrzutu nie da sie odczytac.
+    Bailey liczy V[{SR_n}] jako rozrzut Sharpe'ow POMIEDZY probami. Od
+    2026-09-27 `train.py` zapisuje `oos_sharpe` kandydata wybranego w kazdym
+    oknie do `learn.hypothesis_trial`, wiec ten rozrzut da sie ODCZYTAC -
+    patrz `train.odchylenie_prob_z_bazy` i prog `MIN_PROB_ROZRZUTU`. Do tej
+    daty kolumna byla pusta w 16 050 wierszach z 16 050 (zmierzone na
+    produkcji) i innej drogi niz podstawienie nie bylo.
 
     Pominiecie argumentu wstawia w to miejsce WARIANCJE SAMEGO ESTYMATORA pod
     hipoteza zerowa: gdy zadna proba nie ma przewagi, Sharpe'y roznia sie
     wylacznie bledem pomiaru, czyli sd = sqrt(1 - g3*SR + (g4-1)/4*SR^2) /
     sqrt(T-1). Trzeba powiedziec wprost, w ktora strone to sie myli:
     konfiguracje roznia sie nie tylko szumem, wiec PRAWDZIWY rozrzut jest
-    WIEKSZY, poprzeczka WYZSZA, a prawdziwy DSR NIZSZY niz ten liczony tutaj.
-    Ta droga jest wiec OPTYMISTYCZNA i domkniecie jej wymaga zapisywania
-    `oos_sharpe` przy kazdej probie - nie da sie tego obejsc rachunkiem.
-
+    WIEKSZY, poprzeczka WYZSZA, a prawdziwy DSR NIZSZY niz ten liczony tak.
+    Podstawienie jest wiec droga OPTYMISTYCZNA - i dlatego wynik NAZYWA swoje
+    zrodlo w polu `zrodlo_odchylenia`. Bez tego pola liczba policzona
+    z pomiaru i liczba policzona z podstawienia wygladaja identycznie, a nie sa
+    tym samym: pierwsza jest wynikiem, druga gornym oszacowaniem wyniku.
     Zwraca SLOWNIK ZAWSZE, z `dsr = None` i wypelnionym `powod`, gdy nie ma
     czego liczyc. Bramka ma wtedy WSTRZYMAC promocje, a nie przepuscic ja -
     patrz `train.bramka_dsr`.
     """
     wynik = {"dsr": None, "sharpe": None, "prog": None, "skosnosc": None,
              "kurtoza": None, "n_obserwacji": len(zwroty), "n_prob": n_prob,
-             "odchylenie_prob": odchylenie_prob, "powod": ""}
+             "odchylenie_prob": odchylenie_prob,
+             # CZY TO POMIAR, CZY PODSTAWIENIE - NAZWANE, NIE DOMYSLNE.
+             # Ustawiane na wejsciu, a nie przy uzyciu: gdyby stalo nizej, kazda
+             # nowa sciezka wyjscia z tej funkcji musialaby o nim pamietac.
+             "zrodlo_odchylenia": ("pomiar rozrzutu miedzy konfiguracjami"
+                                   if odchylenie_prob is not None
+                                   else "podstawienie: wariancja estymatora pod H0"),
+             "powod": ""}
     if n_prob < 1:
         wynik["powod"] = ("licznik przetestowanych konfiguracji jest zerowy — "
                           "nie wiadomo, z ilu prób ten wynik jest maksimum")
@@ -421,3 +431,35 @@ def deflowany_sharpe(zwroty: list[float], n_prob: int,
     wynik["prog"] = prog
     wynik["dsr"] = _N01.cdf((sr - prog) * math.sqrt(len(zwroty) - 1) / sigma)
     return wynik
+
+# Ile konfiguracji z policzonym Sharpe'em OOS musi byc w bazie, zeby ich rozrzut
+# WOLNO bylo podstawic pod V[{SR_n}] Baileya. Nizej zostaje podstawienie
+# z hipotezy zerowej, opisane jako podstawienie.
+#
+# DLACZEGO PROG, A NIE "byle cokolwiek zmierzone". Odchylenie probkowe z trzech
+# liczb ma samo rozrzut rzedu 40% swojej wartosci, a wchodzi do poprzeczki
+# selekcji liniowo. Zamiana podstawienia na taki "pomiar" nie domyka luki,
+# tylko przenosi ja w miejsce, w ktorym nikt jej nie szuka: DSR wygladalby
+# wtedy na policzony z danych i skakalby o kilkadziesiat procent miedzy
+# przebiegami roznjacymi sie jednym oknem.
+#
+# 20 to ta sama skala, przy ktorej `spearman` zaczyna cokolwiek liczyc (30)
+# i przy ktorej `t95` przestaje rosnac gwaltownie. Przy 40 oknach na przebieg
+# jeden przebieg `argmax` zapelnia ten prog w calosci.
+MIN_PROB_ROZRZUTU = 20
+
+
+def rozrzut_sharpeow(sharpes: list[float]) -> float | None:
+    """Odchylenie Sharpe'ow MIEDZY konfiguracjami - V[{SR_n}] Baileya, pierwiastek.
+
+    None, gdy proba nie siega `MIN_PROB_ROZRZUTU` albo rozrzutu nie ma. None
+    znaczy "nie zmierzono" i wolajacy MUSI wtedy zostac przy podstawieniu -
+    a nie podstawic zera, ktore zdjeloby cala poprawke na wielokrotne testowanie.
+
+    ODCHYLENIE PROBKOWE (n-1), jak w `sharpe`: zbior konfiguracji, ktore ktos
+    policzyl, jest probka z konfiguracji, ktore mogl policzyc.
+    """
+    if len(sharpes) < MIN_PROB_ROZRZUTU:
+        return None
+    sd = statistics.stdev(sharpes)
+    return sd if sd >= MIN_ROZRZUT else None

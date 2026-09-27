@@ -760,6 +760,51 @@ calosc projektu:             180 wersji | 86 roznych params | 5 modeli
 hypothesis_trial (tor 4h):   12 613     | oos_sharpe wypelnione: 0
 ```
 
+#### `V[{SR_n}]` — od 2026-09-27 MIERZONE, a nie podstawiane
+
+Do tej daty `deflowany_sharpe` podstawiał w miejsce rozrzutu Sharpe'ów **między
+próbami** wariancję samego estymatora pod H₀: `sd = σ/√(T−1)`. Przy T = 1462 to
+**0,0264**. Założenie mówi „konfiguracje różnią się wyłącznie błędem pomiaru",
+a różnią się więcej — więc poprzeczka selekcji była zaniżona, a DSR zawyżony.
+
+`learn.hypothesis_trial.oos_sharpe` istniał od migracji 0006 i był pusty
+w **16 050 wierszach z 16 050** (zmierzone 2026-09-27; miesiąc wcześniej 0 z 12 613).
+Teraz `train.py` zapisuje tam Sharpe OOS kandydata **wybranego w każdym oknie** —
+jedynego, dla którego symulacja poza oknem wyboru w ogóle się liczy. Odrzuceni
+kandydaci (60 losowań + założenia + IC na okno) **nie mają wyniku OOS i nigdy go
+nie mieli**: `ocen(cand, train_slices, cache_tr)` liczy ich in-sample. Policzenie im
+OOS to inny protokół, nie inny zapis.
+
+Skala jest znana z góry, bo ta sama wielkość leży już w `learn.wf_metric`:
+rozrzut Sharpe'ów OOS okno po oknie to **sd = 0,2627** (2 353 okna toru 4h;
+tor 1h 0,2589, model bez horyzontu 0,2600). Dziesięć razy więcej niż podstawienie.
+
+| Sharpe | poprzeczka z H₀ (0,0264) | DSR | poprzeczka ze zmierzonego (0,2627) | DSR |
+| --- | --- | --- | --- | --- |
+| +0,0952 (bez spreadu) | +0,0614 | 0,9001 | +0,6111 | **0,0000** |
+| +0,0823 (spread 5,85 pb) | +0,0613 | 0,7874 | +0,6111 | **0,0000** |
+| +0,0762 (spread 8,618 pb, pomiar) | +0,0612 | 0,7149 | +0,6111 | **0,0000** |
+
+Kierunek jest więc taki, jaki musi być: **poprzeczka w górę, DSR w dół.** Odwrotny
+wynik byłby objawem błędu, nie dobrą wiadomością.
+
+**Dwa zastrzeżenia, oba nazwane w kodzie** (`train.odchylenie_prob_z_bazy`):
+rozrzut mierzymy na ZWYCIĘZCACH okien, czyli w próbie wybranej po górnym ogonie —
+to go ZANIŻA, więc nadal działa na korzyść strategii. Jednocześnie kolejne okna to
+inny rynek, więc w rozrzut wchodzi zmienność okien, nie tylko konfiguracji — a to
+go PODNOSI. Który składnik przeważa, nie jest zmierzone.
+
+**Próg próby jest jawny.** Poniżej `MIN_PROB_ROZRZUTU = 20` konfiguracji z policzonym
+OOS zostaje dzisiejsze podstawienie z H₀, a opis werdyktu mówi wprost, którą drogą
+poszedł. Odchylenie z trzech liczb wchodzi do poprzeczki liniowo i skakałoby o
+kilkadziesiąt procent między przebiegami różniącymi się jednym oknem — „pomiar",
+który tak się zachowuje, przenosi lukę w miejsce, w którym nikt jej nie szuka.
+
+**`n_windows` był wpisywany jako 1 i nigdy nie aktualizowany.** Przy `oos_sharpe`
+równym NULL dwie kolumny tego samego wiersza mówiły co innego. Nowe wiersze dostają
+0, historyczne poprawia migracja 0061, a znaczenie obu kolumn stoi teraz w
+`COMMENT ON COLUMN`, nie tylko w komentarzu w kodzie.
+
 **57 jest DOLNĄ GRANICĄ.** Do 26.09 `params` nie zapisywało `kind` ani `limit`, więc
 dwa przebiegi różniące się wyłącznie cennikiem (`spot` taker 0,100% wobec `spot_eu`
 0,250%) zlewały się w jedną konfigurację. Od teraz zapisuje; historycznych wierszy to

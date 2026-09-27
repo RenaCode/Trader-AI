@@ -178,6 +178,75 @@ CZEGO TEN ODCZYT NIE ROZSTRZYGA, i dlatego brama zostaje otwarta:
 da rozklad, mediane i p90 na tej ksiedze, na ktorej handlujemy — i dopiero
 to domyka te brame. Wartosci sprzed 2026-09-24 pochodza z ksiegi globalnej
 i nie wolno ich z tymi mieszac.
+
+### Spread liczony Z BAZY, per silnik (2026-09-27)
+
+Stala `trainerCron.spreadBps: 5.85` znikla z chartu. Trener liczy spread sam,
+`services/engine/spread.py`, na TYM SAMYM uniwersum (`active AND tradeable`)
+i w TYM SAMYM oknie (`--days`), ktore trenuje. Klucz zostaje w charcie jako
+ZAKOMENTOWANE nadpisanie awaryjne — do policzenia wariantu, nie do codziennego
+przebiegu. Przepisu na 5,85 nie dalo sie odtworzyc: liczba nie stoi w zadnym
+zapytaniu ani w zadnym tescie, a najblizsza rekonstrukcja (wlasna ksiega,
+24–25.09, srednia z median per instrument) daje 5,46 pb dla 1h i 5,69 pb dla 4h.
+
+**Czym jest `book_spread_bps`, z dowodu w kodzie.** `OrderBook.spread` to
+`asks[0].price - bids[0].price`, czyli PELNY spread; `market_worker` zapisuje go
+bez przeliczania; `features.compute_orderbook` agreguje
+`avg(spread / NULLIF(mid, 0)) * 10000`. Runda placi pol spreadu na wejsciu i pol
+na wyjsciu, wiec „polowa na noge razy dwie nogi" z `karta_rundy` jest JUZ
+W SRODKU tej cechy — mnozenie przez dwa zawyzaloby doplate dwukrotnie.
+
+**Statystyka: SREDNIA, i to srednia ze srednich per instrument.** Koszt placi
+kazda transakcja, nie kazda swieca, wiec szukana wielkosc to wartosc oczekiwana,
+a jej estymatorem jest srednia. Zmierzone 2026-09-27, uniwersum decyzyjne
+crypto, swieca 4h, 1 370 obserwacji, 10 par USDC:
+
+| statystyka | wartosc |
+| --- | --- |
+| mediana po swiecach | 4,462 pb |
+| q1 / q3 | 1,037 / 9,592 pb |
+| **srednia ze srednich per instrument (uzywana)** | **8,618 pb** |
+| p90 | 22,98 pb |
+| p99 | 67,38 pb |
+| skrajne instrumenty | BTCUSDC 0,084 pb, NEARUSDC 37,385 pb |
+
+Mediana zanizylaby runde o czynnik 1,93 — w strone korzystna dla strategii.
+Usredniamy najpierw po instrumencie, bo rozrzut MIEDZY instrumentami jest
+o trzy rzedy wielkosci wiekszy niz w czasie (0,013 pb wobec 34,21 pb median),
+wiec instrument o krotszym pokryciu wazylby proporcjonalnie do kompletnosci
+swoich danych, a nie do tego, ile nim handlujemy.
+
+**Czego ta liczba nadal nie jest.** Sredniej wazonej TRANSAKCJAMI. Kierunek
+tego bledu jest zmierzony: 15 pozycji USDC z `exec.position` daje sredni spread
+wazony faktycznym skladem **11,22 pb** wobec 8,618 pb przy wadze rownomiernej
+(strategia weszla m.in. w ARB i NEAR — najszersze pary uniwersum). Przy n = 15
+nie jest to estymator, ale dowodzi, ze 8,618 pb jest DOLNYM oszacowaniem.
+
+**Ksiega nadal obca, i to ustala POMIAR, nie wpis w charcie.** Szereg dla par
+`tradeable` zaczyna sie 2026-09-04, a wlasna ksiega od 2026-09-24, wiec wieksza
+czesc okna pochodzi z hosta globalnego. `spread.zmierz_spread` sprawdza oba
+warunki (data okna i `tradeable` wszystkich instrumentow) i sam ustawia flage —
+karta ZOSTAJE NIEPELNA, a raport podaje krotnosc spreadu, przy ktorej przewaga
+schodzi do zera.
+
+**Equity: dane sa, pomiaru nie ma.** `book_spread_bps` istnieje dla 20 spolek
+uniwersum (560 swiec 1h, 22–25.09), ale mediana po spolkach to 41 pb, a dla JNJ
+479 pb (4,8% ceny). Zrodlem jest feed IEX — jedna gielda z kilkunastu — a
+zlecenie Alpaca kieruje na caly rynek. Dowod, ze to artefakt, nie wymaga wiedzy
+o cenniku: w 257 z 560 przypadkow kwotowanie jest SZERSZE niz caly zakres
+high-low tej samej swiecy, mediana ilorazu 0,843; ta sama liczba dla crypto to
+0,033. `zmierz_spread` odrzuca taki pomiar bramka spojnosci (prog 0,50), wiec
+karta equity nadal konczy sie zdaniem „razem CO NAJMNIEJ ... — bez
+niewypelnienie, spread, oplaty regulacyjne". Dzis odrzuca go jeszcze wczesniej:
+28 swiec na instrument nie siega progu 30, wiec powodem jest POKRYCIE, a nie
+spojnosc. Oba powody sa fail-closed. Zamknie to feed SIP albo kolumna oplat
+z `exec.fill` po pierwszych sprzedazach na koncie paper.
+
+**Wplyw na werdykt.** Sharpe/transakcje spada z +0,0952 (bez spreadu) przez
++0,0823 (stara stala 5,85 pb) do **+0,0762** przy zmierzonych 8,618 pb, a DSR
+przy N = 57 z 0,9001 przez 0,7874 do **0,7149**. Bramka 0,95 nie byla
+przechodzona wczesniej i nie jest teraz — zmiana nie przestawia werdyktu,
+tylko przestaje opierac go na liczbie, ktorej nie dalo sie odtworzyc.
 - [ ] Zmierzyc poslizg — dzis ZERO obserwacji, nie piec: z 49 wypelnien 31 ma
       cene zlecenia, a `limit_price != fill_price` nie zachodzi ani razu. Trzy
       wejscia maja kolumne zniszczona przez `zapisz_wejscie` sprzed poprawki;

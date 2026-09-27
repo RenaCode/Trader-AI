@@ -78,15 +78,19 @@ spec:
                     echo ""
                     echo "=============== OKNO $D DNI ==============="
                     # P0-4: czy spread NASZEJ ksiegi miesci sie w koszcie
-                    # progowym. 5.85 pb to wartosc zmierzona po wdrozeniu
-                    # `7ed0795`, gdy arkusz zaczal isc z gieldy, na ktorej
-                    # skladamy zlecenia. Nocny trener NIE dostaje tej flagi,
-                    # wiec jego karta kosztu jest co noc niepelna.
-                    # Obala: koszt progowy ponizej 5,85 pb.
-                    echo "--- P0-4 koszt progowy wobec spreadu 5,85 pb ---"
+                    # progowym.
+                    #
+                    # DO 2026-09-27 STALO TU `--spread-bps 5.85` I TO BYLA WADA
+                    # TEJ DIAGNOSTYKI: probe P0-4 karmiono stala, wiec pytanie
+                    # "czy koszt progowy pokrywa spread" mialo z gory ustalona
+                    # prawa strone i nie umialo zauwazyc, ze spread sie zmienil.
+                    # Nocny trener liczy go teraz z bazy sam, wiec diagnostyka
+                    # pyta o to samo, czym obstawia produkcja - bez flagi.
+                    # Obala: koszt progowy ponizej zmierzonego spreadu.
+                    echo "--- P0-4 koszt progowy wobec ZMIERZONEGO spreadu ---"
                     python services/engine/train.py \
                       --bar 4h --days "$D" --kind spot_eu --limit \
-                      --sucho --spread-bps 5.85 --spread-obca-ksiega || RC=$?
+                      --sucho || RC=$?
                     # P0-5: czy ekspozycja okna jest ujemnie skorelowana
                     # ze zwrotem kup-i-trzymaj. Trener wypisuje obie liczby
                     # obok siebie w kazdym oknie - wystarczy je zestawic.
