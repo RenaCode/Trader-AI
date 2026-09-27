@@ -1016,6 +1016,51 @@ To luka w modelu, którą trzeba domknąć, zanim ktokolwiek wróci do tematu
 perpetuałów — stawki finansowania są w bazie (39 tys. wierszy w `market`),
 więc naliczanie ich jest wykonalne, a nie hipotetyczne.
 
+## Luka DOMKNIĘTA, pytanie ROZSTRZYGNIĘTE (2026-09-27)
+
+Finansowanie jest naliczane od 2026-09-24 (`koszty.py`, w zwrocie z transakcji,
+nie tylko w krzywej kapitału). `services/engine/wartosc_krotkiej.py` puszczony
+tego dnia na torze 4h, 1400 dni, model 144 (próg wspólny 0,2796 — produkcja nie
+przetrenowała się jeszcze po zmianie progów per reżim):
+
+| | zwrot z okna | Sharpe | transakcji | pominiętych shortów |
+|---|---|---|---|---|
+| **spot_eu** (produkcja) | **+10,28%** | **+0,1036** | 1794 | 3141 |
+| perp (krótkie dozwolone) | +1,85% | +0,0198 | 1433 | 0 |
+
+Odblokowanie krótkiej strony to więc **−8,43 pp zwrotu i −0,0838 Sharpe'a**.
+Sama noga krótka: n=484, średni zwrot **−0,6036%**, przedział 95%
+**[−1,3537%, +0,1073%]** — obejmuje zero, czyli przewagi **nie ma wykazanej**,
+a oszacowanie punktowe jest ujemne. Trafność 57,6% przy ujemnej średniej, czyli
+wiele małych wygranych i kilka dużych przegranych. Finansowanie −363,16 na nodze
+krótkiej wobec +327,92 na długiej. Wynik jest **niewrażliwy na założenie
+o poślizgu** w całym zakresie 0–10 pb (Δ zwrotu stoi na −8,43 pp przy każdym).
+
+### Dwa efekty, nie jeden — i to jest najważniejsze zastrzeżenie
+
+Różnica −8,43 pp **nie jest stratą nogi krótkiej**. Noga długa spada z 1794
+transakcji na 949, a licznik „zablokowane przez ryzyko" idzie z **0 na 4963**:
+krótkie zjadają ten sam budżet ekspozycji (`max_total_exposure` 15%), więc
+wypychają wejścia długie. Większość ubytku to **wejścia długie, których nie
+było**, a nie pieniądze przegrane na shortach.
+
+Wniosek jest przez to mocniejszy, nie słabszy: przy dzisiejszym limicie
+ekspozycji krótka strona nie dokłada przewagi i odbiera miejsce tej, która ją ma.
+
+### Skutek dla 76% odrzucanych sygnałów
+
+Produkcja, cała historia od 2026-08-27 (1869 decyzji): 37 wejść długich, 8
+krótkich (sprzed bramki z migracji 0040) i **143 sygnały krótkie odrzucone** jako
+`short_niewykonalny` — czyli 76% z 188 sygnałów ponad progiem. **To nie jest
+strata okazji.** Sygnał, którego realizacja nie ma wykazanej wartości, nie jest
+okazją, a próba jego przechwycenia kosztuje miejsce pod sygnały długie.
+„Odblokujmy shorty" jest odrzucone pomiarem, w obie strony.
+
+Czego te liczby nie zawierają: bazy kontraktu nad spotem, likwidacji, oraz tego,
+że stawka finansowania pochodzi z perpetuała *USDT (przybliżenie, migracja 0021).
+Uniwersum pozostaje spotowe — wariant perp stosuje cennik perpetuała do szeregu
+cen pary spotowej.
+
 ## Zawężenie uniwersum do tego, co da się kupić
 
 Przy okazji zmierzone: kalibracja na 24 instrumentach, z których 14 nie istnieje

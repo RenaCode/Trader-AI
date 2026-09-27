@@ -253,12 +253,27 @@ tylko przestaje opierac go na liczbie, ktorej nie dalo sie odtworzyc.
       dwa wyjscia maja ja nietknieta i mimo to nie sa pomiarem — zlecenie z
       limitem wypelnia sie po cenie limitu albo lepiej, wiec pomiar wobec
       wlasnego limitu wykryje patologie, nie koszt
-- [ ] Uruchomic `services/engine/wartosc_krotkiej.py` na bazie produkcyjnej —
-      75% sygnalow ponad progiem to shorty, nieuzyteczne na spocie. Narzedzie
-      liczy GORNE OGRANICZENIE, nie wartosc oczekiwana
-- [ ] Decyzja wlasciciela, nie inzynierska: na bybit.eu perpetualow nie ma
-      (spot 127, linear 0, inverse 0). Konto globalne, inna gielda, albo
-      zostajemy na spocie
+- [x] **Uruchomic `services/engine/wartosc_krotkiej.py` — URUCHOMIONE
+      2026-09-27 na bazie produkcyjnej: KROTKA STRONA NIE MA PRZEWAGI.**
+      Tor 4h, 1400 dni, finansowanie JUZ naliczane (od 2026-09-24, czyli luka
+      z pomiaru 04.09 domknieta). Spot_eu +10,28% zwrotu i Sharpe +0,1036 przy
+      1794 transakcjach; perp +1,85% i +0,0198 przy 1433 — odblokowanie
+      krotkich to **-8,43 pp zwrotu i -0,0838 Sharpe'a**. Sama noga krotka:
+      n=484, sredni zwrot -0,6036%, przedzial 95% [-1,3537%, +0,1073%], czyli
+      OBEJMUJE ZERO. Niewrazliwe na zalozenie o posliznieciu 0-10 pb.
+      NAJWAZNIEJSZE: -8,43 pp to w wiekszosci WEJSCIA DLUGIE, KTORYCH NIE BYLO
+      (1794 -> 949 transakcji dlugich, "zablokowane przez ryzyko" 0 -> 4963),
+      bo krotkie zjadaja ten sam budzet ekspozycji. 143 odrzucone sygnaly
+      krotkie (76% z 188 ponad progiem) NIE SA wiec strata okazji. Szczegoly
+      w `docs/03-wynik-walk-forward.md`, sekcja "Luka DOMKNIETA".
+- [x] **Decyzja o perpetualach — ROZSTRZYGNIETA POMIAREM, nie preferencja:
+      zostajemy na spocie.** Na bybit.eu perpetualow nie ma (spot 127,
+      linear 0, inverse 0), a pomiar wyzej mowi, ze konto globalne po nie nie
+      jest warte zakladania: krotka strona nie doklada przewagi i odbiera
+      miejsce tej, ktora ja ma. Do decyzji wlasciciela zostaje wylacznie
+      sytuacja, w ktorej limit ekspozycji rosnie tak, ze krotkie przestaja
+      wypychac dlugie - i wtedy pomiar trzeba powtorzyc, bo caly ten wniosek
+      jest przy `max_total_exposure` = 15%
 - [x] **Rozstrzygnac los equity — ROZSTRZYGNIETE 2026-09-24: PRZEWAGI NIE MA.**
       Pelny walk-forward na 59 oknach, uniwersum 20 spolek, cennik Alpaki.
       Szczegoly nizej.

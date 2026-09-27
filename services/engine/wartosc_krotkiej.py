@@ -2,6 +2,39 @@
 
 PYTANIE, NA KTORE TEN SKRYPT ODPOWIADA
 
+ODPOWIEDZ, ZMIERZONA 2026-09-27 (tor 4h, 1400 dni, model 144, prog wspolny
+0,2796 - produkcja nie przetrenowala sie jeszcze po zmianie progow per rezim):
+
+    SPOT_EU (dzisiejsza produkcja)  zwrot +10,28%  Sharpe +0,1036  transakcji 1794
+                                   pominietych shortow 3141
+    PERP    (krotkie dozwolone)    zwrot  +1,85%  Sharpe +0,0198  transakcji 1433
+
+    czyli odblokowanie krotkiej strony: zwrot -8,43 pp, Sharpe -0,0838
+
+    sama noga krotka: n=484, sredni zwrot -0,6036%, przedzial 95%
+    [-1,3537%, +0,1073%] - OBEJMUJE ZERO, wiec przewagi NIE MA WYKAZANEJ,
+    a oszacowanie punktowe jest ujemne. Trafnosc 57,6% przy ujemnej sredniej,
+    czyli wiele malych wygranych i kilka duzych przegranych. Finansowanie
+    -363,16 na nodze krotkiej wobec +327,92 na dlugiej.
+
+    Wynik jest NIEWRAZLIWY na zalozenie o posliznieciu w calym zakresie
+    0-10 pb: Delta zwrotu stoi na -8,43 pp przy kazdym z nich.
+
+DWA EFEKTY, NIE JEDEN - I TO JEST NAJWAZNIEJSZE ZASTRZEZENIE DO TEJ LICZBY.
+Roznica -8,43 pp NIE JEST strata nogi krotkiej. Noga DLUGA spada z 1794
+transakcji na 949, a licznik "zablokowane przez ryzyko" idzie z 0 na 4963:
+krotkie zjadaja ten sam budzet ekspozycji (`max_total_exposure` 15%), wiec
+wypychaja wejscia dlugie. Wiekszosc ubytku to WEJSCIA DLUGIE, KTORYCH NIE BYLO,
+a nie pieniadze przegrane na shortach. Wniosek jest przez to MOCNIEJSZY, nie
+slabszy: przy dzisiejszym limicie ekspozycji krotka strona nie doklada
+przewagi i odbiera miejsce tej, ktora ja ma.
+
+SKUTEK DLA 76% ODRZUCANYCH SYGNALOW: nie sa strata okazji. Sygnal, ktorego
+realizacja nie ma wykazanej wartosci, nie jest okazja - a proba jego
+przechwycenia kosztuje miejsce pod sygnaly dlugie. "Odblokujmy shorty" jest
+odrzucone POMIAREM, w obie strony.
+
+
 Audyt zmierzyl, ze z 1668 decyzji w calej historii 180 przekroczylo prog
 wejscia, a 135 z nich (75%) to sygnaly KROTKIE - odrzucone, bo silnik handluje
 dziesiecioma parami SPOT, gdzie shortowac sie nie da. Strona dluga konwertuje
