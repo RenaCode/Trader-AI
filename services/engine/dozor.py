@@ -2741,9 +2741,42 @@ def ocen_odlozone_bez_decyzji(wiersze: list[dict]) -> list[tuple[str, str]]:
              f"({w['powod']})") for w in wiersze]
 
 
+def dlugosc_swiecy_petli(bar_starty: list[datetime]) -> int | None:
+    """Ile minut ma swieca, ktora PETLA przetwarza. Z DANYCH. CZYSTA FUNKCJA.
+
+    DLACZEGO NIE Z PARAMETRU `--bar`, I TO JEST WADA ZMIERZONA NA PRODUKCJI
+    2026-09-27, DWADZIESCIA MINUT PO WDROZENIU TEJ CZUJKI.
+
+    `journal.pominiecie` NIE MA kolumny z rozmiarem swiecy. Pierwsza wersja brala
+    dlugosc okna z `--bar`, wiec uruchomiona z `--bar 1h` czytala te SAME wiersze
+    (swiece czterogodzinne, bo tylko takie petla przetwarza) i wymagala decyzji
+    w 60 minutach od otwarcia swiecy. Cechy cenowe sa gotowe 20-35 min po
+    zamknieciu swiecy, czyli grubo po tej granicy - i tak powstalo 190 „swiec bez
+    decyzji" na w pelni zdrowej produkcji. Byloby to KRYTYCZNE powiadomienie
+    o stanie, ktorego nie ma, przy pierwszym nocnym przebiegu.
+
+    Dlugosc bierzemy wiec stamtad, gdzie jest naprawde: z ODSTEPU miedzy
+    kolejnymi swiecami, ktore petla zapisala. Petla zaklada jeden wiersz na swiece,
+    ktora przetworzyla, wiec najczestszy odstep JEST jej swieca. Zmierzone na
+    produkcji: odstepy 240 min co do minuty (12:00, 08:00, 04:00, 00:00, 20:00).
+
+    None przy mniej niz trzech roznych swiecach - z dwoch punktow nie da sie
+    odczytac „najczestszego" odstepu, a zgadniecie dalo by dokladnie te wade,
+    ktora ta funkcja usuwa.
+    """
+    rozne = sorted(set(bar_starty))
+    if len(rozne) < 3:
+        return None
+    odstepy = [round((b - a).total_seconds() / 60) for a, b in zip(rozne, rozne[1:])]
+    odstepy = [o for o in odstepy if o > 0]
+    if not odstepy:
+        return None
+    return max(set(odstepy), key=odstepy.count)
+
+
 async def sprawdz_odlozone_decyzje(fetch_all, notify, sucho: bool = False, *,
                                    engine: str = "crypto", mode: str = "demo",
-                                   bar: str = "4h", okno_h: int = 48) -> int:
+                                   okno_h: int = 48) -> int:
     """Czy swieca ODLOZONA przez niepelne sygnaly dostala potem decyzje.
 
     CZEGO TA CZUJKA PILNUJE, A CZEGO NIE
@@ -2768,14 +2801,27 @@ async def sprawdz_odlozone_decyzje(fetch_all, notify, sucho: bool = False, *,
     swiecy" znaczy co innego dla swiecy godzinnej i czterogodzinnej, a druga
     definicja dlugosci swiecy w tym pliku rozjechalaby sie z `horizons.py`.
     """
-    from services.engine.horizons import get as get_horizon
-
     if await poza_sesja(fetch_all, engine):
         print(f"odlozone ({engine}/{mode}): rynek zamkniety — poza sesja swiece "
               f"nie powstaja, wiec nie ma czego rozstrzygac")
         return 0
 
-    h = get_horizon(bar)
+    # DLUGOSC SWIECY Z DANYCH, NIE Z PARAMETRU - uzasadnienie liczbowe
+    # w `dlugosc_swiecy_petli`. Brak odczytu to LUKA POMIAROWA, nie alarm:
+    # bez dlugosci okna pytanie "czy wrocil w oknie tej swiecy" nie ma tresci.
+    znaczniki = await fetch_all(
+        "SELECT DISTINCT bar_start FROM journal.pominiecie"
+        " WHERE engine::text = %s AND mode::text = %s"
+        "   AND powod = ANY(%s)"
+        "   AND bar_start >= now() - make_interval(hours => %s)"
+        " ORDER BY bar_start", (engine, mode, list(POWODY_ODLOZENIA), okno_h))
+    minut = dlugosc_swiecy_petli([w["bar_start"] for w in znaczniki])
+    if minut is None:
+        print(f"odlozone ({engine}/{mode}, {okno_h} h): mniej niz trzy rozne "
+              f"swiece z odlozeniem — dlugosci swiecy petli NIE DA SIE odczytac "
+              f"z danych, a zgadniecie dalo by falszywe alarmy")
+        return 0
+
     wiersze = await fetch_all(
         "SELECT i.symbol, p.bar_start, p.powod"
         "  FROM journal.pominiecie p"
@@ -2795,17 +2841,16 @@ async def sprawdz_odlozone_decyzje(fetch_all, notify, sucho: bool = False, *,
         "            AND d.decided_at < p.bar_start"
         "                              + make_interval(mins => %s))"
         " ORDER BY p.bar_start DESC, i.symbol",
-        (engine, mode, list(POWODY_ODLOZENIA), okno_h,
-         2 * h.bar_minutes, h.bar_minutes))
+        (engine, mode, list(POWODY_ODLOZENIA), okno_h, 2 * minut, minut))
 
     braki = ocen_odlozone_bez_decyzji(wiersze)
     if not braki:
-        print(f"odlozone ({engine}/{mode}, {bar}, {okno_h} h): kazda odlozona "
-              f"swieca dostala decyzje w swoim oknie")
+        print(f"odlozone ({engine}/{mode}, swieca {minut} min z danych, "
+              f"{okno_h} h): kazda odlozona swieca dostala decyzje w swoim oknie")
         return 0
 
     tytul = (f"{len(braki)} × świeca odłożona i NIEROZSTRZYGNIĘTA "
-             f"({engine}/{mode}, {bar})")
+             f"({engine}/{mode}, świeca {minut} min)")
     tresc = (
         f"Pętla odłożyła te świece z powodu niepełnych sygnałów i nigdy do nich "
         f"nie wróciła — w żadnej z nich nie było ŻADNEJ decyzji, ani wejścia, "
@@ -2840,7 +2885,7 @@ async def sprawdz_odlozone_decyzje(fetch_all, notify, sucho: bool = False, *,
     for u in odbiorcy:
         await notify(u["id"], "engine.decyzje_odlozone", tytul, tresc,
                      engine=engine, severity="critical",
-                     data={"ile": len(braki), "bar": bar,
+                     data={"ile": len(braki), "swieca_min": minut,
                            "klucze": "+".join(sorted(k for k, _ in braki[:20]))})
     return kod_wyjscia(len(braki), 0, "swieca odlozona bez decyzji")
 
@@ -3076,7 +3121,7 @@ async def main() -> int:
             # o ktorej ktos juz wie.
             return await sprawdz_odlozone_decyzje(
                 fetch_all, notify, sucho=args.sucho, engine=args.engine,
-                mode=args.mode, bar=args.bar, okno_h=args.okno_h or 48)
+                mode=args.mode, okno_h=args.okno_h or 48)
 
         wiersze = await fetch_all(
             "SELECT status, windows_total, windows_positive, positive_ci_low,"

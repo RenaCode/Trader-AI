@@ -188,13 +188,23 @@ spec:
                   # nie bylo czytane przez ani jedna z nich, a licznik
                   # `odlozone_niepelne` zyje wylacznie w pamieci petli.
                   #
-                  # TOR I HORYZONT, tak samo jak przy swiezosci: "czy wrocil
-                  # w oknie tej swiecy" znaczy co innego dla 1h i 4h, a equity
-                  # ma wlasny kalendarz sesji (czujka sama milczy poza sesja).
+                  # TOR, ALE NIE HORYZONT - i to jest poprawka z 2026-09-27,
+                  # dwadziescia minut po wdrozeniu tej czujki.
+                  #
+                  # `journal.pominiecie` NIE MA kolumny z rozmiarem swiecy, a
+                  # petla przetwarza jeden horyzont na silnik. Petla po
+                  # `$tor.horyzonty` czytala wiec te SAME wiersze (swiece 4h) raz
+                  # z oknem 240 min i raz z oknem 60 min - i to drugie dalo 190
+                  # "swiec bez decyzji" na w pelni zdrowej produkcji, bo cechy
+                  # cenowe sa gotowe 20-35 min PO zamknieciu swiecy. Byloby to
+                  # krytyczne powiadomienie o stanie, ktorego nie ma.
+                  #
+                  # Czujka bierze teraz dlugosc swiecy Z DANYCH (najczestszy
+                  # odstep miedzy swiecami, ktore petla zapisala), wiec `--bar`
+                  # nie ma tu czego wybierac i zostal usuniety. Equity ma wlasny
+                  # kalendarz sesji - czujka sama milczy poza sesja.
                   {{- range $tor := $tory }}
-                  {{- range $h := $tor.horyzonty }}
-                  python services/engine/dozor.py --co odlozone --engine {{ $tor.engine | quote }} --bar {{ $h | quote }} || RC=$?
-                  {{- end }}
+                  python services/engine/dozor.py --co odlozone --engine {{ $tor.engine | quote }} || RC=$?
                   {{- end }}
                   # CZY ALARM MA JAK OPUSCIC PANEL.
                   #

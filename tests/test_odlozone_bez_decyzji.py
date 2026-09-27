@@ -33,7 +33,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from services.engine.dozor import (
-    POWODY_ODLOZENIA, ocen_odlozone_bez_decyzji, sprawdz_odlozone_decyzje,
+    POWODY_ODLOZENIA, dlugosc_swiecy_petli, ocen_odlozone_bez_decyzji,
+    sprawdz_odlozone_decyzje,
 )
 
 KORZEN = Path(__file__).resolve().parents[1]
@@ -79,9 +80,16 @@ class _Stend:
     pustkę i test padnie, tak jak padłby pomiar."""
 
     def __init__(self, braki: list[dict], poza_sesja: bool = False,
-                 juz_zgloszono: bool = False):
+                 juz_zgloszono: bool = False, swiece_min: int = 240,
+                 ile_swiec: int = 6):
         self.braki, self.poza_sesja_ = braki, poza_sesja
         self.juz = juz_zgloszono
+        # ZNACZNIKI SWIEC, z ktorych czujka odczytuje dlugosc swiecy petli.
+        # Atrapa oddaje je osobno od brakow, bo produkcja tez pyta o nie osobnym
+        # zapytaniem - i to wlasnie ten odczyt naprawia wade z 190 falszywymi
+        # alarmami.
+        self.znaczniki = [{"bar_start": TERAZ - timedelta(minutes=swiece_min * i)}
+                          for i in range(ile_swiec, 0, -1)]
         self.wolania: list[tuple] = []
         self.zapytania: list[str] = []
 
@@ -89,6 +97,8 @@ class _Stend:
         self.zapytania.append(" ".join(sql.split()))
         if "engine_heartbeat" in sql or "sesja" in sql or "rynek_zamkniety" in sql:
             return [{"poza": self.poza_sesja_}] if self.poza_sesja_ else []
+        if "SELECT DISTINCT bar_start FROM journal.pominiecie" in sql:
+            return list(self.znaczniki)
         if "journal.pominiecie" in sql:
             return list(self.braki)
         if "notify.notification" in sql:
@@ -165,8 +175,11 @@ def test_pyta_o_POWODY_ODLOZENIA_a_nie_o_wszystkie_pominiecia():
     przebiegu na zdrowym systemie."""
     stend = _Stend([])
     _uruchom(stend)
-    pominiecia = [q for q in stend.zapytania if "journal.pominiecie" in q]
-    assert pominiecia, "czujka nie pyta o journal.pominiecie"
+    # ZAPYTANIE GLOWNE, nie to o znaczniki swiec: oba czytaja
+    # `journal.pominiecie`, ale tylko glowne szuka BRAKU decyzji.
+    pominiecia = [q for q in stend.zapytania
+                  if "journal.pominiecie" in q and "NOT EXISTS" in q]
+    assert pominiecia, "czujka nie pyta o journal.pominiecie z NOT EXISTS"
     assert "p.powod = ANY(%s)" in pominiecia[0], (
         "czujka nie zawęża powodów — liczy jako brak decyzji także świadome "
         "odmowy wejścia, które decyzję `hold` mają")
@@ -177,22 +190,69 @@ def test_TRWAJACA_swieca_jest_POMIJANA():
     """Świeca w toku jest odłożona ZGODNIE Z ZAMYSŁEM — alarm o niej zapalałby
     się przy każdym przebiegu na w pełni zdrowym systemie."""
     stend = _Stend([])
-    _uruchom(stend, bar="4h")
-    q = [x for x in stend.zapytania if "journal.pominiecie" in x][0]
+    _uruchom(stend)
+    q = [x for x in stend.zapytania
+         if "journal.pominiecie" in x and "NOT EXISTS" in x][0]
     assert "p.bar_start < now() - make_interval(mins => %s)" in q, (
         "czujka nie odcina świecy trwającej ani świeżo zamkniętej")
 
 
-def test_okno_swiecy_bierze_sie_z_HORYZONTU_a_nie_ze_stalej():
-    """„Czy wrócił w oknie tej świecy" znaczy co innego dla świecy godzinnej
-    i czterogodzinnej. Druga definicja długości świecy w `dozor.py` rozjechałaby
-    się z `horizons.py`."""
-    a = _Stend([])
-    _uruchom(a, bar="4h")
-    b = _Stend([])
-    _uruchom(b, bar="1h")
-    assert "get_horizon" in DOZOR.split("async def sprawdz_odlozone_decyzje")[1][:2000], (
-        "czujka nie czyta długości świecy z `horizons`")
+# ============================== DLUGOSC SWIECY Z DANYCH
+#
+# WADA ZMIERZONA NA PRODUKCJI 2026-09-27, DWADZIESCIA MINUT PO WDROZENIU.
+# `journal.pominiecie` nie ma kolumny z rozmiarem swiecy. Pierwsza wersja brala
+# dlugosc okna z `--bar`, wiec uruchomiona z `--bar 1h` czytala te SAME wiersze
+# (swiece 4h, bo tylko takie petla przetwarza) i wymagala decyzji w 60 minutach
+# od otwarcia swiecy. Cechy cenowe sa gotowe 20-35 min PO zamknieciu swiecy, wiec
+# powstalo 190 "swiec bez decyzji" na w pelni zdrowej produkcji - krytyczne
+# powiadomienie o stanie, ktorego nie ma.
+
+def test_dlugosc_swiecy_czytana_z_ODSTEPOW():
+    swiece = [TERAZ - timedelta(hours=4 * i) for i in range(6)]
+    assert dlugosc_swiecy_petli(swiece) == 240
+
+
+def test_dlugosc_swiecy_ODPORNA_na_luke():
+    """Brakujaca swieca (przebieg pominiety, restart) nie moze przestawic
+    dlugosci - dlatego NAJCZESTSZY odstep, a nie sredni ani maksymalny."""
+    swiece = [TERAZ - timedelta(hours=h) for h in (0, 4, 8, 16, 20, 24)]
+    assert dlugosc_swiecy_petli(swiece) == 240
+
+
+def test_MNIEJ_NIZ_TRZY_swiece_to_BRAK_ODCZYTU_a_nie_zgadywanie():
+    assert dlugosc_swiecy_petli([]) is None
+    assert dlugosc_swiecy_petli([TERAZ]) is None
+    assert dlugosc_swiecy_petli([TERAZ, TERAZ - timedelta(hours=4)]) is None
+
+
+def test_powtorzone_znaczniki_nie_daja_odstepu_zero():
+    """`DISTINCT` jest w zapytaniu, ale funkcja nie moze na nim polegac —
+    odstep zero dalby okno zerowe i alarm na kazdej swiecy."""
+    swiece = [TERAZ, TERAZ, TERAZ - timedelta(hours=4),
+              TERAZ - timedelta(hours=8)]
+    assert dlugosc_swiecy_petli(swiece) == 240
+
+
+def test_czujka_NIE_BIERZE_dlugosci_swiecy_z_parametru():
+    """Gdyby brala, ten sam zbior wierszy dawalby inny werdykt przy innym
+    `--bar` — a to bylo zrodlo 190 falszywych alarmow."""
+    import inspect
+    podpis = inspect.signature(sprawdz_odlozone_decyzje)
+    assert "bar" not in podpis.parameters, (
+        f"czujka nadal przyjmuje `bar`: {podpis} — `journal.pominiecie` nie ma "
+        f"kolumny z rozmiarem swiecy, wiec ten parametr moze tylko zmyslic okno")
+    assert "get_horizon" not in DOZOR.split(
+        "async def sprawdz_odlozone_decyzje")[1][:3000], (
+        "czujka czyta horyzont z `horizons`, a ma czytac odstep z danych")
+
+
+def test_BRAK_ODCZYTU_dlugosci_to_MILCZENIE_a_nie_alarm(capsys):
+    """Bez dlugosci okna pytanie „czy wrocil w oknie tej swiecy" nie ma tresci.
+    Alarm w tym stanie mowilby o pomiarze, ktorego nie bylo."""
+    stend = _Stend([_wiersz("ADAUSDC")], ile_swiec=2)
+    assert _uruchom(stend) == 0
+    assert stend.wolania == []
+    assert "NIE DA SIE odczytac" in capsys.readouterr().out
 
 
 # ==================================================== MIGRACJA
@@ -213,6 +273,23 @@ def test_zdarzenie_jest_KRYTYCZNE_i_always_on():
     tresc = MIGRACJA.read_text(encoding="utf-8")
     wstawka = tresc[tresc.index("INSERT INTO notify.event_type"):]
     assert "'critical'" in wstawka and "true" in wstawka
+
+
+def test_chart_wola_czujke_RAZ_NA_SILNIK_a_nie_raz_na_horyzont():
+    """Petla przetwarza jeden horyzont na silnik, a `journal.pominiecie` nie ma
+    kolumny z rozmiarem swiecy. Petla po horyzontach czytala te same wiersze dwa
+    razy z roznym oknem — i wezsze okno dalo 190 falszywych alarmow."""
+    chart = (KORZEN / "charts" / "trader" / "templates"
+             / "zywotnosc-cron.yaml").read_text(encoding="utf-8")
+    linie = [l for l in chart.splitlines() if "--co odlozone" in l]
+    assert linie, "czujka nie jest wolana w zadaniu zywotnosci"
+    for l in linie:
+        assert "--bar" not in l, (
+            f"wywolanie podaje --bar, ktorego czujka nie przyjmuje: {l.strip()}")
+    blok = chart[chart.index("--co odlozone") - 400:chart.index("--co odlozone")]
+    assert "$tor.horyzonty" not in blok, (
+        "czujka jest wolana w petli po horyzontach — te same wiersze zostana "
+        "ocenione dwoma roznymi oknami")
 
 
 def test_czujka_jest_PODLACZONA_do_wyboru_co():
