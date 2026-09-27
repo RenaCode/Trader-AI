@@ -489,6 +489,53 @@ workers:
       limits:   { cpu: 200m, memory: 256Mi }
       requests: { cpu: 20m,  memory: 64Mi }
 
+  # DOZORCA RYZYKA TORU GIELDOWEGO - decyzja wlasciciela 2026-09-27.
+  #
+  # CO BYLO ZMIERZONE, ZANIM TO POWSTALO (produkcja 2026-09-27):
+  #
+  #   * `risk.limit_def`: SIEDEM wlaczonych limitow dla `equity/demo`, w tym
+  #     wszystkie trzy, ktore koncza sie kill-switchem (max_daily_loss 2%,
+  #     max_drawdown 10%, min_equity 95 000),
+  #   * `risk.dozorca_heartbeat`: DOKLADNIE JEDEN wiersz,
+  #     `dozorca-ryzyka:crypto:demo`,
+  #   * `wznow()` - jedyna droga automatycznego zwolnienia kill-switcha - ma
+  #     w calym repozytorium JEDNO miejsce wywolania: `dozorca.py`. `loop.py`
+  #     nie zwalnia,
+  #   * `ref.instrument`: 20 handlowalnych instrumentow equity (migracja 0060),
+  #     a `risk.engine_heartbeat` ma zywy wiersz `equity`.
+  #
+  # Czyli: tor equity mial aktywne limity, zadnego niezaleznego oceniajacego
+  # i NIKOGO, kto moglby zwolnic kill-switcha poza czlowiekiem w API
+  # (`POST /api/risk/killswitch/{id}/release`). Dzis to nieszkodliwe, bo krzywa
+  # equity jest plaska (nav 1,0 na 481 punktach) i `--wymagaj-modelu` wstrzymuje
+  # handel - grozne od pierwszej transakcji, a szczyt `max(nav)` liczy sie BEZ
+  # ograniczenia czasowego, wiec kill-switch z obsuniecia nie mija z doba.
+  #
+  # DWIE INSTANCJE NIE WCHODZA SOBIE W DROGE - sprawdzone, nie zalozone:
+  #   * puls ma klucz `f"{NAZWA}:{engine}:{mode}"` (`dozorca.bij_heartbeat`),
+  #     wiec to DWA wiersze, nie dwa zapisy do jednego,
+  #   * kazde zapytanie `RiskKernel` i `wznow()` filtruje po `engine` i `mode`,
+  #   * `risk.limit_usage` ma rytm trzymany przez BAZE (`NOT EXISTS`, nie licznik
+  #     w pamieci procesu) i osobne `limit_def_id` per silnik,
+  #   * `wznowienie.DZIENNIK` jest stanem PROCESU, a to osobny pod.
+  # Pilnuje tego tests/test_dozorca_dwa_tory.py.
+  #
+  # ZASOBY TE SAME CO WYZEJ, BO ZMIERZONE NA TYM SAMYM KODZIE. `kubectl top`
+  # 2026-09-27: `trader-dozorca` 0m CPU, 30Mi pamieci przy limicie 256Mi. Ten
+  # pod robi to samo co tamten, a na torze bez otwartych pozycji mniej, wiec
+  # dobranie mu WIEKSZYCH limitow byloby zapasem bez pomiaru.
+  dozorca-equity:
+    enabled: true
+    # Ta sama waska rola co dozorca krypto (migracja 0034). Nadania nie zaleza
+    # od silnika - nie ma tu RLS ani wierszy per tor - wiec `trader_dozorca`
+    # wystarcza dla equity bez ani jednego nowego GRANT-u. Sprawdzone na bazie
+    # z migracjami: tests/test_dozorca_dwa_tory.py, sekcja ROLA.
+    dbRole: dozorca
+    command: ["python", "services/engine/dozorca.py", "--engine", "equity", "--mode", "demo"]
+    resources:
+      limits:   { cpu: 200m, memory: 256Mi }
+      requests: { cpu: 20m,  memory: 64Mi }
+
   # Skaner wiadomosci. Bez klucza Anthropic konczy sie natychmiast z komunikatem -
   # dlatego wlaczony dopiero wtedy, gdy klucz jest w bazie.
   news:

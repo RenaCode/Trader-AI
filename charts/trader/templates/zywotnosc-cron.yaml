@@ -1,4 +1,42 @@
 {{- if .Values.zywotnoscCron.enabled }}
+{{/*
+TORY OBJETE CZUJKAMI - JEDNA LISTA, ZLOZONA Z DANYCH, KTORE JUZ TU SA.
+
+Do 2026-09-27 trzy sprawdzenia nizej - `swiezosc`, `instrumenty` i `poslizg` -
+szly BEZ `--engine`, czyli z domyslnym `crypto` (`dozor.main`). Tor `equity` byl
+dla nich niewidoczny w calosci: `sprawdz_swiezosc` filtruje po silniku od
+2026-09-24, `sprawdz_instrumenty` i `sprawdz_poslizg` przyjmuja go parametrem,
+a nikt go nie podawal. (`--co ryzyko`, `--co zywotnosc` i `--co workery`
+iteruja WIERSZE tabel, wiec equity obejmowaly od poczatku - i to jest ta sama
+zasada, tylko wyrazona danymi, a nie argumentem.)
+
+DLACZEGO `--engine` W CHARTCIE, A NIE PETLA PO SILNIKACH W `dozor.py`
+
+Bo `swiezosc` potrzebuje PARY (silnik, horyzont), a nie samego silnika: prog dla
+`feat.feature_value` liczy sie z `bar_minutes`, a kazdy tor trenuje inne swiece
+(`trainerCron.horyzonty` = 4h+1h dla krypto, `trainerCron.equity.horyzonty` = 1h).
+Petla po silnikach wewnatrz `dozor.py` musialaby wiec znac liste horyzontow
+KAZDEGO toru - czyli trzymac DRUGA KOPIE tej listy, obok `workers.features`,
+`workers.features-equity` i `trainerCron`. Rozjazd takiej kopii nie objawia sie
+awaria: kosztowal ten projekt 21 godzin martwych cech 2026-09-04 i to przed nim
+broni `test_swiezosc_pokrywa_kazdy_horyzont`.
+
+Dwa mechanizmy naraz byly by gorsze od jednego: gdyby `instrumenty` i `poslizg`
+iterowaly silniki same, a `swiezosc` brala je z chartu, to trzeci silnik
+wchodzilby do dwoch sprawdzen automatycznie, a do trzeciego nie - i nikt by tego
+nie zauwazyl. Jedno miejsce, ta sama lista, wszystkie trzy wywolania.
+
+CZEGO TA LISTA NIE ROZSTRZYGA: czy sprawdzenie ma ALARMOWAC. To jest pytanie
+o rynek, nie o konfiguracje wdrozenia, i odpowiada na nie `dozor.py` z kolumny
+`ref.venue.is_24_7` - tej samej, ktora rozstrzyga w `sesja.stan_sesji`. Patrz
+`dozor.rynek_z_sesjami`: dla rynku z sesjami wiek danych liczony wobec `now()`
+nie jest miara awarii potoku, bo po otwarciu sesji najnowsza swieca pochodzi
+z poprzedniego zamkniecia (zmierzone: 1050 min przy progu 180).
+*/}}
+{{- $tory := list (dict "engine" "crypto" "horyzonty" (.Values.trainerCron.horyzonty | default (list .Values.trainerCron.bar))) }}
+{{- if .Values.trainerCron.equity.enabled }}
+{{- $tory = append $tory (dict "engine" "equity" "horyzonty" .Values.trainerCron.equity.horyzonty) }}
+{{- end }}
 # Czujka zywotnosci silnikow.
 #
 # MUSI byc osobnym procesem: martwy proces nie zglosi wlasnej smierci. Petla
@@ -112,8 +150,14 @@ spec:
                   # przyklada do `workers.features`, wiec trzeci horyzont
                   # dolozony do treningu wchodzi tu sam. Wlasna kopia byla by
                   # trzecim miejscem z ta liczba i rozjechala by sie cicho.
-                  {{- range $h := .Values.trainerCron.horyzonty | default (list .Values.trainerCron.bar) }}
-                  python services/engine/dozor.py --co swiezosc --bar {{ $h | quote }} || RC=$?
+                  # TOR I HORYZONT, a nie sam horyzont: patrz komentarz przy
+                  # `$tory` na gorze pliku. Bez `--engine` szlo tu domyslne
+                  # `crypto` (`dozor.main`), wiec potok equity mogl stac
+                  # tygodniami i ta czujka nie zauwazylaby tego ANI RAZU.
+                  {{- range $tor := $tory }}
+                  {{- range $h := $tor.horyzonty }}
+                  python services/engine/dozor.py --co swiezosc --engine {{ $tor.engine | quote }} --bar {{ $h | quote }} || RC=$?
+                  {{- end }}
                   {{- end }}
                   # PULS WORKEROW DANYCH. Swiezosc wyzej wykrywa SKUTEK - dane
                   # przestaly naplywac - i robi to dopiero po czasie jednej
@@ -172,7 +216,20 @@ spec:
                   # uprawnien, zamaskowanym przez `|| true`, wiec przez 10 godzin
                   # nikt nie odswiezal statusu i nikt tego nie widzial.
                   # Zostaje sama OCENA, ktora jest odczytem.
-                  python services/engine/dozor.py --co instrumenty || RC=$?
+                  #
+                  # PER TOR. Uniwersum equity to 20 handlowalnych instrumentow
+                  # od migracji 0060 i zadne wywolanie ich nie obejmowalo.
+                  #
+                  # UWAGA: dla `equity` to sprawdzenie melduje BRAK POMIARU, nie
+                  # zgodnosc, i nie wysyla powiadomienia - bo odswiezacza statusu
+                  # dla Alpaki nie ma (`services/ingest/instrumenty.py` pyta
+                  # wylacznie Bybita). Alarm co noc o stanie, ktory nie zmieni sie
+                  # bez nowego procesu, uczylby odklikiwac cala kategorie - w tym
+                  # alarmy o wycofaniu pary, ktora naprawde handlujemy. Powod
+                  # i liczby: `dozor.brak_odczytu_statusu`.
+                  {{- range $tor := $tory }}
+                  python services/engine/dozor.py --co instrumenty --engine {{ $tor.engine | quote }} || RC=$?
+                  {{- end }}
                   # `--kind` TAK SAMO JAK NIZEJ przy `--stawki`. Tolerancja
                   # wzgledna uzgodnienia wychodzi z CENNIKA, a nie ze stalej:
                   # taker podmiotu unijnego to 0,250%, czyli 2,5x wiecej niz
@@ -212,7 +269,14 @@ spec:
                   # gdzie i tak codziennie sie zaglada. Dopoki nie ma wypelnien,
                   # wypisuje wprost "NIE ZMIERZONO" - a to jest inna informacja
                   # niz zmierzone zero.
-                  python services/engine/dozor.py --co poslizg
+                  #
+                  # PER TOR, z tego samego powodu co wyzej. Dla equity nie ma
+                  # jeszcze ani jednego wypelnienia, wiec pomiar wypisze wprost
+                  # "NIE ZMIERZONO" - a to jest inna informacja niz zmierzone
+                  # zero i inna niz cisza. Ta linia nie dopisuje sie do RC.
+                  {{- range $tor := $tory }}
+                  python services/engine/dozor.py --co poslizg --engine {{ $tor.engine | quote }}
+                  {{- end }}
                   exit $RC
               env:
                 # ROLA TYLKO DO ODCZYTU (migracja 0034). Czujka odpowiada na

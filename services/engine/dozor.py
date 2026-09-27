@@ -390,6 +390,42 @@ def podsumuj_dryf_cech(wiersze: list[dict],
 MARTWY_PO_MIN = 15
 
 
+# Nazwa procesu w `risk.dozorca_heartbeat`. Z MODULU DOZORCY, nie przepisana:
+# `dozorca.bij_heartbeat` sklada klucz jako f"{NAZWA}:{engine}:{mode}", wiec
+# druga kopia tego napisu tutaj rozjechalaby sie po cichu i to wlasnie ta czujka
+# twierdzilaby wtedy, ze spodziewanego dozorcy nie ma (albo ze jest).
+from services.engine.dozorca import NAZWA as DOZORCA_PULS  # noqa: E402
+
+
+def brakujacy_dozorcy(pary: list[dict], pulsy: list[dict]) -> list[str]:
+    """Dozorcy, ktorych puls NIE POWSTAL ANI RAZU. CZYSTA FUNKCJA.
+
+    DLACZEGO BRAK WIERSZA MUSI BYC OSOBNYM PYTANIEM
+
+    `sprawdz_zywotnosc` iteruje WIERSZE `risk.dozorca_heartbeat`, wiec odpowiada
+    wylacznie na pytanie "czy ten, kto kiedys bil, bije nadal". Dozorca, ktory
+    nigdy nie wstal, nie zostawia wiersza - a brak wiersza jest w tej petli
+    nieodroznialny od spokoju.
+
+    Nie jest to hipoteza. Tor `equity` stal w tym stanie: siedem wlaczonych
+    limitow dla `equity/demo` (zmierzone 2026-09-27), `risk.dozorca_heartbeat`
+    z DOKLADNIE JEDNYM wierszem `dozorca-ryzyka:crypto:demo`, a `wznow()` - jedyna
+    droga automatycznego zwolnienia kill-switcha - ma w calym repozytorium jedno
+    miejsce wywolania, w `dozorca.py`. Kill-switch na torze equity nie mial wiec
+    kto zwolnic poza czlowiekiem w API, i NIC tego nie mowilo.
+
+    KOGO SIE SPODZIEWAMY, BIERZEMY Z LIMITOW, NIE Z LISTY W KODZIE. Para
+    engine/mode, ktora ma wlaczony limit konta, to para, ktorej limity ktos MUSI
+    oceniac niezaleznie od silnika - i odwrotnie: para bez limitow nie ma czego
+    nadzorowac. Lista nazw procesow wpisana tutaj byla by druga kopia zawartosci
+    `values.yaml` i rozjechala by sie przy pierwszym nowym silniku.
+    """
+    maja = {p["nazwa"] for p in pulsy}
+    return [n for n in
+            (f"{DOZORCA_PULS}:{p['engine']}:{p['mode']}" for p in pary)
+            if n not in maja]
+
+
 async def sprawdz_zywotnosc(fetch_all, notify, sucho: bool = False,
                             prog_min: int | None = None) -> int:
     """Czy silniki, ktore MAJA dzialac, faktycznie bija.
@@ -466,6 +502,19 @@ async def sprawdz_zywotnosc(fetch_all, notify, sucho: bool = False,
         print("brak wpisow o zywotnosci silnikow")
         return 0
 
+    # DOZORCA, KTOREGO NIE MA WCALE - patrz `brakujacy_dozorcy`. Pytanie zadane
+    # PRZED petla nizej, bo petla iteruje istniejace wiersze i o nieistniejacym
+    # procesie nie ma jak powiedziec ani slowa.
+    pary = await fetch_all(
+        "SELECT DISTINCT engine::text AS engine, mode::text AS mode"
+        "  FROM risk.limit_def WHERE enabled ORDER BY 1, 2")
+    brakujacy = brakujacy_dozorcy(
+        pary, await fetch_all("SELECT nazwa FROM risk.dozorca_heartbeat"))
+    for nazwa in brakujacy:
+        print(f"  BRAK      {nazwa}: ani jednego uderzenia — limity tej pary "
+              f"nie mają niezależnego oceniającego, a kill-switcha nie ma kto "
+              f"zwolnić (wznow() woła tylko services/engine/dozorca.py)")
+
     martwe = []
     for s in silniki:
         opis = f"{s['etykieta']}/{s['mode']}: {s['status']}, ostatnie uderzenie {s['wiek_min']:.0f} min temu"
@@ -478,7 +527,7 @@ async def sprawdz_zywotnosc(fetch_all, notify, sucho: bool = False,
         else:
             print(f"  żyje     {opis}")
 
-    if not martwe:
+    if not martwe and not brakujacy:
         return 0
 
     if sucho:
@@ -524,6 +573,40 @@ async def sprawdz_zywotnosc(fetch_all, notify, sucho: bool = False,
                          f"{czym} {s['etykieta']} przestał odpowiadać", tresc,
                          engine=s["engine"], severity="critical", data=dane)
         print(f"  powiadomiono o {s['etykieta']}: {len(odbiorcy)} odbiorców")
+
+    for nazwa in brakujacy:
+        # TLUMIENIE DOBOWE, NIE PO `last_beat_at` - bo tego uderzenia nie ma.
+        # Stan jest trwaly (pod wylaczony w chartcie albo niewstajacy), wiec bez
+        # wlasnego okna czujka krzyczalaby co 10 minut: `engine.down` jest
+        # `always_on`, czyli katalogowy cooldown go nie dotyczy. Doba to ten sam
+        # rytm, ktorym `sprawdz_instrumenty` przypomina o zamrozonym kapitale,
+        # i z tego samego powodu: problem jest problemem codziennie, az do
+        # naprawy, ale przypomniany raz na dobe, nie 144 razy.
+        juz = await fetch_all(
+            "SELECT 1 FROM notify.notification WHERE event_code = 'engine.down'"
+            " AND data->>'proces' = %s"
+            " AND created_at > now() - make_interval(hours => 24) LIMIT 1",
+            (nazwa,))
+        if juz:
+            trwale += 1
+            print(f"  (brak dozorcy {nazwa} zgłoszony w ciągu doby — cisza)")
+            continue
+        zgloszone += 1
+        for u in odbiorcy:
+            await notify(
+                u["id"], "engine.down",
+                f"Proces nadzoru {nazwa} nie istnieje",
+                f"`risk.dozorca_heartbeat` nie ma ANI JEDNEGO uderzenia o tej "
+                f"nazwie, a `risk.limit_def` ma dla tej pary włączone limity "
+                f"konta.\n\nZnaczy to, że limity są egzekwowane wyłącznie "
+                f"z wnętrza pętli decyzyjnej: gdy pętla żyje i nic nie robi "
+                f"(zawieszona na zapytaniu), obsunięcia nie liczy nikt. "
+                f"Automatycznego zwolnienia kill-switcha też nie ma — `wznow()` "
+                f"jest wołane wyłącznie z services/engine/dozorca.py.\n\n"
+                f"Sprawdź: kubectl get deploy | grep dozorca",
+                engine=None, severity="critical",
+                data={"proces": nazwa, "powod": "brak_wiersza_pulsu"})
+        print(f"  powiadomiono o braku {nazwa}: {len(odbiorcy)} odbiorców")
 
     # KOD WYJSCIA NIEZEROWY DOKLADNIE WTEDY, GDY POWIADOMIENIE POSZLO.
     #
@@ -1370,6 +1453,34 @@ def ocen_swiezosc(wiersze: list[dict], swiec_zwloki: int = SWIEC_ZWLOKI
     return powody
 
 
+async def rynek_z_sesjami(fetch_all, engine: str) -> bool:
+    """Czy rynek tego silnika ZAMYKA sie - z `ref.venue.is_24_7`.
+
+    TA SAMA KOLUMNA, KTORA ROZSTRZYGA W `sesja.stan_sesji`, i to jest caly powod,
+    dla ktorego ta funkcja istnieje zamiast przelacznika w chartcie. Lista
+    "silniki z sesjami" wpisana do `values.yaml` albo do tego pliku byla by
+    DRUGA KOPIA wiedzy o tym, ktory rynek zamyka - a rozjazd takiej kopii
+    objawilby sie tu cisza albo alarmem co ranek, czyli dwoma stanami, ktorych
+    ten plik tropi.
+
+    DOMYSL IDZIE W STRONE ALARMU. Brak wpisu w `ref.venue` (albo gielda, ktorej
+    nie obslugujemy) znaczy "nie wiem" - i wtedy zostaje zachowanie sprzed tej
+    zmiany, czyli czujka mowi glosno. Domysl "ma sesje" wyciszalby czujke przez
+    BRAK DANEJ, a to jest ten sam ksztalt bledu co `prog_min_equity` liczony
+    z nieistniejacej liczby.
+
+    `code = ANY(OBSLUGIWANE)` tak samo jak w `sesja.venue_silnika`: placeholder
+    `ibkr` z seeda 0008 nie moze wygrac z gielda, na ktorej naprawde stoi konto.
+    """
+    from services.exchanges.fabryka import OBSLUGIWANE
+
+    w = await fetch_all(
+        "SELECT is_24_7 FROM ref.venue"
+        " WHERE engine::text = %s AND code = ANY(%s) ORDER BY id LIMIT 1",
+        (engine, list(OBSLUGIWANE)))
+    return bool(w) and w[0]["is_24_7"] is False
+
+
 async def poza_sesja(fetch_all, engine: str) -> bool:
     """Czy silnik sam zglosil, ze jego rynek jest teraz zamkniety.
 
@@ -1485,6 +1596,49 @@ async def sprawdz_swiezosc(fetch_all, notify, sucho: bool = False,
     powody = ocen_swiezosc(wiersze)
     if not powody:
         print("  bez zastrzeżeń")
+        return 0
+
+    # POMIAR BEZ ALARMU - dla rynku z sesjami, dopoki nie umiemy policzyc wieku
+    # danych W CZASIE SESJI.
+    #
+    # ZMIERZONE, nie przewidziane (produkcja 2026-09-27). Swiece 1h toru equity
+    # siedza na siatce 12:00..20:00 UTC, a sesja otwiera sie 13:30 UTC. Prog to
+    # trzy swiece zrodlowe, czyli 180 min. W chwili otwarcia najnowsza swieca
+    # pochodzi z POPRZEDNIEGO zamkniecia (20:00 UTC dnia poprzedniego), czyli ma
+    # okolo 1050 minut - a `poza_sesja` jest juz `false`, bo gielda zglasza
+    # otwarcie. Czujka meldowalaby wiec "dane nieswieze" KAZDEGO RANKA, od 13:30
+    # do chwili dopisania pierwszej swiecy dnia (okolo 14:20, `history-equity`
+    # co 1200 s) - przy potoku w pelni zdrowym.
+    #
+    # Tlumienie per zrodlo tego nie zasypuje: klucz to "powiadomienie mlodsze
+    # niz ostatni wpis tego zrodla", a ostatnim wpisem jest wczorajsze
+    # zamkniecie, wiec wczorajszy alarm nie tlumi dzisiejszego. Wychodzi z tego
+    # dokladnie jedno powiadomienie `critical` na zrodlo na kazda sesje, czyli
+    # dwa dziennie - i jeden czerwony Job, ktory uczy odklikiwac `engine.down`
+    # takze wtedy, gdy naprawde padnie potok krypto.
+    #
+    # CZEGO BRAKUJE, ZEBY TO ALARMOWALO UCZCIWIE: chwili OTWARCIA biezacej
+    # sesji. `sesja.StanSesji` oddaje `nastepne_otwarcie` i `nastepne_zamkniecie`
+    # (czyli, w sesji, jutrzejsze otwarcie i dzisiejsze zamkniecie), a
+    # `risk.engine_heartbeat.detail` niesie sam `poza_sesja` - stan dwuwartosciowy
+    # bez historii. Z samych swiec tego nie da sie odtworzyc: "rynek wlasnie
+    # wstal" i "potok stoi" maja w `market.candle` IDENTYCZNY obraz - brak
+    # nowych wierszy. Drugi kalendarz w tym pliku byl by druga kopia wiedzy
+    # o godzinach sesji, przed ktora broni `poza_sesja` wyzej.
+    #
+    # Dopoki tej chwili nie zapisuje zaden proces, ten tor dostaje POMIAR:
+    # wiek obu zrodel w logu przy kazdym przebiegu (dzis nie ma go tam wcale),
+    # bez powiadomienia i bez czerwonego Joba. Cisza w logu byla by tu gorsza
+    # od obu tych rzeczy.
+    if await rynek_z_sesjami(fetch_all, engine):
+        for zrodlo, tytul, tresc in powody:
+            print(f"  {tytul}")
+        print(f"  POMIAR BEZ ALARMU: dla `{engine}` wiek danych liczony wobec "
+              f"`now()` nie jest miarą awarii potoku — po otwarciu sesji "
+              f"najnowsza świeca pochodzi z poprzedniego zamknięcia. "
+              f"Powiadomienia NIE wysyłam; proces liczący te dane pilnuje "
+              f"`--co workery`, a chwili otwarcia sesji nie zapisuje dziś "
+              f"żaden proces.")
         return 0
 
     # TLUMIENIE - DO 2026-09-23 TEJ CZUJKI NIE MIALA W OGOLE.
@@ -1942,7 +2096,54 @@ async def sprawdz_kopie(fetch_all, notify, sucho: bool = False) -> int:
 PRZEGLAD_STATUSU_H = 26
 
 
-def ocen_instrumenty(wiersze: list[dict], prog_h: int = PRZEGLAD_STATUSU_H
+def brak_odczytu_statusu(wiersze: list[dict],
+                         bez_odswiezacza: bool = False) -> bool:
+    """Czy dla TEGO silnika status nie zostal odczytany ANI RAZU. CZYSTA FUNKCJA.
+
+    ROZNICA MIEDZY "ODSWIEZACZ STANAL" I "ODSWIEZACZA NIE MA" - i dlaczego
+    nie wolno ich zglaszac tak samo.
+
+    `sprawdz_instrumenty` mierzy wiek kolumny `status_sprawdzony_at`. Dla
+    krypto pusta data znaczy "zadanie `services/ingest/instrumenty.py`
+    przestalo chodzic" - czyli awarie do naprawienia. Dla toru `equity`
+    znaczy co innego: tamto zadanie pyta WYLACZNIE Bybita
+    (`ref.venue WHERE code = 'bybit'`, `instrumenty.main`) i chart wola je bez
+    `--engine`, wiec dla zadnej akcji nie odczytalo statusu nigdy i nie
+    odczyta, dopoki ktos nie napisze odswiezacza dla Alpaki. Zmierzone na
+    produkcji 2026-09-27: 20 handlowalnych instrumentow equity, z tego
+    `status_sprawdzony_at` ustawione dla ZERA; dla krypto dla wszystkich 34.
+
+    Alarm o tym stanie przychodzilby przy kazdym przebiegu zadania (co 10 min),
+    a `instrument.suspended` ma katalogowy cooldown 3600 s, czyli 24 maile na
+    dobe o rzeczy, ktora nie zmieni sie sama NIGDY. To jest dokladnie wzorzec
+    zmierzony w tym pliku 2026-09-12 przy kill-switchu: sygnal, ktory przychodzi
+    zawsze, uczy odklikiwac CALA kategorie - w tym te alarmy o wycofaniu, ktore
+    dotycza pary naprawde handlowanej.
+
+    Dlatego "ani razu" jest tu BRAKIEM POMIARU: wypisywanym w logu przy kazdym
+    przebiegu, bez powiadomienia i bez czerwonego Joba.
+
+    CZEGO TA FUNKCJA NIE UCISZA - i to sa DWIE osobne granice, obie konieczne.
+
+    PIERWSZA: `bez_odswiezacza` musi byc prawda, czyli gieldy tego silnika nie
+    pyta o status ZADEN proces (`instrumenty.VENUE_ODSWIEZANY`). Dla krypto pusta
+    data znaczy "zadanie `trader-instrumenty` przestalo chodzic" - i to jest
+    awaria do obudzenia czlowieka, dokladnie ta, ktora 2026-09-24 przelezala
+    10 godzin za `|| true`. Domysl parametru to `False`, czyli "odswiezacz
+    istnieje", wiec dla krypto ta funkcja nie ucisza NICZEGO.
+
+    DRUGA: warunek jest "ANI JEDEN wiersz tego silnika nie ma daty", a nie "ten
+    wiersz nie ma daty". Odswiezacz, ktory chodzi i POMIJA czesc uniwersum (nowy
+    instrument, nowa kategoria, zmieniony symbol), zostawia mieszanke - i wtedy
+    alarm idzie jak dotad, bo wtedy jest to naprawde rozjazd, a nie brak
+    mechanizmu.
+    """
+    return (bez_odswiezacza and bool(wiersze)
+            and all(r["sprawdzony_h"] is None for r in wiersze))
+
+
+def ocen_instrumenty(wiersze: list[dict], prog_h: int = PRZEGLAD_STATUSU_H,
+                     bez_odswiezacza: bool = False
                      ) -> list[tuple[str, str, str]]:
     """Czy uniwersum nadal istnieje u giełdy. CZYSTA FUNKCJA.
 
@@ -1973,8 +2174,9 @@ def ocen_instrumenty(wiersze: list[dict], prog_h: int = PRZEGLAD_STATUSU_H
 
     powody: list[tuple[str, str, str]] = []
 
-    nieswiezy = [r for r in wiersze
-                 if r["sprawdzony_h"] is None or r["sprawdzony_h"] > prog_h]
+    nieswiezy = [] if brak_odczytu_statusu(wiersze, bez_odswiezacza) else [
+        r for r in wiersze
+        if r["sprawdzony_h"] is None or r["sprawdzony_h"] > prog_h]
     if nieswiezy:
         opis = ", ".join(
             f"{r['symbol']} ({'nigdy' if r['sprawdzony_h'] is None else str(r['sprawdzony_h']) + ' h temu'})"
@@ -2029,6 +2231,27 @@ def ocen_instrumenty(wiersze: list[dict], prog_h: int = PRZEGLAD_STATUSU_H
     return powody
 
 
+async def venue_bez_odswiezacza(fetch_all, engine: str) -> bool:
+    """Czy gieldy TEGO silnika nie pyta o status zaden proces.
+
+    `services/ingest/instrumenty.py` - jedyny odswiezacz statusu w repozytorium -
+    pyta wylacznie gieldy `VENUE_ODSWIEZANY` i chodzi bez `--engine`. Silnik,
+    ktorego gielda nie jest ta gielda, nie ma wiec ani jednego procesu
+    ustawiajacego `ref.instrument.status_sprawdzony_at`, a jego pusta kolumna nie
+    jest awaria - jest brakiem mechanizmu.
+
+    NAZWA GIELDY IDZIE Z MODULU ODSWIEZACZA, nie jest przepisana. Druga kopia
+    tego napisu rozjechalaby sie w dniu, w ktorym ktos dopisze adapter statusu
+    dla Alpaki - i to wlasnie ta czujka twierdzilaby wtedy dalej, ze pomiaru nie
+    ma, czyli MILCZALABY o pierwszej awarii nowego odswiezacza.
+    """
+    from services.ingest.instrumenty import VENUE_ODSWIEZANY
+
+    return not await fetch_all(
+        "SELECT 1 FROM ref.venue WHERE engine::text = %s AND code = %s LIMIT 1",
+        (engine, VENUE_ODSWIEZANY))
+
+
 async def sprawdz_instrumenty(fetch_all, notify, sucho: bool = False, *,
                               engine: str = "crypto", mode: str = "demo",
                               prog_h: int | None = None) -> int:
@@ -2040,6 +2263,7 @@ async def sprawdz_instrumenty(fetch_all, notify, sucho: bool = False, *,
     akurat wtedy, gdy dotyczy pary, którą naprawdę handlujemy.
     """
     prog = PRZEGLAD_STATUSU_H if prog_h is None else prog_h
+    bez_odswiezacza = await venue_bez_odswiezacza(fetch_all, engine)
     wiersze = await fetch_all(
         "SELECT i.symbol, i.tradeable, i.status_gieldy,"
         "       round(extract(epoch from (now() - i.status_sprawdzony_at))/3600)::int"
@@ -2055,8 +2279,18 @@ async def sprawdz_instrumenty(fetch_all, notify, sucho: bool = False, *,
         " ORDER BY i.symbol",
         {"engine": engine, "mode": mode})
     print(f"instrumenty ({engine}/{mode}): {len(wiersze)} w uniwersum lub z pozycją")
+    if brak_odczytu_statusu(wiersze, bez_odswiezacza):
+        # BRAK POMIARU, NIE ZGODNOSC. Uzasadnienie w `brak_odczytu_statusu`.
+        # Linia idzie przy KAZDYM przebiegu, zeby stan nie stal sie cisza.
+        print(f"  BRAK POMIARU: statusu u giełdy nie odczytano dla ANI JEDNEGO "
+              f"z {len(wiersze)} instrumentów tego silnika — dla `{engine}` nie "
+              f"istnieje proces, który by o to pytał (services/ingest/"
+              f"instrumenty.py pyta wyłącznie Bybita i chodzi bez --engine). "
+              f"To nie jest potwierdzenie handlu: delisting w tym stanie "
+              f"przeszedłby niezauważony. Powiadomienia NIE wysyłam — stan jest "
+              f"trwały i nie zmieni się bez nowego odświeżacza.")
 
-    powody = ocen_instrumenty(wiersze, prog)
+    powody = ocen_instrumenty(wiersze, prog, bez_odswiezacza)
     if not powody:
         print("  bez zastrzeżeń")
         return 0

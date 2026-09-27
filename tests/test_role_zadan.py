@@ -22,11 +22,34 @@ SZABLONY = KORZEN / "charts/trader/templates"
 ZAPISUJACE = ("services/ingest/instrumenty.py",)
 
 
+# KOMENTARZ NIE JEST WYWOLANIEM.
+#
+# Skanowanie po surowej tresci szablonu liczylo WZMIANKE o skrypcie
+# w uzasadnieniu jak jego uruchomienie - a te szablony sa uzasadnieniami gesto
+# pokryte. 2026-09-27 zapalilo to `test_skrypt_zapisujacy_...` na zmianie, ktora
+# nie dodala ani jednego wywolania, tylko komentarz tlumaczacy, dlaczego dla toru
+# equity odswiezacza NIE MA.
+#
+# Zdjecie komentarzy nie moze niczego ukryc, i to jest tu warunek konieczny:
+# wiersz za `#` nie jest przez powloke wykonywany, a komentarz Helma nie trafia
+# nawet do manifestu. Przeciwna kolejnosc bledu (test uspokojony komentarzem)
+# jest wiec niemozliwa, a ta jedna byla realna.
+_KOMENTARZ_HELMA = re.compile(r"\{\{-?/\*.*?\*/-?\}\}", re.S)
+
+
+def bez_komentarzy(tekst: str) -> str:
+    tekst = _KOMENTARZ_HELMA.sub("", tekst)
+    return "\n".join(w.split("#")[0] for w in tekst.splitlines())
+
+
 def zadania_z_rolami() -> dict[str, tuple[str, str]]:
-    """Nazwa pliku -> (polecenia kontenera, rola bazodanowa)."""
+    """Nazwa pliku -> (polecenia kontenera, rola bazodanowa).
+
+    Tresc jest OCZYSZCZONA Z KOMENTARZY - patrz `bez_komentarzy` wyzej.
+    """
     wynik = {}
     for plik in SZABLONY.glob("*.yaml"):
-        tresc = plik.read_text(encoding="utf-8")
+        tresc = bez_komentarzy(plik.read_text(encoding="utf-8"))
         role = re.findall(r'"trader\.rolaDbEnv"\s*\(dict\s+"ctx"\s+\S+\s+"rola"\s+"(\w+)"', tresc)
         if role:
             wynik[plik.name] = (tresc, role)

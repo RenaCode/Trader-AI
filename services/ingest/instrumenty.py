@@ -51,6 +51,22 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 
+# GIELDA, KTOREJ TEN PROCES PYTA O STATUS - I JEDYNA, KTOREJ PYTA.
+#
+# Do 2026-09-27 ten napis stal w SQL-u wewnatrz `main()`, wiec z zewnatrz nie
+# dalo sie odpowiedziec na pytanie "czy status instrumentow silnika X ma kto
+# odswiezac". Odpowiedz jest potrzebna czujce: `dozor.py --co instrumenty`
+# mierzy WIEK kolumny `status_sprawdzony_at`, a pusta data znaczy dwie rozne
+# rzeczy - "odswiezacz stanal" (awaria) albo "odswiezacza dla tej gieldy nie
+# ma" (brak pomiaru). Patrz `dozor.brak_odczytu_statusu`.
+#
+# Stala, a nie argument: rozszerzenie na Alpake to nie podmiana hosta, tylko
+# drugi adapter statusu (inne slowniki stanu, inny endpoint, inne reguly
+# `Filtry`). Dopoki go nie ma, ta nazwa ma byc CZYTELNA Z ZEWNATRZ, zeby brak
+# pokrycia nie udawal zgodnosci.
+VENUE_ODSWIEZANY = "bybit"
+
+
 def rozbieznosci(w_bazie: list[dict], z_gieldy: dict[str, dict]) -> list[dict]:
     """Co trzeba zmienić, żeby baza zgadzała się z giełdą. CZYSTA FUNKCJA.
 
@@ -474,9 +490,11 @@ async def main() -> int:
         # odbiciem kazdego zlecenia komunikatem o "too many decimals", ktory
         # wskazuje na nasze zaokraglanie zamiast na zrodlo reguly.
         host = await fetch_one(
-            "SELECT demo_host, live_host FROM ref.venue WHERE code = 'bybit'")
+            "SELECT demo_host, live_host FROM ref.venue WHERE code = %s",
+            (VENUE_ODSWIEZANY,))
         if not host:
-            sys.exit("brak wpisu ref.venue dla bybit - nie wiadomo, kogo pytac")
+            sys.exit(f"brak wpisu ref.venue dla {VENUE_ODSWIEZANY}"
+                     " - nie wiadomo, kogo pytac")
         adres = host["demo_host"] if args.mode == "demo" else host["live_host"]
 
         # BEZ KLUCZA. Endpoint instrumentow jest publiczny, wiec adapter
