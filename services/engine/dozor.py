@@ -2713,6 +2713,138 @@ async def sprawdz_kanaly(fetch_all, notify, sucho: bool = False) -> int:
     return kod_wyjscia(len(braki), 0, "alarm krytyczny tylko w panelu")
 
 
+# Powody pominiecia, ktore znacza ODLOZENIE, a nie odmowe. Lista jest DODATNIA:
+# `journal.pominiecie` trzyma takze powody, ktore znacza swiadoma odmowe wejscia
+# (pasmo ceny, sesja, minimum wartosci) i te NIE sa awaria - swieca dostaje wtedy
+# decyzje `hold`. Odlozenie jest czym innym: decyzji NIE MA jeszcze wcale.
+POWODY_ODLOZENIA = ("niepelne_sygnaly", "za_malo_cech")
+
+
+def ocen_odlozone_bez_decyzji(wiersze: list[dict]) -> list[tuple[str, str]]:
+    """Swiece ODLOZONE, do ktorych petla nigdy nie wrocila. CZYSTA FUNKCJA.
+
+    Wiersz opisuje jedna swiece jednego instrumentu: `symbol`, `bar_start`,
+    `powod`. Oddaje (klucz, opis); klucz jest stabilny, zeby wolajacy mogl po nim
+    tlumic, tak samo jak w pozostalych czujkach.
+
+    ZERO JEST WARTOSCIA ODNIESIENIA, I TO JEST ZMIERZONE. Odlozenie samo w sobie
+    nie jest awaria - to normalna praca maszyny: cechy pochodne sa gotowe od razu
+    po zamknieciu swiecy, a cenowe 20-35 min pozniej, wiec pierwszy cykl odklada,
+    a ktorys z nastepnych rozstrzyga (uzasadnienie bramki `MIN_POKRYCIE`
+    w `loop.py` i w commicie d8c7759). Zmierzone na produkcji 2026-09-27 na CALEJ
+    historii `journal.pominiecie`: kazdego dnia 40-120 odlozen i KAZDE skonczylo
+    sie decyzja w swoim oknie. Dlatego czujka nie ma progu tolerancji - jeden
+    taki wiersz jest odstepstwem od stanu, ktory trwa od poczatku.
+    """
+    return [(f"{w['symbol']}:{w['bar_start'].isoformat()}",
+             f"{w['symbol']} świeca {w['bar_start']:%m-%d %H:%M} "
+             f"({w['powod']})") for w in wiersze]
+
+
+async def sprawdz_odlozone_decyzje(fetch_all, notify, sucho: bool = False, *,
+                                   engine: str = "crypto", mode: str = "demo",
+                                   bar: str = "4h", okno_h: int = 48) -> int:
+    """Czy swieca ODLOZONA przez niepelne sygnaly dostala potem decyzje.
+
+    CZEGO TA CZUJKA PILNUJE, A CZEGO NIE
+
+    Bramka `MIN_POKRYCIE` z 2026-09-22 slusznie zamienila handel na niepelnym
+    komplecie sygnalow (jedenascie dni, pokrycie 0,02-0,10) na ODLOZENIE decyzji.
+    Zamienila przy tym awarie GLOSNA na CICHA: przy trwalym braku cech kazda
+    swieca zostanie odlozona, nikt nie wejdzie w rynek, a silnik bez wejsc
+    wyglada dokladnie tak samo jak silnik na spokojnym rynku. Puls bije, swiece
+    przychodza, zadania sa zielone.
+
+    Zadna z jedenastu pozostalych czujek tego nie widzi: `journal.pominiecie` nie
+    bylo czytane przez ani jedna z nich, a licznik `odlozone_niepelne` zyje
+    wylacznie w pamieci petli.
+
+    NIE ZASTEPUJE `engine.down`. Petla, ktora nie chodzi wcale, nie zapisuje tez
+    odlozen, wiec ta miara wtedy milczy - i tak ma byc, bo o tamtym stanie mowi
+    `risk.engine_heartbeat`. Ta pilnuje stanu ODWROTNEGO: petla zyje, cyklicznie
+    odklada i nigdy nie wraca.
+
+    OKNO SWIECY BIERZEMY Z HORYZONTU, nie z parametru: "czy wrocil w oknie tej
+    swiecy" znaczy co innego dla swiecy godzinnej i czterogodzinnej, a druga
+    definicja dlugosci swiecy w tym pliku rozjechalaby sie z `horizons.py`.
+    """
+    from services.engine.horizons import get as get_horizon
+
+    if await poza_sesja(fetch_all, engine):
+        print(f"odlozone ({engine}/{mode}): rynek zamkniety — poza sesja swiece "
+              f"nie powstaja, wiec nie ma czego rozstrzygac")
+        return 0
+
+    h = get_horizon(bar)
+    wiersze = await fetch_all(
+        "SELECT i.symbol, p.bar_start, p.powod"
+        "  FROM journal.pominiecie p"
+        "  JOIN ref.instrument i ON i.id = p.instrument_id"
+        " WHERE p.engine::text = %s AND p.mode::text = %s"
+        "   AND p.powod = ANY(%s)"
+        "   AND p.bar_start >= now() - make_interval(hours => %s)"
+        # SWIECA MUSI BYC ZAMKNIETA I MIEC SZANSE NA DRUGI CYKL. Swieca trwajaca
+        # jest odlozona ZGODNIE Z ZAMYSLEM i alarm o niej zapalalby sie przy
+        # kazdym przebiegu na w pelni zdrowym systemie.
+        "   AND p.bar_start < now() - make_interval(mins => %s)"
+        "   AND NOT EXISTS ("
+        "         SELECT 1 FROM journal.decision d"
+        "          WHERE d.instrument_id = p.instrument_id"
+        "            AND d.engine = p.engine AND d.mode = p.mode"
+        "            AND d.decided_at >= p.bar_start"
+        "            AND d.decided_at < p.bar_start"
+        "                              + make_interval(mins => %s))"
+        " ORDER BY p.bar_start DESC, i.symbol",
+        (engine, mode, list(POWODY_ODLOZENIA), okno_h,
+         2 * h.bar_minutes, h.bar_minutes))
+
+    braki = ocen_odlozone_bez_decyzji(wiersze)
+    if not braki:
+        print(f"odlozone ({engine}/{mode}, {bar}, {okno_h} h): kazda odlozona "
+              f"swieca dostala decyzje w swoim oknie")
+        return 0
+
+    tytul = (f"{len(braki)} × świeca odłożona i NIEROZSTRZYGNIĘTA "
+             f"({engine}/{mode}, {bar})")
+    tresc = (
+        f"Pętla odłożyła te świece z powodu niepełnych sygnałów i nigdy do nich "
+        f"nie wróciła — w żadnej z nich nie było ŻADNEJ decyzji, ani wejścia, "
+        f"ani wyjścia, ani `hold`:\n  "
+        + "\n  ".join(opis for _, opis in braki[:20])
+        + (f"\n  … i {len(braki) - 20} więcej" if len(braki) > 20 else "")
+        + f"\n\nWartością odniesienia jest ZERO: na całej historii produkcji "
+          f"każde odłożenie kończyło się decyzją w swoim oknie (zmierzone "
+          f"2026-09-27, 40–120 odłożeń na dobę, zero nierozstrzygniętych).\n\n"
+          f"Handel stoi, ale nie z powodu rynku ani ryzyka — z powodu braku "
+          f"danych. Silnik bez wejść wygląda identycznie jak silnik na spokojnym "
+          f"rynku, dlatego ten stan ma własny alarm. Sprawdź pokrycie wag "
+          f"w `journal.decision.pokrycie_sygnalow` i świeżość cech "
+          f"w `feat.feature_value`; bramkę opisuje `MIN_POKRYCIE` w loop.py.")
+    print(f"\n  {tytul}")
+    for _, opis in braki[:20]:
+        print(f"    {opis}")
+    if sucho:
+        print("  Tryb suchy — powiadomienie nie wysylane.")
+        return len(braki)
+
+    # TLUMIENIE TYM SAMYM WARUNKIEM, KTOREGO UZYWA `notify()` - uzasadnienie
+    # w `sprawdz_kanaly`: dwa warunki tlumienia mierzace co innego zawsze sie
+    # rozjada, a rozjazd objawia sie Jobem czerwonym bez konca.
+    juz = await fetch_all(
+        "SELECT 1 FROM notify.notification"
+        " WHERE event_code = 'engine.decyzje_odlozone'"
+        "   AND created_at > now() - interval '24 hours' LIMIT 1")
+    if juz:
+        return kod_wyjscia(0, len(braki), "swieca odlozona bez decyzji")
+    odbiorcy = await fetch_all('SELECT id FROM app."user" WHERE is_active')
+    for u in odbiorcy:
+        await notify(u["id"], "engine.decyzje_odlozone", tytul, tresc,
+                     engine=engine, severity="critical",
+                     data={"ile": len(braki), "bar": bar,
+                           "klucze": "+".join(sorted(k for k, _ in braki[:20]))})
+    return kod_wyjscia(len(braki), 0, "swieca odlozona bez decyzji")
+
+
 async def sprawdz_dryf(fetch_all, notify, sucho: bool = False, *,
                        engine: str = "crypto", bar: str = "4h",
                        teraz: datetime | None = None) -> int:
@@ -2855,7 +2987,7 @@ async def main() -> int:
     ap.add_argument("--co", default="stan-nauki",
                     choices=("stan-nauki", "zywotnosc", "ryzyko", "kopie",
                              "swiezosc", "egzekucja", "poslizg", "instrumenty",
-                             "workery", "dryf", "kanaly"),
+                             "workery", "dryf", "kanaly", "odlozone"),
                     help="stan-nauki: czy wynik treningu sie zmienil; "
                          "dryf: czy rozklad cech odjechal od treningowego I TAK "
                          "ZOSTAL - stan trwaly, ktorego 'stan-nauki' z definicji "
@@ -2886,7 +3018,7 @@ async def main() -> int:
     ap.add_argument("--mode", default="demo",
                     help="tryb rachunku; dotyczy sprawdzen czytajacych egzekucje")
     ap.add_argument("--okno-h", type=int, default=None, dest="okno_h",
-                    help="okno w godzinach dla --co poslizg; domyslnie od poczatku, "
+                    help="okno w godzinach dla --co poslizg i --co odlozone; dla poslizgu domyslnie od poczatku, "
                          "bo przy probie rzedu kilku wypelnien kazde okno wyrzuca "
                          "czesc jedynych obserwacji, jakie sa")
     # Domyslnie horyzont, ktorym handluje silnik. Tory porownawcze (np. 1h) maja
@@ -2936,6 +3068,15 @@ async def main() -> int:
         if args.co == "dryf":
             return await sprawdz_dryf(fetch_all, notify, sucho=args.sucho,
                                       engine=args.engine, bar=args.bar)
+        if args.co == "odlozone":
+            # `--okno-h` ma domyslnie None (dla `--co poslizg` znaczy to "od
+            # poczatku"), a tutaj None wywrocilo by zapytanie. Domyslne 48 h to
+            # dwanascie swiec czterogodzinnych - dosc, zeby stan trwajacy dobe
+            # byl widoczny, i za malo, zeby wracac do awarii sprzed tygodnia,
+            # o ktorej ktos juz wie.
+            return await sprawdz_odlozone_decyzje(
+                fetch_all, notify, sucho=args.sucho, engine=args.engine,
+                mode=args.mode, bar=args.bar, okno_h=args.okno_h or 48)
 
         wiersze = await fetch_all(
             "SELECT status, windows_total, windows_positive, positive_ci_low,"

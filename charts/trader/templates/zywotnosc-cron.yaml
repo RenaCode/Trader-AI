@@ -172,6 +172,30 @@ spec:
                   # niego samego (market 60 s, history 1200 s), wiec nie ma tu
                   # drugiej kopii tej liczby do rozjechania.
                   python services/engine/dozor.py --co workery   || RC=$?
+                  # SWIECA ODLOZONA I NIEROZSTRZYGNIETA - dziura, ktora otworzyla
+                  # poprawka z 2026-09-22.
+                  #
+                  # Bramka `MIN_POKRYCIE = 0,9` slusznie zamienila handel na
+                  # niepelnym komplecie sygnalow (jedenascie dni, pokrycie
+                  # 0,02-0,10) na ODLOZENIE decyzji. Zamienila przy tym awarie
+                  # GLOSNA na CICHA: przy trwalym braku cech kazda swieca
+                  # zostanie odlozona, nikt nie wejdzie w rynek, a silnik bez
+                  # wejsc wyglada dokladnie tak samo jak silnik na spokojnym
+                  # rynku. Puls bije (linia wyzej), swiece przychodza (czujka
+                  # swiezosci), zadania sa zielone.
+                  #
+                  # DLACZEGO NIE WYSTARCZA ZADNA Z POZOSTALYCH: `journal.pominiecie`
+                  # nie bylo czytane przez ani jedna z nich, a licznik
+                  # `odlozone_niepelne` zyje wylacznie w pamieci petli.
+                  #
+                  # TOR I HORYZONT, tak samo jak przy swiezosci: "czy wrocil
+                  # w oknie tej swiecy" znaczy co innego dla 1h i 4h, a equity
+                  # ma wlasny kalendarz sesji (czujka sama milczy poza sesja).
+                  {{- range $tor := $tory }}
+                  {{- range $h := $tor.horyzonty }}
+                  python services/engine/dozor.py --co odlozone --engine {{ $tor.engine | quote }} --bar {{ $h | quote }} || RC=$?
+                  {{- end }}
+                  {{- end }}
                   # CZY ALARM MA JAK OPUSCIC PANEL.
                   #
                   # Wszystkie czujki wyzej koncza sie powiadomieniem. Ta sprawdza
