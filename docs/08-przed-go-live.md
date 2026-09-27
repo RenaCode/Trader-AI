@@ -333,8 +333,36 @@ nizsza niz w symulacji, na obu nogach.
       Dzis przed shortami na Alpace chroni nas wylacznie niewdrozony silnik —
       zabezpieczenie przez przypadek. Zmiana w kodzie, nie migracja: tabeli
       cennika w bazie nie ma
-- [ ] `adjustment: "raw"` u Alpaki — trzy podzialy 10:1, okolo 670 swiec w
-      cieniu jednego zdarzenia. Kazdy kolejny split wymusza powtorzenie backfillu
+- [ ] korekta o podzialy akcji u Alpaki — MECHANIZM GOTOWY, OPERACJA DO
+      WYKONANIA. Adapter pobiera od 2026-09-27 `adjustment=split`
+      (`services/exchanges/alpaca.py:KOREKTA_SWIEC`; `all` odrzucone — wliczaloby
+      dywidendy, ktorych zaden rachunek silnika nie przyjmuje). Zapisana historia
+      jest nadal NIESKORYGOWANA: w `market.candle` leza trzy podzialy 10:1
+      (NVDA 2024-06-10, AVGO 2024-07-15, NFLX 2025-11-17), a `ret_long` siega
+      168 swiec, wiec jedno zdarzenie zatruwa okolo 670 swiec po sobie.
+      Cztery kroki, W TEJ KOLEJNOSCI, z poda `trader-api` (tam SECRETS_KEY):
+
+        1. `python services/ingest/korekta_podzialow.py --sucho`
+           pomiar, nic nie zapisuje. Zestawienie z `--korekta raw` pokazuje,
+           czy parametr w ogole dochodzi do dostawcy (musza wyjsc ROZNE liczby)
+        2. `python services/ingest/korekta_podzialow.py --przepisz`
+           przepisuje szereg 1h, jedna transakcja na instrument: albo caly
+           szereg instrumentu, albo ani jeden jego wiersz. Znacznika NIE stawia
+        3. `python services/ingest/features.py --bar 1h --engine equity
+           --okno-dni 1400 --once`
+           KROK OBOWIAZKOWY: trener czyta `feat.feature_value`, nie swiece,
+           a `features-equity` chodzi z `--okno-dni 7` i okien z 2024 nie
+           dotknie nigdy
+        4. `python services/ingest/korekta_podzialow.py --znacznik`
+           stawia znacznik, ale najpierw sprawdza, czy zapisane cechy zgadzaja
+           sie ze swiecami (przelicza je w transakcji, ktora wycofuje).
+           Rozjazd = odmowa
+
+      Kazdy kolejny podzial uniewaznia cala zapisana historie (Alpaca koryguje
+      wzgledem DZIS). Od 2026-09-27 nie jest to jednak cicha awaria:
+      `backfill.py` porownuje przy kazdym przebiegu osiem ostatnich swiec
+      z tym, co oddaje dostawca, i po wykryciu przeskalowania ZDEJMUJE znacznik,
+      czyli przywraca bramke w `train.py`
 
 Po stronie pozytywnej: karta kosztow rozroznia teraz stan pochodzenia kazdego
 skladnika. Spread z obcej ksiegi wchodzi jako PODLOGA, nie jako pomiar, a karta

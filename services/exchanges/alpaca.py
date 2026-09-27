@@ -66,12 +66,59 @@ DATA_HOST = "https://data.alpaca.markets"
 # sie cicho: bramka pytalaby o klucz, ktorego nikt nie ustawia, i milczalaby
 # ZAWSZE albo krzyczala ZAWSZE, w obu przypadkach niezaleznie od danych.
 #
-# ZNACZNIKA NIE USTAWIA NIC W TYM REPOZYTORIUM - i tak ma byc. Ustawic go wolno
-# dopiero po przejsciu na `adjustment=split` i POWTORZENIU backfillu `equity 1h`;
-# dopoki tego nie ma, bramka w `services/engine/train.py` odmawia treningu
-# equity. Znacznik wpisany "zeby ruszylo" zamienilby nieznany stan danych
-# w potwierdzony i to jest jedyny sposob, w jaki ta bramka moze zawiesc.
+# ZNACZNIK STAWIA DOKLADNIE JEDNO MIEJSCE: `services/ingest/korekta_podzialow.py
+# --znacznik`, i tylko instrumentowi, ktoremu PRZEPISAL caly szereg (slad
+# w `market.korekta_swiec`, migracja 0065) oraz ktorego zapisane cechy zgadzaja
+# sie z tymi swiecami. Zadna migracja go nie stawia i stawiac nie moze: migracja
+# nie dotyka tresci swiec, wiec znacznik z migracji bylby klamstwem od pierwszej
+# sekundy. Znacznik wpisany "zeby ruszylo" zamienilby nieznany stan danych
+# w potwierdzony i to jest jedyny sposob, w jaki bramka w `train.py` moze zawiesc.
+#
+# ZNACZNIK ZDEJMUJE `services/ingest/backfill.py`, gdy zauwazy, ze dostawca
+# oddaje przeskalowane ceny dla swiec, ktore juz mamy - czyli po kolejnym
+# podziale. Bez tego znacznik raz postawiony mowilby `true` na zawsze, takze
+# o szeregu, ktory nowy podzial znowu zatrul.
 ZNACZNIK_KOREKTY_PODZIALOW = "swiece_skorygowane_o_podzialy"
+
+# JAKA KOREKTA IDZIE DO ALPACA DATA.
+#
+# Alpaca przyjmuje `adjustment` w czterech wartosciach: `raw` (BRAK korekty),
+# `split`, `dividend` i `all`. DOMYSLNA PO STRONIE DOSTAWCY JEST `raw` - dlatego
+# ten parametr byl tu zawsze wpisany JAWNIE, do 2026-09-27 wlasnie jako `raw`,
+# i dlatego zapisana historia jest nieskorygowana. Nie opieramy tego na
+# dokumentacji: w `market.candle` widac trzy skoki x10 (zmierzone nizej).
+#
+# ZGODA WLASCICIELA NA ZMIANE: 2026-09-27, wprost.
+#
+# DLACZEGO `split`, A NIE `all`. TO ROZSTRZYGNIECIE O TYM, CO MIERZYMY.
+#
+#   1. `all` doklada do ceny takze dywidendy, a wynik silnika liczy sie ze ZMIAN
+#      CENY: `train.py` sumuje zwroty ze swiec i odejmuje koszt rundy, a zaden
+#      rachunek silnika nie przyjmuje dywidendy. Szereg skorygowany o dywidendy
+#      pokazywalby wiec zwrot, ktorego pozycja NIE OSIAGA - dla dlugiej zawyzony
+#      o stope dywidendy, dla krotkiej zanizony o te sama wielkosc, bo krotka
+#      dywidende PLACI. Taki blad nie objawia sie awaria: Sharpe wychodzi
+#      wyzszy i nic nie pada.
+#   2. Alpaca koryguje wzgledem DZIS, wiec wspolczynnik zmienia sie przy KAZDYM
+#      zdarzeniu, ktore obejmuje korekta. Dla `split` to trzy zdarzenia na 2,5
+#      roku i 20 instrumentow (NVDA 2024-06-10, AVGO 2024-07-15, NFLX
+#      2025-11-17). Dla `all` to KAZDA dywidenda, czyli kilkadziesiat zdarzen
+#      w roku - a `history-equity` chodzi z `--days 3`, czyli utrzymuje sam
+#      ogon szeregu. Przy `all` ogon bylby wiecznie skorygowany inaczej niz
+#      korpus, a nieciaglosc siedzialaby w srodku okna treningowego i nic by
+#      o niej nie mowilo.
+#
+# CZEGO TA STALA NIE ZALATWIA. Przelaczenie jej dotyczy WYLACZNIE swiec
+# pobieranych OD TERAZ. Historia zapisana wczesniej zostaje nieskorygowana,
+# dopoki nie przepisze jej `services/ingest/korekta_podzialow.py` - i dopiero
+# ten skrypt stawia `ZNACZNIK_KOREKTY_PODZIALOW`, zdejmujac bramke z `train.py`.
+KOREKTA_SWIEC = "split"
+
+# Dopuszczalne wartosci `adjustment`. Whitelista trzyma rozstrzygniecie u nas:
+# jak Alpaca zachowuje sie przy wartosci spoza tej listy, NIE JEST ZMIERZONE,
+# a odpowiedz "200 OK z cenami nieskorygowanymi" byla by cicha i nierozpoznawalna
+# od poprawnej.
+KOREKTY_DOPUSZCZALNE = ("raw", "split", "dividend", "all")
 
 # Nazwy taktow po stronie Alpaca Data. Klucze to nasze `timeframe`
 # z `market.candle` - te same, ktorych uzywa adapter Bybita.
@@ -314,7 +361,8 @@ class AlpacaAdapter:
 
     async def fetch_candles(self, symbol: str, timeframe: str = "1m", limit: int = 200,
                             start: datetime | None = None,
-                            end: datetime | None = None) -> list[Candle]:
+                            end: datetime | None = None, *,
+                            korekta: str | None = None) -> list[Candle]:
         """Swiece z Alpaca Data. Rosnaco po czasie, jak u Bybita.
 
         Alpaca stronicuje przez `next_page_token` i oddaje najwyzej 10 000
@@ -326,39 +374,38 @@ class AlpacaAdapter:
         tf = TIMEFRAMES.get(timeframe)
         if not tf:
             raise ValueError(f"nieobslugiwany timeframe: {timeframe}")
-        # `adjustment: "raw"` - CENY NIESKORYGOWANE O PODZIALY AKCJI. Dlug
-        # swiadomy, opisany, NIE pomylka do cichego poprawienia.
+        # KOREKTA O PODZIALY AKCJI - `KOREKTA_SWIEC` na gorze modulu, tam powod
+        # wyboru `split` zamiast `all` i tam zgoda wlasciciela.
         #
-        # CO TO ZNACZY DLA CECH. Podzial 10:1 wyglada w szeregu jak spadek
-        # o 90%, bo cena z dnia na dzien dzieli sie przez dziesiec, a my
-        # zapisujemy oba stany obok siebie. Zmierzone na produkcji 2026-09-24,
-        # `ret_short__1h` (zwrot z czterech swiec):
+        # CO ZALEZY OD TEJ JEDNEJ WARTOSCI. Podzial 10:1 w szeregu
+        # NIESKORYGOWANYM wyglada jak spadek o 90%, bo cena z dnia na dzien
+        # dzieli sie przez dziesiec, a my zapisujemy oba stany obok siebie.
+        # Zmierzone w `market.candle` 2026-09-27 (zwrot ze swiecy na swieca,
+        # timeframe 1h, uniwersum decyzyjne equity):
         #
-        #     NVDA  2024-06-10   -90,25 %      podzial 10:1
-        #     AVGO  2024-07-15   -90,07 %      podzial 10:1
-        #     NFLX  2025-11-17   -90,12 %      podzial 10:1
+        #     NVDA  2024-06-10 12:00Z   1208,42 -> 120,50   x0,0997
+        #     AVGO  2024-07-15 13:00Z   1698,62 -> 169,99   x0,1001
+        #     NFLX  2025-11-17 14:00Z   1112,11 -> 110,59   x0,0994
         #
-        # To NIE sa ruchy rynku. `ret_long` siega 168 swiec wstecz, a bufor EMA
-        # 288, wiec jedno zdarzenie zatruwa okolo 670 swiec po sobie - i wchodzi
-        # do treningu jako obserwacja kilkunastosigmowa, ktora zdominuje kazda
-        # kalibracje nieodporna na wartosci skrajne.
+        # To NIE sa ruchy rynku. `ret_long` na horyzoncie 1h siega 168 swiec,
+        # a rozgrzewka 200, wiec jedno zdarzenie zatruwa okolo 670 swiec po
+        # sobie - i wchodzi do treningu jako obserwacja kilkunastosigmowa,
+        # ktora zdominuje kazda kalibracje nieodporna na wartosci skrajne.
         #
-        # DLACZEGO WCIAZ `raw`. Przejscie na `split` nie jest zmiana jednego
-        # slowa: Alpaca koryguje ceny wzgledem DZIS, wiec kazdy kolejny podzial
-        # uniewaznia cala zapisana historie i wymaga POWTORZENIA BACKFILLU.
-        # Dopoki silnik equity nie handluje, dlug jest tanszy niz operacja.
-        #
-        # Zanim ktokolwiek bedzie trenowal equity na serio: najpierw `split`
-        # i pelny backfill `equity 1h`, potem trening.
-        #
-        # OD 2026-09-25 TA KOLEJNOSC JEST WYMUSZONA, A NIE ZALECANA. `train.py`
-        # przerywa tor equity, dopoki kazdy instrument uniwersum nie ma znacznika
-        # `ZNACZNIK_KOREKTY_PODZIALOW` w `ref.instrument.meta` (patrz stala na
-        # gorze modulu). Samo zdanie w komentarzu nie zatrzymalo niczego: tor
-        # equity byl juz wpisany do `trainerCron.equity` i probowal trenowac
-        # kazdej nocy.
+        # `korekta` PRZEKAZUJE SIE JAWNIE TYLKO DO POMIARU. Sluzy do zestawienia
+        # "ile wierszy rozni sie miedzy `raw` i `split`" w
+        # `services/ingest/korekta_podzialow.py --sucho`; sciezka ZAPISUJACA
+        # swiece nie podaje go wcale i dostaje `KOREKTA_SWIEC`. Bez tego
+        # zestawienia nie da sie sprawdzic, czy parametr w ogole dochodzi do
+        # dostawcy - a parametr, ktory nie dochodzi, milczy.
+        wybrana = KOREKTA_SWIEC if korekta is None else korekta
+        if wybrana not in KOREKTY_DOPUSZCZALNE:
+            raise ValueError(
+                f"nieznana korekta swiec: {wybrana!r} "
+                f"(dopuszczalne: {', '.join(KOREKTY_DOPUSZCZALNE)})")
         params: dict = {"symbols": symbol, "timeframe": tf, "feed": self._feed,
-                        "adjustment": "raw", "limit": min(limit, 10_000), "sort": "asc"}
+                        "adjustment": wybrana, "limit": min(limit, 10_000),
+                        "sort": "asc"}
         if start is not None:
             params["start"] = start.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
         if end is not None:
