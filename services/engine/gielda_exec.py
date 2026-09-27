@@ -282,8 +282,11 @@ WIEK_ARKUSZA_MAX_S = 60
 
 
 async def arkusz_wysylki(adapter, symbol: str, kategoria: str, teraz: datetime
-                         ) -> tuple[Oferty | None, str]:
-    """Najlepsze oferty z ksiegi EGZEKUCJI w chwili wysylki. Zwraca (oferty, skad).
+                         ) -> tuple[Oferty | None, str, dict]:
+    """Najlepsze oferty z ksiegi EGZEKUCJI w chwili wysylki.
+
+    Zwraca (oferty, skad, slad). `slad` to ten sam odczyt W POSTACI NADAJACEJ
+    SIE DO `exec.order.raw` - patrz sekcja "TRZECI ELEMENT" nizej.
 
     `ksiega_egzekucji=True` NIE JEST TU DOMYSLNA WYGODA, TYLKO CALY SENS
     ODCZYTU. Host publiczny (api.bybit.com) i host egzekucji (api.bybit.eu
@@ -303,29 +306,93 @@ async def arkusz_wysylki(adapter, symbol: str, kategoria: str, teraz: datetime
     Wywolujacy ma dwie rozne reakcje zaleznie od roli zlecenia (wyjscia nie
     wolno zatrzymac, wejscia nie wolno wyslac po cenie sprzed godziny), wiec
     decyzje o tym podejmuje on, a nie ten odczyt.
+
+    TRZECI ELEMENT: SLAD ODCZYTU, BO BEZ NIEGO ODRZUCENIA SIE NIE DA PRZYPISAC
+    (2026-09-27)
+
+    `skad` jest ZDANIEM DLA CZLOWIEKA i do rozstrzygania przyczyn nie sluzy:
+    nie da sie po nim filtrowac, a znacznika arkusza w ogole nie zawiera.
+    Zmierzone na produkcji: `exec.order.raw` zlecen 61, 62 i 64 (odrzucone
+    przez `EC_PostOnlyWillTakeLiquidity`) ma `powod_odmowy_gieldy`
+    i `venue_order_id`, ale ANI BIDU, ANI ASKU, ANI WIEKU ODCZYTU. Dwie
+    przyczyny o PRZECIWNYCH lekarstwach daja wiec identyczny wiersz:
+
+      * arkusz byl STARY - `WIEK_ARKUSZA_MAX_S` dopuszcza odczyt do minuty,
+        a to znaczy "zacisnij prog wieku";
+      * rynek ODJECHAL miedzy odczytem a przyjeciem zlecenia - to znaczy
+        "jeden tick marginesu to za malo".
+
+    Dlatego odczyt oddaje te same liczby DRUGI RAZ, w postaci do zapisania.
+    ZERO dodatkowych zapytan do gieldy: `slad` powstaje z tej samej odpowiedzi
+    `fetch_order_book`, ktora i tak juz mamy w rekach.
+
+    `odczyt_at` JEST TU PO TO, ZEBY NIE LICZYC WIEKU Z `submitted_at`.
+    `exec.order.submitted_at` to `now()`, czyli znacznik TRANSAKCJI cyklu -
+    wszystkie zlecenia jednego cyklu maja go identyczny co do mikrosekundy
+    (zmierzone: zlecenia 63 i 64 oba 2026-09-27 05:11:28.059192+00) i lezy on
+    PRZED odczytem arkusza, nie w jego chwili. `odczyt_at` to `teraz` podane
+    przez wywolujacego, czyli zegar z chwili odczytu.
     """
+    slad: dict = {"odczyt_at": teraz.isoformat(), "bid": None, "ask": None,
+                  "arkusz_at": None, "wiek_s": None, "powod_braku": None}
     try:
         ksiega = await adapter.fetch_order_book(symbol, 1, ksiega_egzekucji=True)
     except ExchangeError as e:
         # `SymbolNieListowany` wpada tutaj jako podklasa i to jest poprawne:
         # z punktu widzenia CENY oba stany znacza to samo - arkusza nie ma.
         # Rozniaca je trwalosc ma znaczenie dla workera rynku, nie dla nas.
-        return None, f"arkusz księgi egzekucji NIEODCZYTANY ({e})"
+        skad = f"arkusz księgi egzekucji NIEODCZYTANY ({e})"
+        return None, skad, {**slad, "powod_braku": skad}
     if not ksiega.bids or not ksiega.asks:
-        return None, "arkusz księgi egzekucji przyszedł BEZ ofert po jednej ze stron"
+        skad = "arkusz księgi egzekucji przyszedł BEZ ofert po jednej ze stron"
+        return None, skad, {**slad, "powod_braku": skad,
+                            "arkusz_at": ksiega.event_time.isoformat()}
     wiek = abs((teraz - ksiega.event_time).total_seconds())
+    # ZNACZNIK I WIEK ZAPISUJEMY TAKZE WTEDY, GDY ODCZYT ODRZUCAMY. Bez tego
+    # "arkusz byl za stary" zostawaloby wiedza wylacznie tej funkcji, a wlasnie
+    # ona rozstrzyga miedzy dwoma przeciwnymi lekarstwami.
+    slad = {**slad, "arkusz_at": ksiega.event_time.isoformat(),
+            "wiek_s": round(wiek, 3),
+            "bid": str(ksiega.bids[0].price), "ask": str(ksiega.asks[0].price)}
     if wiek > WIEK_ARKUSZA_MAX_S:
         # SWIEZA CENA Z ODCZYTU SPRZED GODZINY TO TEN SAM BLAD W NOWYM MIEJSCU.
-        return None, (f"arkusz księgi egzekucji ma {wiek:.0f} s "
-                      f"(granica {WIEK_ARKUSZA_MAX_S} s) — znacznik oferty "
-                      f"{ksiega.event_time:%Y-%m-%d %H:%M:%S}, to nie jest "
-                      f"cena z chwili wysyłki")
+        skad = (f"arkusz księgi egzekucji ma {wiek:.0f} s "
+                f"(granica {WIEK_ARKUSZA_MAX_S} s) — znacznik oferty "
+                f"{ksiega.event_time:%Y-%m-%d %H:%M:%S}, to nie jest "
+                f"cena z chwili wysyłki")
+        return None, skad, {**slad, "powod_braku": skad}
     oferty = Oferty(bid=ksiega.bids[0].price, ask=ksiega.asks[0].price)
     if not oferty.kompletne:
-        return None, (f"arkusz księgi egzekucji ODWRÓCONY albo zerowy "
-                      f"(bid {oferty.bid}, ask {oferty.ask}) — odczyt zepsuty")
+        skad = (f"arkusz księgi egzekucji ODWRÓCONY albo zerowy "
+                f"(bid {oferty.bid}, ask {oferty.ask}) — odczyt zepsuty")
+        return None, skad, {**slad, "powod_braku": skad}
     return oferty, (f"arkusz księgi egzekucji {oferty.bid}/{oferty.ask} "
-                    f"(wiek {wiek:.1f} s)")
+                    f"(wiek {wiek:.1f} s)"), slad
+
+
+def slad_wysylki(arkusz: dict, ceny: dict, plan: dict,
+                 cena: Decimal | None) -> dict:
+    """Blok `exec.order.raw.arkusz_wysylki`: arkusz, jego WIEK i cena wyslana.
+
+    DLACZEGO PRZY KAZDYM ZLECENIU, A NIE TYLKO PRZY ODRZUCONYM. Bo pojedynczy
+    wiersz odrzucenia nie mowi nic o tym, czy ten arkusz byl NIETYPOWY. Odsetek
+    odrzucen PostOnly po poprawce z 2026-09-26 07:47:39Z to 3 na 6 zlecen
+    z limitem - zeby ustalic, czym te trzy roznily sie od tamtych trzech,
+    potrzebne sa liczby dla WSZYSTKICH szesciu. Zapis tylko przy odmowie daje
+    zbior bez grupy odniesienia, czyli pomiar, z ktorego nie wynika nic.
+
+    `cena is None` ZNACZY "W TYM CYKLU NIC NIE WYSLALISMY" - tak wchodzi tu
+    sciezka, w ktorej sprawdzenie odmowilo, a zlecenie i tak lezy u gieldy
+    z poprzedniego cyklu. Zapisanie tam ceny byloby zapisaniem nieprawdy:
+    ta liczba nie poszla nigdzie.
+
+    ZERO DODATKOWYCH ZAPYTAN DO GIELDY. Wszystko, co tu wchodzi, pochodzi
+    z odpowiedzi, ktore `zloz_plan` i tak juz odebral: `arkusz` z `arkusz_wysylki`,
+    `ceny` z `sprawdz_zlecenie`.
+    """
+    return {**arkusz, **ceny,
+            "cena_planu": str(plan["limit_price"]),
+            "cena_wyslana": None if cena is None else str(cena)}
 
 
 async def zloz_plan(cur, adapter, plan: dict, f: Filtry, *, engine: str,
@@ -384,13 +451,17 @@ async def zloz_plan(cur, adapter, plan: dict, f: Filtry, *, engine: str,
     # arkusza zostawia nam `lastPrice`, padniecie obu zatrzymuje WEJSCIA
     # (nizej), ale nie wyjscia. Jeden odczyt na wszystko znaczylby, ze awaria
     # jednego endpointu wstrzymuje handel - gorsze lekarstwo niz choroba.
-    oferty, skad_ceny = await arkusz_wysylki(
+    oferty, skad_ceny, slad_arkusza = await arkusz_wysylki(
         adapter, plan["symbol"], kategoria, datetime.now(timezone.utc))
 
+    # SLAD ZRODLA CENY WYPELNIA `sprawdz_zlecenie`, bo tam ten wybor zapada.
+    # Odtworzenie go tutaj byloby druga kopia regul kolejnosci zrodel.
+    slad_ceny: dict = {}
     ilosc, cena, powod = sprawdz_zlecenie(
         Decimal(plan["qty"]), Decimal(plan["limit_price"]), f,
         kupno=kupno, wyjscie=wyjscie,
-        cena_odniesienia=odniesienie, atr_pct=atr, najlepsze=oferty)
+        cena_odniesienia=odniesienie, atr_pct=atr, najlepsze=oferty,
+        slad=slad_ceny)
 
     # GRANICA, ZA KTORA NIE WCHODZIMY - I SLAD PO NIEJ W DZIENNIKU.
     #
@@ -561,7 +632,11 @@ async def zloz_plan(cur, adapter, plan: dict, f: Filtry, *, engine: str,
                  json.dumps({"execution": "gielda",
                              "etap": "odmowa_a_zlecenie_u_gieldy",
                              "powod_odmowy": powod,
-                             "status_gieldy": istnieje.status})))
+                             "status_gieldy": istnieje.status,
+                             # `cena=None`: w TYM cyklu nic nie poszlo na
+                             # gielde, zlecenie lezy tam z poprzedniego.
+                             "arkusz_wysylki": slad_wysylki(
+                                 slad_arkusza, slad_ceny, plan, None)})))
             return True, (f"giełda zna to zlecenie mimo odmowy sprawdzenia"
                           f" ({powod}) — plan zostaje do rozstrzygnięcia")
 
@@ -574,7 +649,9 @@ async def zloz_plan(cur, adapter, plan: dict, f: Filtry, *, engine: str,
             " VALUES (%s,%s,%s,%s,%s,%s,%s,'limit',%s,%s,'rejected',%s,now(),%s)",
             (plan["decision_id"], plan["id"], engine, mode, plan["instrument_id"],
              id_zlecenia(plan["id"]), plan["side"], plan["qty"], plan["limit_price"],
-             powod, json.dumps({"execution": "gielda", "etap": "przed_zlozeniem"})))
+             powod, json.dumps({"execution": "gielda", "etap": "przed_zlozeniem",
+                                "arkusz_wysylki": slad_wysylki(
+                                    slad_arkusza, slad_ceny, plan, cena)})))
 
         # POZYCJA, KTOREJ JUZ NIGDY NIE DA SIE SPRZEDAC, MUSI ZOSTAC DOMKNIETA.
         #
@@ -642,7 +719,8 @@ async def zloz_plan(cur, adapter, plan: dict, f: Filtry, *, engine: str,
         return await odmowa_gieldy(
             cur, adapter, plan, f, e, ilosc=ilosc, cena=cena, engine=engine,
             mode=mode, kategoria=kategoria, wyjscie=wyjscie, kupno=kupno,
-            odniesienie=odniesienie, atr=atr)
+            odniesienie=odniesienie, atr=atr,
+            slad_arkusza=slad_arkusza, slad_ceny=slad_ceny)
     except ExchangeError as e:
         # NIE OZNACZAMY PLANU JAKO ODRZUCONEGO. Zlecenie moglo wejsc mimo bledu
         # odpowiedzi; rozstrzygniecie w nastepnym cyklu zapyta gielde po naszym
@@ -655,7 +733,9 @@ async def zloz_plan(cur, adapter, plan: dict, f: Filtry, *, engine: str,
             " VALUES (%s,%s,%s,%s,%s,%s,%s,'limit',%s,%s,'unknown',%s,now(),%s)",
             (plan["decision_id"], plan["id"], engine, mode, plan["instrument_id"],
              id_zlecenia(plan["id"]), plan["side"], ilosc, cena, str(e),
-             json.dumps({"execution": "gielda", "etap": "odpowiedz_nie_dotarla"})))
+             json.dumps({"execution": "gielda", "etap": "odpowiedz_nie_dotarla",
+                         "arkusz_wysylki": slad_wysylki(
+                             slad_arkusza, slad_ceny, plan, cena)})))
         return False, f"odpowiedź nie dotarła ({e}) — stan sprawdzimy po naszym id"
 
     cur.execute(
@@ -665,7 +745,9 @@ async def zloz_plan(cur, adapter, plan: dict, f: Filtry, *, engine: str,
         " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,'limit',%s,%s,%s,now(),%s)",
         (plan["decision_id"], plan["id"], engine, mode, plan["instrument_id"],
          z.id_gieldy, z.id_wlasne, plan["side"], ilosc, cena, z.status,
-         json.dumps({"execution": "gielda", "juz_istnialo": z.juz_istnialo})))
+         json.dumps({"execution": "gielda", "juz_istnialo": z.juz_istnialo,
+                     "arkusz_wysylki": slad_wysylki(
+                         slad_arkusza, slad_ceny, plan, cena)})))
     return True, ("odnalezione u giełdy (idempotencja)" if z.juz_istnialo
                   else f"złożone {ilosc} @ {cena}")
 
@@ -673,8 +755,9 @@ async def zloz_plan(cur, adapter, plan: dict, f: Filtry, *, engine: str,
 async def odmowa_gieldy(cur, adapter, plan: dict, f: Filtry, blad: OdmowaGieldy, *,
                         ilosc: Decimal, cena: Decimal, engine: str, mode: str,
                         kategoria: str, wyjscie: bool, kupno: bool,
-                        odniesienie: Decimal | None,
-                        atr: float | None) -> tuple[bool, str]:
+                        odniesienie: Decimal | None, atr: float | None,
+                        slad_arkusza: dict | None = None,
+                        slad_ceny: dict | None = None) -> tuple[bool, str]:
     """Giełda ODMÓWIŁA przyjęcia zlecenia. Zapisuje to jako fakt, nie jako niewiedzę.
 
     DLACZEGO TO JEST OSOBNA ŚCIEŻKA, A NIE GAŁĄŹ W `except ExchangeError`
@@ -720,6 +803,8 @@ async def odmowa_gieldy(cur, adapter, plan: dict, f: Filtry, blad: OdmowaGieldy,
     się stało.
     """
     id_w = id_zlecenia(plan["id"])
+    slad_arkusza = {} if slad_arkusza is None else slad_arkusza
+    slad_ceny = {} if slad_ceny is None else slad_ceny
     meta = {"execution": "gielda", "etap": "odmowa_gieldy",
             "rodzaj_odmowy": blad.rodzaj, "kod_gieldy": blad.code,
             "ilosc_z_ksiag": str(ilosc)}
@@ -763,10 +848,14 @@ async def odmowa_gieldy(cur, adapter, plan: dict, f: Filtry, blad: OdmowaGieldy,
             # Ta sama funkcja, co przy pierwszym podejsciu — reguly gieldy
             # sprawdzamy dla NOWEJ ilosci, bo nizsza ilosc potrafi wpasc pod
             # `min_notional` albo minimum ilosci.
+            # `slad=slad_ceny` NADPISUJE zrodlo ceny, i to jest celowe: ta
+            # proba idzie BEZ `najlepsze`, czyli po cenie z `cena_odniesienia`.
+            # Zostawienie tu sladu z pierwszego podejscia opisywaloby arkuszem
+            # cene, ktora z arkusza nie wyszla.
             ilosc2, cena2, powod2 = sprawdz_zlecenie(
                 potwierdzone, Decimal(plan["limit_price"]), f,
                 kupno=kupno, wyjscie=True,
-                cena_odniesienia=odniesienie, atr_pct=atr)
+                cena_odniesienia=odniesienie, atr_pct=atr, slad=slad_ceny)
             if powod2:
                 meta["zastepcze"] = f"niemozliwe ({powod2})"
                 powod += (f" | ilości potwierdzonej też nie da się wysłać:"
@@ -798,7 +887,9 @@ async def odmowa_gieldy(cur, adapter, plan: dict, f: Filtry, blad: OdmowaGieldy,
             " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,'limit',%s,%s,%s,%s,now(),%s)",
             (plan["decision_id"], plan["id"], engine, mode, plan["instrument_id"],
              zastepcze.id_gieldy, id_w, plan["side"], ilosc, cena,
-             zastepcze.status, powod, json.dumps(meta)))
+             zastepcze.status, powod,
+             json.dumps({**meta, "arkusz_wysylki": slad_wysylki(
+                 slad_arkusza, slad_ceny, plan, cena)})))
         return True, (f"giełda odmówiła ({blad}); złożone {ilosc} @ {cena} —"
                       f" tyle, ile giełda potwierdza. " + powod)
 
@@ -810,7 +901,9 @@ async def odmowa_gieldy(cur, adapter, plan: dict, f: Filtry, blad: OdmowaGieldy,
         " status, reject_reason, submitted_at, raw)"
         " VALUES (%s,%s,%s,%s,%s,%s,%s,'limit',%s,%s,'rejected',%s,now(),%s)",
         (plan["decision_id"], plan["id"], engine, mode, plan["instrument_id"],
-         id_w, plan["side"], ilosc, cena, powod, json.dumps(meta)))
+         id_w, plan["side"], ilosc, cena, powod,
+         json.dumps({**meta, "arkusz_wysylki": slad_wysylki(
+             slad_arkusza, slad_ceny, plan, cena)})))
     return False, f"giełda ODRZUCIŁA zlecenie: {powod}"
 
 

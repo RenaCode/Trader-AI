@@ -488,8 +488,19 @@ def sprawdz_zlecenie(ilosc: Decimal, cena: Decimal, f: Filtry, *,
                      cena_odniesienia: Decimal | None = None,
                      atr_pct: float | None = None,
                      bary: float = BARY_ZYCIA_PLANU,
-                     najlepsze: Oferty | None = None) -> tuple[Decimal, Decimal, str | None]:
+                     najlepsze: Oferty | None = None,
+                     slad: dict | None = None) -> tuple[Decimal, Decimal, str | None]:
     """Zwraca (ilosc, cena, powod_odmowy). `powod_odmowy is None` znaczy: wolno.
+
+    `slad` (OPCJONALNY) JEST WYPELNIANY W MIEJSCU, GDZIE ZRODLO CENY SIE
+    ROZSTRZYGA - i tylko dlatego jest tu, a nie u wywolujacego. Egzekucja musi
+    zapisac do `exec.order.raw`, czy cena wyszla z ARKUSZA, czy z zapasowej
+    `cena_odniesienia` (`lastPrice`), bo te dwa zrodla roznia sie o rzad
+    spreadu - na zleceniu 54 `lastPrice` lezalo JEDENASCIE tickow nad askiem.
+    Gdyby wywolujacy odtwarzal ten wybor u siebie (`if oferty is not None ...`),
+    mialby DRUGA kopie regul kolejnosci zrodel nizej i rozjechalaby sie z nia
+    przy pierwszej zmianie - a rozjazd byloby widac dopiero w raporcie
+    z produkcji, jako opis przyczyny wskazujacy nie to zrodlo, ktore zadzialalo.
 
     `kupno` i `wyjscie` SĄ ROZDZIELONE CELOWO. Kusi, żeby wyprowadzić jedno
     z drugiego — „wyjście to sprzedaż" — ale to prawda tylko dla pozycji
@@ -554,6 +565,11 @@ def sprawdz_zlecenie(ilosc: Decimal, cena: Decimal, f: Filtry, *,
     tymi dwiema kolumnami JEST zapisem zdarzenia.
     """
     rola = "WYJŚCIE" if wyjscie else "wejście"
+    # DOMYSLNIE "plan", bo odmowy ponizej wychodza ZANIM cena zostanie
+    # podmieniona - i wtedy cena naprawde jest ta z planu.
+    if slad is not None:
+        slad["zrodlo_ceny"] = "plan"
+        slad["cena_rynkowa"] = None
     if not f.kompletne:
         brak = [n for n, v in (("krok ilości", f.krok_ilosci),
                                ("krok ceny", f.krok_ceny),
@@ -598,15 +614,25 @@ def sprawdz_zlecenie(ilosc: Decimal, cena: Decimal, f: Filtry, *,
     if najlepsze is not None and najlepsze.kompletne:
         rynkowa = cena_makera(najlepsze.pasywna(kupno=kupno), f.krok_ceny,
                               kupno=kupno)
+        zrodlo = "arkusz"
     elif pasmo is not None:
         rynkowa = cena_makera(pasmo.odniesienie, f.krok_ceny, kupno=kupno)
+        zrodlo = "cena_odniesienia"
     else:
         rynkowa = None
+        zrodlo = "plan"
     # Krok ceny wiekszy od samej ceny to regula bez sensu dla tego instrumentu;
     # cena zero lub ujemna nie jest lepsza od planowej, a o wartosci zlecenia
     # wypowiada sie ponizej minimum wartosci.
     if rynkowa is not None and rynkowa > 0:
         c = rynkowa
+    else:
+        # Odrzucona cena rynkowa NIE JEST zrodlem wyslanej ceny. Zapisanie tu
+        # "arkusz" mowiloby, ze arkusz zadzialal, a wyslalibysmy cene z planu.
+        zrodlo = "plan"
+    if slad is not None:
+        slad["zrodlo_ceny"] = zrodlo
+        slad["cena_rynkowa"] = None if rynkowa is None else str(rynkowa)
 
     if i <= 0:
         return i, c, (f"{rola}: ilość {ilosc} po zaokrągleniu do kroku "
