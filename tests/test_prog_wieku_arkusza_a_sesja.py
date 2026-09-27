@@ -360,9 +360,134 @@ def test_run_once_pyta_o_sesje_PONOWNIE_przed_wysylka():
     drugiego odczytu ta szczelina jest dokładnie tą, w której zlecenie idzie po
     cenie zamknięcia.
     """
+    # KOMENTARZE ODFILTROWANE PRZED SZUKANIEM. Pierwsza wersja tego testu
+    # czytala cale zrodlo i dawala sie zaspokoic komentarzem obok kodu - ta
+    # sama wada, ktora opisuje `test_petla_NIE_bramkuje_wysylki_stanem_killswitcha`.
     zrodlo = (KORZEN / "services/engine/loop.py").read_text(encoding="utf-8")
-    przed_wysylka = zrodlo.split("import zloz_oczekujace")[1]
-    assert "stan_sesji" in przed_wysylka.split("stats.update")[0], (
-        "`zloz_oczekujace` jest wołane bez świeżego odczytu stanu sesji")
-    assert re.search(r"sesja=\w+", przed_wysylka.split("conn.commit")[0]), (
-        "stan sesji nie jest przekazywany do `zloz_oczekujace`")
+    kod = "\n".join(w for w in zrodlo.splitlines()
+                    if not w.lstrip().startswith("#"))
+    przed_wysylka = kod.split("import zloz_oczekujace")[1]
+    wywolanie = przed_wysylka.split("conn.commit")[0]
+
+    # NAZWA ZMIENNEJ Z PRZYPISANIA, a nie wzorzec `sesja=\w+`.
+    #
+    # Pierwsza wersja sprawdzala `re.search(r"sesja=\w+", ...)` i PRZECHODZILA
+    # dla `sesja=None`, bo `\w+` dopasowuje sie do slowa "None". Bramka
+    # w `zloz_plan` stoi na `sesja is not None`, wiec to bylo dokladnie ciche
+    # wylaczenie calej oslony przy zielonym tescie. Teraz test wyciaga nazwe
+    # zmiennej, do ktorej przypisano wynik `stan_sesji`, i wymaga, zeby TA
+    # nazwa poszla do `zloz_oczekujace`.
+    m = re.search(r"(\w+) = await stan_sesji\(", wywolanie)
+    assert m, ("`zloz_oczekujace` jest wołane bez świeżego odczytu stanu "
+               "sesji — brak przypisania z `stan_sesji` przed wysyłką")
+    assert re.search(r"sesja=" + m.group(1) + r"\b", wywolanie), (
+        "do `zloz_oczekujace` nie idzie świeżo policzony stan sesji "
+        "(`sesja=" + m.group(1) + "`) — literał `None` w tym miejscu cicho "
+        "wyłącza całą bramkę, bo `zloz_plan` pyta `sesja is not None`")
+
+
+# ======================== 6. PUNKT INTEGRACJI: obiekt sesji naprawde dochodzi
+
+# WADA, KTORA TA SEKCJA PILNUJE, I DLACZEGO POPRZEDNIE TESTY JEJ NIE LAPALY
+#
+# Bramka w `zloz_plan` brzmi `sesja is not None and not sesja.wolno_decydowac`,
+# wiec `sesja=None` CICHO POMIJA JA CALA i wejscia wychodza - dokladnie stare,
+# zepsute zachowanie. Testy wyzej pilnuja `zloz_plan` GDY dostanie obiekt sesji;
+# ani jeden nie pilnowal, ze `run_once` ten obiekt w ogole podaje. Zmiana
+# `sesja=sesja_wysylki` na `sesja=None` w `loop.run_once` przechodzila caly
+# zestaw 2163 testow na zielono.
+#
+# Komentarz w kodzie mowi "petla decyzyjna przekazuje stan zawsze", ale to jest
+# ZALOZENIE O WOLAJACYM, nie gwarancja. Ten sam ksztalt obalil premise migracji
+# 0060: cos bylo prawda o jednym miejscu i nieprawda o zlozeniu.
+
+@pytest.mark.skipif(not TEST_DB_URL,
+                    reason="ustaw TEST_DB_URL na jednorazową bazę z migracjami")
+@pytest.mark.parametrize("otwarta_przy_wysylce", [False, True, None])
+def test_run_once_PRZEKAZUJE_obiekt_sesji_do_wysylki(otwarta_przy_wysylce,
+                                                    monkeypatch):
+    """`zloz_oczekujace` musi dostać obiekt sesji, a nie `None`.
+
+    Test przebiega PRAWDZIWY `run_once` na prawdziwej bazie i podstawia atrapę
+    pod samą wysyłkę, żeby zapisać, co do niej doszło. Sprawdza trzy rzeczy,
+    bo każda z nich osobno daje się spełnić przypadkiem:
+
+      * że obiekt sesji doszedł W OGÓLE (`sesja is not None`) — to łapie
+        `sesja=None`, czyli ciche pominięcie bramki,
+      * że opisuje stan Z CHWILI WYSYŁKI, a nie z początku cyklu — bramka
+        widzi `otwarta=True`, a zegar przy wysyłce mówi co innego,
+      * że `None` W ŚRODKU obiektu (stan NIEZNANY) jest odróżnialny od braku
+        obiektu — to dwie różne rzeczy i tylko jedna z nich wyłącza bramkę.
+
+    Parametr `True` nie jest ozdobą: bez niego test przechodziłby także dla
+    kodu, który na sztywno podstawia sesję zamkniętą.
+    """
+    import psycopg
+    from psycopg.rows import dict_row
+
+    from services.engine import gielda_exec
+    from services.engine.loop import run_once
+    from services.exchanges.alpaca import Zegar
+
+    class GieldaZZegarem:
+        """Adapter equity. Zegar oddaje stan Z CHWILI WYSYLKI."""
+
+        def __init__(self, otwarta):
+            self._otwarta = otwarta
+            if otwarta is None:
+                # BRAK ZEGARA, a nie zegar oddajacy None: tak wyglada adapter
+                # bez polaczenia. `stan_sesji` robi z tego `otwarta=None`.
+                self.zegar = None
+
+        async def zegar(self):
+            t = dt.datetime.now(dt.timezone.utc)
+            return Zegar(teraz=t, otwarta=self._otwarta,
+                         nastepne_otwarcie=t, nastepne_zamkniecie=t)
+
+        async def cena_odniesienia(self, symbol, kategoria=None):
+            return D(OSTATNIA_TRANSAKCJA)
+
+        async def fetch_order_book(self, symbol, depth=50, *,
+                                   ksiega_egzekucji=True):
+            return None
+
+        async def stan_zlecenia(self, id_wlasne, kategoria="spot"):
+            return None
+
+        async def zlecenia_otwarte(self, **kw):
+            return []
+
+        async def pozycje(self, **kw):
+            return []
+
+    doszlo = dict()
+
+    async def atrapa_wysylki(cur, adapter, **kw):
+        doszlo.update(kw)
+        return dict(zlozone=0, odrzucone=0)
+
+    monkeypatch.setattr(gielda_exec, "zloz_oczekujace", atrapa_wysylki)
+
+    with psycopg.connect(TEST_DB_URL, row_factory=dict_row) as conn:
+        asyncio.run(run_once(
+            conn, "equity", mode="demo", kind_kosztow="stock", limit=True,
+            verbose=False, gielda=GieldaZZegarem(otwarta_przy_wysylce),
+            wymagaj_modelu=False,
+            # BRAMKA 1 WIDZI SESJE OTWARTA. Gdyby test podawal tu stan
+            # zamkniety, cykl skonczylby sie na bramce i nigdy nie dotarl do
+            # wysylki - czyli nie sprawdzilby niczego o przekazaniu.
+            sesja=StanSesji(True, "zegar giełdy")))
+
+    assert "sesja" in doszlo, (
+        "`zloz_oczekujace` zostało zawołane BEZ argumentu `sesja` — bramka "
+        "w `zloz_plan` stoi na `sesja is not None`, więc jej brak cicho "
+        "przepuszcza wejścia")
+    assert doszlo["sesja"] is not None, (
+        "`zloz_oczekujace` dostało `sesja=None` — bramka sesji jest wtedy "
+        "pomijana w całości i wejścia wychodzą poza sesją, czyli wraca "
+        "zachowanie sprzed poprawki")
+    assert doszlo["sesja"].otwarta is otwarta_przy_wysylce, (
+        "stan sesji nie pochodzi z CHWILI WYSYŁKI: zegar giełdy mówi "
+        + str(otwarta_przy_wysylce) + ", a do wysyłki doszło "
+        + str(doszlo["sesja"].otwarta) + " — czytany jest stan z początku "
+        "cyklu, czyli szczelina 15:59 wobec 16:00 jest wciąż otwarta")
