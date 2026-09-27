@@ -32,7 +32,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import feedparser
 import httpx
 import psycopg
-from psycopg.rows import dict_row
+from psycopg.rows import dict_row, tuple_row
 
 from services.api.security import SecretBox
 from services.ingest import puls
@@ -132,8 +132,23 @@ def _klucz(conn, nazwa_sekretu: str, nazwa_env: str) -> str | None:
     `tests/test_rola_skanera_wiadomosci.py` - inaczej nowy dostawca spadalby
     po cichu na sciezke zapasowa ze srodowiska, a worker pracowalby dalej.
     """
-    row = conn.execute("SELECT value_enc FROM app.secret_llm WHERE name = %s",
-                       (nazwa_sekretu,)).fetchone()
+    # WLASNY KURSOR Z JAWNA FABRYKA WIERSZY, a nie `conn.execute`.
+    #
+    # `conn.execute` bierze fabryke z POLACZENIA, a ta zalezy od wolajacego.
+    # `news_worker` ustawia `dict_row` tylko na kursorze, wiec dostawal krotki
+    # i `row[0]` dzialalo. `postmortem.py` laczy sie z `row_factory=dict_row`
+    # na poziomie POLACZENIA, wiec dostawal slownik - a `row[0]` na slowniku
+    # rzuca `KeyError: 0`. Zmierzone: nocny przebieg `trader-postmortem`
+    # z 2026-09-27 05:50 UTC padl dokladnie tu.
+    #
+    # Ta sama funkcja dzialala wiec u jednego wolajacego i padala u drugiego,
+    # a nic w jej sygnaturze tego nie zdradzalo. `tuple_row` zdejmuje te
+    # zaleznosc: `row[0]` jest poprawne niezaleznie od tego, jak polaczenie
+    # zostalo otwarte.
+    with conn.cursor(row_factory=tuple_row) as cur:
+        cur.execute("SELECT value_enc FROM app.secret_llm WHERE name = %s",
+                    (nazwa_sekretu,))
+        row = cur.fetchone()
     if row:
         return SecretBox().decrypt(bytes(row[0]))
     return os.environ.get(nazwa_env) or None
