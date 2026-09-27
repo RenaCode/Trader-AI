@@ -394,7 +394,8 @@ def pokrycie_wag(policzone: Iterable[str], regime: str,
 
 def combine(precomputed: dict[str, SignalOutput], regime: str,
             weights: dict[str, float] | None,
-            with_contributions: bool = True) -> tuple[float, float, list[dict]]:
+            with_contributions: bool = True,
+            slad: dict | None = None) -> tuple[float, float, list[dict]]:
     """Skleja policzone wczesniej sygnaly w jeden wynik wedlug wag.
 
     Musi dawac DOKLADNIE to samo co evaluate() - jest na to test.
@@ -430,6 +431,28 @@ def combine(precomputed: dict[str, SignalOutput], regime: str,
     ukrytym tlumikiem wyniku - zeby decyzja "od jakiego pokrycia nie handlujemy"
     zapadla jawnie i na widocznych danych, a nie sama z siebie.
 
+    `slad` (OPCJONALNY) ODDAJE POKRYCIE WAG, czyli TEN SAM mianownik, przez
+    ktory dzieli sie wynik. Istnieje, bo pokrycia nie da sie odzyskac z wyniku
+    ani z pewnosci: `conf` jest juz przez nie podzielone, a `score` tym bardziej.
+    Dwie kopie tego rachunku rozjechalyby sie przy pierwszej zmianie i to WLASNIE
+    pokrycie bylo by ta liczba, ktora klamie - dlatego jest tu, a nie u
+    wywolujacego.
+
+    KOSZT ZERO, GDY NIKT NIE PYTA: `slad=None` nie alokuje niczego. Symulacja
+    portfelowa wola `combine` dla kazdej swiecy kazdego instrumentu (miliony
+    wywolan), a pokrycia potrzebuje WYLACZNIE dla transakcji, ktore naprawde
+    otwiera - wiec pyta o nie osobnym wywolaniem przy otwarciu pozycji.
+
+    Po co w ogole: zmierzone na produkcji 2026-09-27, decyzje z 21 dni —
+    mediana pokrycia w rezimie `range` to 0,051 przy 1,000 w `high_vol`
+    i `trend_up`; 590 z 639 decyzji `range` ma pokrycie ponizej polowy. Wynik
+    w `range` jest wiec zwykle JEDNYM sygnalem (`funding_carry`, waga ~0,04)
+    podzielonym przez 0,05, czyli wzmocnionym dwudziestokrotnie. `range` jest
+    zarazem jedynym rezimem z ujemnym Sharpe'em na transakcje (-0,0478 na 437
+    transakcjach, tor 4h). Rezim i pokrycie sa na produkcji NIEROZPLATANE (cale
+    niskie pokrycie jest w `range`, caly `range` ma niskie pokrycie), wiec
+    rozstrzygnac to moze tylko symulacja - i po to jest ten slad.
+
     `with_contributions=False` pomija budowanie rozbicia na wklady. Rozbicie jest
     potrzebne WYLACZNIE do zapisu w dzienniku i pokazania w interfejsie; symulacja
     walk-forward go nie czyta, a budowala je przy kazdej swiecy kazdej proby.
@@ -450,6 +473,8 @@ def combine(precomputed: dict[str, SignalOutput], regime: str,
             total += out.score * weight * out.confidence
             conf_num += out.confidence * abs(weight)
             waga_obecna += abs(weight)
+        if slad is not None:
+            slad["pokrycie"] = waga_obecna
         if not waga_obecna:
             return 0.0, 0.0, []
         return _clip(total / waga_obecna), min(1.0, conf_num / waga_obecna), []
@@ -473,6 +498,8 @@ def combine(precomputed: dict[str, SignalOutput], regime: str,
             "inputs": out.inputs,
         })
 
+    if slad is not None:
+        slad["pokrycie"] = waga_obecna
     if not waga_obecna:
         return 0.0, 0.0, contributions
     return _clip(total / waga_obecna), min(1.0, conf_num / waga_obecna), contributions

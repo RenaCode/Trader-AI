@@ -65,6 +65,14 @@ class Position:
     # koszt widoczny wylacznie w krzywej kapitalu zostawia werdykt okna liczony
     # przed kosztem. Prowizja przerabiala dokladnie te droge.
     finansowanie: float = 0.0
+    # POKRYCIE WAG W CHWILI WEJSCIA - mianownik, przez ktory `signals.combine`
+    # podzielilo wynik. 1,0 znaczy "odezwaly sie wszystkie sygnaly, ktore maja
+    # wage"; 0,05 znaczy "odezwal sie jeden o wadze 0,05, a jego glos zostal
+    # wzmocniony dwudziestokrotnie". Trzymane per pozycja, bo pytanie brzmi:
+    # czy transakcje z niskiego pokrycia zarabiaja tyle samo, co te z pelnego.
+    # Na produkcji rezimu i pokrycia rozplesc sie NIE DA (cale niskie pokrycie
+    # jest w `range`), wiec odpowiedzieć moze tylko symulacja.
+    pokrycie: float = 1.0
 
     @property
     def finansowanie_w_zwrocie(self) -> float:
@@ -494,7 +502,7 @@ def simulate_portfolio(panels: dict[str, list[dict]],
                 "ret": (pos.side * (exit_px / pos.entry - 1)
                         - fee * (1 + exit_px / pos.entry)
                         - pos.finansowanie_w_zwrocie),
-                "conf": pos.conf, "symbol": sym,
+                "conf": pos.conf, "pokrycie": pos.pokrycie, "symbol": sym,
                 "opened_at": pos.opened_at, "closed_at": rows[nxt_idx]["t"],
                 # STRONA I FINANSOWANIE PRZY KAZDEJ TRANSAKCJI.
                 #
@@ -636,7 +644,17 @@ def simulate_portfolio(panels: dict[str, list[dict]],
                 entry = limit_px
             else:
                 entry = price * (1 + slip * side)
-            positions[sym] = Position(side=side, qty=qty, entry=entry, conf=conf, opened_at=t)
+            # POKRYCIE LICZONE TYLKO DLA TRANSAKCJI, KTORA NAPRAWDE POWSTAJE.
+            # `combine` wyzej idzie dla kazdej swiecy kazdego instrumentu, wiec
+            # slad przy tamtym wywolaniu alokowalby slownik miliony razy.
+            # Tutaj wywolan jest tyle, ile transakcji - rzedu tysiaca na okno.
+            _slad_pokrycia: dict = {}
+            combine(cache[sym][cur["idx"]][1], cache[sym][cur["idx"]][0],
+                    weights.get(cache[sym][cur["idx"]][0]),
+                    with_contributions=False, slad=_slad_pokrycia)
+            positions[sym] = Position(side=side, qty=qty, entry=entry, conf=conf,
+                                      opened_at=t,
+                                      pokrycie=_slad_pokrycia.get("pokrycie", 1.0))
             fees_paid += qty * entry * fee
             order_times.append(t)
 
@@ -660,7 +678,7 @@ def simulate_portfolio(panels: dict[str, list[dict]],
         res.trades.append({"ret": (pos.side * (exit_px / pos.entry - 1)
                                    - fee - k.taker * exit_px / pos.entry
                                    - pos.finansowanie_w_zwrocie),
-                           "conf": pos.conf,
+                           "conf": pos.conf, "pokrycie": pos.pokrycie,
                            "symbol": sym, "opened_at": pos.opened_at, "closed_at": last_t,
                            "side": pos.side, "finansowanie": pos.finansowanie})
     res.equity_curve.append((last_t, START_EQUITY + realized - fees_paid))

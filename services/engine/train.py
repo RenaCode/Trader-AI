@@ -309,6 +309,92 @@ def _pb(x: float | None) -> str:
     return "—" if x is None else f"{x * 1e4:+.2f} pb"
 
 
+KUBELKI_POKRYCIA = ((0.0, 0.2), (0.2, 0.5), (0.5, 0.9), (0.9, 1.01))
+
+
+def opis_pokrycia(trans: list[tuple[float, float, str]]) -> list[str]:
+    """Wynik wobec POKRYCIA WAG w chwili wejscia. CZYSTA FUNKCJA.
+
+    PYTANIE, KTORE TO ROZSTRZYGA, I DLACZEGO PRODUKCJA GO NIE ROZSTRZYGNIE
+
+    `signals.combine` dzieli wynik przez sume |wag| sygnalow, ktore sie
+    ODEZWALY. Renormalizacja mowi "pozostale reprezentuja calosc", wiec wynik
+    z jednego sygnalu moze siegnac pelnej sily - i docstring `combine` nazywa to
+    CENA TEJ SEMANTYKI, zostawiajac decyzje "od jakiego pokrycia nie handlujemy"
+    jako jawna i niepodjeta.
+
+    Zmierzone na produkcji 2026-09-27 (decyzje z 21 dni):
+
+        rezim       decyzji  mediana pokrycia  ponizej 0,5
+        range           639             0,051    590 (92%)
+        high_vol        269             1,000      0
+        trend_up        142             1,000      0
+
+    W `range` odzywaja sie tylko `news_shock` (waga 0,0) i `funding_carry`
+    (waga ~0,04); szesc sygnalow cenowo-wolumenowych milczy w 91% decyzji, bo
+    w konsolidacji nie maja czego powiedziec. Wynik jest wiec zwykle JEDNYM
+    sygnalem wzmocnionym dwudziestokrotnie - a `range` jest jedynym rezimem
+    z ujemnym Sharpe'em na transakcje (-0,0478 na 437, tor 4h).
+
+    NA PRODUKCJI REZIMU I POKRYCIA ROZPLESC SIE NIE DA: cale niskie pokrycie
+    jest w `range`, caly `range` ma niskie pokrycie. "Niskie pokrycie szkodzi"
+    i "`range` jest trudny" daja tam IDENTYCZNE dane. Symulacja ma tysiace
+    transakcji w kazdym rezimie i pokrycie zmienne w czasie, wiec te dwie
+    hipotezy da sie w niej rozdzielic - i to jest cala tresc tej tabeli.
+
+    CZEGO TA TABELA NIE JEST: nie jest testem. Transakcje nie sa niezalezne,
+    a kubelki wybrano przed pomiarem, ale jest ich cztery razy liczba rezimow.
+    Sluzy do postawienia progu, nie do jego uzasadnienia.
+    """
+    if not trans:
+        return []
+    linie = ["", "WYNIK WOBEC POKRYCIA WAG (złączona próba OOS, po kosztach):"]
+
+    def wiersz(etykieta: str, zwroty: list[float]) -> str:
+        n = len(zwroty)
+        if n < 2:
+            return f"  {etykieta:<30} n={n:<5} — za mało transakcji"
+        sr = statistics.fmean(zwroty)
+        sd = statistics.stdev(zwroty)
+        sh = (sr / sd) if sd > 0 else 0.0
+        traf = sum(1 for r in zwroty if r > 0) / n
+        return (f"  {etykieta:<30} n={n:<5} Sharpe/transakcję {sh:+.4f} "
+                f"±{1.0 / math.sqrt(n):.4f}  trafność {traf:.1%}  "
+                f"średnia {sr:+.4%}")
+
+    def kubelek(nazwa: str, wybrane: list[tuple[float, float, str]]) -> list[str]:
+        out = []
+        for lo, hi in KUBELKI_POKRYCIA:
+            zwroty = [r for r, p, _ in wybrane if lo <= p < hi]
+            if zwroty:
+                out.append(wiersz(f"{nazwa}pokrycie {lo:.1f}–{hi if hi <= 1 else 1.0:.1f}",
+                                  zwroty))
+        return out
+
+    linie += kubelek("", trans)
+    rezimy = sorted({rez for _, _, rez in trans})
+    if len(rezimy) > 1:
+        linie.append("  po reżimach — TU rozdziela się reżim od pokrycia:")
+        for rez in rezimy:
+            wybrane = [t for t in trans if t[2] == rez]
+            w_kubelkach = kubelek("  ", wybrane)
+            if len(w_kubelkach) > 1:
+                linie.append(f"    {rez}")
+                linie += w_kubelkach
+            elif w_kubelkach:
+                # JEDEN KUBELEK TO BRAK ROZDZIELENIA, I TRZEBA TO POWIEDZIEC.
+                # Rezim, w ktorym wszystkie transakcje maja podobne pokrycie,
+                # nie odpowiada na pytanie - a wypisany bez tego zdania wyglada
+                # tak samo jak ten, ktory odpowiada.
+                linie.append(f"    {rez} — pokrycie NIE ZMIENIA SIĘ w tym "
+                             f"reżimie, więc nie rozdziela niczego")
+                linie += w_kubelkach
+    linie.append("  To NIE JEST test: transakcje nie są niezależne, a kubełków "
+                 "jest cztery razy tyle, ile reżimów. Służy do postawienia "
+                 "progu, nie do jego uzasadnienia.")
+    return linie
+
+
 def opis_stron(trans: list[tuple[float, int, str]]) -> list[str]:
     """Wynik strony DLUGIEJ osobno od KROTKIEJ, po rezimach. CZYSTA FUNKCJA.
 
@@ -1868,6 +1954,7 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
     # `podsumowanie_przewagi`.
     wszystkie_zwroty: list[float] = []
     transakcje_stron: list[tuple[float, int, str]] = []
+    transakcje_pokrycia: list[tuple[float, float, str]] = []
     # To samo rozbite na okna: potrzebne, zeby przeliczyc srednia PO OKNACH
     # przy doliczonym koszcie. Sama lista Sharpe'ow tego nie pozwala.
     zwroty_okien_transakcje: list[list[float]] = []
@@ -2155,6 +2242,12 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
             transakcje_stron.extend(
                 (t["ret"], int(t.get("side", 1)), dominant or "(reżim nieznany)")
                 for t in oos_res.trades)
+            # OSOBNA LISTA, A NIE CZWARTY ELEMENT TAMTEJ KROTKI: `opis_stron`
+            # i `opis_pokrycia` odpowiadaja na rozne pytania i maja rozne testy;
+            # wspolna krotka wiazalaby je tak, ze zmiana jednej psulaby druga.
+            transakcje_pokrycia.extend(
+                (t["ret"], float(t.get("pokrycie", 1.0)),
+                 dominant or "(reżim nieznany)") for t in oos_res.trades)
 
         if not sucho:
             cur.execute(
@@ -2743,6 +2836,8 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
                                zwroty_okien_transakcje):
         print(linia)
     for linia in opis_stron(transakcje_stron):
+        print(linia)
+    for linia in opis_pokrycia(transakcje_pokrycia):
         print(linia)
     if len(sharpe_grup) > 1:
         print("Sharpe/transakcję policzony OSOBNO dla grup, w tym samym przebiegu:")
