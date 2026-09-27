@@ -52,7 +52,29 @@ spec:
                 - |
                   set -u
                   RC=0
-                  for D in 1400 1397 1394 1391; do
+                  # OKNA: 1400 to stan produkcji, 1750 to CALA dostepna historia.
+                  #
+                  # Zmierzone 2026-09-27: `market.candle` dla instrumentow
+                  # `tradeable` siega 2021-12-09, czyli 1753 dni - a trener uzywa
+                  # 1400, wiec 353 dni lezy NIEUZYTE. Przy train_days=180,
+                  # test_days=30, step_days=30 daje to 40 okien wobec 52 mozliwych.
+                  #
+                  # DLACZEGO TO JEST PYTANIE BLOKUJACE: tor 4h stoi na `learning`
+                  # WYLACZNIE dlatego, ze nie bije kup-i-trzymaj - 25/39 okien,
+                  # przedzial Wilsona 48,4%-77,3%, czyli dolna granica PONIZEJ 50%.
+                  # Przy tym samym odsetku 64,1% wystarczylyby 43 okna (dolna
+                  # granica 50,2%), a pelna historia daje 52. Brakuje wiec CZTERECH
+                  # okien, a mamy dane na dwanascie.
+                  #
+                  # To NIE JEST dobieranie danych pod wynik: wiecej okien moze
+                  # rownie dobrze odsetek OBNIZYC, bo 2021-2022 to inny rezim
+                  # (dryf cech wynosi dzis 2,67). Wlasnie dlatego jest to
+                  # uczciwy test, a nie sposob na jego przejscie.
+                  #
+                  # 1397/1394/1391 zostaja jako przesuniecia okna - bez nich
+                  # roznica 1400 kontra 1750 bylaby nieodrozniona od szumu
+                  # samego przesuniecia.
+                  for D in 1400 1397 1394 1391 1750; do
                     echo ""
                     echo "=============== OKNO $D DNI ==============="
                     # P0-4: czy spread NASZEJ ksiegi miesci sie w koszcie
@@ -64,7 +86,7 @@ spec:
                     echo "--- P0-4 koszt progowy wobec spreadu 5,85 pb ---"
                     python services/engine/train.py \
                       --bar 4h --days "$D" --kind spot_eu --limit \
-                      --sucho --spread-bps 5.85 || RC=$?
+                      --sucho --spread-bps 5.85 --spread-obca-ksiega || RC=$?
                     # P0-5: czy ekspozycja okna jest ujemnie skorelowana
                     # ze zwrotem kup-i-trzymaj. Trener wypisuje obie liczby
                     # obok siebie w kazdym oknie - wystarczy je zestawic.
