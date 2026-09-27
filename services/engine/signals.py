@@ -332,6 +332,35 @@ def classify_regime(f: dict, atr_p80: float | None) -> tuple[str, float]:
             return "trend_up", min(1.0, dev / 0.8)
         if dev < -0.25 and r_long < 0:
             return "trend_down", min(1.0, abs(dev) / 0.8)
+    # `range` JEST TU TAKZE ODPOWIEDZIA "NIE WIEM", I TO JEST ZNANE RYZYKO.
+    #
+    # Do tej linii dochodzi sie dwiema droznymi drogami, ktorych wynik jest
+    # nieodroznialny: rynek FAKTYCZNIE stoi w konsolidacji (atr i ema_ratio sa,
+    # `dev` miesci sie w +-0,25), albo cech potrzebnych do rozstrzygniecia NIE MA
+    # i zaden warunek wyzej nie mial czego sprawdzic.
+    #
+    # ZMIERZONY SKUTEK TEJ DWUZNACZNOSCI, produkcja 2026-09-12..2026-09-22: przez
+    # jedenascie dni petla nie czytala cech cenowych (`atr_pct`, `ema_ratio`,
+    # `ret_long` nieobecne w 590 z 646 decyzji), wiec KAZDA taka swieca dostala
+    # etykiete `range` z pewnoscia 0,6 - i tak zostala w `journal.decision`.
+    # Kazda analiza grupowana po rezimie miesza od tej pory dwie populacje;
+    # 2026-09-27 wzielem te pule za dzisiejsza wlasnosc rezimu `range` i podalem
+    # wlascicielowi mediane pokrycia 0,051 jako stan biezacy, a nie jako ogon
+    # awarii.
+    #
+    # DLACZEGO TO NIE JEST DZIS NAPRAWIANE, i co to znaczy dla nastepnego
+    # czytelnika. Bramka `loop.MIN_POKRYCIE = 0,9` (od 2026-09-22) odklada
+    # decyzje przy niepelnym pokryciu WAG SYGNALOW, wiec swieca bez cech nie
+    # tworzy juz wiersza w `journal.decision` - zanieczyszczenie sie nie powtarza.
+    # Bramka NIE OSLANIA jednak cech, ktorych potrzebuje TA funkcja: pokrycie
+    # liczy wagi sygnalow, a nie obecnosc `atr_pct`. Uklad "pokrycie >= 0,9
+    # i brak cech rezimu" jest wiec mozliwy i dalby cichy fallback.
+    #
+    # ZMIERZONE, ile razy zaszedl: ZERO. Produkcja od 2026-09-23 (po poprawce) ma
+    # 290 decyzji, wszystkie z pokryciem >= 0,9, ZERO z brakiem cech rezimu i ZERO
+    # oznaczonych `range`. Zmiana kontraktu tej funkcji dotyka pieciu wolajacych
+    # (train.py x2, loop.py x2, portfolio.py) i sciezki decyzyjnej, wiec przy
+    # zerze wystapien czeka na decyzje wlasciciela, a nie zapada tutaj.
     return "range", 0.6
 
 

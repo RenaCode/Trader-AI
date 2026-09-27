@@ -226,3 +226,34 @@ def test_datowanie_skaluje_sie_z_horyzontem():
     assert znane_od(t, H4) - t >= timedelta(hours=4)
     assert znane_od(t, H5) - t >= timedelta(minutes=5)
     assert znane_od(t, H5) - t < timedelta(minutes=6)
+
+
+def test_rezim_bez_cech_wpada_w_range_I_TO_JEST_ZNANE_RYZYKO():
+    """Przypina ZASTANE zachowanie, zeby jego zmiana byla decyzja, nie skutkiem.
+
+    `classify_regime` dochodzi do `range` dwiema droznymi drogami o
+    nieodroznialnym wyniku: rynek faktycznie stoi w konsolidacji, albo cech
+    potrzebnych do rozstrzygniecia NIE MA. Zmierzony skutek, produkcja
+    2026-09-12..2026-09-22: przez jedenascie dni cechy cenowe nie byly czytane,
+    wiec 590 z 646 decyzji dostalo etykiete `range` z pewnoscia 0,6 - i kazda
+    analiza grupowana po rezimie miesza od tej pory dwie populacje.
+
+    Bramka `loop.MIN_POKRYCIE` (od 2026-09-22) sprawia, ze swieca bez cech nie
+    tworzy juz wiersza decyzji, ale liczy POKRYCIE WAG SYGNALOW - nie obecnosc
+    `atr_pct`. Uklad "pokrycie pelne, brak cech rezimu" jest wiec nadal mozliwy.
+    Zmierzona liczba wystapien od poprawki: ZERO na 290 decyzji.
+    """
+    from services.engine.signals import classify_regime
+
+    # Komplet cech, rynek faktycznie w konsolidacji: `dev` miesci sie w +-0,25.
+    rezim_prawdziwy, pewnosc_prawdziwa = classify_regime(
+        {"news_sent": 0.0, "atr_pct": 2.0, "ema_ratio": 1.0, "ret_long": 0.0},
+        atr_p80=5.0)
+    # Cech rezimu NIE MA wcale.
+    rezim_bez_cech, pewnosc_bez_cech = classify_regime({"news_sent": 0.0},
+                                                      atr_p80=5.0)
+
+    assert rezim_prawdziwy == rezim_bez_cech == "range"
+    assert pewnosc_prawdziwa == pewnosc_bez_cech == 0.6, (
+        "gdyby pewnosc rozniła te dwa stany, dalyby sie rozdzielic w dzienniku "
+        "- dzis nie dają, i ten test pilnuje, zeby zmiana tego byla swiadoma")
