@@ -131,15 +131,31 @@ def tozsamosciowy(w: dict) -> bool:
     """Czy cena odniesienia jest DOKLADNIE cena wykonania. CZYSTA FUNKCJA.
 
     Taki wiersz ma poslizg zero i to zero nie niesie zadnej informacji
-    o egzekucji. Sa dwie drogi, ktorymi powstaje, i obie wystepuja:
+    o egzekucji. Droga, ktora powstaje, jest dzis JEDNA i jest STRUKTURALNA:
 
       * zlecenie z limitem wypelnia sie PO CENIE LIMITU albo lepiej,
         a odniesieniem jest wlasnie `exec.order.limit_price`. Pytanie brzmi
         wtedy "czy limit wypelnil sie po cenie limitu" i odpowiedz jest znana
-        przed pomiarem,
-      * `loop.zapisz_wejscie` przy rozstrzyganiu NADPISUJE
-        `exec.order.limit_price` cena WYKONANIA. Wtedy zero wychodzi takze
-        wtedy, gdy zlecenie przeszlo przez spread jako taker po gorszej cenie.
+        przed pomiarem. Egzekucja sklada WYLACZNIE `limit` z `PostOnly`
+        (`gielda_exec` ma `order_type` zapisany na sztywno), wiec dla toru
+        gieldowego ta droga jest jedyna mozliwa.
+
+    DRUGA DROGA ZOSTALA ZAMKNIETA 2026-09-26 i dlatego jej tu nie ma.
+    `loop.zapisz_wejscie` NADPISYWALO `exec.order.limit_price` cena WYKONANIA;
+    wtedy zero wychodzilo takze dla zlecenia, ktore przeszlo przez spread jako
+    taker po gorszej cenie. Dzis ta galaz ma w sobie komentarz "`qty`
+    I `limit_price` ZOSTAJA NIETKNIETE" i UPDATE rusza tylko `status`,
+    `venue_order_id`, `updated_at` i `raw`. Sprawdzone na produkcji 2026-09-27:
+    WSZYSTKIE 35 wypelnionych zlecen z limitem (takze cztery zlozone po tej
+    poprawce) maja `limit_price` rowne `exec.fill.price` co do ostatniej cyfry.
+
+    WNIOSEK, KTORY Z TEGO WYNIKA I KTORY TRZEBA POWIEDZIEC WPROST: dla zlecen
+    PostOnly poslizg CENOWY makera nie jest mala liczba do zmierzenia - on
+    nie istnieje. `POSLIZG_MAKER = 0` jest wiec poprawne przez konstrukcje,
+    a koszt makera siedzi CALY w NIEWYPELNIENIU: w zleceniu, ktore nie weszlo,
+    i w tym, ze wchodzi ono czesciej wtedy, gdy rynek idzie przeciw nam.
+    Tej wielkosci `exec.fill` nie zawiera z definicji - odpowiada na nia
+    wypelnialnosc liczona z `exec.order`.
 
     Porownujemy DZIESIETNIE, nie po przeliczeniu na float: `Decimal("100") ==
     Decimal("100.00")` jest prawda i o to chodzi, a `float` dorzucilby do tego
@@ -560,10 +576,11 @@ def opis(p: dict) -> list[str]:
             linie.append(
                 f"{etykieta}: n={s['n']}, ale we WSZYSTKICH {s['tozsamosciowych']} "
                 f"wierszach cena odniesienia = cena wykonania — TO NIE JEST "
-                f"POMIAR POŚLIZGU, tylko (x−x)/x. Zlecenie z limitem wypełnia "
-                f"się po cenie limitu z definicji, a `loop.zapisz_wejscie` "
-                f"nadpisuje `exec.order.limit_price` ceną wykonania. Stała "
-                f"pozostaje założeniem.")
+                f"POMIAR POŚLIZGU, tylko (x−x)/x. Zlecenie PostOnly wypełnia "
+                f"się po cenie limitu Z DEFINICJI, więc poślizgu CENOWEGO "
+                f"makera nie ma czego mierzyć — i żadna liczba wypełnień tego "
+                f"nie zmieni. Koszt makera siedzi w NIEWYPEŁNIENIU: patrz "
+                f"wypełnialność z `exec.order` niżej.")
             continue
         przedzial = ("—" if s["przedzial"] is None
                      else f"[{_bp(s['przedzial'][0])}, {_bp(s['przedzial'][1])}]")

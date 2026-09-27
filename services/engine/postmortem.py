@@ -165,12 +165,35 @@ def statystyki(pozycje: list[dict]) -> dict:
         "pozycji": len(pozycje),
         "wygranych": len(wygrane),
         "trafnosc": round(len(wygrane) / len(pozycje), 4) if pozycje else None,
-        "wynik_netto": round(suma, 4),
+        # `realized_pnl` JEST BRUTTO - i dlatego netto powstaje przez ODJECIE.
+        #
+        # Do 2026-09-27 stalo tu `"wynik_netto": suma` i `"wynik_brutto": suma
+        # + prowizje`, czyli obie nazwy byly zamienione, a "brutto" niosl
+        # prowizje DWA RAZY. `exec.position` trzyma wynik i koszt w dwoch
+        # kolumnach (`loop.zapisz_wyjscie`: `realized_pnl += wynik`,
+        # `fees_paid += prowizja`), a jedynym miejscem, ktore skladalo je
+        # poprawnie, bylo `loop.update_equity`:
+        #
+        #     SELECT COALESCE(sum(realized_pnl - fees_paid), 0)
+        #
+        # Dowod arytmetyczny, pozycja 33 na produkcji (BTCUSDC, oba
+        # wypelnienia z gieldy): 0.015319 BTC kupione po 85976.80 i sprzedane
+        # po 84046.00 to roznica -29.5779, i dokladnie tyle stoi w
+        # `realized_pnl`; `fees_paid` = 2.6046 stoi OSOBNO.
+        #
+        # ROZJAZD NIE OBJAWIAL SIE NICZYM. Oba pola mialy poprawny typ i znak,
+        # a mylily sie o jedna runde kosztowa - czyli o rzad wielkosci calej
+        # przewagi tej strategii. Zmierzone 2026-09-27, crypto/demo, 35
+        # zamknietych pozycji: dziennik meldowal "netto -147,14" przy prawdzie
+        # -213,42 (= `realized_cum` krzywej kapitalu), czyli 69% straty, i
+        # "brutto -80,86" zamiast -147,14. Ta liczba idzie na POCZATEK
+        # `summary` i do promptu modelu, wiec i czlowiek, i model czytali
+        # wynik lagodniejszy od rzeczywistego.
+        "wynik_netto": round(suma - prowizje, 4),
         "prowizje": round(prowizje, 4),
-        # Prowizje wobec wyniku BRUTTO - liczba, ktora w tym projekcie decyduje
-        # o wszystkim (docs/08, brama 0). Bez niej "wynik -2,3%" nie mowi, czy
-        # strategia przegrala z rynkiem, czy z wlasnym kosztem.
-        "wynik_brutto": round(suma + prowizje, 4),
+        # Wynik PRZED kosztem. Zestawiony z `wynik_netto` mowi, czy strategia
+        # przegrala z rynkiem, czy z wlasnym kosztem (docs/08, brama 0).
+        "wynik_brutto": round(suma, 4),
         "godzin_mediana": round(sorted(godziny)[len(godziny) // 2], 1) if godziny else None,
     }
 
