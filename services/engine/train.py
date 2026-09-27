@@ -59,9 +59,10 @@ from services.engine.portfolio import (
     simulate_portfolio,
 )
 from services.engine.koszty import Karta, karta_rundy, opis_karty
+from services.engine.spread import opis_pomiaru, zmierz_spread
 from services.engine.statystyka import (
-    PROG_DSR, deflowany_sharpe, profit_factor, rozklad,
-    sharpe as sharpe_proby, spearman, wilson,
+    MIN_PROB_ROZRZUTU, PROG_DSR, deflowany_sharpe, profit_factor, rozklad,
+    rozrzut_sharpeow, sharpe as sharpe_proby, spearman, wilson,
 )
 from services.engine.uniwersum import odcisk
 from services.engine.signals import (
@@ -505,7 +506,8 @@ def podsumowanie_przewagi(zwroty: list[float], sharpe_okien: list[float],
     }
 
 
-def przewaga_dsr(zwroty: list[float], n_prob: int) -> dict:
+def przewaga_dsr(zwroty: list[float], n_prob: int,
+                 odchylenie_prob: float | None = None) -> dict:
     """Deflowany Sharpe dla ZLACZONEJ proby transakcji OOS. CZYSTA FUNKCJA.
 
     Cienka warstwa nad `statystyka.deflowany_sharpe` - istnieje, zeby w jednym
@@ -524,8 +526,110 @@ def przewaga_dsr(zwroty: list[float], n_prob: int) -> dict:
         konfiguracji dokladaja tyle wierszy, ile wektorow sie zmienilo -
         a przy `--wybor ic` (domyslnym) jest to jeden na okno i zmienia sie
         co noc, bo granice okien sie przesuwaja.
+      * `odchylenie_prob` to ZMIERZONY rozrzut Sharpe'ow OOS miedzy
+        konfiguracjami - `V[SR_n]` Baileya. None znaczy "nie zmierzono" i wtedy
+        `deflowany_sharpe` podstawia wariancje samego estymatora pod H0, czyli
+        idzie droga OPTYMISTYCZNA. Skad ta liczba sie bierze i kiedy wolno ja
+        podac - `odchylenie_prob_z_bazy`.
     """
-    return deflowany_sharpe(zwroty, n_prob)
+    return deflowany_sharpe(zwroty, n_prob, odchylenie_prob)
+
+
+def odchylenie_prob_z_bazy(cur, model_id: int) -> tuple[float | None, int]:
+    """Rozrzut Sharpe'ow OOS miedzy konfiguracjami tego modelu. Z BAZY.
+
+    Oddaje PARE: odchylenie (albo None) i liczbe konfiguracji, z ktorych wyszlo.
+    Liczba jest potrzebna w opisie, bo to ona rozstrzyga, czy wynik jest
+    pomiarem - a nie sama obecnosc liczby.
+
+    CO DOKLADNIE JEST W `oos_sharpe`, I CZEGO TAM NIE MA. Od 2026-09-27
+    `train()` zapisuje Sharpe OOS kandydata WYBRANEGO w oknie - jedyny, dla
+    ktorego symulacja poza oknem wyboru w ogole sie liczy. Kandydaci odrzuceni
+    (przy `--wybor argmax` to `trials_per_window` losowan plus zalozenia
+    poczatkowe) NIE MAJA wyniku OOS i nigdy go nie mieli: `ocen(cand,
+    train_slices, cache_tr)` liczy ich na oknie TRENINGOWYM. Policzenie im OOS
+    oznaczaloby `trials_per_window` razy wiecej symulacji poza oknem, czyli inny
+    protokol, a nie inny zapis.
+
+    Skutek dla tej liczby trzeba nazwac: rozrzut mierzymy na ZWYCIEZCACH, a ci
+    sa z definicji wybrani po gornym ogonie. Rozrzut w takiej probie jest
+    WEZSZY niz w calym zbiorze kandydatow, a wezszy rozrzut daje NIZSZA
+    poprzeczke i WYZSZY DSR. Ta liczba jest wiec nadal oszacowaniem po stronie
+    korzystnej dla strategii - tylko o rzad wielkosci mniej korzystnym niz
+    podstawienie z H0 (zmierzone 2026-09-27: 0,2627 wobec 0,0264).
+
+    Dolicza sie do tego wplyw przeciwny: kolejne okna to takze inny RYNEK, wiec
+    w rozrzut wchodzi zmiennosc okien, nie tylko konfiguracji - i ten skladnik
+    poprzeczke PODNOSI. Ktory z dwoch przewaza, nie jest zmierzone.
+    """
+    cur.execute("SELECT oos_sharpe FROM learn.hypothesis_trial"
+                " WHERE model_id = %s AND oos_sharpe IS NOT NULL", (model_id,))
+    sharpes = [float(r["oos_sharpe"]) for r in cur.fetchall()]
+    return rozrzut_sharpeow(sharpes), len(sharpes)
+
+
+def opis_zrodla_odchylenia(wynik: dict, n_konfiguracji_z_oos: int) -> str:
+    """Skad wzial sie rozrzut miedzy probami - w tym samym zdaniu, co DSR.
+
+    Bez tego zdania DSR policzony z pomiaru i DSR policzony z podstawienia
+    wygladaja identycznie, a znacza co innego: drugi jest GORNYM oszacowaniem
+    pierwszego. Do 2026-09-27 istniala tylko druga droga i nikt nie mial jak
+    zobaczyc z wyniku, ze nia idzie.
+    """
+    sd = wynik.get("odchylenie_prob")
+    if sd is None:
+        return ""
+    if wynik.get("zrodlo_odchylenia", "").startswith("pomiar"):
+        return (f"Rozrzut Sharpe'ów między konfiguracjami ZMIERZONY: "
+                f"sd = {sd:.4f} z {n_konfiguracji_z_oos} konfiguracji "
+                f"z policzonym Sharpe'em OOS (learn.hypothesis_trial.oos_sharpe). "
+                f"Mierzony na ZWYCIĘZCACH okien, więc jest zaniżony — a zaniżony "
+                f"rozrzut daje niższą poprzeczkę i WYŻSZY DSR.")
+    return (f"Rozrzut Sharpe'ów między konfiguracjami NIE ZMIERZONY: "
+            f"podstawiono wariancję samego estymatora pod H0 (sd = {sd:.4f}), "
+            f"bo w learn.hypothesis_trial jest {n_konfiguracji_z_oos} "
+            f"konfiguracji z Sharpe'em OOS, a próg to {MIN_PROB_ROZRZUTU}. "
+            f"Konfiguracje różnią się nie tylko szumem, więc PRAWDZIWY rozrzut "
+            f"jest większy, poprzeczka wyższa, a prawdziwy DSR NIŻSZY niż ten.")
+
+
+def _hash_konfiguracji(cand: dict) -> bytes:
+    """Odcisk wektora wag - klucz wiersza w `learn.hypothesis_trial`.
+
+    Wydzielony z `zapisz_hipoteze`, bo od 2026-09-27 potrzebuja go DWA miejsca:
+    INSERT przy ocenie kandydata i UPDATE, ktory dokleja mu Sharpe OOS po
+    symulacji poza oknem. Dwa niezalezne `hashlib.sha256(json.dumps(...))`
+    rozjechalyby sie cicho - wystarczyloby, zeby jedno gubilo `sort_keys`,
+    i UPDATE trafialby w zero wierszy, a kolumna zostawalaby pusta dokladnie
+    tak, jak byla.
+    """
+    return hashlib.sha256(json.dumps(cand, sort_keys=True).encode()).digest()
+
+
+def zapisz_oos_sharpe(cur, model_id: int,
+                      wg_konfiguracji: dict[bytes, list[float]]) -> int:
+    """Doklada Sharpe OOS do wierszy `learn.hypothesis_trial`. Oddaje liczbe wierszy.
+
+    SREDNIA PO OKNACH, a nie wartosc z ostatniego okna. Ta sama konfiguracja
+    moze wygrac w kilku oknach; `n_windows` mowi, w ilu, wiec obie kolumny
+    opisuja to samo zdarzenie i dzielnik zgadza sie z licznikiem.
+
+    UPDATE, nie UPSERT. Wiersz musi juz istniec - wstawia go `zapisz_hipoteze`
+    w chwili oceny kandydata na oknie treningowym. Gdy UPDATE nie trafi
+    w zaden wiersz, jest to wada odcisku (`_hash_konfiguracji` policzony
+    inaczej w dwoch miejscach), a nie brak danych - i dlatego ta funkcja oddaje
+    LICZBE ZMIENIONYCH WIERSZY, ktora da sie porownac z liczba konfiguracji.
+    Bez tego rozjazd odciskow zostawialby kolumne pusta dokladnie tak, jak byla,
+    i nie bylo by po czym tego poznac.
+    """
+    zmienione = 0
+    for odcisk_cfg, sharpes in wg_konfiguracji.items():
+        cur.execute(
+            "UPDATE learn.hypothesis_trial SET oos_sharpe = %s, n_windows = %s"
+            " WHERE model_id = %s AND config_hash = %s",
+            (statistics.fmean(sharpes), len(sharpes), model_id, odcisk_cfg))
+        zmienione += cur.rowcount
+    return zmienione
 
 
 def n_konfiguracji(cur, model_id: int) -> int:
@@ -606,7 +710,9 @@ def opis_kosztu_dsr(doplata: float, nieznane: tuple[str, ...]) -> str:
 
 def werdykt_dsr(zwroty: list[float], *, doplata: float, n: int,
                 trials_kumulatywnie: int,
-                nieznane: tuple[str, ...]) -> tuple[bool, str]:
+                nieznane: tuple[str, ...],
+                odchylenie_prob: float | None = None,
+                konfiguracji_z_oos: int = 0) -> tuple[bool, str]:
     """CALA decyzja DSR jednym wywolaniem - to jest to, co wola `train()`.
 
     Istnieje jako osobna funkcja po to, zeby dalo sie przetestowac SKLAD: ze
@@ -622,10 +728,12 @@ def werdykt_dsr(zwroty: list[float], *, doplata: float, n: int,
     latwiejszej bramki, niezaleznie od tego, jak dobrze policzono N.
     """
     po = [r - doplata for r in zwroty]
-    wynik = przewaga_dsr(po, n)
+    wynik = przewaga_dsr(po, n, odchylenie_prob)
     ok, opis = bramka_dsr(wynik)
-    return ok, " ".join([opis, opis_kosztu_dsr(doplata, nieznane),
-                         opis_zrodla_n(n, trials_kumulatywnie)])
+    czesci = [opis, opis_kosztu_dsr(doplata, nieznane),
+              opis_zrodla_n(n, trials_kumulatywnie),
+              opis_zrodla_odchylenia(wynik, konfiguracji_z_oos)]
+    return ok, " ".join(c for c in czesci if c)
 
 
 def bramka_dsr(wynik: dict) -> tuple[bool, str]:
@@ -1116,13 +1224,6 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
           spread_bps: float | None = None,
           spread_nasza_ksiega: bool = True) -> None:
     cur = conn.cursor()
-    # KARTA KOSZTU, NIE JEDNA LICZBA. Wymienia z nazwy skladniki, ktorych
-    # symulacja nie nalicza, zamiast wliczac je jako zera - patrz `koszty.py`.
-    # `spread_bps` zostaje None, dopoki nikt nie poda POMIARU; wymyslona liczba
-    # zamienilaby tu „nie wiem" na „wiem i wynosi tyle".
-    karta = karta_rundy(kind, (egzekucja or Egzekucja()).limit,
-                        spread_bps=spread_bps,
-                        spread_nasza_ksiega=spread_nasza_ksiega)
     rng = random.Random(SEED)
     now = datetime.now(timezone.utc)
 
@@ -1240,7 +1341,46 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
         print(f"  uniwersum zawężone do {len(instruments)}: "
               f"{', '.join(i['symbol'] for i in instruments)}")
 
+    # --- SPREAD: POMIAR Z BAZY, NIE STALA Z CHARTU ---------------------------
+    #
+    # Liczony TUTAJ, a nie w `main()`, i to jest cala rzecz: dopiero w tym
+    # miejscu uniwersum jest ROZSTRZYGNIETE (`active AND tradeable`, po
+    # ewentualnym zawezeniu `--instrumenty`), a okno znane z `days`. Agregat
+    # policzony na innym zbiorze albo innym okresie opisywalby inny rynek niz
+    # ten, ktory symulujemy - i nie bylo by po czym tego poznac.
+    #
+    # `--spread-bps` podany z linii polecen WYGRYWA i zostaje awaryjnym
+    # nadpisaniem (wariant, porownanie, przebieg bez arkusza w bazie). Wtedy
+    # o ksiedze mowi flaga `--spread-obca-ksiega`, bo tylko czlowiek wie, skad
+    # wzial liczbe. Gdy pomiar idzie z bazy, flage USTAWIA POMIAR: to on wie,
+    # czy okno siega przed `spread.DATA_WLASNEJ_KSIEGI` i czy wszystkie
+    # instrumenty byly `tradeable`.
+    if spread_bps is None:
+        pomiar = zmierz_spread(cur, engine, h.bar, h.source_timeframe,
+                               h.bar_minutes, [i["id"] for i in instruments],
+                               now - timedelta(days=days), now)
+        if pomiar.bps is not None:
+            spread_bps = pomiar.bps
+            spread_nasza_ksiega = pomiar.nasza_ksiega
+        for linia in opis_pomiaru(pomiar, {i["id"]: i["symbol"] for i in instruments}):
+            print("  " + linia)
+    else:
+        print(f"  Spread PODANY Z LINII POLECEN: {spread_bps:.3f} pb na rundę "
+              f"(nadpisanie awaryjne, nie pomiar z bazy; księga "
+              f"{'nasza' if spread_nasza_ksiega else 'OBCA'})")
+
+    # KARTA KOSZTU, NIE JEDNA LICZBA. Wymienia z nazwy skladniki, ktorych
+    # symulacja nie nalicza, zamiast wliczac je jako zera - patrz `koszty.py`.
+    # `spread_bps` zostaje None, gdy pomiaru NIE MA - wymyslona liczba
+    # zamienilaby tu "nie wiem" na "wiem i wynosi tyle".
+    karta = karta_rundy(kind, (egzekucja or Egzekucja()).limit,
+                        spread_bps=spread_bps,
+                        spread_nasza_ksiega=spread_nasza_ksiega)
+    for linia in opis_karty(karta):
+        print(linia)
+
     # ODCISK UNIWERSUM. Cechy przekrojowe sa nim filtrowane - patrz load_panel.
+    #
     #
     # Gdy dla tego zbioru nikt jeszcze nie policzyl sily wzglednej, sygnal
     # bedzie martwy we wszystkich oknach. To jest poprawne zachowanie (lepsze
@@ -1450,6 +1590,12 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
     sharpe_grup: dict[str, list[float]] = {}
     porownywalne = 0
     all_sharpes: list[float] = []
+    # Sharpe OOS per KONFIGURACJA (odcisk wektora wag) - material na V[SR_n]
+    # Baileya. Zbierany w pamieci i dopisywany do `learn.hypothesis_trial`
+    # po calym walk-forwardzie, a nie okno po oknie: ta sama konfiguracja moze
+    # wygrac w kilku oknach i wtedy `oos_sharpe` ma byc ich SREDNIA, a nie
+    # wartoscia z ostatniego okna, ktore ja nadpisalo.
+    oos_wg_konfiguracji: dict[bytes, list[float]] = {}
     # Zwroty WSZYSTKICH transakcji OOS, nie usrednione po oknach - patrz
     # `podsumowanie_przewagi`.
     wszystkie_zwroty: list[float] = []
@@ -1554,12 +1700,22 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
         def zapisz_hipoteze(cand):
             if sucho:
                 return
-            cfg_hash = hashlib.sha256(json.dumps(cand, sort_keys=True).encode()).digest()
             cur.execute(
                 "INSERT INTO learn.hypothesis_trial (model_id, config_hash, params,"
-                " n_windows) VALUES (%s,%s,%s,1)"
+                " n_windows) VALUES (%s,%s,%s,0)"
                 " ON CONFLICT (model_id, config_hash) DO NOTHING",
-                (model_id, cfg_hash, json.dumps(cand)))
+                (model_id, _hash_konfiguracji(cand), json.dumps(cand)))
+            # `n_windows = 0`, NIE 1 - I TO NIE JEST KOSMETYKA.
+            #
+            # Kolumna liczy okna, w ktorych ta konfiguracja MA policzony wynik
+            # OOS. W chwili INSERT-u nie ma go jeszcze zadna: kandydat jest
+            # dopiero oceniony na oknie TRENINGOWYM. Wpisana jedynka twierdzila,
+            # ze jedno okno OOS juz policzono, przy `oos_sharpe` rownym NULL -
+            # czyli dwie kolumny tego samego wiersza mowily co innego. Przez to
+            # ani nie dalo sie uzyc `n_windows` jako dzielnika do sredniej, ani
+            # odroznic "nie policzono" od "policzono i wyszlo nic".
+            #
+            # Historyczne 16 050 wierszy poprawia migracja 0061.
 
         # WARIANT WYBORU. Domyslny `argmax` bierze najlepszego z trials_per_window
         # losowan, zalozen poczatkowych i wag z IC - czyli MAKSIMUM Z PROBKI.
@@ -1619,6 +1775,26 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
             start += timedelta(days=h.step_days)
             continue
 
+        # SHARPE OOS KANDYDATA - TUTAJ I TYLKO TUTAJ JEST ZNANY.
+        #
+        # `zapisz_hipoteze` wola sie wyzej, w momencie, w ktorym znany jest
+        # wynik na oknie TRENINGOWYM (`ocen(cand, train_slices, cache_tr)`).
+        # Zapisanie tamtej liczby do `oos_sharpe` wypelniloby kolumne
+        # wartosciami IN-SAMPLE, ktore wygladaja jak pomiar OOS - a to jest
+        # gorsze niz NULL, bo NULL nie klamie. Rozrzut policzony z takich liczb
+        # zawieralby klatwe zwyciezcy i przestawialby poprzeczke selekcji
+        # w strone, ktorej nikt by nie zobaczyl.
+        #
+        # OOS liczy sie DLA JEDNEGO kandydata na okno - tego, ktory wygral
+        # (`best_w`). Pozostali (`trials_per_window` losowan plus zalozenia
+        # poczatkowe plus IC) nie maja wyniku OOS i nigdy go nie mieli.
+        # Powiedziane wprost, bo z samej wypelnionej kolumny tego nie widac.
+        #
+        # `sharpe` moze byc None przy oknie o jednej transakcji - wtedy nie ma
+        # czego zapisac i nie zapisujemy zera.
+        if oos_m.get("sharpe") is not None and not oos_m.get("insufficient"):
+            oos_wg_konfiguracji.setdefault(
+                _hash_konfiguracji(best_w), []).append(oos_m["sharpe"])
         # Transakcje pochodza z JEDNEJ symulacji portfela, wiec sa juz wspolne
         # dla wszystkich instrumentow i podlegaly wspolnym limitom.
         #
@@ -1749,6 +1925,24 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
               f"reżim={dominant}{mark}")
         idx += 1
         start += timedelta(days=h.step_days)
+
+    # --- Sharpe OOS do learn.hypothesis_trial ------------------------------
+    #
+    # Kolumna `oos_sharpe` istnieje od migracji 0006 i do 2026-09-27 byla pusta
+    # w 16 050 wierszach z 16 050 (zmierzone na produkcji). Bez niej `V[SR_n]`
+    # Baileya nie mial skad sie wziac i `statystyka.deflowany_sharpe` podstawial
+    # w to miejsce wariancje samego estymatora pod H0 - droga optymistyczna,
+    # opisana tam wprost.
+    #
+    # PO PETLI, NIE W NIEJ. Konfiguracja moze wygrac w kilku oknach; wtedy
+    # `oos_sharpe` ma byc SREDNIA z tych okien, a `n_windows` ich liczba.
+    # UPDATE wykonywany okno po oknie nadpisywalby wartosc poprzednia i zapisal
+    # wynik ostatniego okna pod nazwa wyniku konfiguracji.
+    if not sucho and oos_wg_konfiguracji:
+        zapisz_oos_sharpe(cur, model_id, oos_wg_konfiguracji)
+        conn.commit()
+        print(f"\n  Sharpe OOS zapisany dla {len(oos_wg_konfiguracji)} "
+              f"konfiguracji (learn.hypothesis_trial.oos_sharpe)")
 
     # --- kalibracja -------------------------------------------------------
     ece = None
@@ -1903,10 +2097,21 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
     #    po `hypothesis_trial`. Jest to zle, bo liczyloby te sama kare dwa razy
     #    - uzasadnienie w `n_konfiguracji`. `trials` zostaje w opisie jako
     #    kontekst i nie dotyka werdyktu.
+    # 3. ROZRZUT MIEDZY PROBAMI. Czytany z `oos_sharpe` - kolumny, ktora ten
+    #    przebieg wlasnie wypelnil. Gdy konfiguracji z policzonym Sharpe'em OOS
+    #    jest mniej niz `MIN_PROB_ROZRZUTU`, `odchylenie_prob_z_bazy` oddaje
+    #    None i zostaje dzisiejsze podstawienie z H0 - OPISANE jako
+    #    podstawienie, a nie przemilczane. Kierunek podmiany jest nazwany:
+    #    rozrzut miedzy konfiguracjami jest WIEKSZY niz rozrzut estymatora
+    #    (zmierzone 2026-09-27: 0,2627 wobec 0,0264), wiec poprzeczka idzie
+    #    W GORE, a DSR W DOL. Gdyby wyszlo odwrotnie, jest to objaw bledu,
+    #    nie dobra wiadomosc.
+    sd_prob, konfiguracji_z_oos = odchylenie_prob_z_bazy(cur, model_id)
     dsr_ok, opis_dsr = werdykt_dsr(
         wszystkie_zwroty, doplata=karta.doplata_poza_symulacja,
         n=n_konfiguracji(cur, model_id), trials_kumulatywnie=trials,
-        nieznane=karta.nieznane)
+        nieznane=karta.nieznane, odchylenie_prob=sd_prob,
+        konfiguracji_z_oos=konfiguracji_z_oos)
 
     # Prog dobrany do miary NA TRANSAKCJE, nie anualizowanej. 0,05 oznacza,
     # ze sredni zwrot z transakcji to 5% jej wlasnego odchylenia - skromnie,
@@ -2214,12 +2419,17 @@ def main() -> int:
                          "siegajacych przed 2026-09-24 ORAZ dla pomiaru "
                          "liczonego na instrumentach `tradeable = false`")
     ap.add_argument("--spread-bps", type=float, default=None, dest="spread_bps",
-                    help="ZMIERZONA polowa spreadu na noge razy dwie nogi, "
-                         "w punktach bazowych na runde. Zrodlo: "
-                         "market.book_snapshot / cecha book_spread_bps. "
-                         "BEZ TEJ WARTOSCI spread zostaje w karcie kosztu jako "
-                         "NIE ZMIERZONY - i tak ma byc, dopoki nikt go nie "
-                         "policzyl. Nie wpisywac liczby 'na oko'")
+                    help="AWARYJNE NADPISANIE pomiaru z bazy. Od 2026-09-27 "
+                         "spread liczy sie SAM, z cechy book_spread_bps, na tym "
+                         "samym uniwersum i w tym samym oknie, co trening "
+                         "(services/engine/spread.py). Ta flaga sluzy do "
+                         "policzenia WARIANTU albo do przebiegu na bazie bez "
+                         "arkusza; podana liczba wchodzi jako PELNY spread "
+                         "w punktach bazowych na runde (polowa na noge razy dwie "
+                         "nogi - dokladnie to, co zawiera cecha). Gdy jest "
+                         "podana, o pochodzeniu decyduje --spread-obca-ksiega, "
+                         "bo pomiar nie ma jak tego stwierdzic za czlowieka. "
+                         "Nie wpisywac liczby 'na oko'")
     # ZGODA CZLOWIEKA NA PODMIANE STRATEGII W TRYBIE LIVE.
     #
     # Flaga przebiegu, nie ustawienie w bazie i nie wpis w chart: zadanie
@@ -2280,15 +2490,15 @@ def main() -> int:
         egz = Egzekucja(limit=args.limit)
         print(f"Walk-forward: świeca {h.bar}, trening {h.train_days} dni / "
               f"test {h.test_days} dni, krok {h.step_days} dni")
-        # NAGLOWEK PODAWAL DOTAD SAMA LICZBE: „koszt rundy 0.040%". Czytalo sie
-        # to jak pelny rachunek, a byla to suma dwoch skladnikow z czterech.
-        # Karta wypisuje takze te, ktorych nie ma - slowami, nie zerami.
-        karta = karta_rundy(args.kind, args.limit, spread_bps=args.spread_bps,
-                            spread_nasza_ksiega=not args.spread_obca_ksiega)
+        # KARTA KOSZTU WYPISUJE SIE W `train()`, NIE TUTAJ - I TO JEST WAZNE.
+        #
+        # Od 2026-09-27 spread jest MIERZONY z bazy na uniwersum tego przebiegu,
+        # a uniwersum rozstrzyga sie dopiero w `train()`. Karta wypisana tutaj
+        # bylaby karta SPRZED pomiaru: oglaszalaby "spread NIE ZMIERZONO"
+        # w przebiegu, ktory chwile pozniej podaje zmierzona liczbe. Dwa rozne
+        # rachunki w jednym logu, oba podpisane jako koszt rundy.
         print(f"Egzekucja: {args.kind}, zlecenia "
               f"{'z limitem' if args.limit else 'rynkowe'}")
-        for linia in opis_karty(karta):
-            print(linia)
         print(f"Wybór wag na oknie treningowym: {args.wybor}"
               f"{f' ({args.trials} losowań + założenia + IC)' if args.wybor == 'argmax' else ' (bez losowania)'}\n")
         tylko = {s.strip().upper() for s in args.instrumenty.split(",") if s.strip()}
