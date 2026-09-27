@@ -59,13 +59,22 @@ def test_zero_nie_jest_wygrana():
 def test_wynik_brutto_pokazuje_ile_zjadly_prowizje():
     """Liczba, która w tym projekcie rozstrzyga wszystko (docs/08, brama 0).
 
-    Bez niej „wynik −0,02" nie mówi, czy strategia przegrała z rynkiem, czy
+    Bez niej „wynik −0,12" nie mówi, czy strategia przegrała z rynkiem, czy
     z własnym kosztem — a to są dwa różne wnioski i dwie różne reakcje.
+
+    TEN TEST ZAPISYWAŁ WADĘ (poprawione 2026-09-27). Asercje brzmiały
+    `wynik_netto == -0.02` i `wynik_brutto == 0.08`, czyli przyjmowały, że
+    `realized_pnl` jest już po prowizji. Nie jest: `loop.zapisz_wyjscie`
+    księguje wynik i prowizję w DWÓCH kolumnach, a jedynym miejscem, które
+    składało je poprawnie, było `loop.update_equity`
+    (`sum(realized_pnl - fees_paid)`). Test przechodził, więc pilnował tego,
+    żeby dziennik dalej mylił się o całą rundę kosztową — patrz
+    `test_postmortem_wynik_po_koszcie.py` po pomiar z produkcji.
     """
     s = statystyki([_poz(1, -0.01, fees=0.05), _poz(2, -0.01, fees=0.05)])
-    assert s["wynik_netto"] == -0.02
+    assert s["wynik_brutto"] == -0.02, "brutto to suma realized_pnl"
     assert s["prowizje"] == 0.1
-    assert s["wynik_brutto"] == 0.08
+    assert s["wynik_netto"] == -0.12, "netto = brutto - prowizje"
 
 
 def test_mediana_trzymania_a_nie_srednia():
