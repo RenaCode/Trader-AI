@@ -417,6 +417,30 @@ def test_trener_zapisuje_te_miare_dla_KAZDEGO_okna():
         "miara policzona warunkowo wzgledem rezimu nie da sie porownac miedzy nimi")
 
 
+def test_miara_powrotow_idzie_TAKZE_DO_WYDRUKU_a_nie_tylko_do_bazy():
+    """`--sucho` NIE ZAPISUJE NIC, a wlasnie `--sucho` sluzy do porownan.
+
+    Miara zapisana wylacznie do `learn.wf_metric` odpowiada na pytanie o
+    EXIT_RATIO dopiero po nocnym przebiegu, i tylko temu, kto zna nazwe
+    metryki. Zmierzone 2026-09-27: porownanie `--progi wspolny` kontra
+    `--progi per-rezim` (oba `--sucho`) nie pokazalo tej liczby ani raz.
+    Warunek rozstrzygajacy postawiono ZAWCZASU i wymaga wartosci PO OKNACH,
+    razem z rezimem i liczba transakcji - czyli w tej samej linii wydruku.
+    """
+    zrodlo = TRAIN.read_text(encoding="utf-8")
+    i = zrodlo.index('print(f"  okno {idx:>2d}')
+    linia = zrodlo[i:zrodlo.index("\n", zrodlo.index("reżim=", i))]
+    assert "powroty" in linia, (
+        "wydruk okna nie podaje odsetka powrotow. Przy `--sucho` nie ma go "
+        "wtedy NIGDZIE - ani w bazie, ani na ekranie")
+    # Okno bez transakcji nie ma tej miary w `agg` (oddaje None), wiec wydruk
+    # musi to znosic, a nie rzucac KeyError na pierwszym pustym oknie.
+    fragment = zrodlo[zrodlo.index("powroty = (f", i - 3000):i]
+    assert '"udzial_powtornych_wejsc" in agg' in fragment, (
+        "wydruk siega po miare bez sprawdzenia, czy okno ja ma - okno bez "
+        "transakcji wywroci caly przebieg na KeyError")
+
+
 # ================================== KANARKI DETEKTOROW
 #
 # Testy strukturalne wyzej czytaja drzewo skladniowe. Gdyby detektor niczego nie

@@ -2141,9 +2141,22 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
             mark += f"  [KILL-SWITCH {oos_res.killswitch_at:%m-%d %H:%M}]"
         if oos_m["blocked"]:
             mark += f"  odrzuconych wejść: {oos_m['blocked']}"
+        # POWROTY IDA DO WYDRUKU, A NIE TYLKO DO `learn.wf_metric`.
+        #
+        # Miara istnieje od 2026-09-27 i odpowiada na pytanie, czy EXIT_RATIO
+        # = 0,45 nie wypycha nas z pozycji, w ktora zaraz wracamy. Zapisana
+        # WYLACZNIE do bazy odpowiadalaby na nie dopiero po nocnym przebiegu
+        # i tylko temu, kto zna nazwe metryki - a `--sucho` nie zapisuje nic,
+        # wiec porownanie wariantow (po to `--sucho` jest) tej liczby nie
+        # widzialo wcale. Warunek rozstrzygajacy postawiono ZAWCZASU: udzial
+        # powyzej 40% w oknach `range` o co najmniej 55 transakcjach i ponizej
+        # 15% w `range` o mniej niz 55 - a do jego sprawdzenia potrzebne sa
+        # wartosci PO OKNACH, z rezimem i liczba transakcji w tej samej linii.
+        powroty = (f"  powroty={agg['udzial_powtornych_wejsc']:.0%}"
+                   if "udzial_powtornych_wejsc" in agg else "")
         print(f"  okno {idx:>2d}  {test_from:%m-%d}–{test_to:%m-%d}  "
               f"Sharpe/transakcję={agg['sharpe']:+.4f}  transakcje={n_trades}  "
-              f"reżim={dominant}{mark}")
+              f"reżim={dominant}{powroty}{mark}")
         idx += 1
         start += timedelta(days=h.step_days)
 
