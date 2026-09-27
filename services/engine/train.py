@@ -526,45 +526,102 @@ def przewaga_dsr(zwroty: list[float], n_prob: int,
         konfiguracji dokladaja tyle wierszy, ile wektorow sie zmienilo -
         a przy `--wybor ic` (domyslnym) jest to jeden na okno i zmienia sie
         co noc, bo granice okien sie przesuwaja.
-      * `odchylenie_prob` to ZMIERZONY rozrzut Sharpe'ow OOS miedzy
-        konfiguracjami - `V[SR_n]` Baileya. None znaczy "nie zmierzono" i wtedy
+      * `odchylenie_prob` to ZMIERZONY rozrzut Sharpe'a miedzy KONFIGURACJAMI -
+        `V[SR_n]` Baileya. Nie miedzy oknami: ta pomylka daje liczbe dziesiec
+        razy wieksza i zostala tu raz wdrozona (uzasadnienie liczbowe
+        w `odchylenie_prob_z_bazy`). None znaczy "nie zmierzono" i wtedy
         `deflowany_sharpe` podstawia wariancje samego estymatora pod H0, czyli
-        idzie droga OPTYMISTYCZNA. Skad ta liczba sie bierze i kiedy wolno ja
-        podac - `odchylenie_prob_z_bazy`.
+        idzie droga OPTYMISTYCZNA - zmierzone 2026-09-27 o 2,7%, nie o rzad.
     """
     return deflowany_sharpe(zwroty, n_prob, odchylenie_prob)
 
 
+# Rozrzut Sharpe'a MIEDZY KONFIGURACJAMI - material na V[SR_n] Baileya.
+#
+# GRUPOWANIE PO `v.params`, A NIE PO OKNACH ANI PO PRZEBIEGACH. To jest cala
+# tresc tego zapytania i powod, dla ktorego stoi ono tutaj z nazwa:
+#
+#   * `params` to ta sama wielkosc, ktora liczy `n_konfiguracji`
+#     (`count(DISTINCT params)`) i ktora panel pokazuje jako N. Poprzeczka
+#     deflacji i mianownik, wobec ktorego ja liczymy, MUSZA opisywac ten sam
+#     zbior - inaczej odejmujemy klatwe zwyciezcy policzona dla innej mnogosci.
+#   * `avg(...)` po przebiegach TEJ SAMEJ konfiguracji, bo dwa kolejne nocne
+#     przebiegi dziela 39 z 40 okien (rho ~0,97). Sa jedna proba, nie dwiema;
+#     policzone osobno zawyzalyby n i zanizaly rozrzut o czynnik zalezny od
+#     tego, ile nocy minelo.
+#   * `median_oos_sharpe` jest agregatem po WSZYSTKICH oknach przebiegu, wiec
+#     szum estymacji Sharpe'a z jednego okna (~1/n_transakcji) jest w nim
+#     usredniony. Pojedyncze okno ma go tyle, ze przeslania wszystko inne -
+#     patrz komentarz w `odchylenie_prob_z_bazy`.
+_SQL_ROZRZUT_KONFIGURACJI = """
+SELECT avg(l.median_oos_sharpe) AS sharpe
+FROM learn.learning_state_log l
+JOIN learn.model_version v ON v.id = l.model_version_id
+WHERE v.model_id = %s AND l.median_oos_sharpe IS NOT NULL
+GROUP BY v.params
+"""
+
+
 def odchylenie_prob_z_bazy(cur, model_id: int) -> tuple[float | None, int]:
-    """Rozrzut Sharpe'ow OOS miedzy konfiguracjami tego modelu. Z BAZY.
+    """Rozrzut Sharpe'a MIEDZY KONFIGURACJAMI tego modelu. Z BAZY.
 
     Oddaje PARE: odchylenie (albo None) i liczbe konfiguracji, z ktorych wyszlo.
     Liczba jest potrzebna w opisie, bo to ona rozstrzyga, czy wynik jest
     pomiarem - a nie sama obecnosc liczby.
 
-    CO DOKLADNIE JEST W `oos_sharpe`, I CZEGO TAM NIE MA. Od 2026-09-27
-    `train()` zapisuje Sharpe OOS kandydata WYBRANEGO w oknie - jedyny, dla
-    ktorego symulacja poza oknem wyboru w ogole sie liczy. Kandydaci odrzuceni
-    (przy `--wybor argmax` to `trials_per_window` losowan plus zalozenia
-    poczatkowe) NIE MAJA wyniku OOS i nigdy go nie mieli: `ocen(cand,
-    train_slices, cache_tr)` liczy ich na oknie TRENINGOWYM. Policzenie im OOS
-    oznaczaloby `trials_per_window` razy wiecej symulacji poza oknem, czyli inny
-    protokol, a nie inny zapis.
+    CZYM TA WIELKOSC NIE JEST. Dwa bledy sa tu naturalne, oba daja liczbe
+    wygladajaca poprawnie i oba zostaly juz raz popelnione:
 
-    Skutek dla tej liczby trzeba nazwac: rozrzut mierzymy na ZWYCIEZCACH, a ci
-    sa z definicji wybrani po gornym ogonie. Rozrzut w takiej probie jest
-    WEZSZY niz w calym zbiorze kandydatow, a wezszy rozrzut daje NIZSZA
-    poprzeczke i WYZSZY DSR. Ta liczba jest wiec nadal oszacowaniem po stronie
-    korzystnej dla strategii - tylko o rzad wielkosci mniej korzystnym niz
-    podstawienie z H0 (zmierzone 2026-09-27: 0,2627 wobec 0,0264).
+      1. NIE JEST ROZRZUTEM MIEDZY OKNAMI. Tak bylo do 2026-09-27: funkcja
+         czytala `learn.hypothesis_trial.oos_sharpe`, gdzie kazdy wiersz to
+         Sharpe z JEDNEGO okna. Zmierzone na produkcji tego dnia, tor 4h:
 
-    Dolicza sie do tego wplyw przeciwny: kolejne okna to takze inny RYNEK, wiec
-    w rozrzut wchodzi zmiennosc okien, nie tylko konfiguracji - i ten skladnik
-    poprzeczke PODNOSI. Ktory z dwoch przewaza, nie jest zmierzone.
+             miedzy OKNAMI        (wf_metric, n=2353)          sd = 0,2627
+             miedzy PRZEBIEGAMI   (learning_state_log, n=29)   sd = 0,0270
+             miedzy KONFIGURACJAMI (DISTINCT params, n=28)     sd = 0,0266
+             podstawienie z H0    (T=1500)                     sd = 0,0259
+
+         Roznica jest DZIESIECIOKROTNA i przewraca werdykt z "nie przechodzi
+         o wlos" na "nie przechodzi o rzad wielkosci". Poprzeczka rosla z
+         +0,062 na +0,618, a DSR spadal z 0,71 na 0,00.
+
+         Powod jest mierzalny, nie interpretacyjny. Rozrzut miedzy oknami ma
+         DWA skladniki, z ktorych zaden nie jest rozrzutem konfiguracji:
+         zmiennosc RYNKU okno po oknie oraz szum estymacji Sharpe'a z proby
+         jednego okna. Drugi maleje jak 1/n: przy medianie 35 transakcji na
+         okno daje wariancje rzedu 0,029 przy zmierzonej calkowitej 0,069,
+         a dopasowanie `0,041 + 0,82/n` ma przy 1/n wspolczynnik 0,82 wobec
+         teoretycznego 1,0 - czyli to jest wlasnie szum estymatora.
+
+      2. NIE JEST SZUMEM ESTYMATORA. Ten drugi jest MNIEJSZY: to podstawienie
+         z H0 (`sigma/sqrt(T-1)`), ktore `deflowany_sharpe` wstawia, gdy tej
+         liczby nie ma. Rozrzut konfiguracji musi byc od niego wieksza albo
+         rowny, bo konfiguracje roznia sie CO NAJMNIEJ szumem - dlatego
+         `deflowany_sharpe` traktuje podstawienie jako PODLOGE i nie pozwala
+         pomiarowi obnizyc poprzeczki pod nia.
+
+    CZEGO TA LICZBA NADAL NIE MIERZY - trzy rzeczy, wszystkie w te sama strone:
+
+      * INNA STATYSTYKA NIZ SR W BRAMCE. `median_oos_sharpe` to mediana po
+        oknach, a `SR`, od ktorego odejmujemy poprzeczke, to Sharpe ZLACZONEJ
+        proby transakcji. To nie jest ta sama wielkosc (docs/03 podaje przypadek,
+        w ktorym mediana po oknach i wynik zlaczony rozjechaly sie o rzad).
+        Zamkniecie wymaga zapisywania Sharpe'a zlaczonego per przebieg - dzis
+        nie ma go w zadnej kolumnie.
+      * KONFIGURACJE OCENIONE NA TYCH SAMYCH DANYCH. Przebiegi dziela okna,
+        wiec rozrzut opisuje "ile zmienia zmiana konfiguracji przy niemal
+        ustalonych danych". Bailey chce dokladnie tego, ale to znaczy, ze dla
+        innych danych rozrzut byl by WIEKSZY.
+      * 28 KONFIGURACJI Z 59, KTORE LICZY N. Pozostale to przebiegi bez wiersza
+        w dzienniku stanu (sucho, przerwane, sprzed jego wprowadzenia). Gdyby
+        byly systematycznie inne, rozrzut byl by wiekszy.
+
+    Wszystkie trzy zanizaja rozrzut, wiec poprzeczka jest DOLNYM oszacowaniem,
+    a DSR GORNYM. Kierunek jest jeden i to jest jedyna dobra wiadomosc o tej
+    liscie.
     """
-    cur.execute("SELECT oos_sharpe FROM learn.hypothesis_trial"
-                " WHERE model_id = %s AND oos_sharpe IS NOT NULL", (model_id,))
-    sharpes = [float(r["oos_sharpe"]) for r in cur.fetchall()]
+    cur.execute(_SQL_ROZRZUT_KONFIGURACJI, (model_id,))
+    sharpes = [float(r["sharpe"]) for r in cur.fetchall() if r["sharpe"] is not None]
     return rozrzut_sharpeow(sharpes), len(sharpes)
 
 
@@ -575,23 +632,45 @@ def opis_zrodla_odchylenia(wynik: dict, n_konfiguracji_z_oos: int) -> str:
     wygladaja identycznie, a znacza co innego: drugi jest GORNYM oszacowaniem
     pierwszego. Do 2026-09-27 istniala tylko druga droga i nikt nie mial jak
     zobaczyc z wyniku, ze nia idzie.
+
+    TRZY DROGI, NIE DWIE. Od poprawki z 2026-09-27 (wieczor) jest jeszcze
+    trzecia: pomiar, ktory wyszedl PONIZEJ podlogi H0. Musi byc widoczny osobno,
+    bo w liczbach wyglada dokladnie jak podstawienie, a znaczy co innego -
+    znaczy "mierzylismy i pomiar jest niepelny".
     """
     sd = wynik.get("odchylenie_prob")
     if sd is None:
         return ""
-    if wynik.get("zrodlo_odchylenia", "").startswith("pomiar"):
-        return (f"Rozrzut Sharpe'ów między konfiguracjami ZMIERZONY: "
+    zrodlo = wynik.get("zrodlo_odchylenia", "")
+    wspolne = (f" Liczone po DISTINCT learn.model_version.params, czyli po tej "
+               f"samej wielkosci, ktora jest N — nie po oknach: rozrzut miedzy "
+               f"OKNAMI jest dziesieciokrotnie wieksszy (0,2627 wobec 0,0266 "
+               f"zmierzonych 2026-09-27) i nie jest rozrzutem konfiguracji.")
+    if zrodlo.startswith("podloga"):
+        return (f"Rozrzut Sharpe'ow miedzy konfiguracjami ZMIERZONY, ale "
+                f"ODRZUCONY: wyszedl ponizej samego bledu estymatora, wiec "
+                f"uzyto podlogi H0 (sd = {sd:.4f}). Konfiguracje roznia sie CO "
+                f"NAJMNIEJ szumem, wiec pomiar mniejszy od niego jest dowodem "
+                f"na niepelnosc pomiaru, nie na zgodnosc konfiguracji."
+                + wspolne)
+    if zrodlo.startswith("pomiar"):
+        return (f"Rozrzut Sharpe'ow miedzy konfiguracjami ZMIERZONY: "
                 f"sd = {sd:.4f} z {n_konfiguracji_z_oos} konfiguracji "
-                f"z policzonym Sharpe'em OOS (learn.hypothesis_trial.oos_sharpe). "
-                f"Mierzony na ZWYCIĘZCACH okien, więc jest zaniżony — a zaniżony "
-                f"rozrzut daje niższą poprzeczkę i WYŻSZY DSR.")
-    return (f"Rozrzut Sharpe'ów między konfiguracjami NIE ZMIERZONY: "
-            f"podstawiono wariancję samego estymatora pod H0 (sd = {sd:.4f}), "
-            f"bo w learn.hypothesis_trial jest {n_konfiguracji_z_oos} "
-            f"konfiguracji z Sharpe'em OOS, a próg to {MIN_PROB_ROZRZUTU}. "
-            f"Konfiguracje różnią się nie tylko szumem, więc PRAWDZIWY rozrzut "
-            f"jest większy, poprzeczka wyższa, a prawdziwy DSR NIŻSZY niż ten.")
-
+                f"z policzonym Sharpe'em OOS (podloga H0: "
+                f"{wynik.get('odchylenie_podloga_h0', 0.0):.4f}). Jest to DOLNE "
+                f"oszacowanie: statystyka proby to mediana po oknach, a nie "
+                f"Sharpe zlaczonej proby, konfiguracje oceniano na tych samych "
+                f"oknach, a Sharpe ma tylko czesc z nich — wszystkie trzy braki "
+                f"ZANIZAJA rozrzut, wiec DSR jest GORNYM oszacowaniem."
+                + wspolne)
+    return (f"Rozrzut Sharpe'ow miedzy konfiguracjami NIE ZMIERZONY: "
+            f"podstawiono wariancje samego estymatora pod H0 (sd = {sd:.4f}), "
+            f"bo konfiguracji z policzonym Sharpe'em OOS jest "
+            f"{n_konfiguracji_z_oos}, a prog to {MIN_PROB_ROZRZUTU}. "
+            f"Konfiguracje roznia sie nie tylko szumem, wiec PRAWDZIWY rozrzut "
+            f"jest wiekszy, poprzeczka wyzsza, a prawdziwy DSR NIZSZY niz ten — "
+            f"zmierzone 2026-09-27 na torze 4h: 0,0266 wobec podlogi 0,0260, "
+            f"czyli o 2,7%, a nie o rzad wielkosci." + wspolne)
 
 def _hash_konfiguracji(cand: dict) -> bytes:
     """Odcisk wektora wag - klucz wiersza w `learn.hypothesis_trial`.
@@ -2097,15 +2176,22 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
     #    po `hypothesis_trial`. Jest to zle, bo liczyloby te sama kare dwa razy
     #    - uzasadnienie w `n_konfiguracji`. `trials` zostaje w opisie jako
     #    kontekst i nie dotyka werdyktu.
-    # 3. ROZRZUT MIEDZY PROBAMI. Czytany z `oos_sharpe` - kolumny, ktora ten
-    #    przebieg wlasnie wypelnil. Gdy konfiguracji z policzonym Sharpe'em OOS
-    #    jest mniej niz `MIN_PROB_ROZRZUTU`, `odchylenie_prob_z_bazy` oddaje
-    #    None i zostaje dzisiejsze podstawienie z H0 - OPISANE jako
-    #    podstawienie, a nie przemilczane. Kierunek podmiany jest nazwany:
-    #    rozrzut miedzy konfiguracjami jest WIEKSZY niz rozrzut estymatora
-    #    (zmierzone 2026-09-27: 0,2627 wobec 0,0264), wiec poprzeczka idzie
-    #    W GORE, a DSR W DOL. Gdyby wyszlo odwrotnie, jest to objaw bledu,
-    #    nie dobra wiadomosc.
+    # 3. ROZRZUT MIEDZY KONFIGURACJAMI - nie miedzy oknami i nie miedzy
+    #    przebiegami. Czytany po DISTINCT `learn.model_version.params`, czyli po
+    #    TEJ SAMEJ wielkosci, ktora jest N w punkcie 2; inaczej odejmowalibysmy
+    #    klatwe zwyciezcy policzona dla innej mnogosci niz ta, ktora ja
+    #    wytworzyla. Gdy konfiguracji z policzonym Sharpe'em jest mniej niz
+    #    `MIN_PROB_ROZRZUTU`, `odchylenie_prob_z_bazy` oddaje None i zostaje
+    #    podstawienie z H0 - OPISANE jako podstawienie, a nie przemilczane.
+    #
+    #    KIERUNEK: rozrzut konfiguracji jest WIEKSZY (albo rowny) niz rozrzut
+    #    estymatora, wiec poprzeczka idzie W GORE, a DSR W DOL. SKALA jest mala
+    #    i to tez trzeba podac, bo do 2026-09-27 wieczorem stala tu liczba
+    #    dziesieciokrotnie za duza: 0,0266 wobec podlogi 0,0260, czyli 2,7%.
+    #    Liczba 0,2627, ktora tu wczesniej byla, to rozrzut miedzy OKNAMI -
+    #    zmiennosc rynku plus szum estymacji z jednego okna, nie konfiguracje.
+    #    Gdyby pomiar wyszedl PONIZEJ podlogi, `deflowany_sharpe` bierze podloge
+    #    i to mowi: pomiar mniejszy od samego szumu jest dowodem niepelnosci.
     sd_prob, konfiguracji_z_oos = odchylenie_prob_z_bazy(cur, model_id)
     dsr_ok, opis_dsr = werdykt_dsr(
         wszystkie_zwroty, doplata=karta.doplata_poza_symulacja,

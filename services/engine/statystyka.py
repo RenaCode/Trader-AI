@@ -364,23 +364,45 @@ def deflowany_sharpe(zwroty: list[float], n_prob: int,
 
     `odchylenie_prob` - POMIAR ALBO PODSTAWIENIE, I WYNIK MOWI KTORE
 
-    Bailey liczy V[{SR_n}] jako rozrzut Sharpe'ow POMIEDZY probami. Od
-    2026-09-27 `train.py` zapisuje `oos_sharpe` kandydata wybranego w kazdym
-    oknie do `learn.hypothesis_trial`, wiec ten rozrzut da sie ODCZYTAC -
-    patrz `train.odchylenie_prob_z_bazy` i prog `MIN_PROB_ROZRZUTU`. Do tej
-    daty kolumna byla pusta w 16 050 wierszach z 16 050 (zmierzone na
-    produkcji) i innej drogi niz podstawienie nie bylo.
+    Bailey liczy V[{SR_n}] jako rozrzut Sharpe'ow MIEDZY KONFIGURACJAMI - bo to
+    on rzadzi tym, jak wysoko wypada maksimum z N prob. Zrodlem jest
+    `train.odchylenie_prob_z_bazy`: `learn.learning_state_log.median_oos_sharpe`
+    grupowany po DISTINCT `learn.model_version.params`, czyli po tej samej
+    wielkosci, ktora jest N.
+
+    NIE JEST TO ROZRZUT MIEDZY OKNAMI, i ta pomylka zostala tu raz popelniona
+    i wdrozona. Zmierzone na produkcji 2026-09-27, tor 4h:
+
+        miedzy OKNAMI         (learn.wf_metric, n=2353)        sd = 0,2627
+        miedzy PRZEBIEGAMI    (learning_state_log, n=29)       sd = 0,0270
+        miedzy KONFIGURACJAMI (DISTINCT params, n=28)          sd = 0,0266
+        podstawienie z H0     (T=1500)                         sd = 0,0260
+
+    Roznica jest dziesieciokrotna, a skutek na werdykt nie jest kosmetyczny:
+    przy SR +0,0762 poprzeczka rosla z +0,062 na +0,615, a DSR spadal z 0,70
+    na 0,00 - z "nie przechodzi o wlos" na "nie przechodzi o rzad wielkosci".
+    Rozrzut miedzy oknami mierzy zmiennosc RYNKU okno po oknie oraz szum
+    estymacji Sharpe'a z jednego okna; zaden z tych skladnikow nie jest
+    rozrzutem konfiguracji. Uzasadnienie liczbowe - w `odchylenie_prob_z_bazy`.
 
     Pominiecie argumentu wstawia w to miejsce WARIANCJE SAMEGO ESTYMATORA pod
     hipoteza zerowa: gdy zadna proba nie ma przewagi, Sharpe'y roznia sie
     wylacznie bledem pomiaru, czyli sd = sqrt(1 - g3*SR + (g4-1)/4*SR^2) /
-    sqrt(T-1). Trzeba powiedziec wprost, w ktora strone to sie myli:
-    konfiguracje roznia sie nie tylko szumem, wiec PRAWDZIWY rozrzut jest
-    WIEKSZY, poprzeczka WYZSZA, a prawdziwy DSR NIZSZY niz ten liczony tak.
-    Podstawienie jest wiec droga OPTYMISTYCZNA - i dlatego wynik NAZYWA swoje
-    zrodlo w polu `zrodlo_odchylenia`. Bez tego pola liczba policzona
-    z pomiaru i liczba policzona z podstawienia wygladaja identycznie, a nie sa
-    tym samym: pierwsza jest wynikiem, druga gornym oszacowaniem wyniku.
+    sqrt(T-1). Kierunek pomylki jest znany: konfiguracje roznia sie nie tylko
+    szumem, wiec PRAWDZIWY rozrzut jest WIEKSZY, poprzeczka WYZSZA, a prawdziwy
+    DSR NIZSZY. SKALA jest teraz takze zmierzona i jest MALA - 0,0266 wobec
+    0,0260, czyli 2,7%, a nie rzad wielkosci. Podstawienie bylo wiec droga
+    optymistyczna, ale niemal o nic.
+
+    TA SAMA LICZBA JEST PODLOGA. Rozrzut konfiguracji nie moze byc mniejszy od
+    bledu estymatora, bo konfiguracje roznia sie CO NAJMNIEJ nim. Pomiar
+    ponizej tej podlogi jest odrzucany na jej rzecz i `zrodlo_odchylenia` to
+    mowi - inaczej niepelny pomiar ULATWIALBY bramke.
+
+    Wynik NAZYWA swoje zrodlo w polu `zrodlo_odchylenia` i podaje podloge
+    w `odchylenie_podloga_h0`. Bez tych pol liczba z pomiaru, liczba
+    z podstawienia i liczba z podlogi wygladaja identycznie, a znacza trzy
+    rozne rzeczy.
     Zwraca SLOWNIK ZAWSZE, z `dsr = None` i wypelnionym `powod`, gdy nie ma
     czego liczyc. Bramka ma wtedy WSTRZYMAC promocje, a nie przepuscic ja -
     patrz `train.bramka_dsr`.
@@ -419,8 +441,34 @@ def deflowany_sharpe(zwroty: list[float], n_prob: int,
         return wynik
     sigma = math.sqrt(wariancja)
 
+    # PODLOGA H0 - POMIAR NIE MOZE OBNIZYC POPRZECZKI PONIZEJ SZUMU ESTYMATORA.
+    #
+    # `sigma/sqrt(T-1)` to rozrzut Sharpe'ow, ktory powstalby, GDYBY zadna proba
+    # nie miala przewagi: konfiguracje identyczne, roznice wylacznie z bledu
+    # pomiaru. Prawdziwe V[SR_n] musi byc od tego WIEKSZE albo rowne, bo
+    # konfiguracje roznia sie CO NAJMNIEJ szumem - to jest nierownosc, nie
+    # zalozenie.
+    #
+    # Pomiar mniejszy od podlogi nie jest wiec wiadomoscia "konfiguracje sa
+    # zgodniejsze, niz sadzilismy". Jest wiadomoscia "nasz pomiar rozrzutu jest
+    # NIEPELNY" - najczesciej dlatego, ze konfiguracje oceniano na tych samych
+    # danych, wiec czesc szumu sie skrocila. Uzycie go obnizyloby poprzeczke pod
+    # poziom, ktory sam blad pomiaru uzasadnia, czyli ULATWILOBY bramke przez
+    # niedomiar wiedzy. Bierzemy wieksza z dwoch i MOWIMY, ktora wygrala.
+    #
+    # Zmierzone 2026-09-27 (tor 4h): pomiar 0,0266 wobec podlogi 0,0259 - przeszedl
+    # o 2,7%. Margines jest maly, a blad estymacji sd przy n=28 wynosi ~14%, wiec
+    # ten warunek NIE jest formalnoscia: kolejny przebieg moze zmierzyc ponizej.
+    podloga = sigma / math.sqrt(len(zwroty) - 1)
+    wynik["odchylenie_podloga_h0"] = podloga
     if odchylenie_prob is None:
-        odchylenie_prob = sigma / math.sqrt(len(zwroty) - 1)
+        odchylenie_prob = podloga
+        wynik["odchylenie_prob"] = odchylenie_prob
+    elif odchylenie_prob < podloga:
+        wynik["zrodlo_odchylenia"] = (
+            f"podloga H0: zmierzony rozrzut {odchylenie_prob:.4f} wyszedl PONIZEJ "
+            f"samego bledu estymatora {podloga:.4f}, wiec pomiar jest niepelny")
+        odchylenie_prob = podloga
         wynik["odchylenie_prob"] = odchylenie_prob
     prog = oczekiwany_maksymalny_sharpe(n_prob, odchylenie_prob)
     if prog is None:
