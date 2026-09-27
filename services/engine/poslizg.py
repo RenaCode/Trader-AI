@@ -111,6 +111,12 @@ from services.engine.statystyka import przedzial_sredniej  # noqa: E402
 # zapisane do bazy i odczytane z powrotem.
 ZRODLO_MIERZALNE = "gielda"
 
+# Nazwa zrodla ceny odniesienia dla zlecen RYNKOWYCH (likwidacja po
+# kill-switchu). Stala, a nie literal w dwoch miejscach: `cena_odniesienia`
+# ja zwraca, a `tozsamosciowy` na niej rozstrzyga - rozjazd tych dwoch napisow
+# odebralby probie takera kazde idealne wypelnienie i zrobil to po cichu.
+ZRODLO_LIKWIDACJI = "arkusz_likwidacji"
+
 # Zalozenie, ktore ten pomiar ma sprawdzic. IMPORTOWANE, nie przepisane -
 # przepisana kopia rozjechalaby sie przy pierwszej zmianie stalej, a wtedy
 # pomiar porownywalby sie z nieaktualnym zalozeniem i milczal.
@@ -168,7 +174,21 @@ def tozsamosciowy(w: dict) -> bool:
         wykonana = Decimal(str(surowa))
     except (InvalidOperation, ValueError):
         return False
-    odniesienie, _ = cena_odniesienia(w)
+    odniesienie, skad = cena_odniesienia(w)
+    if skad == ZRODLO_LIKWIDACJI:
+        # ZERO Z ARKUSZA LIKWIDACJI JEST POMIAREM, NIE ARYTMETYKA.
+        #
+        # Odniesieniem jest tu bid (albo ask) z chwili PRZED wyslaniem, a cena
+        # wypelnienia przychodzi od gieldy PO wykonaniu. Rownosc tych dwoch
+        # liczb nie wynika z zadnej definicji - znaczy, ze zlecenie rynkowe
+        # weszlo DOKLADNIE po cenie dotkniecia, czyli ze poslizg wyniosl zero.
+        # To jest najlepszy mozliwy wynik egzekucji i musi zostac w probie.
+        #
+        # Wrzucenie go do `tozsamosciowych` mialoby skutek dokladnie odwrotny do
+        # zamierzonego: proba samych idealnych wypelnien dostalaby werdykt
+        # „odniesienie rowne cenie wykonania", czyli „NIE ZMIERZONO" - i pomiar
+        # znikalby tym mocniej, im lepsza byla egzekucja.
+        return False
     return odniesienie is not None and odniesienie == wykonana
 
 
@@ -212,8 +232,28 @@ def cena_odniesienia(w: dict) -> tuple[Decimal | None, str]:
        modulu. Zostaje jako zapas dla wierszy, ktore ceny zlecenia nie maja.
     3. `cena_decyzji` (`journal.decision.target_price`) - jedyna cena, jaka
        istnieje dla zlecenia bez limitu.
+
+    ZERO: `cena_arkusza` (`exec.likwidacja.cena_odniesienia`) - cena Z ARKUSZA
+    ksiegi egzekucji, odczytana TUZ PRZED wyslaniem zlecenia RYNKOWEGO, po tej
+    stronie ksiegi, ktora zlecenie uderzy (bid przy sprzedazy, ask przy kupnie).
+    Stoi PRZED cena zlecenia i to nie jest kosmetyka:
+
+      * zlecenie rynkowe NIE MA `limit_price` (jest NULL-em), wiec punkt 1 dla
+        niego nie istnieje. Bez tego zrodla wiersz spadalby na `target_price`,
+        czyli na cene z chwili DECYZJI - a likwidacja zachodzi wiele godzin po
+        niej i bez zwiazku z nia. Poslizg wychodzilby wtedy rowny dryfowi rynku
+        przez te godziny, czyli o rzad wielkosci za duzy;
+      * dla wierszy Z LIMITEM ta kolumna jest NULL-em (dziennik likwidacji
+        dotyczy WYLACZNIE zlecen rynkowych), wiec pierwszenstwo nie zmienia
+        niczego w pomiarze makera. Pilnuje tego test
+        `test_zrodlo_likwidacji_nie_rusza_pomiaru_makera`.
+
+    TO JEST PIERWSZE ZRODLO, KTORE CZYNI POSLIZG TAKERA MIERZALNYM. Przed nim
+    `POSLIZG_TAKER` mial n=0 nie dlatego, ze zlecen rynkowych bylo malo, ale
+    dlatego, ze nie bylo ANI JEDNEGO z ceną odniesienia z chwili wysylki.
     """
-    for pole, skad in (("cena_zlecenia", "zlecenie"), ("cena_planu", "plan"),
+    for pole, skad in (("cena_arkusza", "arkusz_likwidacji"),
+                       ("cena_zlecenia", "zlecenie"), ("cena_planu", "plan"),
                        ("cena_decyzji", "decyzja")):
         v = w.get(pole)
         if v is None:
@@ -679,6 +719,9 @@ SELECT o.order_type                     AS rodzaj_zlecenia,
        o.raw->>'ulamek_wypelnienia'     AS ulamek,
        o.raw->>'rodzaj'                 AS rodzaj_wypelnienia,
        o.limit_price                    AS cena_zlecenia,
+       l.cena_odniesienia               AS cena_arkusza,
+       l.bid                            AS bid_wysylki,
+       l.ask                            AS ask_wysylki,
        p.limit_price                    AS cena_planu,
        d.target_price                   AS cena_decyzji,
        f.price                          AS cena_wykonania,
@@ -690,6 +733,10 @@ SELECT o.order_type                     AS rodzaj_zlecenia,
   JOIN ref.instrument i       ON i.id = o.instrument_id
   LEFT JOIN journal.planned_order p ON p.id = o.planned_order_id
   LEFT JOIN journal.decision d      ON d.id = o.decision_id
+  -- Dziennik likwidacji trzyma jedyna cene odniesienia, jaka ma zlecenie
+  -- RYNKOWE: bid albo ask z arkusza sprzed wyslania. `LEFT JOIN`, bo dla
+  -- kazdego zlecenia z limitem tej tabeli nie ma i nie ma jej miec.
+  LEFT JOIN exec.likwidacja l       ON l.order_id = o.id
  WHERE o.engine::text = %(engine)s
    AND o.mode::text = %(mode)s
    AND (%(h)s::int IS NULL

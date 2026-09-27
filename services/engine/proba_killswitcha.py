@@ -660,20 +660,27 @@ async def przeprowadz(fetch_all, fetch_one, execute, engine: str = "crypto",
               "i zadziałały ===")
         return 0
     finally:
-        # PRZYWRACANIE W `finally`, nie na końcu bloku: próg musi wrócić także
-        # wtedy, gdy próba padnie w połowie albo zostanie przerwana.
-        print(f"\n--- przywracanie {LIMIT_PROBY} na {prog_przed:.2f} ---")
-        # Znacznik okna schodzi razem z progiem. Gdyby ten zapis nie doszedl,
-        # termin i tak wygasnie sam - patrz `OKNO_PROBY_S`.
-        await execute(
-            "UPDATE risk.limit_def SET value = %s, updated_at = now(), proba_do = NULL"
-            " WHERE engine::text=%s AND mode::text=%s AND name=%s",
-            (prog_przed, engine, mode, LIMIT_PROBY))
-        po = await fetch_one(
-            "SELECT value FROM risk.limit_def WHERE engine::text=%s AND mode::text=%s"
-            "   AND name=%s", (engine, mode, LIMIT_PROBY))
-        print(f"    próg po przywróceniu: {float(po['value']):.2f}")
-
+        # KOLEJNOSC: NAJPIERW ZWOLNIENIE ZDARZENIA, POTEM PRZYWROCENIE PROGU.
+        #
+        # Do 2026-09-27 bylo odwrotnie i miedzy tymi dwoma zapisami istnialo
+        # okno, w ktorym `proba_do` jest juz NULL-em, a wywolane przez probe
+        # zdarzenie jest jeszcze czynne. W tym oknie zdarzenie proby jest
+        # NIEODROZNIALNE od prawdziwego kill-switcha dla kazdego, kto pyta
+        # o znacznik - a od 2026-09-27 pyta o niego LIKWIDACJA POZYCJI
+        # (`services/engine/likwidacja.ocen_zdarzenie`). Cykl silnika trafiony
+        # w to okno sprzedalby cala ekspozycje zleceniem rynkowym, placac pelny
+        # poslizg takera za artefakt proby.
+        #
+        # Okno bylo milisekundowe i wlasnie dlatego trzeba je bylo zamknac:
+        # "milisekundy sie nie trafia" to ta sama premisa, co "proba i tak nie
+        # ma czego zamykac", a ekspozycja jest niezerowa.
+        #
+        # ODWROTNA KOLEJNOSC NIE TWORZY NOWEGO OKNA. Gdyby proces zginal miedzy
+        # zwolnieniem a przywroceniem, prog zostaje podniesiony i silnik wystrzeli
+        # NOWE zdarzenie - ale `proba_do` jest wtedy nadal ustawione, a
+        # `triggered_at` nowego zdarzenia lezy po `updated_at`, wiec likwidacja
+        # rozpozna je jako artefakt proby i NIE ruszy. Kierunek bledu jest w te
+        # strone, w ktora ma byc: zadnego zlecenia rynkowego.
         # ZDARZENIE PROBY TEZ WRACA, I Z TEGO SAMEGO POWODU CO PROG.
         #
         # Kill-switch wywolany przez probe nie opisuje zadnego stanu rachunku -
@@ -704,6 +711,20 @@ async def przeprowadz(fetch_all, fetch_one, execute, engine: str = "crypto",
                  "próg) już nie istnieje. Łańcuch NIE został potwierdzony "
                  "w całości: próba padła albo któregoś ogniwa nie zmierzyła.",
                  moje_zdarzenie))
+
+        # PRZYWRACANIE W `finally`, nie na końcu bloku: próg musi wrócić także
+        # wtedy, gdy próba padnie w połowie albo zostanie przerwana.
+        print(f"\n--- przywracanie {LIMIT_PROBY} na {prog_przed:.2f} ---")
+        # Znacznik okna schodzi razem z progiem. Gdyby ten zapis nie doszedl,
+        # termin i tak wygasnie sam - patrz `OKNO_PROBY_S`.
+        await execute(
+            "UPDATE risk.limit_def SET value = %s, updated_at = now(), proba_do = NULL"
+            " WHERE engine::text=%s AND mode::text=%s AND name=%s",
+            (prog_przed, engine, mode, LIMIT_PROBY))
+        po = await fetch_one(
+            "SELECT value FROM risk.limit_def WHERE engine::text=%s AND mode::text=%s"
+            "   AND name=%s", (engine, mode, LIMIT_PROBY))
+        print(f"    próg po przywróceniu: {float(po['value']):.2f}")
 
 
 async def uruchom(fetch_all, fetch_one, execute, **kw) -> int:
