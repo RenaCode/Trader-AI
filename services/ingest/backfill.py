@@ -16,6 +16,7 @@ import asyncio
 import os
 import sys
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -50,6 +51,118 @@ PROBY_PONOWIEN = 6
 # ewentualne bledy. Trzy wystarczaja: swieca zamyka sie raz i wiecej sie nie
 # zmienia, wiec jedyne, co wymaga poprawki, to koncowka poprzedniego przebiegu.
 ZAKLADKA = 3
+
+
+# --- CZY DOSTAWCA PRZESKALOWAL HISTORIE, KTORA JUZ MAMY ---------------------
+#
+# Alpaca koryguje ceny wzgledem DZIS (`adjustment=split`), wiec KAZDY nastepny
+# podzial uniewaznia cala zapisana historie: to, co mamy, jest skorygowane wedlug
+# stanu z dnia przepisania, a to, co dopiero przyjdzie - wedlug dzisiejszego.
+# Nieciaglosc wypada wtedy w SRODKU okna treningowego i nic o niej nie mowi:
+# znacznik `swiece_skorygowane_o_podzialy` nadal stoi na `true`, wiec bramka
+# w `train.py` przepuszcza trening, a szereg jest zepsuty dokladnie tak, jak
+# przed cala ta operacja.
+#
+# Dlatego przy kazdym przebiegu porownujemy OSTATNIE zapisane swiece z tym, co
+# dostawca oddaje dla TYCH SAMYCH chwil. Staly czynnik na wszystkich naraz to
+# nie poprawka danych - to przeskalowanie, czyli podzial. Wtedy znacznik LECI,
+# bramka znow zatrzymuje trening i czlowiek wie, ze trzeba powtorzyc
+# `korekta_podzialow.py --przepisz`.
+#
+# Ile swiec: osiem. Jedna nie rozrozni przeskalowania od poprawki jednej swiecy,
+# a osiem godzin to mniej niz jedna sesja gieldowa, wiec zawsze sa dostepne.
+SWIEC_DO_POROWNANIA = 8
+
+# Czynnik dalej od jedynki niz to uznajemy za przeskalowanie. Najmniejszy realny
+# podzial (5:4) daje 0,80, czyli 20% - prog 2% lezy daleko od niego i daleko od
+# zwyklych poprawek zamkniecia, ktore sa rzedu setnych procenta.
+PROG_PRZESKALOWANIA = Decimal("0.02")
+
+# Jak blisko siebie musza lezec czynniki policzone z poszczegolnych swiec, zeby
+# nazwac je JEDNYM czynnikiem. Podzial skaluje wszystkie identycznie (do
+# zaokraglenia ceny); poprawka danych rusza jedna swiece i tego warunku nie
+# spelni. To on odcina falszywe alarmy.
+ZGODNOSC_CZYNNIKA = Decimal("0.005")
+
+
+def _czynnik_przeskalowania(pary: list) -> Decimal | None:
+    """Jeden czynnik dla par (stara_cena, nowa_cena) albo None.
+
+    None znaczy: albo za malo swiec do orzeczenia, albo czynniki nie sa zgodne
+    (czyli to poprawka pojedynczych swiec, nie przeskalowanie), albo czynnik jest
+    jedynka (nic sie nie stalo).
+    """
+    if len(pary) < 2:
+        return None
+    czynniki = [nowa / stara for stara, nowa in pary if stara]
+    if len(czynniki) < 2:
+        return None
+    sredni = sum(czynniki) / len(czynniki)
+    if not sredni:
+        return None
+    if max(abs(c / sredni - 1) for c in czynniki) > ZGODNOSC_CZYNNIKA:
+        return None
+    if abs(sredni - 1) <= PROG_PRZESKALOWANIA:
+        return None
+    return sredni
+
+
+async def sprawdz_ponowna_korekte(adapter, conn, cur, instrument_id: int,
+                                  symbol: str, timeframe: str, step,
+                                  have_until, now) -> Decimal | None:
+    """Czy znacznik korekty nadal mowi prawde. Zwraca czynnik albo None.
+
+    DOTYCZY WYLACZNIE INSTRUMENTOW ZE ZNACZNIKIEM. Bybit nie dzieli akcji, wiec
+    dla crypto ta funkcja konczy sie na pierwszym pytaniu i nie wysyla ani jednego
+    zapytania do gieldy.
+
+    Wykrycie NIE PRZERYWA cyklu. Przerwanie zatrzymaloby zbieranie danych, a to
+    nie jest potrzebne: zepsuty jest MODEL, ktory by sie na tym policzyl, i to
+    jego blokuje bramka po zdjeciu znacznika. Dane niech ida dalej.
+    """
+    from services.exchanges.alpaca import (KOREKTA_SWIEC,
+                                           ZNACZNIK_KOREKTY_PODZIALOW)
+    cur.execute(
+        "SELECT coalesce(meta->%s, 'false'::jsonb) = 'true'::jsonb"
+        "  FROM ref.instrument WHERE id = %s",
+        (ZNACZNIK_KOREKTY_PODZIALOW, instrument_id))
+    wiersz = cur.fetchone()
+    if not wiersz or not wiersz[0]:
+        return None
+
+    od = have_until - (SWIEC_DO_POROWNANIA - 1) * step
+    cur.execute(
+        "SELECT event_time, close FROM market.candle"
+        " WHERE instrument_id = %s AND timeframe = %s AND event_time >= %s"
+        " ORDER BY event_time", (instrument_id, timeframe, od))
+    stare = dict(cur.fetchall())
+    if len(stare) < 2:
+        return None
+
+    swiece = await adapter.fetch_candles(symbol, timeframe,
+                                        limit=SWIEC_DO_POROWNANIA * 2, start=od)
+    pary = [(stare[c.event_time], c.close) for c in swiece
+            if c.event_time in stare and c.event_time + step <= now]
+    czynnik = _czynnik_przeskalowania(pary)
+    if czynnik is None:
+        return None
+
+    cur.execute("UPDATE ref.instrument SET meta = meta - %s WHERE id = %s",
+                (ZNACZNIK_KOREKTY_PODZIALOW, instrument_id))
+    cur.execute(
+        "INSERT INTO market.korekta_swiec (instrument_id, timeframe, zdarzenie,"
+        " adjustment, okno_od, okno_do, swiec_zmienionych, wspolczynnik, szczegol)"
+        " VALUES (%s,%s,'uniewazniony',%s,%s,%s,%s,%s,%s)",
+        (instrument_id, timeframe, KOREKTA_SWIEC, min(stare), max(stare),
+         len(pary), czynnik,
+         "dostawca oddaje inne ceny dla swiec, ktore juz mamy - historia "
+         "zostala przeskalowana, czyli byl kolejny podzial"))
+    conn.commit()
+    print(f"  {symbol:10s} UWAGA: dostawca przeskalowal historie czynnikiem "
+          f"{czynnik:.4f} na {len(pary)} porownanych swiecach.\n"
+          f"      Znacznik korekty ZDJETY - bramka w train.py znow zatrzyma tor. "
+          f"Powtorz: korekta_podzialow.py --przepisz, potem cechy i --znacznik.")
+    return czynnik
 
 
 def batched_insert(cur, rows: list) -> int:
@@ -112,6 +225,12 @@ async def backfill_symbol(adapter, conn, instrument_id: int, symbol: str,
     )
     have_from, have_until = cur.fetchone()
     now = datetime.now(timezone.utc)
+
+    # NAJPIERW: czy znacznik korekty nadal mowi prawde (patrz wyzej).
+    # Przed zapisem, bo porownanie musi widziec STARE wartosci.
+    if have_until is not None:
+        await sprawdz_ponowna_korekte(adapter, conn, cur, instrument_id,
+                                      symbol, timeframe, step, have_until, now)
 
     ranges: list[tuple[datetime, datetime]] = []
     if napraw:
