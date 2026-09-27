@@ -88,10 +88,20 @@ async def state(engine: Silnik):
             "calibration_error": None,
             "max_psi": None,
             "trials_run": None,
+            "n_konfiguracji": None,
         }
 
     total = row["windows_total"]
     positive = row["windows_positive"]
+    # N BRAMKUJACE liczymy TU, czyli PO wczesnym wyjsciu dla silnika bez stanu.
+    # Przed nim byloby to zapytanie wykonywane takze wtedy, gdy nie ma czego
+    # opisywac - i wywracalo dwie atrapy, ktore (slusznie) odmawiaja zgadywania
+    # odpowiedzi na zapytanie, ktorego nikt im nie podlozyl.
+    konf = await fetch_one(
+        "SELECT count(DISTINCT v.params) AS n FROM learn.model_version v"
+        " JOIN learn.model m ON m.id = v.model_id WHERE m.name = %s",
+        (row["model_name"],)) if row.get("model_name") else None
+    n_konf = konf["n"] if konf else None
     return {
         "status": row["status"],
         "reason": row["reason"],
@@ -129,6 +139,23 @@ async def state(engine: Silnik):
         # dwa przebiegi tej samej konfiguracji dokladaja tylko te wektory,
         # ktore sie zmienily, a `purge_demo.py` czysci tabele w calosci.
         "trials_run": row["trials_run"],
+        # N, KTORE FAKTYCZNIE BRAMKUJE - liczba ROZROZNIALNYCH konfiguracji
+        # tego modelu. Bez niej panel pokazywal `trials_run` jako miare
+        # uczciwosci pomiaru i konczyl zdaniem "bez tej liczby deflated Sharpe
+        # jest nieobliczalny", co od 2026-09-27 jest FALSZEM: DSR jest liczony
+        # i jawnie NIE z tego licznika. Czytelnik panelu dowiadywal sie wiec
+        # odwrotnosci tego, co robi system.
+        #
+        # Liczone tu, a nie brane z `learning_state`, bo tam takiej kolumny nie
+        # ma, a dopisanie jej wymagaloby migracji i zmiany trenera - podczas gdy
+        # to jest jedno `count(DISTINCT params)`, zawsze aktualne. Ta sama
+        # wielkosc co `train.n_konfiguracji`, wiec panel i bramka nie moga sie
+        # rozjechac.
+        #
+        # DOLNA GRANICA: `params` nie zapisywalo `kind` ani `limit` do
+        # 2026-09-26, wiec przebiegi rozniace sie samym cennikiem zlewaly sie
+        # w jedna konfiguracje. Panel musi to powiedziec, nie ukryc.
+        "n_konfiguracji": n_konf,
     }
 
 

@@ -275,7 +275,13 @@ def test_stan_nauki_bez_wiersza_oddaje_KOMPLET_kluczy(monkeypatch):
         "trained_to": datetime(2026, 9, 22, tzinfo=timezone.utc),
     }
 
-    podlacz(monkeypatch, modul, Dyspozytor(("learn.learning_state", [pelny])))
+    # Drugie zapytanie tego endpointu od 2026-09-27: N BRAMKUJACE, czyli
+    # `count(DISTINCT params)` po `learn.model_version`. Atrapa slusznie odmawia
+    # zgadywania, wiec regula musi tu byc - inaczej test mowilby o rozjezdzie
+    # kluczy, a padal na braku odpowiedzi.
+    podlacz(monkeypatch, modul, Dyspozytor(
+        ("learn.learning_state", [pelny]),
+        ("count(DISTINCT v.params)", [{"n": 58}])))
     z_wierszem = asyncio.run(modul.state("crypto"))
 
     podlacz(monkeypatch, modul, Dyspozytor(("learn.learning_state", [])))

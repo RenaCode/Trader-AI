@@ -121,6 +121,12 @@ class BazaNauki:
             mv = params[0]
             pasujace = sorted(r for r, v in self.przebiegi.items() if v == mv)
             wiersze = [{"id": pasujace[-1]}] if pasujace else []
+        elif "count(DISTINCT v.params)" in plaski:
+            # N BRAMKUJACE (od 2026-09-27): liczba ROZROZNIALNYCH konfiguracji
+            # tego modelu. Ten endpoint pyta o nia obok stanu nauki, zeby panel
+            # pokazywal te sama liczbe, ktora wstrzymuje promocje - a nie
+            # licznik wektorow wag, ktory N nie jest.
+            wiersze = [{"n": 58}]
         else:
             raise AssertionError("zapytanie spoza tego endpointu: " + plaski)
         sprawdz_kolumny(plaski, wiersze)

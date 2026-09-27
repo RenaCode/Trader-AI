@@ -342,13 +342,26 @@ export default function Learning({ engine }) {
             <span className="hint">licznik przetestowanych hipotez</span>
           </div>
           <div className="stat" style={{ marginBottom: 12 }}>
-            <span className="stat-value">{s?.trials_run ?? '—'}</span>
-            <span className="stat-sub">konfiguracji przetestowanych na tym modelu</span>
+            <span className="stat-value">{s?.n_konfiguracji ?? '—'}</span>
+            <span className="stat-sub">rozróżnialnych konfiguracji — to N, które bramkuje</span>
           </div>
           <div className="row-body">
-            Ten licznik istnieje, żeby nie dało się nas oszukać selekcją. Im więcej konfiguracji
-            przetestowano, tym łatwiej trafić dobry wynik przypadkiem — i tym mocniej trzeba
-            zdyskontować Sharpe'a. Bez tej liczby <em>deflated Sharpe</em> jest nieobliczalny.
+            Ta liczba jest mianownikiem poprawki na selekcję: im więcej konfiguracji
+            porównano, tym łatwiej trafić dobry wynik przypadkiem i tym wyżej stoi poprzeczka,
+            którą <em>deflated Sharpe</em> musi przejść. Jest to <strong>dolna granica</strong> —
+            do 26.09.2026 zapis konfiguracji nie obejmował cennika ani trybu limitu, więc
+            przebiegi różniące się samym kosztem zlewały się w jedną.
+          </div>
+          <div className="stat" style={{ marginBottom: 12 }}>
+            <span className="stat-value dim">{s?.trials_run ?? '—'}</span>
+            <span className="stat-sub">wektorów wag w dzienniku hipotez — to NIE jest N</span>
+          </div>
+          <div className="row-body">
+            Do 27.09.2026 panel pokazywał tutaj tę drugą liczbę i twierdził, że bez niej
+            <em> deflated Sharpe</em> jest nieobliczalny. Było to nieprawdą w obie strony: DSR
+            jest liczony, i jawnie nie z niej. Kandydaci z tego dziennika byli oceniani
+            <em> na oknie treningowym</em>, a walk-forward już za nich zapłacił, mierząc wynik
+            poza oknem wyboru — doliczenie ich liczyłoby tę samą karę dwa razy.
           </div>
           <div className="row-body">
             Model trenowany na danych {fmtDate(s?.trained_from)} – {fmtDate(s?.trained_to)}.
