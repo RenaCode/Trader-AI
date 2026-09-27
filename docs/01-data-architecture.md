@@ -129,7 +129,10 @@ Odpowiedź w schemacie:
   jego kandydaci (`argmax`) byli oceniani **in-sample**, a walk-forward już za nich
   zapłacił, licząc wynik poza oknem wyboru — doliczenie ich do poprzeczki deflacji liczy
   tę samą karę dwa razy. N bierze się z `count(DISTINCT params)` po `learn.model_version`
-  (patrz `train.n_konfiguracji`); licznik hipotez zostaje w raporcie jako kontekst.
+  **ograniczonym do wersji, które doszły do wyniku** (`candidate`/`active`/`retired`, plus
+  wersja trwającego przebiegu — patrz `train.n_konfiguracji`); wersja, która została
+  w `training`, nie oddała wyniku, więc nie jest próbą. Licznik hipotez zostaje w raporcie
+  jako kontekst.
 
   **Czego ten licznik NIE jest — i nie da się tego naprawić rachunkiem.** Tabela ma
   `UNIQUE (model_id, config_hash)`, a jedyny INSERT (`train.py`) kończy się

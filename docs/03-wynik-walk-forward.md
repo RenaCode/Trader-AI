@@ -760,6 +760,38 @@ calosc projektu:             180 wersji | 86 roznych params | 5 modeli
 hypothesis_trial (tor 4h):   12 613     | oos_sharpe wypelnione: 0
 ```
 
+##### „Których wynik ktoś zobaczył" jest tu WARUNKIEM, nie ozdobą (2026-09-27)
+
+Do 2026-09-27 zapytanie liczyło **każdy** wiersz `learn.model_version`, także wersje,
+które zostały w statusie `training` — sieroty po przebiegach zabitych i po `--sucho`.
+Taki przebieg nigdy nie doszedł do wyniku, więc selekcja nie mogła się na nim oprzeć:
+nikt go nie zobaczył i nikt na jego podstawie niczego nie wybrał. Rozbicie 59 różnych
+`params` toru 4h, zmierzone tego dnia:
+
+```
+28  ma zapisany median OOS Sharpe                      -> proba
+24  skonczone (active/retired), bez wiersza w dzienniku -> proba (`--sucho`)
+ 7  wylacznie `training`, nigdy nie doszly do wyniku     -> NIE proba
+```
+
+Siedem `params` z `training` nie powtarza się w żadnym innym statusie, więc filtr
+naprawdę je usuwa. N toru 4h spada z **59 na 52** (toru 1h: 27 na 26), poprzeczka
+selekcji z **+0,0622 na +0,0609**, a DSR rośnie z **0,7064 na 0,7232**. Kierunek błędu
+był więc **na niekorzyść strategii** — nie przepuszczał niczego, co nie powinno przejść,
+ale podawał człowiekowi jako pomiar liczbę, która pomiarem nie była. Werdykt się nie
+zmienia: 0,7232 wobec progu 0,95.
+
+**Wersja bieżącego przebiegu wchodzi do N osobno.** `train()` zakłada swój wiersz
+(status domyślny `training`) **zanim** dojdzie do bramki, więc sam filtr statusu gubiłby
+dokładnie tę próbę, która jest przedmiotem selekcji — a pierwszy przebieg nowego toru
+dostawałby N = 0, czyli DSR **nieobliczalny** i promocję wstrzymaną przez filtr, a nie
+przez wielokrotność prób (`crypto_signal_weighting_5m` i `equity_signal_weighting_1h`
+stoją dziś dokładnie w tym stanie: po jednej wersji, obie `training`).
+
+**Rozrzut pod `V[{SR_n}]` pochodzi z WĘŻSZEJ populacji niż N** — z 28 konfiguracji
+z zapisanym Sharpe'em OOS, nie z 52. Przyjęcie sd tych 28 za sd całej populacji N jest
+**założeniem, nie pomiarem**, i od tej samej daty stoi jawnie w `reason` stanu nauki.
+
 #### `V[{SR_n}]` — od 2026-09-27 MIERZONE, a nie podstawiane
 
 Do tej daty `deflowany_sharpe` podstawiał w miejsce rozrzutu Sharpe'ów **między

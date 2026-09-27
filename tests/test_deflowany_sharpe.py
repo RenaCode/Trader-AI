@@ -515,6 +515,14 @@ def test_N_liczy_ROZNE_params_z_model_version():
         "tor 4h ma 143 wersje i 57 roznych params")
     assert "learn.model_version" in kur.sql
     assert "hypothesis_trial" not in kur.sql
+    # ATRAPA ODDAJE PODLOZONA LICZBE NIEZALEZNIE OD FILTRU, wiec ten test
+    # przechodzil przez caly czas, gdy N liczylo sie ze zlej populacji (takze
+    # z wersji, ktore zostaly w `training`). Populacje sprawdza na PRAWDZIWEJ
+    # bazie `test_n_selekcji_tylko_przebiegi_z_wynikiem`; tutaj zostaje sam
+    # wymog, zeby filtr w SQL byl - inaczej nie ma czego sprawdzac.
+    assert "status IN ('candidate','active','retired')" in kur.sql, (
+        "zapytanie o N nie filtruje statusow — licza sie wersje, ktore nigdy "
+        "nie doszly do wyniku")
 
 
 def test_zmierzone_N_57_NIE_PRZEPUSZCZA_wyniku_ktory_przy_17_przechodzil():
@@ -636,8 +644,13 @@ def test_bramka_w_trenerze_liczy_DSR_PO_koszcie_i_z_N_z_konfiguracji():
     arg = wywolanie.group(1)
     assert "doplata=karta.doplata_poza_symulacja" in arg, (
         "DSR liczony na zwrotach PRZED kosztem, ktorego symulacja nie nalicza")
-    assert "n=n_konfiguracji(cur, model_id)" in arg, (
-        "N nie pochodzi z liczby rozroznialnych konfiguracji")
+    # `mv_id` jest tu czescia wymogu, nie szczegolem: wiersz biezacego przebiegu
+    # stoi w `training` w chwili liczenia N, wiec bez niego filtr statusu gubi
+    # dokladnie te probe, ktora bramka wlasnie ocenia. Osobno pilnuje tego
+    # `test_n_selekcji_tylko_przebiegi_z_wynikiem`.
+    assert "n=n_konfiguracji(cur, model_id, mv_id)" in arg, (
+        "N nie pochodzi z liczby rozroznialnych konfiguracji ALBO nie dolicza "
+        "wlasnej wersji biezacego przebiegu")
     assert "trials_kumulatywnie=trials" in arg
     assert "przewaga_dsr(wszystkie_zwroty, trials)" not in ZRODLO_TRENERA, (
         "licznik hipotez znow jest N deflacji — patrz `n_konfiguracji`")

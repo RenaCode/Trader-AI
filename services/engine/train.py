@@ -522,8 +522,13 @@ def przewaga_dsr(zwroty: list[float], n_prob: int,
         Sharpe ze sredniej po oknach nie ma sensownego T do wzoru na PSR:
         „liczba obserwacji" byla by wtedy liczba okien, a koszt placi kazda
         transakcja z osobna.
-      * `n_prob` to `learn.hypothesis_trial` policzone dla tego modelu.
-        CZEGO TA LICZBA NIE JEST, jest opisane w `docs/01-data-architecture.md`
+      * `n_prob` to N SELEKCJI z `n_konfiguracji` - rozne `params` po wersjach
+        modelu, ktore doszly do wyniku. NIE jest to licznik
+        `learn.hypothesis_trial`, choc ten opis tak twierdzil do 2026-09-27
+        (i tak twierdzil komentarz przy migracji 0006). Tamten licznik ma dla
+        toru 4h 12 613 wierszy wobec N = 52, wiec pomylka nie jest kosmetyczna;
+        powod, dla ktorego nie jest mianownikiem, stoi w `n_konfiguracji`.
+        CZEGO TEN LICZNIK NIE JEST, jest opisane w `docs/01-data-architecture.md`
         i warto to miec przed oczami przy czytaniu wyniku: tabela ma
         `UNIQUE (model_id, config_hash)` i INSERT `ON CONFLICT DO NOTHING`,
         wiec liczy ROZNE WEKTORY WAG, a nie proby. Dwa przebiegi tej samej
@@ -646,10 +651,27 @@ def opis_zrodla_odchylenia(wynik: dict, n_konfiguracji_z_oos: int) -> str:
     if sd is None:
         return ""
     zrodlo = wynik.get("zrodlo_odchylenia", "")
+    # DWIE POPULACJE, DWIE LICZBY, JEDNO ZDANIE. Rozrzut wychodzi z WEZSZEJ
+    # populacji niz N: z konfiguracji, ktore maja ZAPISANY Sharpe OOS
+    # (`learning_state_log`), a nie ze wszystkich, ktore doszly do wyniku.
+    # Zmierzone 2026-09-27, tor 4h: 28 wobec N = 52. Podstawienie sd z 28 jako
+    # sd z 52 jest ZALOZENIEM, nie pomiarem, i musi byc widoczne w tym samym
+    # zdaniu - inaczej czytelnik bierze obie liczby za jedna probe.
+    n_selekcji = wynik.get("n_prob")
     wspolne = (f" Liczone po DISTINCT learn.model_version.params, czyli po tej "
-               f"samej wielkosci, ktora jest N — nie po oknach: rozrzut miedzy "
+               f"samej WIELKOSCI, ktora jest N — nie po oknach: rozrzut miedzy "
                f"OKNAMI jest dziesieciokrotnie wieksszy (0,2627 wobec 0,0266 "
                f"zmierzonych 2026-09-27) i nie jest rozrzutem konfiguracji.")
+    # Zdanie o DWOCH POPULACJACH nalezy WYLACZNIE do galezi `pomiar`. W dwoch
+    # pozostalych uzyta sd jest podloga H0, ktora nie pochodzi z zadnej proby
+    # konfiguracji - doklejenie tam "rozrzut z N konfiguracji" bylo by falszem
+    # o dokladnie tym ksztalcie, ktory ten opis ma tepic.
+    dwie_populacje = (
+        f" POPULACJE SIE ROZNIA: rozrzut wyszedl z {n_konfiguracji_z_oos} "
+        f"konfiguracji z ZAPISANYM Sharpe'em OOS, a N = {n_selekcji} liczy "
+        f"wszystkie, ktore doszly do wyniku (2026-09-27, tor 4h: 28 wobec 52). "
+        f"Przyjecie rozrzutu tych {n_konfiguracji_z_oos} za rozrzut calej "
+        f"populacji N jest ZALOZENIEM, nie pomiarem.")
     if zrodlo.startswith("podloga"):
         return (f"Rozrzut Sharpe'ow miedzy konfiguracjami ZMIERZONY, ale "
                 f"ODRZUCONY: wyszedl ponizej samego bledu estymatora, wiec "
@@ -666,7 +688,7 @@ def opis_zrodla_odchylenia(wynik: dict, n_konfiguracji_z_oos: int) -> str:
                 f"Sharpe zlaczonej proby, konfiguracje oceniano na tych samych "
                 f"oknach, a Sharpe ma tylko czesc z nich — wszystkie trzy braki "
                 f"ZANIZAJA rozrzut, wiec DSR jest GORNYM oszacowaniem."
-                + wspolne)
+                + dwie_populacje + wspolne)
     return (f"Rozrzut Sharpe'ow miedzy konfiguracjami NIE ZMIERZONY: "
             f"podstawiono wariancje samego estymatora pod H0 (sd = {sd:.4f}), "
             f"bo konfiguracji z policzonym Sharpe'em OOS jest "
@@ -715,7 +737,7 @@ def zapisz_oos_sharpe(cur, model_id: int,
     return zmienione
 
 
-def n_konfiguracji(cur, model_id: int) -> int:
+def n_konfiguracji(cur, model_id: int, mv_id: int | None = None) -> int:
     """Ile ROZROZNIALNYCH konfiguracji tego modelu kiedykolwiek policzono.
 
     `SELECT count(DISTINCT params) FROM learn.model_version WHERE model_id=%s`.
@@ -752,8 +774,52 @@ def n_konfiguracji(cur, model_id: int) -> int:
     Prawdziwe N jest WIEKSZE, a wieksze N daje MNIEJSZY DSR, wiec blad tej
     liczby dziala na korzysc strategii.
     """
-    cur.execute("SELECT count(DISTINCT params) AS n FROM learn.model_version"
-                " WHERE model_id = %s", (model_id,))
+    # PRZEBIEG, KTORY NIGDY NIE DOSZEDL DO WYNIKU, NIE JEST PROBA.
+    #
+    # Do 2026-09-27 liczylo sie tu KAZDE `params`, takze wersje, ktore zostaly
+    # w statusie `training` - czyli wiersze-sieroty po `--sucho` i po zabitych
+    # zadaniach (znany skutek `--sucho`, opisany przy tej fladze). Selekcja nie
+    # mogla sie na nich oprzec, bo nie oddaly wyniku: nikt ich nie widzial.
+    # Liczenie ich w N zawyzalo poprzeczke, czyli mylilo sie NA NIEKORZYSC
+    # strategii - ale bylo po prostu nieprawda.
+    #
+    # Zmierzone na produkcji 2026-09-27, tor 4h, rozbicie 59 roznych `params`:
+    #
+    #     28  ma zapisany median OOS Sharpe          -> bezsprzeczna proba
+    #     24  skonczone (active/retired), bez wiersza w learning_state_log
+    #         - to przebiegi `--sucho`: wynik POLICZYLY i wypisaly, wiec proba
+    #      7  wylacznie `training` - NIGDY nie doszly do wyniku, NIE proba
+    #
+    # Skutek na poprzeczke przy sd = 0,0266 i T = 1500:
+    #     N=28 -> +0,0544   N=52 -> +0,0609   N=59 -> +0,0622
+    # czyli 0,017 DSR miedzy obronnym 52 i dawnym 59. Malo, ale w zla strone
+    # i bez powodu.
+    #
+    # ROZNICA POPULACJI Z ODCHYLENIEM ZOSTAJE i jest nazwana w opisie werdyktu:
+    # N liczy sie tutaj (52), a `odchylenie_prob_z_bazy` liczy rozrzut z tych
+    # 28, ktore maja zapisany Sharpe. Uzycie rozrzutu 28 jako oszacowania
+    # rozrzutu 52 jest ZALOZENIEM, nie pomiarem - i musi byc widoczne.
+    #
+    # WLASNA WERSJA BIEZACEGO PRZEBIEGU MUSI WEJSC OSOBNO, i to jest jedyny
+    # powod, dla ktorego ta funkcja przyjmuje `mv_id`. `train()` zaklada swoj
+    # wiersz w `learn.model_version` ZANIM dojdzie do bramki (INSERT ze
+    # statusem domyslnym `training`), wiec w chwili liczenia N sam kandydat,
+    # ktorego bramka wlasnie ocenia, jeszcze nie wyszedl z `training`. Bez tego
+    # czlonu filtr gubilby dokladnie te probe, ktora jest przedmiotem selekcji,
+    # a pierwszy przebieg nowego toru dostawalby N=0, czyli DSR NIEOBLICZALNY
+    # (bramka fail-closed) - zmierzone: `crypto_signal_weighting_5m`
+    # i `equity_signal_weighting_1h` maja dzis po jednej wersji i obie stoja
+    # w `training`. `mv_id=None` (panel, ktory nie jest w trakcie przebiegu)
+    # liczy sama populacje zakonczona.
+    #
+    # STATUSY WYPISANE Z NAZWY, nie przez `<> 'training'`: `learn.mv_status` ma
+    # jeszcze `failed`, a przebieg, ktory padl, tak samo nie oddal wyniku. Dzis
+    # nie ma ani jednego takiego wiersza, wiec na liczbe to nie wplywa - ale
+    # lista dodatnia nie przepusci go po cichu, gdy sie pojawi.
+    cur.execute(
+        "SELECT count(DISTINCT params) AS n FROM learn.model_version"
+        " WHERE model_id = %s AND (status IN ('candidate','active','retired')"
+        "                          OR id = %s)", (model_id, mv_id))
     return cur.fetchone()["n"]
 
 
@@ -765,7 +831,11 @@ def opis_zrodla_n(n: int, trials_kumulatywnie: int) -> str:
     a wlasnie ten licznik komentarz przy migracji 0006 wskazywal jako zrodlo.
     """
     return (f"N = {n} rozróżnialnych konfiguracji z learn.model_version "
-            f"(count(DISTINCT params)) — DOLNA GRANICA: `kind` i `limit` nie "
+            f"(count(DISTINCT params) po wersjach candidate/active/retired plus "
+            f"wersja tego przebiegu; wersje, które nigdy nie wyszły ze statusu "
+            f"`training`, NIE są próbami — nie doszły do wyniku, więc selekcja "
+            f"nie mogła się na nich oprzeć: dla toru 4h to 7 z 59, zmierzone "
+            f"2026-09-27) — DOLNA GRANICA: `kind` i `limit` nie "
             f"były zapisywane do 2026-09-26, więc przebiegi różniące się samym "
             f"cennikiem zlewały się w jedną. Licznik learn.hypothesis_trial "
             f"({trials_kumulatywnie} wektorów wag) NIE jest tu mianownikiem: "
@@ -2267,7 +2337,7 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
     sd_prob, konfiguracji_z_oos = odchylenie_prob_z_bazy(cur, model_id)
     dsr_ok, opis_dsr = werdykt_dsr(
         wszystkie_zwroty, doplata=karta.doplata_poza_symulacja,
-        n=n_konfiguracji(cur, model_id), trials_kumulatywnie=trials,
+        n=n_konfiguracji(cur, model_id, mv_id), trials_kumulatywnie=trials,
         nieznane=karta.nieznane, odchylenie_prob=sd_prob,
         konfiguracji_z_oos=konfiguracji_z_oos)
 

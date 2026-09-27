@@ -97,9 +97,17 @@ async def state(engine: Silnik):
     # Przed nim byloby to zapytanie wykonywane takze wtedy, gdy nie ma czego
     # opisywac - i wywracalo dwie atrapy, ktore (slusznie) odmawiaja zgadywania
     # odpowiedzi na zapytanie, ktorego nikt im nie podlozyl.
+    # FILTR STATUSU MUSI BYC TEN SAM, CO W BRAMCE. `train.n_konfiguracji` liczy
+    # od 2026-09-27 wylacznie wersje, ktore doszly do wyniku
+    # (candidate/active/retired); wersja stojaca w `training` nigdy nie oddala
+    # wyniku, wiec selekcja nie mogla sie na niej oprzec. Bez tego samego filtru
+    # panel pokazywalby 59 tam, gdzie promocje wstrzymuje 52 - czyli znowu inna
+    # liczbe niz ta, ktora dziala. Roznica `OR id = mv_id` z bramki nie ma tu
+    # odpowiednika i wynosi najwyzej 1: panel nie jest w trakcie przebiegu.
     konf = await fetch_one(
         "SELECT count(DISTINCT v.params) AS n FROM learn.model_version v"
-        " JOIN learn.model m ON m.id = v.model_id WHERE m.name = %s",
+        " JOIN learn.model m ON m.id = v.model_id"
+        " WHERE m.name = %s AND v.status IN ('candidate','active','retired')",
         (row["model_name"],)) if row.get("model_name") else None
     n_konf = konf["n"] if konf else None
     return {
