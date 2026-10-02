@@ -1786,8 +1786,12 @@ async def sprawdz(conn, engine: str = "crypto", h: Horizon | None = None) -> int
         if f:
             regime, _ = classify_regime(f, None)
             probuj(f"{sym}: ocena sygnałów ({len(f)} cech, reżim {regime})",
+                   # `weights` bywa jawnie None (brak aktywnego modelu, patrz
+                   # active_model) - `.get("weights", {})` zwracalo wtedy None
+                   # i kontrola wywracala start silnika. Ukryte, dopoki ostatnia
+                   # swieca nie miala cech (do 2026-10-02 byla pomijana).
                    lambda ff=f, r=regime: evaluate(
-                       ff, r, (model or {}).get("weights", {}).get(r), h))
+                       ff, r, ((model or {}).get("weights") or {}).get(r), h))
 
     # KONTROLA STRUKTURALNA: czy wszystkie cechy horyzontu siedza na siatce swiec.
     # Cechy liczone na wlasnej siatce (funding, news) potrafily wyladowac na
