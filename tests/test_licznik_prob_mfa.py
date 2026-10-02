@@ -140,8 +140,20 @@ class BazaLogowania:
             return self._przytnij(plaski, {"secret_enc": SEKRET.encode(),
                                            "confirmed_at": teraz()})
 
-        if "FROM app.backup_code" in plaski:
+        if "FROM app.backup_code" in plaski or plaski.startswith("UPDATE app.backup_code"):
             return None          # to konto nie ma kodów zapasowych
+
+        if plaski.startswith("UPDATE app.totp_secret SET last_step"):
+            # Zużycie kroku jest warunkowe (`last_step < krok`) i zwraca wiersz
+            # tylko wtedy, gdy TO żądanie przestawiło krok.
+            krok, _, granica = params
+            if self.last_step is not None and self.last_step >= granica:
+                return None
+            self.last_step = krok
+            return {"user_id": UZYTKOWNIK}
+
+        if "FROM app.audit_log" in plaski:
+            return {"?column?": 1}   # urządzenie znane — bez powiadomienia
 
         raise AssertionError("zapytanie bez podłożonej odpowiedzi:\n" + plaski)
 

@@ -148,6 +148,13 @@ async def delete_credential(credential_id: int, request: Request,
     await execute("DELETE FROM app.api_credential WHERE id = %s", (credential_id,))
     await audit("credential.delete", user_id=user["id"], entity="api_credential",
                 entity_id=row["label"], request=request)
+    # Usuniecie klucza to tez "zmiana kluczy" (`credential.changed`, migracja
+    # 0011) - a petla bez aktywnego klucza konczy proces (`loop.py`, filtr
+    # `c.active`). Zgloszone bylo wylacznie dodanie.
+    await powiadom_o_bezpieczenstwie(
+        user["id"], "credential.changed", "Usunięto klucz API giełdy",
+        f"Etykieta: {row['label']}.\n\nJeśli to nie Ty — zmień hasło.",
+        severity="warning")
     return {"ok": True}
 
 

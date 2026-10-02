@@ -17,6 +17,7 @@ spec:
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets: {{- toYaml . | nindent 8 }}
       {{- end }}
+      {{- include "trader.podBezUprawnien" . | nindent 6 }}
       # Migracje ida jako initContainer, nie jako Job: dzieki temu API nigdy nie
       # wystartuje na schemacie starszym niz jego kod, a ArgoCD nie musi
       # koordynowac kolejnosci Job -> Deployment.
@@ -24,6 +25,7 @@ spec:
         - name: migrate
           image: "{{ .Values.api.image.repository }}:{{ .Values.api.image.tag }}"
           imagePullPolicy: {{ .Values.api.image.pullPolicy }}
+          {{- include "trader.kontenerBezUprawnien" . | nindent 10 }}
           command: ["python", "db/migrate.py"]
           env:
             # Migracje ida rola WLASCICIELA - tylko one moga zmieniac strukture.
@@ -45,6 +47,7 @@ spec:
         - name: api
           image: "{{ .Values.api.image.repository }}:{{ .Values.api.image.tag }}"
           imagePullPolicy: {{ .Values.api.image.pullPolicy }}
+          {{- include "trader.kontenerBezUprawnien" . | nindent 10 }}
           env:
             {{- include "trader.appDbPasswordEnv" . | nindent 12 }}
             - name: DATABASE_URL

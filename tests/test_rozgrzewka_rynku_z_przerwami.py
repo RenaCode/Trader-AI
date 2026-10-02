@@ -175,10 +175,13 @@ def test_okno_zegarowe_NIE_zebraloby_dosc_swiec_na_gieldzie():
 def test_swieca_po_dlugiej_przerwie_dostaje_cechy_tylko_w_szerszym_oknie():
     """Dlaczego worker equity ma `--okno-dni 7`, a nie domyślną dobę.
 
-    Świeca dostaje cechy dopiero w cyklu, w którym istnieje świeca PO niej —
-    ostatnią w panelu `compute_prices` pomija, bo jest jeszcze otwarta.
-    Po piątkowym zamknięciu następna świeca przychodzi 65 h później, więc
-    w oknie dobowym świeca piątkowa 19:00 nie dostaje cech NIGDY.
+    Do 02.10.2026 świeca dostawała cechy dopiero w cyklu, w którym istniała
+    świeca PO niej (`compute_prices` pomijało ostatnią bezwarunkowo). Po
+    piątkowym zamknięciu następna świeca przychodzi 65 h później, więc
+    w oknie dobowym świeca piątkowa 19:00 nie dostawała cech NIGDY. Dziś
+    liczy się w piątek po zamknięciu (tests/test_cechy_ostatniej_zamknietej_
+    swiecy.py), ale okno 7 dni zostaje jako siatka bezpieczeństwa dla cyklu,
+    który akurat wtedy nie przeszedł.
     """
     znaczniki = swiece_gieldowe(dni=400)
     piatek = [t for t in znaczniki if t.weekday() == 4 and t.hour == 19][-1]

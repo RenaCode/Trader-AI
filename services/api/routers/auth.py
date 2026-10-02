@@ -61,6 +61,14 @@ class PasswordBody(BaseModel):
     new_password: str = Field(min_length=12, max_length=512)
 
 
+class TotpDisableBody(BaseModel):
+    # Wylaczenie drugiego skladnika potwierdza sie BIEZACYM haslem. Do
+    # 2026-10-02 endpoint bral `PasswordBody`, czyli wymagal tez pola
+    # `new_password` (min. 12 znakow), ktorego nie uzywal - zadanie z samym
+    # haslem dostawalo 422.
+    current_password: str = Field(min_length=1, max_length=512)
+
+
 async def _start_session(user_id: int, mfa_ok: bool, request: Request,
                          response: Response) -> None:
     token, token_hash = new_session_token()
@@ -165,11 +173,17 @@ async def login(body: LoginBody, request: Request, response: Response):
 
     ok, rehash = verify_password(row["password_hash"], body.password)
     if not ok:
-        failed = (row["failed_logins"] or 0) + 1
-        lock = now + LOCKOUT if failed >= MAX_FAILED else None
+        # Licznik podbijany W BAZIE, tak jak w `_odnotuj_bledny_kod`. Do
+        # 2026-10-02 stal tu odczyt z `row` i zapis policzonej w Pythonie
+        # wartosci: N rownoleglych zgadniec czytalo ten sam stan i kazde
+        # zapisywalo `failed_logins = 1`. Blokada po pieciu probach nie
+        # zapadala nigdy pod tym obciazeniem, przed ktorym ma chronic.
         await execute(
-            "UPDATE app.user SET failed_logins = %s, locked_until = %s WHERE id = %s",
-            (failed, lock, row["id"]),
+            "UPDATE app.user SET failed_logins = failed_logins + 1,"
+            " locked_until = CASE WHEN failed_logins + 1 >= %s THEN now() + %s"
+            "                     ELSE locked_until END"
+            " WHERE id = %s",
+            (MAX_FAILED, LOCKOUT, row["id"]),
         )
         await audit("auth.login_failed", user_id=row["id"], request=request)
         raise generic
@@ -254,8 +268,14 @@ async def _zglos_nowe_urzadzenie(user_id: int, request: Request) -> None:
     # Odejmowanie sekundy odcina wpis wlasnie zapisany przez audit() - inaczej
     # kazde logowanie widzialoby samo siebie jako wczesniejsze i nie zglaszaloby
     # nigdy niczego.
+    #
+    # Udane logowanie to KAZDA z trzech akcji: konto bez drugiego skladnika
+    # konczy na `auth.login`, konto z TOTP na `auth.mfa` albo
+    # `auth.mfa_backup_code`. Samo `auth.login` sprawialo, ze przy wlaczonym
+    # TOTP zadne urzadzenie nie bylo nigdy "znane".
     znane = await fetch_one(
-        "SELECT 1 FROM app.audit_log WHERE actor_user_id = %s AND action = 'auth.login'"
+        "SELECT 1 FROM app.audit_log WHERE actor_user_id = %s"
+        "   AND action IN ('auth.login', 'auth.mfa', 'auth.mfa_backup_code')"
         "   AND ip IS NOT DISTINCT FROM %s::inet AND user_agent IS NOT DISTINCT FROM %s"
         "   AND at < now() - interval '1 second' LIMIT 1",
         (user_id, ip, ua))
@@ -300,14 +320,34 @@ async def mfa(body: MfaBody, request: Request, response: Response):
     step = verify_totp(secret, code, last_step=pending["last_step"])
     accepted = step is not None
     used_backup = False
+    if step is not None:
+        # Zapis PRZED utworzeniem sesji: gdyby kolejny krok zawiodl, kod i tak
+        # ma pozostac zuzyty. Odwrotna kolejnosc zostawialaby okno na powtorzenie.
+        #
+        # ZUZYCIE KROKU JEST WARUNKOWE I ATOMOWE. `last_step` przeczytany wyzej
+        # jest juz nieaktualny, gdy dwa zadania z tym samym kodem ida naraz:
+        # oba przechodzily `verify_totp`, oba zapisywaly krok i oba dostawaly
+        # sesje - ochrona przed powtorzeniem (RFC 6238 §5.2) nie dzialala
+        # dokladnie wtedy, gdy przechwycony kod jest odtwarzany od razu.
+        # Wygrywa to zadanie, ktore przestawi krok; drugie traci kod.
+        zuzyty = await fetch_one(
+            "UPDATE app.totp_secret SET last_step = %s WHERE user_id = %s"
+            " AND (last_step IS NULL OR last_step < %s) RETURNING user_id",
+            (step, pending["user_id"], step))
+        if not zuzyty:
+            step = None
+            accepted = False
+
     if not accepted:
-        # Kod zapasowy - jednorazowy, oznaczany jako zuzyty w tej samej transakcji.
+        # Kod zapasowy - jednorazowy. Zuzycie i sprawdzenie to JEDNA instrukcja:
+        # wczesniej SELECT i osobny UPDATE wpuszczaly ten sam kod dwa razy,
+        # gdy dwa zadania zmiescily sie miedzy nimi.
         bc = await fetch_one(
-            "SELECT id FROM app.backup_code WHERE user_id = %s AND code_hash = %s AND used_at IS NULL",
+            "UPDATE app.backup_code SET used_at = now()"
+            " WHERE user_id = %s AND code_hash = %s AND used_at IS NULL RETURNING id",
             (pending["user_id"], backup_code_hash(body.code)),
         )
         if bc:
-            await execute("UPDATE app.backup_code SET used_at = now() WHERE id = %s", (bc["id"],))
             accepted = True
             used_backup = True
 
@@ -315,13 +355,6 @@ async def mfa(body: MfaBody, request: Request, response: Response):
         await audit("auth.mfa_failed", user_id=pending["user_id"], request=request)
         await _odnotuj_bledny_kod(pending["id"], pending["user_id"])
         raise HTTPException(status_code=401, detail="Nieprawidlowy kod")
-
-    if step is not None:
-        # Zapis PRZED utworzeniem sesji: gdyby kolejny krok zawiodl, kod i tak
-        # ma pozostac zuzyty. Odwrotna kolejnosc zostawialaby okno na powtorzenie.
-        await execute(
-            "UPDATE app.totp_secret SET last_step = %s WHERE user_id = %s",
-            (step, pending["user_id"]))
 
     # Bilet zuzyty. Sesja powstaje NOWA - to jest zabezpieczenie przed session fixation.
     await execute("UPDATE app.session SET revoked_at = now() WHERE id = %s", (pending["id"],))
@@ -331,6 +364,16 @@ async def mfa(body: MfaBody, request: Request, response: Response):
     await _start_session(pending["user_id"], True, request, response)
     await audit("auth.mfa_backup_code" if used_backup else "auth.mfa",
                 user_id=pending["user_id"], request=request)
+    # NOWE URZADZENIE TAKZE PRZY DRUGIM SKLADNIKU. Do 2026-10-02 wykrywanie
+    # stalo wylacznie na sciezce konta BEZ TOTP, wiec wlaczenie drugiego
+    # skladnika wylaczalo po cichu alarm `always_on` o logowaniu z obcego
+    # adresu - lepiej chronione konto bylo gorzej pilnowane. Oslona jak przy
+    # `/login`: blad wykrywania nie ma prawa wywrocic logowania.
+    try:
+        await _zglos_nowe_urzadzenie(pending["user_id"], request)
+    except Exception as e:                                    # noqa: BLE001
+        print(f"[powiadomienie] wykrywanie nowego urządzenia zawiodło: "
+              f"{type(e).__name__}: {e}", flush=True)
     return {"ok": True}
 
 
@@ -422,12 +465,21 @@ async def totp_confirm(body: TotpConfirmBody, request: Request,
         await execute("INSERT INTO app.backup_code (user_id, code_hash) VALUES (%s,%s)",
                       (user["id"], h))
     await audit("auth.totp_enabled", user_id=user["id"], request=request)
+    # `credential.changed` obejmuje wprost "ustawienia drugiego skladnika"
+    # (etykieta w migracji 0011), a nikt go tu nie wysylal. Wlaczenie TOTP
+    # z przejetej sesji - setup i confirm nie pytaja o haslo - zamyka
+    # wlasciciela poza kontem przy nastepnym logowaniu. Ma o tym wiedziec.
+    await powiadom_o_bezpieczenstwie(
+        user["id"], "credential.changed", "Włączono weryfikację dwuetapową",
+        "Jeśli to nie Ty — ktoś z dostępem do sesji przypisał konto do swojej "
+        "aplikacji uwierzytelniającej.",
+        severity="warning")
     # Kody pokazywane RAZ - w bazie sa tylko ich hashe.
     return {"ok": True, "backup_codes": [c for c, _ in codes]}
 
 
 @router.post("/totp/disable", dependencies=[Depends(require_csrf)])
-async def totp_disable(body: PasswordBody, request: Request,
+async def totp_disable(body: TotpDisableBody, request: Request,
                        user: dict = Depends(current_user)):
     row = await fetch_one("SELECT password_hash FROM app.user WHERE id = %s", (user["id"],))
     ok, _ = verify_password(row["password_hash"], body.current_password)
@@ -436,6 +488,11 @@ async def totp_disable(body: PasswordBody, request: Request,
     await execute("DELETE FROM app.totp_secret WHERE user_id = %s", (user["id"],))
     await execute("DELETE FROM app.backup_code WHERE user_id = %s", (user["id"],))
     await audit("auth.totp_disabled", user_id=user["id"], request=request)
+    await powiadom_o_bezpieczenstwie(
+        user["id"], "credential.changed", "Wyłączono weryfikację dwuetapową",
+        "Jeśli to nie Ty — konto chroni teraz samo hasło. Zmień je i włącz "
+        "drugi składnik ponownie.",
+        severity="warning")
     return {"ok": True}
 
 

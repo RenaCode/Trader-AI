@@ -2833,15 +2833,22 @@ async def sprawdz_odlozone_decyzje(fetch_all, notify, sucho: bool = False, *,
         # jest odlozona ZGODNIE Z ZAMYSLEM i alarm o niej zapalalby sie przy
         # kazdym przebiegu na w pelni zdrowym systemie.
         "   AND p.bar_start < now() - make_interval(mins => %s)"
+        # OKNO DECYZJI DLA SWIECY B TO [B + swieca, B + 2*swieca) - tak samo
+        # jak `loop.okno_decyzji`: decyzja dla B zapada dopiero PO jej
+        # zamknieciu. Do 2026-10-02 stalo tu [B, B + swieca), czyli okno, w ktorym
+        # petla rozstrzyga swiece POPRZEDNIA. Kazda decyzja dla B-1 "gasila"
+        # brak decyzji dla B, wiec czujka milczala, a odzywala sie najwczesniej
+        # jedna swieca za pozno - gdy brakowalo juz dwoch z rzedu.
         "   AND NOT EXISTS ("
         "         SELECT 1 FROM journal.decision d"
         "          WHERE d.instrument_id = p.instrument_id"
         "            AND d.engine = p.engine AND d.mode = p.mode"
         "            AND d.decided_at >= p.bar_start"
+        "                              + make_interval(mins => %s)"
         "            AND d.decided_at < p.bar_start"
         "                              + make_interval(mins => %s))"
         " ORDER BY p.bar_start DESC, i.symbol",
-        (engine, mode, list(POWODY_ODLOZENIA), okno_h, 2 * minut, minut))
+        (engine, mode, list(POWODY_ODLOZENIA), okno_h, 2 * minut, minut, 2 * minut))
 
     braki = ocen_odlozone_bez_decyzji(wiersze)
     if not braki:

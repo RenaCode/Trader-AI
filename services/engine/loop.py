@@ -2912,7 +2912,11 @@ async def main() -> int:
                       f"kończę proces, żeby restart był WIDOCZNY zamiast cichy")
                 return 1
         if args.once:
-            return 0
+            # Kod wyjscia MOWI, jak poszedl ten jeden cykl. Do 2026-10-02 stalo
+            # tu `return 0` takze po przebiegu przerwanym wyjatkiem - kazde
+            # wywolanie z `--once` (reczne sprawdzenie, Job, skrypt) widzialo
+            # sukces tam, gdzie cykl sie wywrocil.
+            return 1 if pod_rzad else 0
         await asyncio.sleep(args.interval)
 
 

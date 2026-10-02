@@ -357,7 +357,8 @@ def load_bars(cur, instrument_id: int, h: Horizon, since: datetime,
                    (array_agg(open  ORDER BY event_time))[1]      AS open,
                    max(high) AS high, min(low) AS low,
                    (array_agg(close ORDER BY event_time DESC))[1] AS close,
-                   sum(volume) AS volume
+                   sum(volume) AS volume,
+                   count(*) AS n
             FROM zrodlo
             GROUP BY 1 ORDER BY 1
         """
@@ -369,9 +370,48 @@ def load_bars(cur, instrument_id: int, h: Horizon, since: datetime,
             FROM zrodlo ORDER BY 1
         """
     cur.execute(sql, args)
+    # `n` - ile swiec zrodlowych weszlo do agregatu. Bez niego nie da sie
+    # odroznic kubla 4h zlozonego z czterech zamknietych swiec 1h od kubla,
+    # w ktorym jest dopiero jedna (patrz `_ostatnia_gotowa`).
     return [{"t": r["t"], "open": float(r["open"]), "high": float(r["high"]),
              "low": float(r["low"]), "close": float(r["close"]),
-             "volume": float(r["volume"])} for r in cur.fetchall()]
+             "volume": float(r["volume"]),
+             **({"n": int(r["n"])} if "n" in r else {})} for r in cur.fetchall()]
+
+
+def _ostatnia_gotowa(bar: dict, h: Horizon, until: datetime) -> bool:
+    """Czy OSTATNIA swieca panelu jest domknieta i kompletna.
+
+    DLACZEGO WARUNEK, A NIE "ZAWSZE POMIJAJ OSTATNIA"
+
+    Do 2026-10-02 `compute_prices` pomijalo ostatnia swiece bezwarunkowo,
+    z uzasadnieniem "jest jeszcze otwarta". Bylo to prawda do 2026-09-06 -
+    od tego dnia `backfill.py` zapisuje wylacznie swiece ZAMKNIETE
+    (`event_time + step <= now`), wiec pomijana byla swieca zamknieta.
+    Skutek: cecha swiecy B pojawiala sie dopiero, gdy istniala swieca PO
+    niej. Dla 4h z 1h to ~godzina pozniej (kubel B+4h musi dostac pierwsza
+    swiece 1h), dla equity 1h - nastepnego notowania, czyli po sesji.
+
+    Teraz swieca liczy sie wtedy, gdy:
+      * jej koniec nie wychodzi poza `until` (zegar, nie pozycja w liscie);
+      * przy agregacji - ma KOMPLET swiec zrodlowych. Kubel 12:00 o 13:20
+        ma jedna swiece 1h z czterech, a `insert_values` poprawia wiersz
+        dopiero przy nastepnym przebiegu - petla zdazylaby zdecydowac na
+        kawalku swiecy.
+
+    Brak `n` (wywolanie spoza `load_bars`) znaczy "nie wiadomo" i swieca
+    jest pomijana - tak jak dotad.
+
+    Warunek dotyczy WYLACZNIE ostatniej swiecy panelu. Wczesniejsze kuble
+    z dziurami w danych liczyly sie zawsze i dalej sie licza: zmiana ich
+    zestawu przesunelaby indeksy okien w calej historii, na ktorej stoi
+    trening.
+    """
+    if bar["t"] + timedelta(minutes=h.bar_minutes) > until:
+        return False
+    if h.aggregate:
+        return bar.get("n", 0) >= h.swiec_zrodlowych_na_swiece
+    return True
 
 
 # ------------------------------------------------------------------ liczenie
@@ -399,13 +439,11 @@ def compute_prices(cur, instrument_id: int, h: Horizon, feat_ids: dict[str, int]
     ema_buf = h.ema_slow * 4
     rows: list[tuple] = []
 
-    # Ostatnia swieca panelu jest JESZCZE OTWARTA - time_bucket zwraca ja
-    # z niepelnymi danymi. Policzona z niej cecha opisuje kawalek swiecy, a przez
-    # ON CONFLICT DO NOTHING zostaje w bazie na zawsze, bo pozniejszy przebieg
-    # nie nadpisze istniejacego wiersza. Pomijamy ja.
-    ostatnia_zamknieta = len(bars) - 1
+    # Ostatnia swieca panelu liczy sie tylko domknieta i kompletna - patrz
+    # `_ostatnia_gotowa`. Do 2026-10-02 pomijana byla ZAWSZE, takze zamknieta.
+    koniec = len(bars) if _ostatnia_gotowa(bars[-1], h, until) else len(bars) - 1
 
-    for i in range(lookback, ostatnia_zamknieta):
+    for i in range(lookback, koniec):
         t = bars[i]["t"]
         if t < since:
             continue

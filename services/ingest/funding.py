@@ -144,9 +144,36 @@ async def backfill(adapter, conn, perp_id: int, symbol: str, since: datetime) ->
     return total
 
 
+async def odczekaj_albo_przerwij(e: ExchangeError, symbol: str, proby: int,
+                                 start: datetime, co: str) -> None:
+    """Ponowienie po bledzie ponawialnym - Z LICZNIKIEM i narastajacym odstepem.
+
+    Ta sama regula co w `backfill.fetch_range` (tam opisana w pelni), bo to
+    byl ten sam blad: do 2026-10-02 tutaj i w `pozycjonowanie._pobierz_okno`
+    stalo `sleep(5); continue` bez licznika. `retryable=True` niesie kazde
+    5xx i limit zapytan, wiec okno serwisowe gieldy krecilo petla co piec
+    sekund bez konca: cykl `history` sie nie konczyl, puls nie bil, licznik
+    awarii nie rosl, a pod stal "Running" ze stojacym finansowaniem.
+
+    `proby` liczy bledy POD RZAD - wolajacy zeruje je po udanym pobraniu.
+    """
+    from services.ingest.backfill import PROBY_PONOWIEN
+    if proby > PROBY_PONOWIEN:
+        raise ExchangeError(
+            f"{symbol}: {PROBY_PONOWIEN} kolejnych prób pobrania {co} od "
+            f"{start:%Y-%m-%d %H:%M} zakończonych błędem giełdy ({e}). "
+            f"Przerywam cykl — ponawianie bez końca nie bije pulsu i nie "
+            f"podnosi licznika awarii.", retryable=True) from e
+    czekaj = min(60.0, 5.0 * (2 ** (proby - 1)))
+    print(f"  {symbol:12s} {e} — ponawiam za {czekaj:.0f} s "
+          f"(próba {proby}/{PROBY_PONOWIEN})")
+    await asyncio.sleep(czekaj)
+
+
 async def _fetch_range(adapter, conn, cur, perp_id: int, symbol: str,
                        start: datetime, stop: datetime, now: datetime) -> int:
     total = 0
+    proby = 0
     while start < stop:
         end = min(start + timedelta(hours=INTERVAL_H * PAGE), stop)
         try:
@@ -154,9 +181,11 @@ async def _fetch_range(adapter, conn, cur, perp_id: int, symbol: str,
         except ExchangeError as e:
             if not e.retryable:
                 raise
-            print(f"  {symbol:12s} {e} — ponawiam za 5 s")
-            await asyncio.sleep(5)
+            proby += 1
+            await odczekaj_albo_przerwij(e, symbol, proby, start,
+                                         "stawek finansowania")
             continue
+        proby = 0
 
         if rows:
             cur.executemany(

@@ -48,7 +48,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from services.exchanges.base import ExchangeError  # noqa: E402
 from services.exchanges.bybit import BybitAdapter  # noqa: E402
-from services.ingest.funding import ensure_perp, missing_ranges  # noqa: E402
+from services.ingest.funding import (  # noqa: E402
+    ensure_perp, missing_ranges, odczekaj_albo_przerwij,
+)
 
 # Siatka godzinowa - taka, jaką oddaje giełda dla obu tych wielkości.
 INTERVAL_H = 1
@@ -60,6 +62,7 @@ PAGE = 200
 async def _pobierz_okno(adapter, conn, cur, perp_id: int, symbol: str,
                         start: datetime, stop: datetime, now: datetime) -> int:
     total = 0
+    proby = 0
     while start < stop:
         end = min(start + timedelta(hours=INTERVAL_H * PAGE), stop)
         try:
@@ -67,9 +70,11 @@ async def _pobierz_okno(adapter, conn, cur, perp_id: int, symbol: str,
         except ExchangeError as e:
             if not e.retryable:
                 raise
-            print(f"  {symbol:12s} {e} — ponawiam za 5 s")
-            await asyncio.sleep(5)
+            # Z licznikiem - patrz `funding.odczekaj_albo_przerwij`.
+            proby += 1
+            await odczekaj_albo_przerwij(e, symbol, proby, start, "pozycjonowania")
             continue
+        proby = 0
 
         if rows:
             # ON CONFLICT DO UPDATE, a nie DO NOTHING: dwa źródła mogą przyjść

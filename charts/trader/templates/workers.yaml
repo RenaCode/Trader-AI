@@ -75,6 +75,7 @@ spec:
       {{- with $.Values.imagePullSecrets }}
       imagePullSecrets: {{- toYaml . | nindent 8 }}
       {{- end }}
+      {{- include "trader.podBezUprawnien" $ | nindent 6 }}
       {{/*
       BRAMKA MIGRACJI.
 
@@ -113,6 +114,7 @@ spec:
         - name: czekaj-na-migracje
           image: "{{ $.Values.api.image.repository }}:{{ $.Values.api.image.tag }}"
           imagePullPolicy: {{ $.Values.api.image.pullPolicy }}
+          {{- include "trader.kontenerBezUprawnien" $ | nindent 10 }}
           env:
             {{/*
             TA SAMA ROLA, CO WORKER - i nic poza nia. Ani helpera od hasel
@@ -229,6 +231,7 @@ spec:
         - name: {{ $name }}
           image: "{{ $.Values.api.image.repository }}:{{ $.Values.api.image.tag }}"
           imagePullPolicy: {{ $.Values.api.image.pullPolicy }}
+          {{- include "trader.kontenerBezUprawnien" $ | nindent 10 }}
           command: {{ toJson $w.command }}
           env:
             {{/*

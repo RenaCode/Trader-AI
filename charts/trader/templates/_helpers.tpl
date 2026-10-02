@@ -131,3 +131,37 @@ nigdzie indziej i dlatego każda analiza szła najdroższym modelem.
 - name: LLM_DAILY_CALLS
   value: {{ required "llm.dailyCalls musi byc ustawiony wprost" .Values.llm.dailyCalls | quote }}
 {{- end -}}
+
+{{/*
+KONTEKST BEZPIECZEŃSTWA PODÓW Z OBRAZEM API (2026-10-02).
+
+Obraz API ustawia `USER trader` (uid 10001, docker/api.Dockerfile), ale chart
+niczego nie wymuszał: brak `runAsNonRoot`, brak `allowPrivilegeEscalation:
+false`, pełny domyślny zestaw capabilities. Te pody trzymają `SECRETS_KEY`
+i - w `engine` - odszyfrowane klucze giełdy, a `news` przetwarza treść od
+obcych (RSS, odpowiedzi modeli). Ucieczka z procesu nie powinna dostawać
+w prezencie roota ani `setuid`.
+
+`runAsUser` JEST WPISANY LICZBOWO, i to nie jest powtórzenie Dockerfile'a:
+`USER trader` to nazwa, a kubelet z `runAsNonRoot: true` i nienumerycznym
+użytkownikiem obrazu odmawia startu („cannot verify user is non-root").
+Bez tej linii poprawka zatrzymałaby API i wszystkie workery naraz.
+Pilnuje tego tests/test_chart_kontekst_bezpieczenstwa.py.
+
+`readOnlyRootFilesystem` CELOWO NIE: nikt nie zmierzył, czy żaden proces nie
+pisze poza /tmp, a ten chart synchronizuje się na produkcję od razu.
+*/}}
+{{- define "trader.podBezUprawnien" -}}
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  seccompProfile:
+    type: RuntimeDefault
+{{- end -}}
+
+{{- define "trader.kontenerBezUprawnien" -}}
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: ["ALL"]
+{{- end -}}
