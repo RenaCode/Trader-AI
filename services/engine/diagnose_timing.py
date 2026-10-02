@@ -74,16 +74,33 @@ LOSOWAN = 200
 SEED = 20260907
 
 
-def zwrot_losowej(panel: list[dict], start: int, dlugosc: int,
-                  koszt_rundy: float) -> float | None:
-    """Zwrot transakcji o zadanej dlugosci, wchodzacej w swiecy `start`.
+def zwrot_losowej(panel: list[dict], decyzja: int, dlugosc: int,
+                  koszt_rundy: float, *, limit: bool = False) -> float | None:
+    """Zwrot transakcji o zadanej dlugosci, z decyzja wejscia w swiecy `decyzja`.
 
-    Wejscie po cenie swiecy start+1 i wyjscie po start+1+dlugosc - dokladnie tak,
-    jak liczy to symulacja portfelowa. Koszt rundy odejmowany raz, bo dotyczy
-    obu nog razem.
+    `dlugosc` to ta sama liczba, ktora `main` odtwarza z transakcji
+    faktycznych: indeks `closed_at` minus indeks `opened_at` w panelu. Ceny
+    biore DOKLADNIE z tych swiec, z ktorych bierze je `simulate_portfolio`:
+
+      * zlecenie rynkowe: wejscie po cenie swiecy `decyzja+1`, wyjscie po cenie
+        swiecy `closed_at`, czyli `decyzja+dlugosc`,
+      * zlecenie z limitem: wejscie po cenie swiecy decyzji, wyjscie po cenie
+        swiecy decyzji wyjscia, czyli `decyzja+dlugosc-1`.
+
+    W obu przypadkach cena jest trzymana przez `dlugosc-1` swiec, nie
+    `dlugosc`. Do 2026-10-02 stalo tu `start+1 .. start+1+dlugosc`, czyli
+    transakcja losowa trzymala JEDNA SWIECE DLUZEJ niz faktyczna. Na rynku
+    z dryfem w gore dluzsze trzymanie daje wiekszy sredni zwrot, wiec wynik
+    faktyczny wypadal nizej wsrod losowych, niz powinien - a w trybie
+    `--losuj dlugosc` wejscie stalo dodatkowo o swiece wczesniej niz przy
+    zleceniu rynkowym. Porownanie mialo roznic sie WYLACZNIE momentem
+    wejscia, a roznilo sie tez dlugoscia.
+
+    Koszt rundy odejmowany raz, bo dotyczy obu nog razem.
     """
-    a, b = start + 1, start + 1 + dlugosc
-    if b >= len(panel):
+    a = decyzja + (0 if limit else 1)
+    b = a + dlugosc - 1
+    if a < 0 or b >= len(panel):
         return None
     p0, p1 = panel[a]["price"], panel[b]["price"]
     if not p0:
@@ -229,10 +246,11 @@ def main() -> int:
             if args.losuj == "dlugosc":
                 # Tasowanie dlugosci MIEDZY transakcjami okna: kazda transakcja
                 # dostaje dlugosc innej, wejscie zostaje w swojej swiecy.
-                # `zwrot_losowej` wchodzi w swiecy start+1, wiec start = i0-1.
+                # `i0` to swieca DECYZJI (`opened_at`), a o swiecy wejscia
+                # decyduje `zwrot_losowej` z trybu egzekucji - jak symulacja.
                 rng.shuffle(dlugosci)
                 for (sym, i0, _), dl in zip(wzorce, dlugosci):
-                    z = zwrot_losowej(test[sym], i0 - 1, dl, koszt) if i0 >= 1 else None
+                    z = zwrot_losowej(test[sym], i0, dl, koszt, limit=args.limit)
                     if z is not None:
                         zwroty.append(z)
             else:
@@ -241,7 +259,7 @@ def main() -> int:
                     if len(seria) - dlugosc - 2 <= 0:
                         continue
                     i = rng.randrange(0, len(seria) - dlugosc - 2)
-                    z = zwrot_losowej(seria, i, dlugosc, koszt)
+                    z = zwrot_losowej(seria, i, dlugosc, koszt, limit=args.limit)
                     if z is not None:
                         zwroty.append(z)
             if zwroty:

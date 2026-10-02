@@ -121,7 +121,7 @@ def test_trener_zbiera_strone_TAM_GDZIE_ZNA_REZIM():
     zwrotami dawało NameError na pierwszym oknie — a przy zmiennej już
     zdefiniowanej skutek byłby gorszy i cichy: reżim POPRZEDNIEGO okna
     dopisany do transakcji tego."""
-    i_dom = TRAIN.index("dominant = max(set(regimes)")
+    i_dom = TRAIN.index("dominant = rezim_dominujacy(regimes)")
     i_zbior = TRAIN.index("transakcje_stron.extend(")
     assert i_zbior > i_dom, (
         "strony zbierane PRZED wyliczeniem `dominant` — reżim przy transakcjach "
@@ -131,7 +131,7 @@ def test_trener_zbiera_strone_TAM_GDZIE_ZNA_REZIM():
 def test_trener_zbiera_TE_SAME_okna_co_zlaczona_proba():
     """Tabela stron musi opisywać tę samą próbę, co Sharpe całości. Inaczej
     dwie liczby w jednym raporcie mówią o dwóch różnych próbach."""
-    fragment = TRAIN[TRAIN.index("dominant = max(set(regimes)"):
+    fragment = TRAIN[TRAIN.index("dominant = rezim_dominujacy(regimes)"):
                      TRAIN.index("transakcje_stron.extend(")]
     assert "if informative:" in fragment, (
         "strony zbierane także z okien NIEinformatywnych, których złączona "

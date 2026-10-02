@@ -149,7 +149,7 @@ def test_trener_zbiera_i_WYPISUJE_tabele_pokrycia():
     assert "for linia in opis_pokrycia(transakcje_pokrycia):" in TRAIN, (
         "policzone i niewypisane — przy `--sucho` nie ma tego nigdzie")
     i_zbior = TRAIN.index("transakcje_pokrycia.extend(")
-    fragment = TRAIN[TRAIN.index("dominant = max(set(regimes)"):i_zbior]
+    fragment = TRAIN[TRAIN.index("dominant = rezim_dominujacy(regimes)"):i_zbior]
     assert "if informative:" in fragment, (
         "pokrycie zbierane także z okien NIEinformatywnych, których złączona "
         "próba nie zawiera")

@@ -240,14 +240,88 @@ DRYF_CECH_W_TRESCI = 5
 UBYTEK_OKIEN = 0.25
 
 
-def zmiany(poprzedni: dict | None, biezacy: dict) -> list[str]:
+# MIARA, KTORA POLICZONO PRZEBIEG - zeby porownywac tylko liczby tego samego rodzaju.
+#
+# Od 2026-10-02 trener liczy miary okien (odsetek dodatnich, mediane Sharpe'a)
+# PO doplacie z karty kosztu, a wczesniej liczyl je BRUTTO. Pierwszy przebieg po
+# wdrozeniu porownany z ostatnim sprzed niego zglaszalby „mediana Sharpe
+# zmienila znak" i wyjscie odsetka poza przedzial - zmiane DEFINICJI, nie rynku.
+# Tor 1h na 1400 dniach przechodzi przy tym z ~50% na 40,4% dodatnich okien,
+# o wlos od progu `degraded`: falszywy alarm bylby prawie pewny.
+#
+# SKAD WIADOMO, KTORA MIARA - BEZ MIGRACJI. `learn.learning_state_log` nie ma
+# kolumny na to, ale ma `model_version_id`, a trener zapisuje od tej zmiany
+# metryke okna `doplata_pb` (`learn.wf_metric`) - doplate, przy ktorej miary
+# policzono. Wolajacy dociaga ja podzapytaniem (`SQL_STAN_NAUKI`). Brak metryki
+# = przebieg sprzed zmiany; zero = liczby identyczne z brutto, wiec to TA SAMA
+# miara co dawniej, a nie nowa.
+MIARA_BRUTTO = "brutto (przed dopłatą z karty)"
+MIARA_PO_KARCIE = "po dopłacie z karty kosztu"
+
+SQL_STAN_NAUKI = """
+SELECT l.status, l.windows_total, l.windows_positive, l.positive_ci_low,
+       l.positive_ci_high, l.median_oos_sharpe, l.max_psi, l.trials_run, l.run_at,
+       (SELECT max(m.value)
+          FROM learn.training_run r
+          JOIN learn.wf_window w ON w.training_run_id = r.id
+          JOIN learn.wf_metric m ON m.wf_window_id = w.id
+         WHERE r.model_version_id = l.model_version_id
+           AND m.metric = 'doplata_pb') AS doplata_pb
+FROM learn.learning_state_log l
+WHERE l.engine = %s AND l.bar = %s
+ORDER BY l.run_at DESC LIMIT %s
+"""
+
+# Ile wierszy wstecz szukamy poprzednika liczonego ta sama miara. Trener chodzi
+# raz na dobe na tor, wiec to dwa tygodnie - dosc, zeby przezyc reczne przebiegi
+# tej samej nocy, i malo, zeby nie porownywac z czyms sprzed miesiaca.
+STAN_NAUKI_WSTECZ = 14
+
+
+def miara_przebiegu(wiersz: dict) -> str:
+    """Ktora definicja miar okien stoi za wierszem dziennika stanu nauki."""
+    doplata = wiersz.get("doplata_pb")
+    return MIARA_PO_KARCIE if doplata else MIARA_BRUTTO
+
+
+def wybierz_poprzedni(wiersze: list[dict]) -> tuple[dict | None, int]:
+    """Najnowszy WCZESNIEJSZY przebieg liczony TA SAMA miara co biezacy.
+
+    `wiersze` - najnowszy pierwszy. Oddaje pare: poprzednik (albo None) i liczbe
+    przebiegow pominietych po drodze, bo liczone inna miara. Liczba idzie do
+    `zmiany`, zeby brak poprzednika z POWODU ZMIANY MIARY nie udawal pierwszego
+    przebiegu w historii.
+    """
+    biezacy = wiersze[0]
+    miara = miara_przebiegu(biezacy)
+    pominiete = 0
+    for w in wiersze[1:]:
+        if miara_przebiegu(w) == miara:
+            return w, pominiete
+        pominiete += 1
+    return None, pominiete
+
+
+def zmiany(poprzedni: dict | None, biezacy: dict,
+           pominiete_inna_miara: int = 0) -> list[str]:
     """Lista powodow, dla ktorych warto sie odezwac. Pusta = cisza.
 
     Funkcja jest czysta i to jest celowe: caly werdykt da sie przetestowac bez
     bazy, gieldy i sieci.
+
+    `poprzedni` MUSI byc liczony ta sama miara co `biezacy` - wybiera go
+    `wybierz_poprzedni`. Gdy takiego nie ma, a wczesniejsze przebiegi istnieja
+    (`pominiete_inna_miara`), mowimy to wprost RAZ, zamiast porownywac liczby
+    dwoch roznych definicji albo udawac pierwszy przebieg.
     """
     if biezacy["windows_total"] == 0:
         return ["przebieg nie dal ani jednego okna informatywnego"]
+
+    if poprzedni is None and pominiete_inna_miara:
+        return [f"pierwszy przebieg liczony miarą „{miara_przebiegu(biezacy)}” — "
+                f"{pominiete_inna_miara} wcześniejszych liczono inną definicją, "
+                f"więc porównanie odsetka, przedziału i znaku mediany POMINIĘTE; "
+                f"bieżący status: {biezacy['status']}"]
 
     if poprzedni is None:
         return ["pierwszy zapisany przebieg — nie ma z czym porownac"]
@@ -3130,19 +3204,21 @@ async def main() -> int:
                 fetch_all, notify, sucho=args.sucho, engine=args.engine,
                 mode=args.mode, okno_h=args.okno_h or 48)
 
-        wiersze = await fetch_all(
-            "SELECT status, windows_total, windows_positive, positive_ci_low,"
-            " positive_ci_high, median_oos_sharpe, max_psi, trials_run, run_at"
-            " FROM learn.learning_state_log WHERE engine = %s AND bar = %s"
-            " ORDER BY run_at DESC LIMIT 2", (args.engine, args.bar))
+        wiersze = await fetch_all(SQL_STAN_NAUKI,
+                                  (args.engine, args.bar, STAN_NAUKI_WSTECZ))
         if not wiersze:
             print(f"brak zapisanych przebiegow dla {args.engine}/{args.bar}"
                   " — dozor nie ma czego porownac")
             return 0
 
         biezacy = wiersze[0]
-        poprzedni = wiersze[1] if len(wiersze) > 1 else None
-        powody = zmiany(poprzedni, biezacy)
+        # POPRZEDNIK TA SAMA MIARA, nie po prostu drugi wiersz - patrz
+        # komentarz przy `MIARA_PO_KARCIE`.
+        poprzedni, pominiete = wybierz_poprzedni(wiersze)
+        if pominiete:
+            print(f"pominięto {pominiete} przebieg(ów) liczonych inną miarą niż "
+                  f"bieżący ({miara_przebiegu(biezacy)})")
+        powody = zmiany(poprzedni, biezacy, pominiete)
 
         # AWARIA TRENERA MUSI SIE ODEZWAC, choc nie jest zmiana stanu.
         #

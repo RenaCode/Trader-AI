@@ -459,9 +459,12 @@ def test_zlaczona_proba_DSR_pochodzi_z_tej_samej_symulacji_co_koszt():
     ROZNY DSR, proba musi pochodzic z `simulate_portfolio(..., kind=kind)`.
     Test pilnuje tego lancucha w zrodle — sama funkcja DSR nie ma jak sprawdzic,
     czym ja nakarmiono."""
+    # `oos_brutto`, nie `oos_res` (od 2026-10-02): `oos_res` jest juz po
+    # doplacie z karty, a `werdykt_dsr` odejmuje ja SAM - proba DSR musi wiec
+    # byc brutto, inaczej doplata zostalaby odjeta dwa razy.
     assert "wszystkie_zwroty.extend(zwroty_okna)" in ZRODLO_TRENERA
-    assert "zwroty_okna = [t[\"ret\"] for t in oos_res.trades]" in ZRODLO_TRENERA
-    oos = ZRODLO_TRENERA[ZRODLO_TRENERA.index("oos_res = simulate_portfolio("):]
+    assert "zwroty_okna = [t[\"ret\"] for t in oos_brutto.trades]" in ZRODLO_TRENERA
+    oos = ZRODLO_TRENERA[ZRODLO_TRENERA.index("oos_brutto = simulate_portfolio("):]
     assert "kind=kind" in oos[:400], (
         "symulacja OOS nie dostaje `kind`, więc stawka prowizji nie dochodzi "
         "do próby, z której liczy się DSR")

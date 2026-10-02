@@ -24,14 +24,14 @@ dostarcza im tylko stan trzymany w pamieci zamiast w bazie.
 from __future__ import annotations
 
 import statistics
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from decimal import Decimal
 
 from services.engine.horizons import Horizon
 from services.engine.koszty import (
     GODZINY_FINANSOWANIA, POSLIZG_MAKER, POSLIZG_TAKER, koszty,
-    stawka_finansowania_na_ulamek,
+    stawka_finansowania_na_ulamek, zwroty_po_doplacie,
 )
 from services.engine.risk_rules import (
     START_EQUITY, udzial_budzetu,
@@ -518,6 +518,11 @@ def simulate_portfolio(panels: dict[str, list[dict]],
                 # czy na inkasowaniu stawki - a to sa dwie rozne strategie
                 # i dwa rozne ryzyka.
                 "side": pos.side, "finansowanie": pos.finansowanie,
+                # NOTIONAL WEJSCIA - baza, w ktorej wyrazony jest `ret`. Bez niego
+                # koszt podany jako ulamek rundy (`Karta.doplata_poza_symulacja`)
+                # nie daje sie przeliczyc na walute konta, czyli na krzywa
+                # kapitalu - patrz `wynik_po_doplacie`.
+                "notional": pos.qty * pos.entry,
             })
             del positions[sym]
             order_times.append(t)
@@ -601,7 +606,19 @@ def simulate_portfolio(panels: dict[str, list[dict]],
             rows = panels[sym]
             nxt_idx = cur["idx"] + 1
             price = rows[nxt_idx]["price"]
-            notional, qty = _sizing(score, price, baza)
+            # WIELKOSC POZYCJI Z CENY DECYZJI, WYKONANIE PO CENIE NASTEPNEJ SWIECY.
+            #
+            # Petla decyzyjna liczy `qty = notional / price`, gdzie `price` to
+            # zamkniecie swiecy decyzyjnej (`loop.py`, galaz `enter_*`) - innej
+            # ceny w chwili decyzji nie zna. Do 2026-10-02 stala tu cena
+            # NASTEPNEJ swiecy, czyli symulacja dzielila budzet przez cene, ktorej
+            # produkcja jeszcze nie widzi: po wzroscie kupowala mniej sztuk, po
+            # spadku wiecej, niz kupi produkcja. Rozjazd maly co do wielkosci,
+            # ale systematyczny i skorelowany z ruchem, ktory jest przedmiotem
+            # pomiaru. Cena wykonania (`entry` nizej) zostaje cena NASTEPNEJ
+            # swiecy - decyzja z zamkniecia T nie moze sie wypelnic po cenie T.
+            cena_decyzji = cur["row"]["price"]
+            notional, qty = _sizing(score, cena_decyzji, baza)
 
             state = RiskState(
                 equity=Decimal(str(equity)), peak=Decimal(str(peak)),
@@ -633,7 +650,7 @@ def simulate_portfolio(panels: dict[str, list[dict]],
             if v.verdict == "downsize":
                 res.downsized += 1
                 qty = float(v.qty)
-                notional = qty * price
+                notional = qty * cena_decyzji
 
             side = 1 if score > 0 else -1
             if egz.limit:
@@ -680,7 +697,8 @@ def simulate_portfolio(panels: dict[str, list[dict]],
                                    - pos.finansowanie_w_zwrocie),
                            "conf": pos.conf, "pokrycie": pos.pokrycie,
                            "symbol": sym, "opened_at": pos.opened_at, "closed_at": last_t,
-                           "side": pos.side, "finansowanie": pos.finansowanie})
+                           "side": pos.side, "finansowanie": pos.finansowanie,
+                           "notional": pos.qty * pos.entry})
     res.equity_curve.append((last_t, START_EQUITY + realized - fees_paid))
     res.max_exposure = max_exposure
     res.avg_exposure = (suma_ekspozycji / swiec_ekspozycji) if swiec_ekspozycji else 0.0
@@ -755,6 +773,48 @@ def metrics(res: PortfolioResult, min_trades: int) -> dict:
     }
 
 
+def wynik_po_doplacie(res: PortfolioResult, doplata: float) -> PortfolioResult:
+    """Wynik symulacji PO doliczeniu kosztu, ktorego symulacja nie nalicza.
+
+    `doplata` to `Karta.doplata_poza_symulacja` - ta sama liczba, ktora DSR
+    odejmuje od zlaczonej proby. Przepuszczenie wyniku okna przez te funkcje
+    PRZED `metrics` sprawia, ze KAZDA miara okna (Sharpe, trafnosc, zwrot
+    z konta, obsuniecie) opisuje swiat po doplacie z karty, a nie tylko werdykt
+    DSR. Do 2026-10-02 bramka statusu brala trzy miary sprzed spreadu i jedna
+    po nim.
+
+    DWIE BAZY, JEDNA DOPLATA:
+      * `ret` transakcji - przez `koszty.zwroty_po_doplacie`, czyli dokladnie
+        tak, jak odejmuje ja DSR,
+      * krzywa kapitalu - doplata razy NOTIONAL WEJSCIA transakcji, w walucie.
+        Polowa na wejsciu, polowa na wyjsciu: karta liczy spread jako "polowe
+        spreadu na noge razy dwie nogi", a symulacja tak samo rozklada
+        prowizje. Wejscie obciaza punkty krzywej PO swiecy decyzji (tam, gdzie
+        pojawia sie prowizja wejscia), wyjscie - od `closed_at` wlacznie.
+        Ostatni punkt krzywej niesie wiec caly koszt, a obsuniecie widzi go
+        tam, gdzie zostal zaplacony, a nie dopiero na koncu okna.
+
+    Doplata zero oddaje TEN SAM obiekt - zachowanie sprzed zmiany co do bitu.
+    Transakcja bez `notional` przy doplacie dodatniej PRZERYWA: koszt bez bazy
+    nie ma sie od czego policzyc, a zero byloby tu cichym klamstwem.
+    """
+    if not doplata:
+        return res
+    for t in res.trades:
+        if "notional" not in t:
+            raise ValueError("transakcja bez `notional` - nie da się przeliczyć "
+                             "dopłaty na walutę konta")
+    nowe_zwroty = zwroty_po_doplacie([t["ret"] for t in res.trades], doplata)
+    trades = [t | {"ret": r} for t, r in zip(res.trades, nowe_zwroty)]
+    polowa = [doplata * t["notional"] / 2 for t in res.trades]
+    curve = []
+    for ct, ev in res.equity_curve:
+        koszt = sum(p for t, p in zip(res.trades, polowa) if ct > t["opened_at"])
+        koszt += sum(p for t, p in zip(res.trades, polowa) if ct >= t["closed_at"])
+        curve.append((ct, ev - koszt))
+    return replace(res, trades=trades, equity_curve=curve)
+
+
 POWTORNE_WEJSCIE_SWIEC = 3
 
 
@@ -825,7 +885,8 @@ def udzial_powtornych_wejsc(trades: list[dict], bar_minutes: int,
     return powtorne / len(trades)
 
 
-def kup_i_trzymaj(panels: dict[str, list[dict]], kind: str = "spot") -> float:
+def kup_i_trzymaj(panels: dict[str, list[dict]], kind: str = "spot",
+                  doplata: float = 0.0) -> float:
     """Zwrot z prostego kupienia i trzymania calego zbioru, rowna waga.
 
     PUNKT ODNIESIENIA, KTOREGO BRAKOWALO.
@@ -840,6 +901,15 @@ def kup_i_trzymaj(panels: dict[str, list[dict]], kind: str = "spot") -> float:
 
     Koszt liczymy raz: jedno wejscie i jedno wyjscie na instrument, po cenie
     rynkowej - bo tyle wlasnie kosztuje kupic i trzymac.
+
+    `doplata` - KOSZT RUNDY SPOZA SYMULACJI, TAKZE DLA ODNIESIENIA. Od
+    2026-10-02 strategia jest mierzona po `Karta.doplata_poza_symulacja`
+    (spread, niewypelnienie), wiec odniesienie bez niej bylo by asymetryczne
+    w strone TRUDNIEJSZEJ bramki: strategia placilaby spread, a koszyk nie.
+    Kup-i-trzymaj tez przechodzi przez spread - raz przy wejsciu, raz przy
+    wyjsciu - czyli placi JEDNA doplate rundy na instrument. Wolajacy podaje
+    doplate z karty RYNKOWEJ (`karta_rundy(kind, maker=False, ...)`), bo tak
+    ten koszyk jest kupowany: prowizja i poslizg sa juz policzone wyzej.
     """
     k = koszty(kind)
     zwroty = []
@@ -849,5 +919,5 @@ def kup_i_trzymaj(panels: dict[str, list[dict]], kind: str = "spot") -> float:
         wejscie = rows[0]["price"] * (1 + POSLIZG_TAKER)
         wyjscie = rows[-1]["price"] * (1 - POSLIZG_TAKER)
         brutto = wyjscie / wejscie - 1
-        zwroty.append(brutto - 2 * k.taker)
+        zwroty.append(zwroty_po_doplacie([brutto - 2 * k.taker], doplata)[0])
     return sum(zwroty) / len(zwroty) * 100 if zwroty else 0.0

@@ -310,6 +310,25 @@ class Karta:
         return not self.nieznane
 
 
+def zwroty_po_doplacie(zwroty: list[float], doplata: float) -> list[float]:
+    """Zwroty z transakcji PO doliczeniu `Karta.doplata_poza_symulacja`.
+
+    JEDNA DEFINICJA, BO DO 2026-10-02 BYLY DWIE MIARY DWOCH SWIATOW.
+
+    DSR odejmowal doplate od kazdej transakcji, a odsetek dodatnich okien,
+    mediana Sharpe'a i porownanie z kup-i-trzymaj - nie. Bramka statusu
+    skladala wiec werdykt z czterech liczb, z ktorych trzy opisywaly swiat
+    bez spreadu. Kazda miara po doplacie z karty ma przejsc PRZEZ TE FUNKCJE
+    (wprost albo przez `portfolio.wynik_po_doplacie`), a nie przez wlasne
+    `r - doplata` wpisane w miejscu uzycia.
+
+    Doplata jest ulamkiem NOTIONALU WEJSCIA na cala runde - w tej samej bazie
+    co `ret` z `simulate_portfolio` - wiec odejmuje sie ja od kazdej transakcji
+    z osobna, tak jak jest placona.
+    """
+    return [r - doplata for r in zwroty]
+
+
 def karta_rundy(kind: str, maker: bool = False, *,
                 spread_bps: float | None = None,
                 spread_nasza_ksiega: bool = True,

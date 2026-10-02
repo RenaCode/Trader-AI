@@ -131,5 +131,7 @@ def test_permutacja_DLUGOSCI_zostawia_wejscia_na_miejscu():
     ten sam rozkład długości, inny przydział."""
     assert '"--losuj"' in TIMING and '"dlugosc"' in TIMING
     assert "rng.shuffle(dlugosci)" in TIMING
-    assert "zwrot_losowej(test[sym], i0 - 1, dl, koszt)" in TIMING, (
-        "wejście ma zostać w swojej świecy (start = i0-1, bo zwrot_losowej wchodzi w start+1)")
+    # Od 2026-10-02 `zwrot_losowej` dostaje swiece DECYZJI i sam wybiera swiece
+    # wejscia z trybu egzekucji - patrz tests/test_zwrot_losowej_jak_symulacja.py.
+    assert "zwrot_losowej(test[sym], i0, dl, koszt, limit=args.limit)" in TIMING, (
+        "wejście ma zostać w swojej świecy (i0 = świeca decyzji, jak `opened_at`)")

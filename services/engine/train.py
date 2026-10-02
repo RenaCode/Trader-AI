@@ -40,6 +40,7 @@ import math
 import os
 import random
 import statistics
+from collections import Counter
 from decimal import Decimal
 import sys
 from datetime import datetime, timedelta, timezone
@@ -59,9 +60,11 @@ from services.engine.bramki import (
 )
 from services.engine.portfolio import (
     Egzekucja, kup_i_trzymaj, metrics as portfolio_metrics, precompute_panels,
-    simulate_portfolio, udzial_powtornych_wejsc,
+    simulate_portfolio, udzial_powtornych_wejsc, wynik_po_doplacie,
 )
-from services.engine.koszty import Karta, karta_rundy, opis_karty
+from services.engine.koszty import (
+    NIEZMIERZONE, Karta, karta_rundy, opis_karty, zwroty_po_doplacie,
+)
 from services.engine.spread import opis_pomiaru, zmierz_spread
 from services.engine.statystyka import (
     MIN_PROB_ROZRZUTU, PROG_DSR, deflowany_sharpe, profit_factor, rozklad,
@@ -489,35 +492,69 @@ def opis_przewagi(zwroty: list[float], sharpe_okien: list[float],
     if not zwroty:
         return ["Przewaga: brak transakcji OOS — nie ma czego liczyć."]
 
-    linie = ["", "PRZEWAGA PO KOSZTACH, KTÓRE SYMULACJA NALICZYŁA:"]
+    # KAZDA LICZBA W TYM BLOKU JEST BRUTTO - i jest tak nazwana.
+    #
+    # Wolajacy podaje tu zwroty i Sharpe'y okien SPRZED doplaty z karty
+    # (`wszystkie_zwroty`, `all_sharpes_brutto`): koszt progowy i drabina
+    # wrazliwosci potrzebuja punktu zero, a doplate odejmuja same. Do
+    # 2026-10-02 wieczorem `sharpe_okien` przychodzilo juz PO doplacie, wiec
+    # w jednym bloku stal Sharpe zlaczony brutto obok sredniej i mediany okien
+    # po karcie - dwie miary dwoch swiatow pod jednym naglowkiem.
+    linie = ["", "PRZEWAGA BRUTTO — po kosztach, które symulacja naliczyła "
+                 "(prowizja, poślizg, finansowanie), PRZED dopłatą z karty:"]
     linie.append(
-        f"  Sharpe/transakcję ze ZŁĄCZONEJ próby {p['n_transakcji']} transakcji: "
-        f"{p['sharpe_zbiorczy']:+.4f}" if p["sharpe_zbiorczy"] is not None
-        else "  Sharpe/transakcję ze złączonej próby: — (za mało transakcji)")
+        f"  brutto: Sharpe/transakcję ze ZŁĄCZONEJ próby {p['n_transakcji']} "
+        f"transakcji: {p['sharpe_zbiorczy']:+.4f}" if p["sharpe_zbiorczy"] is not None
+        else "  brutto: Sharpe/transakcję ze złączonej próby: — (za mało transakcji)")
     # OBIE LICZBY NARAZ. Rozjazd miedzy nimi jest wynikiem, nie szczegolem:
     # gdy sa rozne, to znaczy, ze srednia po oknach mowi o wadze okien,
     # a nie o transakcjach.
     linie.append(
-        f"  ta sama miara jako ŚREDNIA PO {p['n_okien']} OKNACH: "
+        f"  brutto: ta sama miara jako ŚREDNIA PO {p['n_okien']} OKNACH: "
         f"{p['sharpe_sredni_po_oknach']:+.4f} — inna liczba niż wyżej, bo "
         f"średnia ilorazów nie jest ilorazem; okno o kilku transakcjach waży "
         f"w niej tyle samo, co okno o dwustu"
-        if p["sharpe_sredni_po_oknach"] is not None else "  średnia po oknach: —")
+        if p["sharpe_sredni_po_oknach"] is not None else "  brutto: średnia po oknach: —")
     ok = p["okna"]
     if ok["n"]:
         linie.append(
-            f"  rozkład okien: mediana {ok['mediana']:+.4f}, kwartyle "
+            f"  brutto: rozkład okien: mediana {ok['mediana']:+.4f}, kwartyle "
             f"[{ok['q1']:+.4f}, {ok['q3']:+.4f}]" if ok["q1"] is not None
-            else f"  rozkład okien: mediana {ok['mediana']:+.4f}")
+            else f"  brutto: rozkład okien: mediana {ok['mediana']:+.4f}")
         linie.append(
-            f"  okien ujemnych: {ok['ujemnych']}/{ok['n']} "
+            f"  brutto: okien ujemnych: {ok['ujemnych']}/{ok['n']} "
             f"({ok['udzial_ujemnych']:.1%})")
     pf = p["profit_factor_zbiorczy"]
     linie.append(
-        f"  profit factor ZBIORCZY: {pf:.4f}" if pf is not None
-        else "  profit factor zbiorczy: — (brak strat w próbie)")
-    linie.append(f"  średni zwrot z transakcji: {p['sredni_zwrot'] * 100:+.4f}%, "
+        f"  brutto: profit factor ZBIORCZY: {pf:.4f}" if pf is not None
+        else "  brutto: profit factor zbiorczy: — (brak strat w próbie)")
+    linie.append(f"  brutto: średni zwrot z transakcji: {p['sredni_zwrot'] * 100:+.4f}%, "
                  f"trafnych {p['hit_rate']:.1%}")
+
+    # TE SAME MIARY PO DOPLACIE - to one stoja za bramka i DSR. Liczone ta
+    # sama `podsumowanie_przewagi` i `_sharpe_po_oknach` co drabina nizej,
+    # czyli przez `koszty.zwroty_po_doplacie`, a nie osobnym rachunkiem.
+    doplata = karta.doplata_poza_symulacja
+    if doplata:
+        po = podsumowanie_przewagi(zwroty, [], doplata=doplata)
+        okna_po = [x for x in (sharpe_proby(zwroty_po_doplacie(o, doplata))
+                               for o in zwroty_okien) if x is not None]
+        linie.append("")
+        linie.append(f"PO DOPŁACIE ({opis_doplaty(karta)}) — tak liczy bramka i DSR:")
+        linie.append(
+            f"  po dopłacie: Sharpe/transakcję ze ZŁĄCZONEJ próby: "
+            f"{po['sharpe_zbiorczy']:+.4f}" if po["sharpe_zbiorczy"] is not None
+            else "  po dopłacie: Sharpe/transakcję ze złączonej próby: —")
+        if okna_po:
+            linie.append(
+                f"  po dopłacie: średnia po {len(okna_po)} oknach "
+                f"{statistics.fmean(okna_po):+.4f}, mediana okien "
+                f"{statistics.median(okna_po):+.4f}, okien ujemnych "
+                f"{sum(1 for x in okna_po if x < 0)}/{len(okna_po)} "
+                f"(odchylenie PRÓBKOWE, jak w drabinie; bramka bierze medianę "
+                f"z `portfolio.metrics`, czyli populacyjne)")
+        linie.append(f"  po dopłacie: średni zwrot z transakcji: "
+                     f"{po['sredni_zwrot'] * 100:+.4f}%, trafnych {po['hit_rate']:.1%}")
 
     linie.append("")
     linie.append("RACHUNEK KOSZTU RUNDY — SKŁADNIK PO SKŁADNIKU, Z POCHODZENIEM:")
@@ -526,16 +563,16 @@ def opis_przewagi(zwroty: list[float], sharpe_okien: list[float],
     linie.append("")
     prog = p["koszt_progowy"]
     if prog is None:
-        linie.append("KOSZT PROGOWY: — (brak transakcji)")
+        linie.append("KOSZT PROGOWY (z brutto): — (brak transakcji)")
     elif prog <= 0:
         linie.append(
-            f"KOSZT PROGOWY: {_pb(prog)} na rundę — UJEMNY. Przewagi nie ma "
+            f"KOSZT PROGOWY (z brutto): {_pb(prog)} na rundę — UJEMNY. Przewagi nie ma "
             f"JUŻ przy kosztach, które symulacja nalicza; nienaliczone "
             f"składniki ({', '.join(karta.nieznane) or 'brak'}) mogą ją tylko "
             f"pogłębić.")
     else:
         linie.append(
-            f"KOSZT PROGOWY: {_pb(prog)} na rundę. Tyle wynosi cały zapas na "
+            f"KOSZT PROGOWY (z brutto): {_pb(prog)} na rundę. Tyle wynosi cały zapas na "
             f"to, czego symulacja NIE liczy. Jeśli spread, niewypełnienie "
             f"i finansowanie sumują się do więcej, przewagi nie ma — i nikt "
             f"dotąd nie zmierzył, czy sumują się do mniej.")
@@ -586,12 +623,17 @@ def opis_przewagi(zwroty: list[float], sharpe_okien: list[float],
         linie.append("SHARPE PRZY RÓŻNYCH WARTOŚCIACH TEGO, CZEGO NIE ZMIERZONO "
                      "(dopłata na rundę):")
         linie.append("  dopłata |  zbiorczy | średnia po oknach")
-        for bps in (0.0, 2.0, 5.0, 10.0, 20.0):
+        # DOPLATA Z KARTY DOSTAJE WLASNY WIERSZ. Od 2026-10-02 bramka statusu
+        # i wszystkie miary okien licza sie wlasnie przy niej, wiec wiersz
+        # „0 pb" jest juz BRUTTO, a nie rachunkiem, ktory widzi bramka.
+        z_karty = round(karta.doplata_poza_symulacja * 1e4, 4)
+        for bps in sorted({0.0, 2.0, 5.0, 10.0, 20.0, z_karty}):
             z = podsumowanie_przewagi(zwroty, sharpe_okien,
                                       doplata=bps / 1e4)["sharpe_zbiorczy"]
             o = _sharpe_po_oknach(zwroty_okien, bps / 1e4)
             o_txt = "—" if o is None else f"{o:+.4f}"
-            znacznik = "   <- dzisiejszy rachunek" if bps == 0 else ""
+            znacznik = ("   <- dopłata z karty: tak liczy bramka" if bps == z_karty
+                        else "   <- brutto (sama symulacja)" if bps == 0 else "")
             linie.append(f"  {bps:6.1f} pb | {z:+9.4f} | {o_txt:>17}{znacznik}")
         linie.append(
             "  Obie kolumny liczone tym samym odchyleniem PRÓBKOWYM (n−1). "
@@ -611,7 +653,7 @@ def _sharpe_po_oknach(zwroty_okien: list[list[float]],
     konkretna wartoscia - „brak przewagi" - i podstawione za „nie da sie
     policzyc" ciagnie srednia do zera tym mocniej, im wiecej okien jest pustych.
     """
-    s = [x for x in (sharpe_proby([r - doplata for r in okno])
+    s = [x for x in (sharpe_proby(zwroty_po_doplacie(okno, doplata))
                      for okno in zwroty_okien) if x is not None]
     return statistics.fmean(s) if s else None
 
@@ -646,7 +688,7 @@ def podsumowanie_przewagi(zwroty: list[float], sharpe_okien: list[float],
     znaczy, ze zapasu nie ma juz teraz - i ma byc wypisany jako liczba ujemna,
     nie jako zero.
     """
-    po = [r - doplata for r in zwroty]
+    po = zwroty_po_doplacie(zwroty, doplata)
     return {
         "n_transakcji": len(po),
         "n_okien": len(sharpe_okien),
@@ -999,6 +1041,25 @@ def opis_zrodla_n(n: int, trials_kumulatywnie: int) -> str:
             f"zapłacił, licząc wynik poza oknem wyboru.")
 
 
+def opis_doplaty(karta: Karta) -> str:
+    """Czym jest dopłata, przy której liczą się miary - BEZ słowa „pełna".
+
+    Do 2026-10-02 (wieczór) wydruk nazywał ją „pełną kartą". Przy `--limit`
+    to nieprawda: niewypełnienie stoi w karcie BEZ wartości, więc do dopłaty
+    nie wchodzi - dopłata to wtedy sam spread. To samo dotyczy spreadu z obcej
+    księgi (wchodzi jako podłoga) i opłat equity. Zdanie ma wymieniać z nazwy,
+    czego w dopłacie NIE ma, a nie ogłaszać kompletu.
+    """
+    braki = [f"{s.nazwa} (NIEZMIERZONE)" for s in karta.skladniki
+             if s.wartosc is None and s.zrodlo == NIEZMIERZONE]
+    podlogi = [f"{s.nazwa} tylko jako podłoga (obca księga)"
+               for s in karta.skladniki if s.wartosc is not None and not s.wiarygodny]
+    opis = f"dopłata z karty {karta.doplata_poza_symulacja * 1e4:.2f} pb na rundę"
+    if not braki and not podlogi:
+        return opis + " — karta pełna"
+    return opis + " — karta BEZ: " + "; ".join(braki + podlogi)
+
+
 def opis_kosztu_dsr(doplata: float, nieznane: tuple[str, ...]) -> str:
     """Przy jakim koszcie policzono DSR. ZAWSZE, takze gdy doplata to zero.
 
@@ -1036,7 +1097,7 @@ def werdykt_dsr(zwroty: list[float], *, doplata: float, n: int,
     i dlatego werdykt liczony na zwrotach PRZED doplata bylby wada w kierunku
     latwiejszej bramki, niezaleznie od tego, jak dobrze policzono N.
     """
-    po = [r - doplata for r in zwroty]
+    po = zwroty_po_doplacie(zwroty, doplata)
     wynik = przewaga_dsr(po, n, odchylenie_prob)
     # PROBA IDZIE DO BRAMKI, bo bez niej odleglosc od progu da sie podac tylko
     # w DSR - a DSR nie ma skali, w ktorej czlowiek umie ocenic "blisko".
@@ -1148,6 +1209,34 @@ def bramka_dsr(wynik: dict, zwroty: list[float] | None = None) -> tuple[bool, st
     return False, opis + odpornosc + (
         " Po uwzględnieniu liczby prób wynik nie jest odróżnialny od "
         "najlepszego z tylu losowych — promocja wstrzymana.")
+
+
+def rezim_dominujacy(rezimy: list[str]) -> str | None:
+    """Najczestszy rezim w probce okna. REMIS ROZSTRZYGA KOLEJNOSC `REGIMES`.
+
+    Do 2026-10-02 stalo tu `max(set(rezimy), key=rezimy.count)`. Przy remisie
+    `max` oddaje pierwszy element w kolejnosci iteracji ZBIORU, a ta dla
+    napisow zalezy od `PYTHONHASHSEED` - losowanego przy kazdym starcie
+    interpretera, bo CronJob trenera go nie ustawia. Ta sama baza i ten sam
+    kod dawaly wiec okno opisane raz jako `range`, raz jako `trend_up`.
+
+    Etykieta NIE wplywa na wagi, progi ani bramke statusu - trafia do wydruku
+    okna (`reżim=`, czytanego przez `scripts/porownaj_warianty.py` tylko do
+    opisu), do `learn.wf_window.dominant_regime` (panel `/learning`)
+    i do rozbic `opis_stron` / `opis_pokrycia`. Nieodtwarzalny byl wiec
+    raport, nie model - ale raport, ktorego nie da sie powtorzyc, nie nadaje
+    sie do porownania dwoch przebiegow.
+
+    Porzadek jawny, a nie "pierwsze wystapienie": kolejnosc probki zalezy od
+    kolejnosci instrumentow, czyli od uniwersum, a `REGIMES` jest stala kodu.
+    Rezim spoza `REGIMES` (nie powinien sie zdarzyc) idzie na koniec,
+    alfabetycznie - tez deterministycznie.
+    """
+    if not rezimy:
+        return None
+    licznik = Counter(rezimy)
+    kolejnosc = {r: i for i, r in enumerate(REGIMES)}
+    return min(licznik, key=lambda r: (-licznik[r], kolejnosc.get(r, len(REGIMES)), r))
 
 
 def status_walidacji(total: int, positive: int, median: float | None,
@@ -1790,6 +1879,39 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
     for linia in opis_karty(karta):
         print(linia)
 
+    # WSZYSTKIE MIARY OKIEN PO TEJ SAMEJ DOPLACIE, KTORA ODEJMUJE DSR.
+    #
+    # Do 2026-10-02 doplate (`doplata_poza_symulacja` - dzis spread, przy
+    # limicie takze niewypelnienie, gdy zmierzone) odejmowal WYLACZNIE DSR.
+    # Odsetek dodatnich okien, mediana Sharpe'a i porownanie z kup-i-trzymaj
+    # - trzy z czterech warunkow `status_walidacji` - liczyly sie na zwrotach
+    # sprzed niej, czyli opisywaly tanszy swiat niz ten, w ktorym handlujemy.
+    # Wada w strone LATWIEJSZEJ bramki, ta sama, ktora opisuje `werdykt_dsr`.
+    #
+    # Teraz wynik okna przechodzi przez `portfolio.wynik_po_doplacie` zanim
+    # cokolwiek z niego policzymy; liczby sprzed doplaty zostaja w logu jako
+    # BRUTTO - do porownania, nie do bramki.
+    #
+    # ODNIESIENIE PLACI SWOJA RUNDE Z TEJ SAMEJ KARTY. Kup-i-trzymaj to jedno
+    # wejscie i jedno wyjscie ZLECENIEM RYNKOWYM, wiec doplate bierzemy z karty
+    # rynkowej (`maker=False`) przy tym samym pomiarze spreadu. Przy
+    # egzekucji rynkowej to ta sama liczba co dla strategii; przy limicie
+    # rozni sie tylko o niewypelnienie, ktorego koszyk kupiony po rynku nie
+    # ponosi. Uzasadnienie symetrii - w `portfolio.kup_i_trzymaj`.
+    doplata = karta.doplata_poza_symulacja
+    doplata_odniesienia = karta_rundy(
+        kind, False, spread_bps=spread_bps,
+        spread_nasza_ksiega=spread_nasza_ksiega).doplata_poza_symulacja
+    if doplata or doplata_odniesienia:
+        print(f"  Miary okien i bramka statusu PO dopłacie {doplata * 1e4:.2f} pb "
+              f"na rundę (ta sama co w DSR); kup-i-trzymaj po "
+              f"{doplata_odniesienia * 1e4:.2f} pb na swoją jedną rundę. "
+              f"Liczby „brutto” = przed dopłatą, tylko do porównania.")
+    # CZEGO W DOPLACIE NIE MA - zawsze, takze przy doplacie zero. Przy `--limit`
+    # niewypelnienie jest NIEZMIERZONE i do dopłaty nie wchodzi; bez tego
+    # zdania „po dopłacie" czytaloby sie jak „po wszystkich kosztach".
+    print(f"  {opis_doplaty(karta)}")
+
     # ODCISK UNIWERSUM. Cechy przekrojowe sa nim filtrowane - patrz load_panel.
     #
     #
@@ -1989,6 +2111,15 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
     # wylacznie dluga na rosnacym rynku ma duzo dodatnich okien z samej bety.
     pokonane_odniesienie = 0
     pokonane_pelne = 0        # przy odniesieniu 100% zaangazowanym - do raportu
+    # BRUTTO, czyli przed doplata - wylacznie do wydruku obok miar po doplacie
+    # z karty. Do bramki nie wchodzi zadna z tych liczb.
+    positive_brutto = 0
+    # Zlecenia z limitem, ktore w symulacji OOS NIE weszly (wejscia + wyjscia).
+    # Do wydruku obok karty: niewypelnienie w karcie jest NIEZMIERZONE jako
+    # koszt, a ta liczba mowi przynajmniej, jak czesto symulacja go ponosi.
+    niewypelnione_oos = 0
+    all_sharpes_brutto: list[float] = []
+    pokonane_odniesienie_brutto = 0
     ekspozycje: list[float] = []
     zwroty_okien: list[float] = []
     rozklad: list[dict] = []          # czynniki ekspozycji, okno po oknie
@@ -2196,11 +2327,18 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
                 wybrane_ic += 1
 
         # --- ocena OUT-OF-SAMPLE --------------------------------------------
-        oos_res = simulate_portfolio(
+        oos_brutto = simulate_portfolio(
             {s: v for s, v in test_slices.items() if v}, best_w, thresholds, gates, h,
             MIN_CONF, instrument_ids=inst_ids, cache=cache_te,
             kind=kind, egzekucja=egzekucja, zakladane_pozycje=zakladane_pozycje)
+        # OD TEGO MIEJSCA `oos_res` I `oos_m` SA PO DOPLACIE Z KARTY - patrz
+        # komentarz przy `doplata`. Wersja brutto zostaje pod wlasna nazwa
+        # i idzie WYLACZNIE do wydruku oraz do dwoch odbiorcow, ktorzy doplate
+        # odejmuja sami (`werdykt_dsr`, `opis_przewagi`) - patrz nizej.
+        oos_res = wynik_po_doplacie(oos_brutto, doplata)
         oos_m = portfolio_metrics(oos_res, h.min_trades)
+        oos_m_brutto = portfolio_metrics(oos_brutto, h.min_trades)
+        niewypelnione_oos += oos_m["niewypelnione"]
         if not oos_res.equity_curve:
             start += timedelta(days=h.step_days)
             continue
@@ -2236,6 +2374,17 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
         informative = not oos_m.get("insufficient")
         agg = {k: oos_m[k] for k in
                ("sharpe", "sortino", "max_dd", "hit_rate", "avg_r", "profit_factor")}
+        # ZNACZNIK MIARY: dopłata, przy której policzono miary tego okna.
+        #
+        # Od 2026-10-02 miary okna są PO dopłacie z karty, wcześniej brutto.
+        # Wiersz `learn.learning_state_log` nie ma kolumny, która by to mówiła,
+        # więc `dozor.miara_przebiegu` czyta ją stąd (przez `model_version_id`
+        # -> `training_run` -> `wf_window`). Brak tej metryki = przebieg sprzed
+        # zmiany; zero = ta sama liczba co brutto. Dozór porównuje wyłącznie
+        # przebiegi liczone tą samą miarą - inaczej pierwszy przebieg po
+        # wdrożeniu zgłaszałby „zmianę znaku mediany", która jest zmianą
+        # definicji, nie rynku.
+        agg["doplata_pb"] = doplata * 1e4
         # SIODMA MIARA NA OKNO: odsetek transakcji bedacych POWROTEM w ten sam
         # instrument ponizej trzech swiec po wyjsciu z niego. NIE jest to
         # czestotliwosc handlu - patrz `portfolio.udzial_powtornych_wejsc`.
@@ -2252,6 +2401,9 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
             worst_dd = min(worst_dd, agg["max_dd"])
             if agg["sharpe"] > 0:
                 positive += 1
+            all_sharpes_brutto.append(oos_m_brutto["sharpe"])
+            if oos_m_brutto["sharpe"] > 0:
+                positive_brutto += 1
             # ZLACZONA PROBA WSZYSTKICH TRANSAKCJI OOS.
             #
             # `all_sharpes` zbiera ILORAZY policzone osobno w kazdym oknie,
@@ -2259,7 +2411,12 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
             # o pieciu transakcjach wazy tam tyle samo, co okno o dwustu.
             # Dokladanie kosztu tez wymaga tej listy: koszt placi kazda
             # transakcja z osobna, nie kazde okno.
-            zwroty_okna = [t["ret"] for t in oos_res.trades]
+            #
+            # BRUTTO, A NIE `oos_res`: obaj odbiorcy tej listy - `werdykt_dsr`
+            # i `opis_przewagi` - odejmuja doplate SAMI, przez te sama
+            # `koszty.zwroty_po_doplacie`, i podaja ja w opisie. Lista juz po
+            # doplacie odjelaby ja tam drugi raz.
+            zwroty_okna = [t["ret"] for t in oos_brutto.trades]
             wszystkie_zwroty.extend(zwroty_okna)
             # ROZBITE NA OKNA, a nie tylko zlaczone - zeby te sama miare, ktora
             # raport podaje dzis (srednia po oknach), dalo sie PRZELICZYC po
@@ -2292,7 +2449,7 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
         step = max(1, len(next(iter(test_slices.values()), [])) // 50)
         regimes = [classify_regime(r["f"], thresholds[s])[0]
                    for s in aktywne for r in test_slices[s][::step]]
-        dominant = max(set(regimes), key=regimes.count) if regimes else None
+        dominant = rezim_dominujacy(regimes)
 
         # STRONA I REZIM PRZY KAZDEJ TRANSAKCJI - material na `opis_stron`.
         #
@@ -2345,7 +2502,10 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
         weight_history.append(best_w)
         martwe_w_oknie.append(martwe)
 
-        odniesienie = kup_i_trzymaj({s: v for s, v in test_slices.items() if v}, kind)
+        odniesienie = kup_i_trzymaj({s: v for s, v in test_slices.items() if v}, kind,
+                                    doplata=doplata_odniesienia)
+        odniesienie_brutto = kup_i_trzymaj({s: v for s, v in test_slices.items() if v},
+                                           kind)
         # ODNIESIENIE DOPASOWANE EKSPOZYCJA - uzasadnienie przy `bije_odniesienie`.
         # Kup-i-trzymaj angazuje caly kapital przez cale okno; strategia
         # srednio `ekspozycja` jego czesci. Zwrot z kupienia i trzymania
@@ -2384,6 +2544,9 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
                 pokonane_odniesienie += 1
             if oos_m["total_return"] > odniesienie:
                 pokonane_pelne += 1
+            # Ta sama ekspozycja - doplata nie zmienia ani jednej pozycji.
+            if oos_m_brutto["total_return"] > odniesienie_brutto * ekspozycja:
+                pokonane_odniesienie_brutto += 1
         mark = "" if informative else (f"  (poniżej {h.min_trades} transakcji — "
                                        "pominięte w ocenie)")
         if informative:
@@ -2409,9 +2572,16 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
         # wartosci PO OKNACH, z rezimem i liczba transakcji w tej samej linii.
         powroty = (f"  powroty={agg['udzial_powtornych_wejsc']:.0%}"
                    if "udzial_powtornych_wejsc" in agg else "")
+        # BRUTTO PO `reżim=`, nie przed: `scripts/porownaj_warianty.py` czyta
+        # `Sharpe/transakcję=... transakcje=... reżim=...` jednym wzorcem
+        # (WZOR_OKNA), wiec liczba w nim jest ta po doplacie z karty, a dopisek
+        # trafia do ogona, ktory skrypt tylko przeszukuje.
+        brutto = (f"  [brutto: Sharpe/transakcję={oos_m_brutto['sharpe']:+.4f}, "
+                  f"zwrot {oos_m_brutto['total_return']:+.2f}%]"
+                  if doplata and informative else "")
         print(f"  okno {idx:>2d}  {test_from:%m-%d}–{test_to:%m-%d}  "
               f"Sharpe/transakcję={agg['sharpe']:+.4f}  transakcje={n_trades}  "
-              f"reżim={dominant}{powroty}{mark}")
+              f"reżim={dominant}{powroty}{brutto}{mark}")
         idx += 1
         start += timedelta(days=h.step_days)
 
@@ -2898,12 +3068,27 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
     print(f"Okna: {total}, dodatnie: {positive} ({pct:.1f}%)"
           f"   przedział ufności 95%: {ci_lo:.1%}–{ci_hi:.1%}")
     print(f"Mediana Sharpe (OOS): {median:+.3f}" if median is not None else "Mediana Sharpe: —")
+    if egzekucja is not None and egzekucja.limit:
+        print(f"Niewypełnione zlecenia z limitem w symulacji OOS: "
+              f"{niewypelnione_oos} (wejścia + wyjścia, wszystkie okna). "
+              f"Ich KOSZT nie jest w dopłacie — w karcie stoi jako NIEZMIERZONE.")
+    # BRUTTO OBOK, NIE ZAMIAST. Gdy doplaty nie ma, obie wersje sa identyczne
+    # i wiersz bylby szumem.
+    if doplata and total:
+        print(f"  brutto (przed dopłatą {doplata * 1e4:.2f} pb, NIE do bramki): "
+              f"dodatnie {positive_brutto}/{total}, mediana Sharpe "
+              f"{statistics.median(all_sharpes_brutto):+.3f}"
+              + (f", kup-i-trzymaj przy tej samej ekspozycji pokonane w "
+                 f"{pokonane_odniesienie_brutto}/{porownywalne}"
+                 if porownywalne else ""))
     # DSR ZAWSZE RAZEM Z N I LICZBA PROB - `bramka_dsr` sklada to w jedno zdanie
     # i to samo zdanie idzie do `reason`, zeby wydruk i baza nie mowily dwoch
     # roznych rzeczy o tym samym pomiarze.
     print(f"Deflowany Sharpe: {opis_dsr}")
     print(f"Najgorsze obsunięcie: {worst_dd:.2f}%")
-    for linia in opis_przewagi(wszystkie_zwroty, all_sharpes, karta,
+    # BRUTTO, i to jest kontrakt `opis_przewagi`: koszt progowy i drabina
+    # potrzebuja zera, a miary po doplacie funkcja liczy sama z tej samej karty.
+    for linia in opis_przewagi(wszystkie_zwroty, all_sharpes_brutto, karta,
                                zwroty_okien_transakcje):
         print(linia)
     for linia in opis_stron(transakcje_stron):
