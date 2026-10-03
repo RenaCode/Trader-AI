@@ -73,6 +73,9 @@ MIGRACJE_NADAN = [
     # Próba zapisuje wynik w `risk.killswitch_event.proba_wynik` (0072) -
     # nadanie kolumnowe, tylko tej jednej kolumny.
     KORZEN / "db" / "migrations" / "0072_wynik_proby_pozarowej.sql",
+    # Silnik traci SELECT na `app.secret` (U-9): czyta wylacznie widok
+    # `app.secret_llm`, ktory chodzi prawami wlasciciela.
+    KORZEN / "db" / "migrations" / "0076_silnik_bez_app_secret.sql",
 ]
 
 # Role procesów z 0034 i 0052. Wypisane tutaj, a nie wyciągnięte z chartu, bo to
@@ -840,3 +843,19 @@ def test_BAZA_api_zwalnia_recznie_i_nie_udaje_automatu(jako):
                 "UPDATE risk.killswitch_event SET released_auto = true") \
         == "InsufficientPrivilege"
     assert jako("trader_app", ZATRZYMANIE) == "InsufficientPrivilege"
+
+
+
+def test_silnik_NIE_czyta_tabeli_sekretow(nadania):
+    """Audyt Fable U-9: 0034 nadało `trader_silnik` SELECT na `app.secret`
+    (klucze dostawców LLM i inne sekrety ustawień), a żaden proces tą rolą
+    tabeli nie czyta - klucze LLM idą przez widok `app.secret_llm`."""
+    assert "SELECT" not in nadania.na_tabeli("trader_silnik", "app.secret")
+
+
+@wymaga_bazy
+def test_BAZA_silnik_nie_czyta_app_secret_ale_widzi_widok_llm(jako):
+    assert jako("trader_silnik", "SELECT name FROM app.secret") \
+        == "InsufficientPrivilege"
+    assert jako("trader_silnik", "SELECT * FROM app.secret_llm") is None, \
+        "widok kluczy LLM przestał działać dla silnika"

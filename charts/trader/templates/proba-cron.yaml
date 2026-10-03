@@ -122,9 +122,10 @@ spec:
                 # dokladnie jak limit niespelniony, wiec nikt by tego nie
                 # zauwazyl az do chwili, w ktorej bylby potrzebny.
                 {{- include "trader.rolaDbEnv" (dict "ctx" $ "rola" "proba") | nindent 16 }}
-                - name: SECRETS_KEY
-                  valueFrom:
-                    secretKeyRef: { name: {{ .Values.secretName }}, key: SECRETS_KEY }
+                # BEZ SECRETS_KEY (audyt Fable U-9): proba nic nie odszyfrowuje -
+                # nie wola `notify()` ani adaptera gieldy, ogniwo 4 tylko CZYTA
+                # `notify.notification`. Klucz do kluczy gieldy i TOTP nie ma
+                # powodu lezec w tym podzie.
                 - name: PYTHONUNBUFFERED
                   value: "1"
               resources:

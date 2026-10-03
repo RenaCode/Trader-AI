@@ -109,14 +109,29 @@ def test_trener_ma_SECRETS_KEY_bo_wola_dozor_a_dozor_wola_notify():
         "wartość wpisana wprost w chart trafia do repozytorium")
 
 
-def test_trener_bierze_klucz_dokladnie_tak_samo_jak_proba_pozarowa():
+def _env_zadania(plik):
+    return jedyny_cronjob(plik)["spec"]["jobTemplate"]["spec"]["template"]["spec"]["containers"][0]["env"]
+
+
+def test_trener_bierze_klucz_dokladnie_tak_samo_jak_zywotnosc():
     """Dwa zadania w jednym chartcie, jeden sekret — i jeden sposób sięgania po
     niego. Rozjazd formy nie objawia się niczym aż do dnia, w którym jedno
-    z nich przestaje działać po zmianie nazwy sekretu."""
+    z nich przestaje działać po zmianie nazwy sekretu. (Do 2026-10-03 wzorcem
+    była próba pożarowa - ta klucza już nie dostaje, patrz test niżej.)"""
     def wpis(plik):
-        env = jedyny_cronjob(plik)["spec"]["jobTemplate"]["spec"]["template"]["spec"]["containers"][0]["env"]
-        return next(e for e in env if e["name"] == "SECRETS_KEY")
-    assert wpis("trainer-cron.yaml") == wpis("proba-cron.yaml")
+        return next(e for e in _env_zadania(plik) if e["name"] == "SECRETS_KEY")
+    assert wpis("trainer-cron.yaml") == wpis("zywotnosc-cron.yaml")
+
+
+def test_proba_pozarowa_NIE_dostaje_SECRETS_KEY():
+    """Audyt Fable U-9. Próba nie woła `notify()` ani adaptera giełdy (nic
+    nie odszyfrowuje) - ogniwo 4 tylko CZYTA `notify.notification`. Klucz,
+    który odszyfrowuje klucze giełdy i TOTP, nie ma powodu leżeć w jej podzie.
+    `zywotnosc` go potrzebuje: `notify()` i `mozliwosci.py` tworzą SecretBox."""
+    assert not [e for e in _env_zadania("proba-cron.yaml")
+                if e["name"] == "SECRETS_KEY"]
+    zrodlo = (KORZEN / "services/engine/proba_killswitcha.py").read_text(encoding="utf-8")
+    assert "SecretBox" not in zrodlo and "notify(" not in zrodlo
 
 
 def test_kod_wyjscia_dozoru_ZBIERANY_do_wyniku_zadania():
