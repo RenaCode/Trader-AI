@@ -187,4 +187,18 @@ async def audit(action: str, *, user_id: int | None = None, entity: str | None =
     )
 
 
+# LISTA SESJI AKTYWNYCH - wspolna dla `/auth/sessions` i `/account/sessions`.
+# Bezczynna dluzej niz SESSION_IDLE jest martwa (`current_user` odrzuci ja przy
+# nastepnym zadaniu), ale do tego zadania lezala w bazie z `revoked_at IS NULL`
+# i lista pokazywala ja jako aktywna (audyt Fable U-11). Parametry:
+# (biezaca sesja, uzytkownik, prog bezczynnosci w sekundach).
+SQL_SESJE_AKTYWNE = (
+    "SELECT id, created_at, expires_at, ip, user_agent, (id = %s) AS current"
+    " FROM app.session"
+    " WHERE user_id = %s AND revoked_at IS NULL AND expires_at > now()"
+    "   AND coalesce(last_seen_at, created_at) > now() - make_interval(secs => %s)"
+    " ORDER BY created_at DESC")
+SESSION_IDLE_S = int(SESSION_IDLE.total_seconds())
+
+
 Protected = Depends(current_user)

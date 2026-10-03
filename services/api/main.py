@@ -33,7 +33,11 @@ async def lifespan(app: FastAPI):
     await close_pool()
 
 
-app = FastAPI(title="Trader-AI API", version="0.1.0", lifespan=lifespan)
+# BEZ /docs, /redoc i /openapi.json (audyt Fable U-11). Pelna mapa API, w tym
+# sciezek zapisu, dla kazdego, kto dojdzie do procesu - z zewnatrz zaslanial
+# ja wylacznie nginx, czyli konfiguracja innego poda.
+app = FastAPI(title="Trader-AI API", version="0.1.0", lifespan=lifespan,
+              docs_url=None, redoc_url=None, openapi_url=None)
 
 app.add_middleware(
     CORSMiddleware,
@@ -69,8 +73,11 @@ async def health():
     procesu nie naprawia wolnej ani zatrzymanej bazy, a zabija jedyne miejsce,
     w ktorym widac, co sie dzieje.
     """
-    row = await fetch_one("SELECT count(*) AS n FROM schema_migrations")
-    return {"status": "ok", "migrations": row["n"] if row else 0}
+    # BEZ LICZBY MIGRACJI (U-11): endpoint jest publiczny, a wersja schematu
+    # anonimowemu odwiedzajacemu do niczego potrzebna nie jest. Zapytanie
+    # zostaje - gotowosc ma zalezec od bazy.
+    await fetch_one("SELECT 1 AS ok")
+    return {"status": "ok"}
 
 
 @app.get("/api/zywy")

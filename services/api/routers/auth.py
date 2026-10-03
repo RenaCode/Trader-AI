@@ -19,8 +19,8 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
 from ..auth import (
-    CSRF_COOKIE, adres_klienta, audit, clear_session_cookies, current_user,
-    require_csrf, set_session_cookies,
+    CSRF_COOKIE, SESSION_IDLE_S, SQL_SESJE_AKTYWNE, adres_klienta, audit,
+    clear_session_cookies, current_user, require_csrf, set_session_cookies,
 )
 from ..db import execute, fetch_all, fetch_one
 from ..notifications import powiadom_o_bezpieczenstwie
@@ -610,12 +610,8 @@ async def totp_disable(body: TotpDisableBody, request: Request,
 
 @router.get("/sessions")
 async def sessions(user: dict = Depends(current_user)):
-    rows = await fetch_all(
-        "SELECT id, created_at, expires_at, ip, user_agent, (id = %s) AS current"
-        " FROM app.session WHERE user_id = %s AND revoked_at IS NULL AND expires_at > now()"
-        " ORDER BY created_at DESC",
-        (user["session_id"], user["id"]),
-    )
+    rows = await fetch_all(SQL_SESJE_AKTYWNE,
+                           (user["session_id"], user["id"], SESSION_IDLE_S))
     return [
         {"id": r["id"], "created_at": r["created_at"].isoformat(),
          "expires_at": r["expires_at"].isoformat(), "ip": str(r["ip"]) if r["ip"] else None,

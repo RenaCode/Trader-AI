@@ -10,7 +10,8 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
-from ..auth import audit, current_user, require_csrf
+from ..auth import (SESSION_IDLE_S, SQL_SESJE_AKTYWNE, audit, current_user,
+                    require_csrf)
 from ..db import execute, fetch_all, fetch_one
 from .auth import potwierdz_haslo
 
@@ -60,12 +61,8 @@ async def update_profile(body: ProfileBody, request: Request,
 
 @router.get("/sessions")
 async def sessions(user: dict = Depends(current_user)):
-    rows = await fetch_all(
-        "SELECT id, created_at, expires_at, ip, user_agent, (id = %s) AS current"
-        " FROM app.session"
-        " WHERE user_id = %s AND revoked_at IS NULL AND expires_at > now()"
-        " ORDER BY created_at DESC",
-        (user["session_id"], user["id"]))
+    rows = await fetch_all(SQL_SESJE_AKTYWNE,
+                           (user["session_id"], user["id"], SESSION_IDLE_S))
     return [
         {
             "id": r["id"], "created_at": r["created_at"].isoformat(),

@@ -101,14 +101,15 @@ export default function App() {
               <span className="logo-badge demo">DEMO</span>
               {/* Trzy stany, nie jeden: "API OK" swiecilo zawsze, gdy fetch
                   sie udal, i nie mowilo niczego. Teraz mowi, czy API odpowiada,
-                  kiedy ostatnio sprawdzono i ile migracji ma baza. */}
+                  i kiedy ostatnio sprawdzono. Liczby migracji publiczny
+                  /api/health juz nie oddaje (audyt Fable U-11). */}
               <span className={`logo-badge ${health.error ? 'bad' : health.data ? '' : 'muted'}`}
                     title={health.error
                       ? `API nie odpowiada: ${health.error}`
                       : health.data
-                        ? `API odpowiada · migracji ${health.data.migrations} · sprawdzono ${new Date().toLocaleTimeString('pl-PL')}`
+                        ? `API odpowiada · sprawdzono ${new Date().toLocaleTimeString('pl-PL')}`
                         : 'Sprawdzam API…'}>
-                {health.error ? 'API ✗' : health.data ? `API · ${health.data.migrations} migr.` : 'API …'}
+                {health.error ? 'API ✗' : health.data ? 'API ✓' : 'API …'}
               </span>
             </div>
           </div>

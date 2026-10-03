@@ -37,9 +37,10 @@ import csv
 import io
 from datetime import datetime
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import StreamingResponse
 
+from ..auth import audit, wymagaj_wlasciciela
 from ..db import fetch_all
 
 router = APIRouter(prefix="/api/engines/{engine}/eksport", tags=["eksport"])
@@ -91,12 +92,29 @@ def _csv(wiersze, kolumny, nazwa: str, wariant: str) -> StreamingResponse:
     )
 
 
+async def _odnotuj(widok: str, user: dict, request: Request | None, engine: str,
+                   mode: str, od, do, wierszy: int) -> None:
+    """Slad eksportu w `app.audit_log` (audyt Fable U-11).
+
+    Eksport to cala historia transakcji w jednym pliku - jedyny odczyt w tym API,
+    ktory wynosi dane poza aplikacje. Do 2026-10-03 nie zostawial sladu i byl
+    dostepny dla kazdej waznej sesji, nie tylko wlasciciela.
+    """
+    await audit(f"eksport.{widok}", user_id=user["id"], entity="eksport",
+                after={"engine": engine, "mode": mode,
+                       "od": od.isoformat() if od else None,
+                       "do": do.isoformat() if do else None, "wierszy": wierszy},
+                request=request)
+
+
 def _czas(v: datetime | None) -> str:
     return v.isoformat() if v else ""
 
 
 @router.get("/wypelnienia")
-async def wypelnienia(engine: str, mode: str = Query("demo"),
+async def wypelnienia(engine: str, request: Request,
+                  user: dict = Depends(wymagaj_wlasciciela),
+                  mode: str = Query("demo"),
                       od: datetime | None = None, do: datetime | None = None,
                       wariant: str = Query("csv", pattern="^(csv|excel)$")):
     """Pojedyncze wypełnienia — surowy materiał do rozliczeń."""
@@ -122,11 +140,14 @@ async def wypelnienia(engine: str, mode: str = Query("demo"),
         for r in rows
     ]
     nazwa = f"trader-{engine}-{mode}-wypelnienia.csv"
+    await _odnotuj("wypelnienia", user, request, engine, mode, od, do, len(wiersze))
     return _csv(wiersze, KOLUMNY_WYPELNIEN, nazwa, wariant)
 
 
 @router.get("/pozycje")
-async def pozycje(engine: str, mode: str = Query("demo"),
+async def pozycje(engine: str, request: Request,
+                  user: dict = Depends(wymagaj_wlasciciela),
+                  mode: str = Query("demo"),
                   od: datetime | None = None, do: datetime | None = None,
                   wariant: str = Query("csv", pattern="^(csv|excel)$")):
     """Zamknięte pozycje — wynik po kosztach, gotowy do przeczytania."""
@@ -156,4 +177,5 @@ async def pozycje(engine: str, mode: str = Query("demo"),
         for r in rows
     ]
     nazwa = f"trader-{engine}-{mode}-pozycje.csv"
+    await _odnotuj("pozycje", user, request, engine, mode, od, do, len(wiersze))
     return _csv(wiersze, KOLUMNY_POZYCJI, nazwa, wariant)
