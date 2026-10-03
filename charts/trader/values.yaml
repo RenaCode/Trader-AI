@@ -500,14 +500,9 @@ workers:
   # pomiar byl "stary", czyli zeby `check_account` dal `block`. Dla toru bez
   # otwartych pozycji nie kosztuje to niczego, ale prog wieku pomiaru per silnik
   # (razem z brakiem dozorcy dla `engine='equity'`) jest osobna decyzja.
-  # TOR EQUITY WSTRZYMANY NA GIELDZIE (2026-10-03, decyzja wlasciciela po
-  # audycie Fable, R9): brak wyniku out-of-sample po korekcie podzialow,
-  # model nieaktywny od 24.09, swieze poprawki T1/T6. Silnik dziala i bije
-  # puls (czujki milcza), ale `--egzekucja papier` - zadne zlecenie nie
-  # idzie na Alpake. Powrot: `gielda` po decyzji stop/go z planu naprawy.
   engine-equity:
     enabled: true
-    command: ["sh", "-c", "sleep 90; python services/engine/loop.py --engine equity --bar 1h --sprawdz && exec python services/engine/loop.py --engine equity --bar 1h --interval 300 --kind stock --limit --wymagaj-modelu --egzekucja papier --mode demo"]
+    command: ["sh", "-c", "sleep 90; python services/engine/loop.py --engine equity --bar 1h --sprawdz && exec python services/engine/loop.py --engine equity --bar 1h --interval 300 --kind stock --limit --wymagaj-modelu --egzekucja gielda --mode demo"]
     resources:
       limits:   { cpu: 1000m, memory: 512Mi }
       requests: { cpu: 100m,  memory: 128Mi }
