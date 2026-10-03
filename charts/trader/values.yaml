@@ -813,8 +813,14 @@ trainerCron:
   # BYBITA, bo innego wtedy nie bylo - mierzyly oplaty, ktorych to konto nie
   # placi. Po tej zmianie tor equity liczy sie wlasnym rachunkiem i tamte liczby
   # nie sa juz jego opisem.
+  # TOR EQUITY WSTRZYMANY (2026-10-03, decyzja wlasciciela po audycie Fable,
+  # R9): bez treningu nie ma aktywnego modelu, a silnik equity chodzi z
+  # `--wymagaj-modelu`, wiec nie sklada zadnych zlecen (puls bije dalej).
+  # Egzekucja papierowa NIE nadaje sie do wstrzymania - adapter papierowy nie
+  # ma zegara sesji Alpaki i petla equity sie wywraca (a99a966).
+  # Powrot: `enabled: true` po decyzji stop/go z planu naprawy.
   equity:
-    enabled: true
+    enabled: false
     horyzonty: ["1h"]
     kind: "stock"
     limit: true
