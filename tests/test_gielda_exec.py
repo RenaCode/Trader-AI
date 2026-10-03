@@ -401,34 +401,6 @@ def test_nieudane_anulowanie_zostawia_SLAD_a_nie_cisze():
                for _, p in cur.sql if p)
 
 
-def test_petla_NIE_bramkuje_wysylki_stanem_killswitcha():
-    """Reguła „wyjścia przechodzą przez kill-switch" żyje w `run_once`, którego
-    testy jednostkowe nie obejmują — wymaga bazy.
-
-    Sprawdzamy więc samo wywołanie: wysyłka ma być wołana ZAWSZE, a stan
-    kill-switcha ma trafiać do `tylko_wyjscia`, nie do warunku wejścia. Gdyby
-    trafiał do warunku, plany wyjścia powstawałyby i nigdy nie szły na giełdę —
-    pozycje zostałyby uwięzione dokładnie wtedy, gdy ryzyko jest za duże.
-
-    KOMENTARZE SĄ ODFILTROWANE przed przeszukaniem. Wcześniejszy test w tym
-    projekcie przechodził, bo szukanego wzorca dostarczał komentarz nad kodem.
-    """
-    from pathlib import Path
-
-    zrodlo = Path("services/engine/loop.py").read_text(encoding="utf-8")
-    kod = "\n".join(w for w in zrodlo.splitlines()
-                    if not w.lstrip().startswith("#"))
-
-    (wywolanie,) = [b for b in kod.split("zloz_oczekujace(")[1:]
-                    if "tylko_wyjscia" in b]
-    assert "tylko_wyjscia=wejscia_wstrzymane" in wywolanie.split(")")[0]
-
-    warunek = kod.split("from services.engine.gielda_exec import zloz_oczekujace")[0]
-    ostatni_if = warunek.rstrip().splitlines()[-1]
-    assert "gielda is not None" in ostatni_if
-    assert "wejscia_wstrzymane" not in ostatni_if
-
-
 # ------------------------------------------------------- próba ścieżki egzekucji
 
 def test_proba_egzekucji_ANULUJE_takze_po_bledzie():

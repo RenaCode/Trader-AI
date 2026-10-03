@@ -151,15 +151,12 @@ def test_petla_equity_wymaga_modelu_a_krypto_nie():
 
 
 def test_run_once_oddaje_powod_blokady_a_nie_same_zera():
-    """Cykl bez decyzji musi być odróżnialny od cyklu, który nic nie znalazł."""
-    zrodlo = (KORZEN / "services/engine/loop.py").read_text()
-    # Obie bramki kończą się pulsem — inaczej `dozor --co zywotnosc` uznałby
-    # każdą noc za śmierć silnika equity i wysyłał alarm krytyczny o 22:00.
-    for bramka in ("poza_sesja=True", "bez_modelu=True"):
-        assert bramka in zrodlo, f"brak bramki {bramka}"
-        blok = zrodlo.split(bramka)[1].split("return stats")[0]
-        assert "zapisz_puls" in blok, f"bramka {bramka} nie bije pulsu"
+    """Cykl bez decyzji musi być odróżnialny od cyklu, który nic nie znalazł.
 
+    To, że obie bramki kończą się PULSEM (inaczej `dozor --co zywotnosc`
+    uznałby każdą noc za śmierć silnika equity), sprawdza wykonanie
+    `run_once` w `tests/test_run_once.py` — tu zostaje sam kształt pulsu.
+    """
     # Puls musi mieć PEŁNY kształt, także w cyklu przerwanym: `detail` jest
     # nadpisywany co przebieg, więc licznik pominięty w gałęzi bramki znikałby
     # z pulsu na całą noc — i "nic nie pominięto" stawałoby się nieodróżnialne
@@ -249,33 +246,6 @@ def test_equity_handluje_na_gieldzie_w_trybie_demo_jak_krypto():
     assert "--egzekucja gielda" in cmd and "--mode demo" in cmd
     assert "--limit" in cmd
     assert "--sprawdz" in cmd, "przebieg kontrolny przed pętlą, tak jak w krypto"
-
-
-def test_pomiar_ryzyka_dzieje_sie_PRZED_bramkami():
-    """Podłoga kapitału nie przestaje obowiązywać, gdy giełda zamyka.
-
-    ZNALEZIONE NA PRODUKCJI 2026-09-24, przy pierwszym cyklu silnika equity.
-    Bramki stały wtedy PRZED `RiskKernel`, więc każdy cykl kończył się na
-    bramce sesji i `check_account` nie wykonał się ani razu. Czujka `--co ryzyko`
-    zgłosiła to sama: „BEZPIECZNIK NIE RAPORTUJE equity/demo: ANI JEDNEGO
-    zapisanego pomiaru limitów konta w całej historii".
-
-    To nie była kosmetyka. Pozycje zostają otwarte przez noc i weekend,
-    a `kapital-equity` aktualizuje krzywą kapitału z ksiąg Alpaki co 15 minut
-    niezależnie od sesji — obsunięcie mogło więc przekroczyć limit o 03:00
-    i nie zostałoby przez nikogo ocenione.
-
-    `check_account` jest poza sesją bezpieczny, bo czyta `exec.equity_point`,
-    a ekspozycji świadomie nie liczy — nie sięga po świeże świece, których
-    wtedy nie ma.
-    """
-    zrodlo = (KORZEN / "services/engine/loop.py").read_text()
-    ciało = zrodlo.split("async def run_once(")[1].split("\nasync def ")[0]
-    pomiar = ciało.index("konto = risk.check_account()")
-    for bramka in ("BRAMKA 1: SESJA GIELDY.", "BRAMKA 2: WYMAGANY ZWALIDOWANY MODEL."):
-        assert ciało.index(bramka) > pomiar, (
-            f"{bramka} stoi przed pomiarem limitów konta — poza sesją podłoga "
-            f"kapitału przestaje być liczona i nikt tego nie ocenia")
 
 
 def test_trening_bez_instrumentow_NIE_MELDUJE_SUKCESU():

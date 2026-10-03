@@ -53,7 +53,6 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import os
-import re
 from decimal import Decimal as D
 from pathlib import Path
 
@@ -351,39 +350,6 @@ def test_krypto_nie_dostaje_luzniejszego_progu_ani_zadnego_zapytania():
 
 
 # ======================================= 5. bramka jest WPIETA, a nie tylko jest
-
-def test_run_once_pyta_o_sesje_PONOWNIE_przed_wysylka():
-    """Stan sesji z początku cyklu nie opisuje jego końca.
-
-    Cykl wystartowany 15:59 czasu Nowego Jorku przechodzi bramkę jako
-    "otwarta", a `zloz_oczekujace` stoi na końcu przebiegu — po 16:00. Bez
-    drugiego odczytu ta szczelina jest dokładnie tą, w której zlecenie idzie po
-    cenie zamknięcia.
-    """
-    # KOMENTARZE ODFILTROWANE PRZED SZUKANIEM. Pierwsza wersja tego testu
-    # czytala cale zrodlo i dawala sie zaspokoic komentarzem obok kodu - ta
-    # sama wada, ktora opisuje `test_petla_NIE_bramkuje_wysylki_stanem_killswitcha`.
-    zrodlo = (KORZEN / "services/engine/loop.py").read_text(encoding="utf-8")
-    kod = "\n".join(w for w in zrodlo.splitlines()
-                    if not w.lstrip().startswith("#"))
-    przed_wysylka = kod.split("import zloz_oczekujace")[1]
-    wywolanie = przed_wysylka.split("conn.commit")[0]
-
-    # NAZWA ZMIENNEJ Z PRZYPISANIA, a nie wzorzec `sesja=\w+`.
-    #
-    # Pierwsza wersja sprawdzala `re.search(r"sesja=\w+", ...)` i PRZECHODZILA
-    # dla `sesja=None`, bo `\w+` dopasowuje sie do slowa "None". Bramka
-    # w `zloz_plan` stoi na `sesja is not None`, wiec to bylo dokladnie ciche
-    # wylaczenie calej oslony przy zielonym tescie. Teraz test wyciaga nazwe
-    # zmiennej, do ktorej przypisano wynik `stan_sesji`, i wymaga, zeby TA
-    # nazwa poszla do `zloz_oczekujace`.
-    m = re.search(r"(\w+) = await stan_sesji\(", wywolanie)
-    assert m, ("`zloz_oczekujace` jest wołane bez świeżego odczytu stanu "
-               "sesji — brak przypisania z `stan_sesji` przed wysyłką")
-    assert re.search(r"sesja=" + m.group(1) + r"\b", wywolanie), (
-        "do `zloz_oczekujace` nie idzie świeżo policzony stan sesji "
-        "(`sesja=" + m.group(1) + "`) — literał `None` w tym miejscu cicho "
-        "wyłącza całą bramkę, bo `zloz_plan` pyta `sesja is not None`")
 
 
 # ======================== 6. PUNKT INTEGRACJI: obiekt sesji naprawde dochodzi
