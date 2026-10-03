@@ -216,6 +216,14 @@ spec:
                   {{- range $tor := $tory }}
                   python services/engine/dozor.py --co odlozone --engine {{ $tor.engine | quote }} || RC=$?
                   {{- end }}
+                  # DECYZJA NA KAZDA SWIECE DLA KAZDEGO INSTRUMENTU (F-8.3).
+                  # Puls silnika bije, gdy cykl sie udal - takze bez ani jednej
+                  # decyzji. Dwie domkniete swiece z rzedu bez kompletu przy
+                  # swiezych cechach -> warning. TYLKO CRYPTO: silnik equity
+                  # chodzi z `--wymagaj-modelu` i bez aktywnego modelu konczy
+                  # cykl na bramce (wstrzymany trening, values.yaml) - czujka
+                  # krzyczalaby o stanie zamierzonym przy kazdej sesji.
+                  python services/engine/dozor.py --co decyzje --engine crypto --bar 4h || RC=$?
                   # CZY ALARM MA JAK OPUSCIC PANEL.
                   #
                   # Wszystkie czujki wyzej koncza sie powiadomieniem. Ta sprawdza

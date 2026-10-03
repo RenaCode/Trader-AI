@@ -107,7 +107,7 @@ import argparse
 import asyncio
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -3204,6 +3204,160 @@ async def sprawdz_odlozone_decyzje(fetch_all, notify, sucho: bool = False, *,
     return kod_wyjscia(len(braki), 0, "swieca odlozona bez decyzji")
 
 
+# ------------------------------------------------- decyzje na kazda swiece
+#
+# CZUJKI WYKRYWALY BRAK PULSU, NIE BRAK SENSU (audyt Fable F-8.3, 2026-10-03).
+# Puls silnika bije, gdy cykl sie udal - takze gdy nie bylo ani jednej decyzji.
+# `swiezosc` pilnuje cech, `odlozone` swiec odlozonych przez niepelny komplet
+# sygnalow; zadna nie pytala wprost "czy ta swieca ma decyzje dla kazdego
+# instrumentu uniwersum, skoro cechy przyszly".
+#
+# Ile domknietych swiec z rzedu bez kompletu daje alarm. Jedna to restart poda
+# albo pojedynczy wywrocony cykl - nie stan.
+SWIEC_BEZ_DECYZJI = 2
+
+# Po ilu minutach od ZAMKNIECIA swiecy jej decyzje musza juz byc. Zmierzone
+# opoznienie decyzji przed F-4.1 siegalo 88 min (journal.decision 02.10), po
+# skroceniu interwalow history/features do 300 s najgorszy przypadek to 15 min.
+# 90 min lezy nad historycznym maksimum, wiec czujka nie miga przy powolnej
+# swiecy, a dwie swiece z rzedu i tak rozstrzygaja o alarmie.
+ZWLOKA_DECYZJI_MIN = 90
+
+
+def swiece_do_oceny(teraz: datetime, minut: int, zwloka_min: int,
+                    ile: int) -> list[datetime]:
+    """Poczatki swiec, ktorych decyzje MUSZA juz byc - od najnowszej. CZYSTA.
+
+    Decyzja dla swiecy B zapada w oknie [B + swieca, B + 2*swieca)
+    (`loop.okno_decyzji`); oceniamy B dopiero, gdy od jej zamkniecia minela
+    `zwloka_min`.
+    """
+    krok = minut * 60
+    granica = teraz - timedelta(minutes=minut + zwloka_min)
+    najnowsza = datetime.fromtimestamp(granica.timestamp() // krok * krok,
+                                       tz=timezone.utc)
+    return [najnowsza - timedelta(minutes=minut * k) for k in range(ile)]
+
+
+def ocen_decyzje_na_swiece(wiersze: list[dict], uniwersum: int,
+                           swiec: int = SWIEC_BEZ_DECYZJI) -> dict | None:
+    """Czy ostatnie `swiec` swiec ma decyzje dla mniej niz calego uniwersum,
+    choc cechy tych swiec przyszly. CZYSTA FUNKCJA.
+
+    Wiersz: `bar_start`, `decyzji` (rozne instrumenty z decyzja w oknie tej
+    swiecy), `z_cechami` (rozne instrumenty z jakakolwiek cecha tej swiecy).
+    Od najnowszej. None = cisza.
+
+    BRAK CECH TO NIE TA CZUJKA: potok cech, ktory stanal, zglasza `swiezosc`.
+    Dwa alarmy o jednej awarii ucza przewijac oba.
+    """
+    ostatnie = wiersze[:swiec]
+    if len(ostatnie) < swiec or not uniwersum:
+        return None
+    if any(w["decyzji"] >= uniwersum or not w["z_cechami"] for w in ostatnie):
+        return None
+    return {"swiece": [w["bar_start"] for w in ostatnie],
+            "opis": "; ".join(
+                f"{w['bar_start']:%m-%d %H:%M}: decyzji {w['decyzji']}/{uniwersum}, "
+                f"z cechami {w['z_cechami']}/{uniwersum}" for w in ostatnie)}
+
+
+SQL_DECYZJE_NA_SWIECE = (
+    "SELECT s.b AS bar_start,"
+    "       (SELECT count(DISTINCT d.instrument_id) FROM journal.decision d"
+    "         WHERE d.engine::text = %(engine)s AND d.mode::text = %(mode)s"
+    "           AND d.instrument_id = ANY(%(ids)s)"
+    "           AND d.decided_at >= s.b + make_interval(mins => %(m)s)"
+    "           AND d.decided_at <  s.b + make_interval(mins => 2 * %(m)s)"
+    "       ) AS decyzji,"
+    "       (SELECT count(DISTINCT fv.instrument_id) FROM feat.feature_value fv"
+    "          JOIN feat.feature_def fd ON fd.id = fv.feature_def_id"
+    "         WHERE fd.active AND fd.params->>'bar' = %(bar)s"
+    "           AND fv.instrument_id = ANY(%(ids)s)"
+    "           AND fv.event_time = s.b"
+    "       ) AS z_cechami"
+    "  FROM unnest(%(swiece)s::timestamptz[]) AS s(b)"
+    " ORDER BY s.b DESC")
+
+
+async def sprawdz_decyzje(fetch_all, notify, sucho: bool = False, *,
+                          engine: str = "crypto", mode: str = "demo",
+                          bar: str = "4h", teraz: datetime | None = None) -> int:
+    """Czy silnik podejmuje decyzje dla kazdego instrumentu na kazdej swiecy.
+
+    Uniwersum z `uniwersum.WARUNEK_UNIWERSUM_DECYZYJNEGO` - tym samym, ktorym
+    petla wybiera instrumenty. Cechy - z tego samego horyzontu.
+    """
+    from services.engine.horizons import get as get_horizon
+    from services.engine.uniwersum import sql_uniwersum_decyzyjnego
+
+    h = get_horizon(bar)
+    teraz = teraz or datetime.now(timezone.utc)
+    instrumenty = await fetch_all(sql_uniwersum_decyzyjnego("id, symbol"), (engine,))
+    if not instrumenty:
+        print(f"decyzje ({engine}/{mode}/{bar}): uniwersum decyzyjne puste — "
+              f"nie ma czego oceniac")
+        return 0
+    ids = [w["id"] for w in instrumenty]
+    swiece = swiece_do_oceny(teraz, h.bar_minutes, ZWLOKA_DECYZJI_MIN,
+                             SWIEC_BEZ_DECYZJI)
+    wiersze = await fetch_all(SQL_DECYZJE_NA_SWIECE, {
+        "engine": engine, "mode": mode, "ids": ids, "m": h.bar_minutes,
+        "bar": bar, "swiece": swiece})
+    for w in wiersze:
+        print(f"decyzje ({engine}/{mode}/{bar}) świeca {w['bar_start']:%m-%d %H:%M}: "
+              f"{w['decyzji']}/{len(ids)} instrumentów z decyzją, "
+              f"{w['z_cechami']}/{len(ids)} z cechami")
+
+    werdykt = ocen_decyzje_na_swiece(wiersze, len(ids))
+    if werdykt is None:
+        if any(not w["z_cechami"] for w in wiersze):
+            print("  świeca bez cech — to stan dla `--co swiezosc`, nie dla tej "
+                  "czujki")
+        else:
+            print(f"  komplet decyzji w co najmniej jednej z ostatnich "
+                  f"{SWIEC_BEZ_DECYZJI} świec — cisza")
+        return 0
+
+    brakujace = await fetch_all(
+        "SELECT i.symbol FROM ref.instrument i"
+        " WHERE i.id = ANY(%(ids)s) AND NOT EXISTS ("
+        "   SELECT 1 FROM journal.decision d"
+        "    WHERE d.instrument_id = i.id"
+        "      AND d.engine::text = %(engine)s AND d.mode::text = %(mode)s"
+        "      AND d.decided_at >= %(od)s AND d.decided_at < %(do)s)"
+        " ORDER BY i.symbol",
+        {"ids": ids, "engine": engine, "mode": mode,
+         "od": werdykt["swiece"][0] + timedelta(minutes=h.bar_minutes),
+         "do": werdykt["swiece"][0] + timedelta(minutes=2 * h.bar_minutes)})
+    symbole = ", ".join(w["symbol"] for w in brakujace) or "?"
+    tytul = (f"Brak decyzji dla części uniwersum przez {SWIEC_BEZ_DECYZJI} "
+             f"świece ({engine}/{bar})")
+    tresc = (f"{werdykt['opis']}.\n\nBez decyzji w ostatniej świecy: {symbole}.\n\n"
+             f"Cechy tych świec przyszły, a silnik nie zapisał decyzji (ani "
+             f"`hold`) dla każdego instrumentu. Puls silnika tego nie widzi — "
+             f"bije, gdy cykl się udał. Sprawdź log `trader-engine` "
+             f"i `journal.pominiecie`.")
+    print(f"  {tytul}\n  bez decyzji: {symbole}")
+    if sucho:
+        print("  Tryb suchy — powiadomienie nie wysylane.")
+        return 1
+
+    juz = await fetch_all(
+        "SELECT 1 FROM notify.notification"
+        " WHERE event_code = 'engine.brak_decyzji' AND engine::text = %s"
+        "   AND created_at > now() - interval '24 hours' LIMIT 1", (engine,))
+    if juz:
+        return kod_wyjscia(0, 1, "brak decyzji dla części uniwersum")
+    odbiorcy = await fetch_all('SELECT id FROM app."user" WHERE is_active')
+    for u in odbiorcy:
+        await notify(u["id"], "engine.brak_decyzji", tytul, tresc,
+                     engine=engine, severity="warning",
+                     data={"swiece": [s.isoformat() for s in werdykt["swiece"]],
+                           "bez_decyzji": symbole})
+    return kod_wyjscia(1, 0, "brak decyzji dla części uniwersum")
+
+
 async def sprawdz_dryf(fetch_all, notify, sucho: bool = False, *,
                        engine: str = "crypto", bar: str = "4h",
                        teraz: datetime | None = None) -> int:
@@ -3346,7 +3500,8 @@ async def main() -> int:
     ap.add_argument("--co", default="stan-nauki",
                     choices=("stan-nauki", "zywotnosc", "ryzyko", "kopie",
                              "swiezosc", "egzekucja", "poslizg", "instrumenty",
-                             "workery", "dryf", "kanaly", "odlozone"),
+                             "workery", "dryf", "kanaly", "odlozone",
+                             "decyzje"),
                     help="stan-nauki: czy wynik treningu sie zmienil; "
                          "dryf: czy rozklad cech odjechal od treningowego I TAK "
                          "ZOSTAL - stan trwaly, ktorego 'stan-nauki' z definicji "
@@ -3365,7 +3520,9 @@ async def main() -> int:
                          "instrumenty: czy uniwersum nadal istnieje u gieldy "
                          "(wycofanie, zawieszenie, nieaktualny odczyt statusu); "
                          "workery: czy procesy zbierajace dane domykaja cykle - "
-                         "prog liczony z INTERWALU kazdego z nich")
+                         "prog liczony z INTERWALU kazdego z nich; "
+                         "decyzje: czy kazda swieca ma decyzje dla kazdego "
+                         "instrumentu uniwersum, gdy cechy przyszly")
     ap.add_argument("--prog-statusu-h", type=int, default=None, dest="prog_statusu_h",
                     help="prog nieswiezosci odczytu statusu w godzinach dla "
                          "--co instrumenty; do wywolania sciezki alarmowej na "
@@ -3429,6 +3586,10 @@ async def main() -> int:
         if args.co == "dryf":
             return await sprawdz_dryf(fetch_all, notify, sucho=args.sucho,
                                       engine=args.engine, bar=args.bar)
+        if args.co == "decyzje":
+            return await sprawdz_decyzje(fetch_all, notify, sucho=args.sucho,
+                                         engine=args.engine, mode=args.mode,
+                                         bar=args.bar)
         if args.co == "odlozone":
             # `--okno-h` ma domyslnie None (dla `--co poslizg` znaczy to "od
             # poczatku"), a tutaj None wywrocilo by zapytanie. Domyslne 48 h to
