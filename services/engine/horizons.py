@@ -52,6 +52,13 @@ class Horizon:
     min_trades: int              # laczna liczba transakcji (wszystkie instrumenty)
                                  # ponizej ktorej okno nie niesie informacji
     max_staleness_min: int       # dopuszczalny wiek cechy przy odczycie point-in-time
+    # HORYZONT ZWROTU W IC (`train.ic_weights`), w swiecach tego horyzontu.
+    #
+    # Do 2026-10-03 byla to stala `horyzont_swiec = 3` w sygnaturze `ic_weights`,
+    # niezalezna od swiecy: na 4h znaczyla 12 godzin, na 1h - 3 godziny. Dwie
+    # rozne hipotezy pod jedna nazwa (audyt Fable F-2.6). Teraz liczba stoi
+    # przy horyzoncie i znaczy 12 godzin na kazdym z nich.
+    ic_horizon_bars: int
 
     # Etykiety okien zwrotow - trafiaja do opisu cechy w UI, zeby dalo sie
     # przeczytac, ze "zwrot krotki" na 1 h znaczy co innego niz na 5 min.
@@ -87,6 +94,7 @@ H5M = Horizon(
     ret_short=12, ret_mid=48, ret_long=288,
     range_window=288, volume_lookback=288, warmup=300,
     train_days=14, test_days=2, step_days=2, min_trades=5, max_staleness_min=90,
+    ic_horizon_bars=144,
     labels={"ret_short": "1 h", "ret_mid": "4 h", "ret_long": "24 h",
             "range": "24 h", "volume": "24 h"},
 )
@@ -124,6 +132,7 @@ H1H = Horizon(
     ret_short=4, ret_mid=24, ret_long=168,
     range_window=168, volume_lookback=168, warmup=200,
     train_days=90, test_days=14, step_days=14, min_trades=8, max_staleness_min=180,
+    ic_horizon_bars=12,
     labels={"ret_short": "4 h", "ret_mid": "24 h", "ret_long": "7 dni",
             "range": "7 dni", "volume": "7 dni"},
 )
@@ -138,6 +147,7 @@ H4H = Horizon(
     ret_short=6, ret_mid=42, ret_long=180,
     range_window=42, volume_lookback=180, warmup=200,
     train_days=180, test_days=30, step_days=30, min_trades=12, max_staleness_min=600,
+    ic_horizon_bars=3,
     labels={"ret_short": "24 h", "ret_mid": "7 dni", "ret_long": "30 dni",
             "range": "7 dni", "volume": "30 dni"},
 )

@@ -132,196 +132,592 @@
  "ic": {
   "json": {
    "b0_dodatnie": [
-    2,
-    5
+    4,
+    7
    ],
    "bije_b1": [
+    2,
+    7
+   ],
+   "bije_b2": [
+    4,
+    7
+   ],
+   "bije_b3": [
+    5,
+    7
+   ],
+   "brak_swiec_1h": 0,
+   "days": 400,
+   "do": "2026-10-03 04:00",
+   "dodatnie": 3,
+   "doplata_pb": 2.4994552304595214,
+   "dsr": 0.4904555220185957,
+   "limit": true,
+   "mediana_sharpe": -0.0062,
+   "n_selekcji": 2,
+   "niewypelnienie_pb": null,
+   "od": "2025-08-29 04:00",
+   "odniesienia": {
+    "B1": [
+     3.2687152488380407,
+     1.0,
+     3,
+     7
+    ],
+    "B2": [
+     0.6840604888106689,
+     0.40223463687150834,
+     2,
+     7
+    ],
+    "B3": [
+     -0.09587593487002162,
+     0.04166001596169194,
+     3,
+     7
+    ],
+    "strategia": [
+     0.028842857142857142,
+     0.003282571428571429,
+     4,
+     7
+    ]
+   },
+   "okna": 7,
+   "opoznienie_min": 0,
+   "pesymistyczna": false,
+   "status": "learning",
+   "transakcji": 173,
+   "wypelnialnosc": 1.0,
+   "zwrot_na_runde_pb": 8.647544622583256
+  },
+  "stdout": "  Spread z bazy: 2.000 pb na rundę (średnia ze średnich per instrument, 2 instrumentów, 200 świec)\n    okno pomiaru: 2025-08-29 04:00..2026-10-03 04:00 UTC\n    rozkład po świecach: mediana 2.000 | q1 1.000 | q3 3.000 | max 3.000 pb\n    skrajne instrumenty: BTCUSDC 1.000 pb, ETHUSDC 3.000 pb\n  prowizja: 0.200% (taryfa gieldy)\n  niewypelnienie: NIE ZMIERZONO — symulacja przyjmuje, ze limit wchodzi ZAWSZE, gdy swieca dotknela ceny; `exec.fill` nie zawiera zlecen, ktore nie weszly\n  wyjscie takerem: NIE ZMIERZONO — udzial wyjsc zlozonych agresywnie razy (taker - maker) na jednej nodze; symulacja zaklada makera na obu\n  spread: 0.020% (pomiar)\n  pyl: 0.005% (zalozenie)\n  razem CO NAJMNIEJ 0.225% rundy — bez niewypelnienie, wyjscie takerem. Prawdziwy koszt jest WIEKSZY o nieznana wartosc; ta liczba jest dolnym oszacowaniem, nie kosztem.\n  pył per instrument (pb na rundę; notional 975 z test 0.260, cena = maksimum okna):\n    ADAUSDC 0.38  BTCUSDC 0.10  DOGEUSDC 0.50  ETHUSDC 0.18  LINKUSDC 1.21  SOLUSDC 0.24  SUIUSDC 0.61  XRPUSDC 0.78\n    do karty: średnia 0.50 pb (maksimum 1.21 pb)\n  Miary okien OOS i bramka statusu PO dopłacie 2.50 pb na rundę (ta sama KWOTA co w DSR); selekcja wag in-sample liczona BRUTTO; V[SR_n] miesza przebiegi brutto sprzed 2026-10-02 z przebiegami po dopłacie; kup-i-trzymaj po 2.04 pb na swoją jedną rundę. Liczby „brutto” = przed dopłatą, tylko do porównania.\n  dopłata z karty 2.50 pb na rundę (w tym: spread 2.00 pb, pyl 0.50 pb) — karta BEZ: niewypelnienie (NIEZMIERZONE); wyjscie takerem (NIEZMIERZONE)\n  BTCUSDC      2,399 punktów panelu\n  ETHUSDC      2,399 punktów panelu\n  SOLUSDC      2,399 punktów panelu\n  ADAUSDC      2,399 punktów panelu\n  XRPUSDC      2,399 punktów panelu\n  DOGEUSDC     2,399 punktów panelu\n  LINKUSDC     2,399 punktów panelu\n  SUIUSDC      2,399 punktów panelu\n  rewizje po czasie decyzji: 201 z 249,496 wartości cech (0.081%) — na tych silnik widział inną liczbę niż ta, na której uczy się trener\n  sygnały bez zmienności na danych, wyłączone z kalibracji: news_shock, pozycjonowanie_tlumu\n  progi wejścia (per reżim, percentyl 0.88, min. 50 próbek): high_vol=0.3779 (n=1671), trend_down=0.2619 (n=2382), trend_up=0.2462 (n=1089); BEZ PROGU WEJŚCIA: range, news_shock\n  okno  0  02-25–03-27  Sharpe/transakcję=-0.2577  transakcje=28  reżim=trend_down  powroty=11%  [brutto: Sharpe/transakcję=-0.2415, zwrot -0.14%]  [strategia -0.15% przy ekspozycji 0.2% vs kup-i-trzymaj -4.54% → przy tej samej ekspozycji -0.01%]  bije B1=nie B2=nie B3=nie\n  okno  1  03-27–04-26  Sharpe/transakcję=-0.0967  transakcje=22  reżim=trend_down  powroty=0%  [brutto: Sharpe/transakcję=-0.0822, zwrot -0.04%]  [strategia -0.05% przy ekspozycji 0.2% vs kup-i-trzymaj -0.84% → przy tej samej ekspozycji -0.00%]  bije B1=nie B2=nie B3=tak\n  okno  2  04-26–05-26  Sharpe/transakcję=+0.4034  transakcje=24  reżim=trend_up  powroty=4%  [brutto: Sharpe/transakcję=+0.4106, zwrot +0.44%]  [strategia +0.44% przy ekspozycji 0.7% vs kup-i-trzymaj +12.28% → przy tej samej ekspozycji +0.08%]  bije B1=tak B2=tak B3=tak\n  okno  3  05-26–06-25  Sharpe/transakcję=+0.1879  transakcje=22  reżim=trend_up  powroty=9%  [brutto: Sharpe/transakcję=+0.2001, zwrot +0.10%]  [strategia +0.09% przy ekspozycji 0.4% vs kup-i-trzymaj +20.68% → przy tej samej ekspozycji +0.09%]  bije B1=nie B2=tak B3=nie\n  okno  4  06-25–07-25  Sharpe/transakcję=-0.1389  transakcje=41  reżim=trend_down  powroty=17%  [brutto: Sharpe/transakcję=-0.1296, zwrot -0.15%]  [strategia -0.16% przy ekspozycji 0.5% vs kup-i-trzymaj -7.27% → przy tej samej ekspozycji -0.04%]  bije B1=nie B2=nie B3=tak\n  okno  5  07-25–08-24  Sharpe/transakcję=-0.0062  transakcje=21  reżim=trend_up  powroty=10%  [brutto: Sharpe/transakcję=+0.0120, zwrot +0.01%]  [strategia +0.01% przy ekspozycji 0.1% vs kup-i-trzymaj +5.94% → przy tej samej ekspozycji +0.01%]  bije B1=nie B2=tak B3=tak\n  okno  6  08-24–09-23  Sharpe/transakcję=+0.1319  transakcje=15  reżim=trend_down  powroty=7%  [brutto: Sharpe/transakcję=+0.1487, zwrot +0.03%]  [strategia +0.03% przy ekspozycji 0.1% vs kup-i-trzymaj -3.37% → przy tej samej ekspozycji -0.00%]  bije B1=tak B2=tak B3=tak\ndryf cech: okno nowe 30 dni wobec poprzedzających 90, świeca 4h, odcisk uniwersum 29172a93\n  (dryf cech pominięty — przebieg z pliku panelu)\n  reżimy bez progu wejścia (próba poniżej 50 obserwacji), liczba okien — range: 2\n\nProgi wejścia dla produkcji (mediana po oknach, percentyl 0.88): trend_up=0.2087 (7 okien), trend_down=0.1553 (7 okien), range=0.1939 (5 okien), high_vol=0.3779 (7 okien)\n\nWariant wyboru: ic — bez losowania, jeden kandydat na każde z 7 okien\nŚrednia ekspozycja: 0.18% kapitału (limit łączny: 15% kapitału)\n  = w rynku 12.1% świec × 1.03 pozycji na świecę w rynku × 1.19% kapitału na pozycję = 0.15%\n    do wykorzystania: 8 pozycji × 1.88% = 15.0% kapitału. Zajęte: 1.03 pozycji (13% miejsc) po 64% budżetu, przez 12% czasu\nPokonano kup-i-trzymaj PRZY TEJ SAMEJ EKSPOZYCJI w 2/7 oknach (28.6%)   przedział 95%: 8.2%–64.1%\n  dla porównania, wobec odniesienia zaangażowanego w 100%: 4/7 (57.1%) — ta liczba jest funkcją znaku rynku, nie strategii\nOkna: 7, dodatnie: 3 (42.9%)   przedział ufności 95%: 15.8%–75.0%\nMediana Sharpe (OOS): -0.006\nNiewypełnione zlecenia z limitem w symulacji OOS: 0 (wejścia + wyjścia, wszystkie okna). Ich KOSZT nie jest w dopłacie — w karcie stoi jako NIEZMIERZONE.\nBije B1 przy tej samej ekspozycji (przenoszonej): 2/7 okien (29%, przedział 95% 8%–64%)\nBije B2 przy tej samej ekspozycji (przenoszonej): 4/7 okien (57%, przedział 95% 25%–84%)\nBije B3 przy tej samej ekspozycji (przenoszonej): 5/7 okien (71%, przedział 95% 36%–92%)\nB0 (gotówka): zwrot > 0 w 4/7 okien; ponad 4% w skali roku na CAŁYM kapitale w 1/7\n  brutto (przed dopłatą 2.50 pb, NIE do bramki): dodatnie 4/7, mediana Sharpe +0.012, kup-i-trzymaj przy tej samej ekspozycji pokonane w 4/7\nDeflowany Sharpe: Deflowany Sharpe 0.4905 przy progu 0.95 (Sharpe +0.0370 z 173 transakcji, 2 przetestowanych konfiguracji — N SELEKCJI tego przebiegu, nie licznik kumulatywny; poprzeczka selekcji +0.0387, skośność +1.253, kurtoza 6.277). ODPORNOŚĆ WERDYKTU: do progu 0.95 brakuje 0.1166 Sharpe'a na transakcję, czyli 1.53 błędu standardowego (1/√173 = 0.0760). Po uwzględnieniu liczby prób wynik nie jest odróżnialny od najlepszego z tylu losowych — promocja wstrzymana. DSR policzony PO doliczeniu 2.50 pb na rundę, których symulacja nie nalicza; nadal NIE ZMIERZONO: niewypelnienie, wyjscie takerem, więc ta liczba jest GÓRNYM oszacowaniem. N = 2 rozróżnialnych konfiguracji z learn.model_version (count(DISTINCT params) po wersjach candidate/active/retired plus wersja tego przebiegu; wersje, które nigdy nie wyszły ze statusu `training`, NIE są próbami — nie doszły do wyniku, więc selekcja nie mogła się na nich oprzeć: dla toru 4h to 7 z 59, zmierzone 2026-09-27) — DOLNA GRANICA: `kind` i `limit` nie były zapisywane do 2026-09-26, więc przebiegi różniące się samym cennikiem zlewały się w jedną. Licznik learn.hypothesis_trial (120 wektorów wag) NIE jest tu mianownikiem: jego kandydaci byli oceniani in-sample, a walk-forward już za nich zapłacił, licząc wynik poza oknem wyboru. Rozrzut Sharpe'ow miedzy konfiguracjami NIE ZMIERZONY: podstawiono wariancje samego estymatora pod H0 (sd = 0.0745), bo konfiguracji z policzonym Sharpe'em OOS jest 0, a prog to 20. Konfiguracje roznia sie nie tylko szumem, wiec PRAWDZIWY rozrzut jest wiekszy, poprzeczka wyzsza, a prawdziwy DSR NIZSZY niz ten — zmierzone 2026-09-27 na torze 4h: 0,0266 wobec podlogi 0,0260, czyli o 2,7%, a nie o rzad wielkosci. Liczone po DISTINCT learn.model_version.params, czyli po tej samej WIELKOSCI, ktora jest N — nie po oknach: rozrzut miedzy OKNAMI jest dziesieciokrotnie wieksszy (0,2627 wobec 0,0266 zmierzonych 2026-09-27) i nie jest rozrzutem konfiguracji.\nNajgorsze obsunięcie: -0.21%\n\nPRZEWAGA BRUTTO — po kosztach, które symulacja naliczyła (prowizja, poślizg, finansowanie), PRZED dopłatą z karty:\n  brutto: Sharpe/transakcję ze ZŁĄCZONEJ próby 173 transakcji: +0.0476\n  brutto: ta sama miara jako ŚREDNIA PO 7 OKNACH: +0.0454 — inna liczba niż wyżej, bo średnia ilorazów nie jest ilorazem; okno o kilku transakcjach waży w niej tyle samo, co okno o dwustu\n  brutto: rozkład okien: mediana +0.0120, kwartyle [-0.1059, +0.1744]\n  brutto: okien ujemnych: 3/7 (42.9%)\n  brutto: profit factor ZBIORCZY: 1.1427\n  brutto: średni zwrot z transakcji: +0.1115%, trafnych 44.5%\n\nPO DOPŁACIE (dopłata z karty 2.50 pb na rundę (w tym: spread 2.00 pb, pyl 0.50 pb) — karta BEZ: niewypelnienie (NIEZMIERZONE); wyjscie takerem (NIEZMIERZONE)) — tak liczy bramka i DSR:\n  po dopłacie: Sharpe/transakcję ze ZŁĄCZONEJ próby: +0.0370\n  po dopłacie: średnia po 7 oknach +0.0307, mediana okien -0.0061, okien ujemnych 4/7 (odchylenie PRÓBKOWE, jak w drabinie; bramka bierze medianę z `portfolio.metrics`, czyli populacyjne)\n  po dopłacie: średni zwrot z transakcji: +0.0865%, trafnych 43.9%\n\nRACHUNEK KOSZTU RUNDY — SKŁADNIK PO SKŁADNIKU, Z POCHODZENIEM:\n  prowizja: 0.200% (taryfa gieldy)\n  niewypelnienie: NIE ZMIERZONO — symulacja przyjmuje, ze limit wchodzi ZAWSZE, gdy swieca dotknela ceny; `exec.fill` nie zawiera zlecen, ktore nie weszly\n  wyjscie takerem: NIE ZMIERZONO — udzial wyjsc zlozonych agresywnie razy (taker - maker) na jednej nodze; symulacja zaklada makera na obu\n  spread: 0.020% (pomiar)\n  pyl: 0.005% (zalozenie)\n  razem CO NAJMNIEJ 0.225% rundy — bez niewypelnienie, wyjscie takerem. Prawdziwy koszt jest WIEKSZY o nieznana wartosc; ta liczba jest dolnym oszacowaniem, nie kosztem.\n\nKOSZT PROGOWY (z brutto): +11.15 pb na rundę. Tyle wynosi cały zapas na to, czego symulacja NIE liczy. Jeśli spread, niewypełnienie i finansowanie sumują się do więcej, przewagi nie ma — i nikt dotąd nie zmierzył, czy sumują się do mniej.\n  dla skali: koszt naliczony to 22.50 pb rundy, czyli 2.02× próg\n\nSHARPE PRZY RÓŻNYCH WARTOŚCIACH TEGO, CZEGO NIE ZMIERZONO (dopłata na rundę):\n  dopłata |  zbiorczy | średnia po oknach\n     0.0 pb |   +0.0476 |           +0.0439   <- brutto (sama symulacja)\n     2.0 pb |   +0.0391 |           +0.0334\n     2.5 pb |   +0.0370 |           +0.0307   <- dopłata z karty: tak liczy bramka\n     5.0 pb |   +0.0263 |           +0.0175\n    10.0 pb |   +0.0049 |           -0.0088\n    20.0 pb |   -0.0378 |           -0.0616\n  Obie kolumny liczone tym samym odchyleniem PRÓBKOWYM (n−1). `portfolio.metrics` liczy populacyjne (n), czyli przy medianie dwudziestu transakcji na okno zawyża każdy Sharpe o ok. 2,6% — zawsze w górę.\n\nSTRONA DŁUGA KONTRA KRÓTKA (złączona próba OOS, po kosztach):\n  długa                      n=173   Sharpe/transakcję +0.0370 ±0.0760  trafność 43.9%  średnia +0.0865%\n  krótka                     n=0     — za mało transakcji, żeby policzyć Sharpe'a\n  udział krótkich w transakcjach: 0.0%\n  po reżimach (reżim DOMINUJĄCY w oknie, nie w chwili wejścia):\n    trend_down\n    długa                      n=106   Sharpe/transakcję -0.1218 ±0.0971  trafność 39.6%  średnia -0.2555%\n    krótka                     n=0     — za mało transakcji, żeby policzyć Sharpe'a\n    trend_up\n    długa                      n=67    Sharpe/transakcję +0.2409 ±0.1222  trafność 50.7%  średnia +0.6275%\n    krótka                     n=0     — za mało transakcji, żeby policzyć Sharpe'a\n  RÓŻNICA STRON NIE JEST TU TESTEM: przedziały ±1/√n liczone na transakcjach, które NIE są niezależne (te same świece, te same okna). Liczba mówi, czy warto pytać dalej.\n\nWYNIK WOBEC POKRYCIA WAG (złączona próba OOS, po kosztach):\n  pokrycie 0.9–1.0               n=173   Sharpe/transakcję +0.0370 ±0.0760  trafność 43.9%  średnia +0.0865%\n  po reżimach — TU rozdziela się reżim od pokrycia:\n    trend_down — pokrycie NIE ZMIENIA SIĘ w tym reżimie, więc nie rozdziela niczego\n    pokrycie 0.9–1.0             n=106   Sharpe/transakcję -0.1218 ±0.0971  trafność 39.6%  średnia -0.2555%\n    trend_up — pokrycie NIE ZMIENIA SIĘ w tym reżimie, więc nie rozdziela niczego\n    pokrycie 0.9–1.0             n=67    Sharpe/transakcję +0.2409 ±0.1222  trafność 50.7%  średnia +0.6275%\n  To NIE JEST test: transakcje nie są niezależne, a kubełków jest cztery razy tyle, ile reżimów. Służy do postawienia progu, nie do jego uzasadnienia.\nUdział w transakcjach (6 największych z 8): XRPUSDC 16%  ETHUSDC 14%  SUIUSDC 14%  ADAUSDC 14%  DOGEUSDC 12%  SOLUSDC 11%\nPrzetestowanych konfiguracji: 120\nStan: learning — Za mało informatywnych okien: 7 z wymaganych 20. Strategia zawiera zbyt mało transakcji, żeby cokolwiek orzec — to nie jest wynik ujemny, to brak wyniku. Deflowany Sharpe 0.4905 przy progu 0.95 (Sharpe +0.0370 z 173 transakcji, 2 przetestowanych konfiguracji — N SELEKCJI tego przebiegu, nie licznik kumulatywny; poprzeczka selekcji +0.0387, skośność +1.253, kurtoza 6.277). ODPORNOŚĆ WERDYKTU: do progu 0.95 brakuje 0.1166 Sharpe'a na transakcję, czyli 1.53 błędu standardowego (1/√173 = 0.0760). Po uwzględnieniu liczby prób wynik nie jest odróżnialny od najlepszego z tylu losowych — promocja wstrzymana. DSR policzony PO doliczeniu 2.50 pb na rundę, których symulacja nie nalicza; nadal NIE ZMIERZONO: niewypelnienie, wyjscie takerem, więc ta liczba jest GÓRNYM oszacowaniem. N = 2 rozróżnialnych konfiguracji z learn.model_version (count(DISTINCT params) po wersjach candidate/active/retired plus wersja tego przebiegu; wersje, które nigdy nie wyszły ze statusu `training`, NIE są próbami — nie doszły do wyniku, więc selekcja nie mogła się na nich oprzeć: dla toru 4h to 7 z 59, zmierzone 2026-09-27) — DOLNA GRANICA: `kind` i `limit` nie były zapisywane do 2026-09-26, więc przebiegi różniące się samym cennikiem zlewały się w jedną. Licznik learn.hypothesis_trial (120 wektorów wag) NIE jest tu mianownikiem: jego kandydaci byli oceniani in-sample, a walk-forward już za nich zapłacił, licząc wynik poza oknem wyboru. Rozrzut Sharpe'ow miedzy konfiguracjami NIE ZMIERZONY: podstawiono wariancje samego estymatora pod H0 (sd = 0.0745), bo konfiguracji z policzonym Sharpe'em OOS jest 0, a prog to 20. Konfiguracje roznia sie nie tylko szumem, wiec PRAWDZIWY rozrzut jest wiekszy, poprzeczka wyzsza, a prawdziwy DSR NIZSZY niz ten — zmierzone 2026-09-27 na torze 4h: 0,0266 wobec podlogi 0,0260, czyli o 2,7%, a nie o rzad wielkosci. Liczone po DISTINCT learn.model_version.params, czyli po tej samej WIELKOSCI, ktora jest N — nie po oknach: rozrzut miedzy OKNAMI jest dziesieciokrotnie wieksszy (0,2627 wobec 0,0266 zmierzonych 2026-09-27) i nie jest rozrzutem konfiguracji.\nPODSUMOWANIE_JSON {\"days\": 400, \"od\": \"2025-08-29 04:00\", \"do\": \"2026-10-03 04:00\", \"pesymistyczna\": false, \"opoznienie_min\": 0, \"limit\": true, \"okna\": 7, \"dodatnie\": 3, \"transakcji\": 173, \"zwrot_na_runde_pb\": 8.647544622583256, \"doplata_pb\": 2.4994552304595214, \"dsr\": 0.4904555220185957, \"n_selekcji\": 2, \"mediana_sharpe\": -0.0062, \"wypelnialnosc\": 1.0, \"niewypelnienie_pb\": null, \"brak_swiec_1h\": 0, \"bije_b1\": [2, 7], \"bije_b2\": [4, 7], \"bije_b3\": [5, 7], \"b0_dodatnie\": [4, 7], \"status\": \"learning\", \"odniesienia\": {\"strategia\": [0.028842857142857142, 0.003282571428571429, 4, 7], \"B1\": [3.2687152488380407, 1.0, 3, 7], \"B2\": [0.6840604888106689, 0.40223463687150834, 2, 7], \"B3\": [-0.09587593487002162, 0.04166001596169194, 3, 7]}}\n"
+ },
+ "ic_pesymistyczna": {
+  "json": {
+   "b0_dodatnie": [
     1,
-    5
+    6
+   ],
+   "bije_b1": [
+    0,
+    6
    ],
    "bije_b2": [
     1,
-    5
+    6
    ],
    "bije_b3": [
-    2,
-    5
+    0,
+    6
    ],
    "brak_swiec_1h": 0,
    "days": 400,
    "do": "2026-10-03 04:00",
    "dodatnie": 2,
    "doplata_pb": 2.4994552304595214,
-   "dsr": 0.12649272172232104,
+   "dsr": 2.4228804774774354e-05,
    "limit": true,
-   "mediana_sharpe": -0.0497,
+   "mediana_sharpe": -0.39595,
    "n_selekcji": 2,
-   "niewypelnienie_pb": null,
+   "niewypelnienie_pb": 42.64448044620346,
    "od": "2025-08-29 04:00",
    "odniesienia": {
     "B1": [
-     4.061588075519732,
+     4.375324729788546,
      1.0,
-     2,
-     5
+     3,
+     6
     ],
     "B2": [
-     1.534374577912767,
-     0.4960893854748603,
+     0.7980705702791138,
+     0.4692737430167597,
      2,
-     5
+     6
     ],
     "B3": [
-     -0.10251771610897856,
-     0.04793296089385475,
+     -0.17878955634282864,
+     0.04273743016759777,
      2,
-     5
+     6
     ],
     "strategia": [
-     -0.03391999999999999,
-     0.0074342,
-     2,
-     5
+     -0.18999999999999997,
+     0.0032261666666666667,
+     1,
+     6
     ]
    },
-   "okna": 5,
-   "opoznienie_min": 0,
-   "pesymistyczna": false,
-   "status": "learning",
-   "transakcji": 216,
-   "wypelnialnosc": 1.0,
-   "zwrot_na_runde_pb": -13.447313066761721
-  },
-  "stdout": "  Spread z bazy: 2.000 pb na rundę (średnia ze średnich per instrument, 2 instrumentów, 200 świec)\n    okno pomiaru: 2025-08-29 04:00..2026-10-03 04:00 UTC\n    rozkład po świecach: mediana 2.000 | q1 1.000 | q3 3.000 | max 3.000 pb\n    skrajne instrumenty: BTCUSDC 1.000 pb, ETHUSDC 3.000 pb\n  prowizja: 0.200% (taryfa gieldy)\n  niewypelnienie: NIE ZMIERZONO — symulacja przyjmuje, ze limit wchodzi ZAWSZE, gdy swieca dotknela ceny; `exec.fill` nie zawiera zlecen, ktore nie weszly\n  wyjscie takerem: NIE ZMIERZONO — udzial wyjsc zlozonych agresywnie razy (taker - maker) na jednej nodze; symulacja zaklada makera na obu\n  spread: 0.020% (pomiar)\n  pyl: 0.005% (zalozenie)\n  razem CO NAJMNIEJ 0.225% rundy — bez niewypelnienie, wyjscie takerem. Prawdziwy koszt jest WIEKSZY o nieznana wartosc; ta liczba jest dolnym oszacowaniem, nie kosztem.\n  pył per instrument (pb na rundę; notional 975 z test 0.260, cena = maksimum okna):\n    ADAUSDC 0.38  BTCUSDC 0.10  DOGEUSDC 0.50  ETHUSDC 0.18  LINKUSDC 1.21  SOLUSDC 0.24  SUIUSDC 0.61  XRPUSDC 0.78\n    do karty: średnia 0.50 pb (maksimum 1.21 pb)\n  Miary okien OOS i bramka statusu PO dopłacie 2.50 pb na rundę (ta sama KWOTA co w DSR); selekcja wag in-sample liczona BRUTTO; V[SR_n] miesza przebiegi brutto sprzed 2026-10-02 z przebiegami po dopłacie; kup-i-trzymaj po 2.04 pb na swoją jedną rundę. Liczby „brutto” = przed dopłatą, tylko do porównania.\n  dopłata z karty 2.50 pb na rundę (w tym: spread 2.00 pb, pyl 0.50 pb) — karta BEZ: niewypelnienie (NIEZMIERZONE); wyjscie takerem (NIEZMIERZONE)\n  BTCUSDC      2,399 punktów panelu\n  ETHUSDC      2,399 punktów panelu\n  SOLUSDC      2,399 punktów panelu\n  ADAUSDC      2,399 punktów panelu\n  XRPUSDC      2,399 punktów panelu\n  DOGEUSDC     2,399 punktów panelu\n  LINKUSDC     2,399 punktów panelu\n  SUIUSDC      2,399 punktów panelu\n  rewizje po czasie decyzji: 201 z 249,496 wartości cech (0.081%) — na tych silnik widział inną liczbę niż ta, na której uczy się trener\n  sygnały bez zmienności na danych, wyłączone z kalibracji: news_shock, pozycjonowanie_tlumu\n  progi wejścia (per reżim, percentyl 0.88, min. 50 próbek): high_vol=0.1801 (n=1569), range=0.2516 (n=532), trend_down=0.2740 (n=2273), trend_up=0.3463 (n=2531); BEZ PROGU WEJŚCIA: news_shock\n  okno  0  02-25–03-27  Sharpe/transakcję=-0.5938  transakcje=23  reżim=trend_down  powroty=13%  [brutto: Sharpe/transakcję=-0.5739, zwrot -0.18%]  [strategia -0.19% przy ekspozycji 0.2% vs kup-i-trzymaj -4.54% → przy tej samej ekspozycji -0.01%]  bije B1=nie B2=nie B3=nie\n  okno  1  03-27–04-26  Sharpe/transakcję=-0.0497  transakcje=30  reżim=trend_down  powroty=23%  [brutto: Sharpe/transakcję=-0.0352, zwrot -0.03%]  [strategia -0.04% przy ekspozycji 0.4% vs kup-i-trzymaj -0.84% → przy tej samej ekspozycji -0.00%]  bije B1=nie B2=nie B3=tak\n  okno  2  04-26–05-26  Sharpe/transakcję=+0.1991  transakcje=47  reżim=trend_up  powroty=28%  [brutto: Sharpe/transakcję=+0.2057, zwrot +0.46%]  [strategia +0.45% przy ekspozycji 1.1% vs kup-i-trzymaj +12.28% → przy tej samej ekspozycji +0.14%]  bije B1=tak B2=tak B3=tak\n  okno  3  05-26–06-25  Sharpe/transakcję=+0.0161  transakcje=65  reżim=trend_up  powroty=22%  [brutto: Sharpe/transakcję=+0.0231, zwrot +0.13%]  [strategia +0.11% przy ekspozycji 1.3% vs kup-i-trzymaj +20.68% → przy tej samej ekspozycji +0.26%]  bije B1=nie B2=nie B3=nie\n  okno  4  06-25–07-25  Sharpe/transakcję=-0.3651  transakcje=51  reżim=trend_down  powroty=18%  [brutto: Sharpe/transakcję=-0.3556, zwrot -0.49%]  [strategia -0.50% przy ekspozycji 0.7% vs kup-i-trzymaj -7.27% → przy tej samej ekspozycji -0.05%]  bije B1=nie B2=nie B3=nie\n  okno  5  07-25–08-24  Sharpe/transakcję=+0.0000  transakcje=0  reżim=trend_up  (poniżej 12 transakcji — pominięte w ocenie)\n  okno  6  08-24–09-23  Sharpe/transakcję=+0.0000  transakcje=3  reżim=trend_down  powroty=0%  (poniżej 12 transakcji — pominięte w ocenie)\ndryf cech: okno nowe 30 dni wobec poprzedzających 90, świeca 4h, odcisk uniwersum 29172a93\n  (dryf cech pominięty — przebieg z pliku panelu)\n\nProgi wejścia dla produkcji (mediana po oknach, percentyl 0.88): trend_up=0.3450 (7 okien), trend_down=0.2712 (7 okien), range=0.2468 (7 okien), high_vol=0.1786 (7 okien)\n\nWariant wyboru: ic — bez losowania, jeden kandydat na każde z 7 okien\nŚrednia ekspozycja: 0.50% kapitału (limit łączny: 15% kapitału)\n  = w rynku 37.0% świec × 1.15 pozycji na świecę w rynku × 1.07% kapitału na pozycję = 0.45%\n    do wykorzystania: 8 pozycji × 1.88% = 15.0% kapitału. Zajęte: 1.15 pozycji (14% miejsc) po 57% budżetu, przez 37% czasu\nPokonano kup-i-trzymaj PRZY TEJ SAMEJ EKSPOZYCJI w 1/5 oknach (20.0%)   przedział 95%: 3.6%–62.4%\n  dla porównania, wobec odniesienia zaangażowanego w 100%: 3/5 (60.0%) — ta liczba jest funkcją znaku rynku, nie strategii\nOkna: 5, dodatnie: 2 (40.0%)   przedział ufności 95%: 11.8%–76.9%\nMediana Sharpe (OOS): -0.050\nNiewypełnione zlecenia z limitem w symulacji OOS: 0 (wejścia + wyjścia, wszystkie okna). Ich KOSZT nie jest w dopłacie — w karcie stoi jako NIEZMIERZONE.\nBije B1 przy tej samej ekspozycji (przenoszonej): 1/5 okien (20%, przedział 95% 4%–62%)\nBije B2 przy tej samej ekspozycji (przenoszonej): 1/5 okien (20%, przedział 95% 4%–62%)\nBije B3 przy tej samej ekspozycji (przenoszonej): 2/5 okien (40%, przedział 95% 12%–77%)\nB0 (gotówka): zwrot > 0 w 2/5 okien; ponad 4% w skali roku na CAŁYM kapitale w 1/5\n  brutto (przed dopłatą 2.50 pb, NIE do bramki): dodatnie 2/5, mediana Sharpe -0.035, kup-i-trzymaj przy tej samej ekspozycji pokonane w 1/5\nDeflowany Sharpe: Deflowany Sharpe 0.1265 przy progu 0.95 (Sharpe -0.0434 z 216 transakcji, 2 przetestowanych konfiguracji — N SELEKCJI tego przebiegu, nie licznik kumulatywny; poprzeczka selekcji +0.0362, skośność +0.976, kurtoza 4.574). ODPORNOŚĆ WERDYKTU: do progu 0.95 brakuje 0.1849 Sharpe'a na transakcję, czyli 2.72 błędu standardowego (1/√216 = 0.0680). Po uwzględnieniu liczby prób wynik nie jest odróżnialny od najlepszego z tylu losowych — promocja wstrzymana. DSR policzony PO doliczeniu 2.50 pb na rundę, których symulacja nie nalicza; nadal NIE ZMIERZONO: niewypelnienie, wyjscie takerem, więc ta liczba jest GÓRNYM oszacowaniem. N = 2 rozróżnialnych konfiguracji z learn.model_version (count(DISTINCT params) po wersjach candidate/active/retired plus wersja tego przebiegu; wersje, które nigdy nie wyszły ze statusu `training`, NIE są próbami — nie doszły do wyniku, więc selekcja nie mogła się na nich oprzeć: dla toru 4h to 7 z 59, zmierzone 2026-09-27) — DOLNA GRANICA: `kind` i `limit` nie były zapisywane do 2026-09-26, więc przebiegi różniące się samym cennikiem zlewały się w jedną. Licznik learn.hypothesis_trial (120 wektorów wag) NIE jest tu mianownikiem: jego kandydaci byli oceniani in-sample, a walk-forward już za nich zapłacił, licząc wynik poza oknem wyboru. Rozrzut Sharpe'ow miedzy konfiguracjami NIE ZMIERZONY: podstawiono wariancje samego estymatora pod H0 (sd = 0.0697), bo konfiguracji z policzonym Sharpe'em OOS jest 0, a prog to 20. Konfiguracje roznia sie nie tylko szumem, wiec PRAWDZIWY rozrzut jest wiekszy, poprzeczka wyzsza, a prawdziwy DSR NIZSZY niz ten — zmierzone 2026-09-27 na torze 4h: 0,0266 wobec podlogi 0,0260, czyli o 2,7%, a nie o rzad wielkosci. Liczone po DISTINCT learn.model_version.params, czyli po tej samej WIELKOSCI, ktora jest N — nie po oknach: rozrzut miedzy OKNAMI jest dziesieciokrotnie wieksszy (0,2627 wobec 0,0266 zmierzonych 2026-09-27) i nie jest rozrzutem konfiguracji.\nNajgorsze obsunięcie: -0.60%\n\nPRZEWAGA BRUTTO — po kosztach, które symulacja naliczyła (prowizja, poślizg, finansowanie), PRZED dopłatą z karty:\n  brutto: Sharpe/transakcję ze ZŁĄCZONEJ próby 216 transakcji: -0.0354\n  brutto: ta sama miara jako ŚREDNIA PO 5 OKNACH: -0.1472 — inna liczba niż wyżej, bo średnia ilorazów nie jest ilorazem; okno o kilku transakcjach waży w niej tyle samo, co okno o dwustu\n  brutto: rozkład okien: mediana -0.0352, kwartyle [-0.3556, +0.0231]\n  brutto: okien ujemnych: 3/5 (60.0%)\n  brutto: profit factor ZBIORCZY: 0.9094\n  brutto: średni zwrot z transakcji: -0.1095%, trafnych 41.2%\n\nPO DOPŁACIE (dopłata z karty 2.50 pb na rundę (w tym: spread 2.00 pb, pyl 0.50 pb) — karta BEZ: niewypelnienie (NIEZMIERZONE); wyjscie takerem (NIEZMIERZONE)) — tak liczy bramka i DSR:\n  po dopłacie: Sharpe/transakcję ze ZŁĄCZONEJ próby: -0.0434\n  po dopłacie: średnia po 5 oknach -0.1556, mediana okien -0.0488, okien ujemnych 3/5 (odchylenie PRÓBKOWE, jak w drabinie; bramka bierze medianę z `portfolio.metrics`, czyli populacyjne)\n  po dopłacie: średni zwrot z transakcji: -0.1345%, trafnych 40.7%\n\nRACHUNEK KOSZTU RUNDY — SKŁADNIK PO SKŁADNIKU, Z POCHODZENIEM:\n  prowizja: 0.200% (taryfa gieldy)\n  niewypelnienie: NIE ZMIERZONO — symulacja przyjmuje, ze limit wchodzi ZAWSZE, gdy swieca dotknela ceny; `exec.fill` nie zawiera zlecen, ktore nie weszly\n  wyjscie takerem: NIE ZMIERZONO — udzial wyjsc zlozonych agresywnie razy (taker - maker) na jednej nodze; symulacja zaklada makera na obu\n  spread: 0.020% (pomiar)\n  pyl: 0.005% (zalozenie)\n  razem CO NAJMNIEJ 0.225% rundy — bez niewypelnienie, wyjscie takerem. Prawdziwy koszt jest WIEKSZY o nieznana wartosc; ta liczba jest dolnym oszacowaniem, nie kosztem.\n\nKOSZT PROGOWY (z brutto): -10.95 pb na rundę — UJEMNY. Przewagi nie ma JUŻ przy kosztach, które symulacja nalicza; nienaliczone składniki (niewypelnienie, wyjscie takerem) mogą ją tylko pogłębić.\n\nSHARPE PRZY RÓŻNYCH WARTOŚCIACH TEGO, CZEGO NIE ZMIERZONO (dopłata na rundę):\n  dopłata |  zbiorczy | średnia po oknach\n     0.0 pb |   -0.0354 |           -0.1443   <- brutto (sama symulacja)\n     2.0 pb |   -0.0418 |           -0.1534\n     2.5 pb |   -0.0434 |           -0.1556   <- dopłata z karty: tak liczy bramka\n     5.0 pb |   -0.0515 |           -0.1670\n    10.0 pb |   -0.0677 |           -0.1896\n    20.0 pb |   -0.1000 |           -0.2349\n  Obie kolumny liczone tym samym odchyleniem PRÓBKOWYM (n−1). `portfolio.metrics` liczy populacyjne (n), czyli przy medianie dwudziestu transakcji na okno zawyża każdy Sharpe o ok. 2,6% — zawsze w górę.\n\nSTRONA DŁUGA KONTRA KRÓTKA (złączona próba OOS, po kosztach):\n  długa                      n=216   Sharpe/transakcję -0.0434 ±0.0680  trafność 40.7%  średnia -0.1345%\n  krótka                     n=0     — za mało transakcji, żeby policzyć Sharpe'a\n  udział krótkich w transakcjach: 0.0%\n  po reżimach (reżim DOMINUJĄCY w oknie, nie w chwili wejścia):\n    trend_down\n    długa                      n=104   Sharpe/transakcję -0.3016 ±0.0981  trafność 35.6%  średnia -0.6582%\n    krótka                     n=0     — za mało transakcji, żeby policzyć Sharpe'a\n    trend_up\n    długa                      n=112   Sharpe/transakcję +0.0952 ±0.0945  trafność 45.5%  średnia +0.3518%\n    krótka                     n=0     — za mało transakcji, żeby policzyć Sharpe'a\n  RÓŻNICA STRON NIE JEST TU TESTEM: przedziały ±1/√n liczone na transakcjach, które NIE są niezależne (te same świece, te same okna). Liczba mówi, czy warto pytać dalej.\n\nWYNIK WOBEC POKRYCIA WAG (złączona próba OOS, po kosztach):\n  pokrycie 0.9–1.0               n=216   Sharpe/transakcję -0.0434 ±0.0680  trafność 40.7%  średnia -0.1345%\n  po reżimach — TU rozdziela się reżim od pokrycia:\n    trend_down — pokrycie NIE ZMIENIA SIĘ w tym reżimie, więc nie rozdziela niczego\n    pokrycie 0.9–1.0             n=104   Sharpe/transakcję -0.3016 ±0.0981  trafność 35.6%  średnia -0.6582%\n    trend_up — pokrycie NIE ZMIENIA SIĘ w tym reżimie, więc nie rozdziela niczego\n    pokrycie 0.9–1.0             n=112   Sharpe/transakcję +0.0952 ±0.0945  trafność 45.5%  średnia +0.3518%\n  To NIE JEST test: transakcje nie są niezależne, a kubełków jest cztery razy tyle, ile reżimów. Służy do postawienia progu, nie do jego uzasadnienia.\nUdział w transakcjach (6 największych z 8): XRPUSDC 16%  ETHUSDC 14%  DOGEUSDC 14%  SUIUSDC 12%  SOLUSDC 12%  ADAUSDC 11%\nPrzetestowanych konfiguracji: 120\nStan: learning — Za mało informatywnych okien: 5 z wymaganych 20. Strategia zawiera zbyt mało transakcji, żeby cokolwiek orzec — to nie jest wynik ujemny, to brak wyniku. Deflowany Sharpe 0.1265 przy progu 0.95 (Sharpe -0.0434 z 216 transakcji, 2 przetestowanych konfiguracji — N SELEKCJI tego przebiegu, nie licznik kumulatywny; poprzeczka selekcji +0.0362, skośność +0.976, kurtoza 4.574). ODPORNOŚĆ WERDYKTU: do progu 0.95 brakuje 0.1849 Sharpe'a na transakcję, czyli 2.72 błędu standardowego (1/√216 = 0.0680). Po uwzględnieniu liczby prób wynik nie jest odróżnialny od najlepszego z tylu losowych — promocja wstrzymana. DSR policzony PO doliczeniu 2.50 pb na rundę, których symulacja nie nalicza; nadal NIE ZMIERZONO: niewypelnienie, wyjscie takerem, więc ta liczba jest GÓRNYM oszacowaniem. N = 2 rozróżnialnych konfiguracji z learn.model_version (count(DISTINCT params) po wersjach candidate/active/retired plus wersja tego przebiegu; wersje, które nigdy nie wyszły ze statusu `training`, NIE są próbami — nie doszły do wyniku, więc selekcja nie mogła się na nich oprzeć: dla toru 4h to 7 z 59, zmierzone 2026-09-27) — DOLNA GRANICA: `kind` i `limit` nie były zapisywane do 2026-09-26, więc przebiegi różniące się samym cennikiem zlewały się w jedną. Licznik learn.hypothesis_trial (120 wektorów wag) NIE jest tu mianownikiem: jego kandydaci byli oceniani in-sample, a walk-forward już za nich zapłacił, licząc wynik poza oknem wyboru. Rozrzut Sharpe'ow miedzy konfiguracjami NIE ZMIERZONY: podstawiono wariancje samego estymatora pod H0 (sd = 0.0697), bo konfiguracji z policzonym Sharpe'em OOS jest 0, a prog to 20. Konfiguracje roznia sie nie tylko szumem, wiec PRAWDZIWY rozrzut jest wiekszy, poprzeczka wyzsza, a prawdziwy DSR NIZSZY niz ten — zmierzone 2026-09-27 na torze 4h: 0,0266 wobec podlogi 0,0260, czyli o 2,7%, a nie o rzad wielkosci. Liczone po DISTINCT learn.model_version.params, czyli po tej samej WIELKOSCI, ktora jest N — nie po oknach: rozrzut miedzy OKNAMI jest dziesieciokrotnie wieksszy (0,2627 wobec 0,0266 zmierzonych 2026-09-27) i nie jest rozrzutem konfiguracji.\nPODSUMOWANIE_JSON {\"days\": 400, \"od\": \"2025-08-29 04:00\", \"do\": \"2026-10-03 04:00\", \"pesymistyczna\": false, \"opoznienie_min\": 0, \"limit\": true, \"okna\": 5, \"dodatnie\": 2, \"transakcji\": 216, \"zwrot_na_runde_pb\": -13.447313066761721, \"doplata_pb\": 2.4994552304595214, \"dsr\": 0.12649272172232104, \"n_selekcji\": 2, \"mediana_sharpe\": -0.0497, \"wypelnialnosc\": 1.0, \"niewypelnienie_pb\": null, \"brak_swiec_1h\": 0, \"bije_b1\": [1, 5], \"bije_b2\": [1, 5], \"bije_b3\": [2, 5], \"b0_dodatnie\": [2, 5], \"status\": \"learning\", \"odniesienia\": {\"strategia\": [-0.03391999999999999, 0.0074342, 2, 5], \"B1\": [4.061588075519732, 1.0, 2, 5], \"B2\": [1.534374577912767, 0.4960893854748603, 2, 5], \"B3\": [-0.10251771610897856, 0.04793296089385475, 2, 5]}}\n"
- },
- "ic_pesymistyczna": {
-  "json": {
-   "b0_dodatnie": [
-    0,
-    5
-   ],
-   "bije_b1": [
-    0,
-    5
-   ],
-   "bije_b2": [
-    0,
-    5
-   ],
-   "bije_b3": [
-    0,
-    5
-   ],
-   "brak_swiec_1h": 0,
-   "days": 400,
-   "do": "2026-10-03 04:00",
-   "dodatnie": 0,
-   "doplata_pb": 2.4994552304595214,
-   "dsr": 9.779419954722146e-06,
-   "limit": true,
-   "mediana_sharpe": -0.2208,
-   "n_selekcji": 2,
-   "niewypelnienie_pb": 54.28101578206927,
-   "od": "2025-08-29 04:00",
-   "odniesienia": {
-    "B1": [
-     4.061588075519732,
-     1.0,
-     2,
-     5
-    ],
-    "B2": [
-     1.534374577912767,
-     0.4960893854748603,
-     2,
-     5
-    ],
-    "B3": [
-     -0.10251771610897856,
-     0.04793296089385475,
-     2,
-     5
-    ],
-    "strategia": [
-     -0.37348,
-     0.0074616000000000005,
-     0,
-     5
-    ]
-   },
-   "okna": 5,
+   "okna": 6,
    "opoznienie_min": 20,
    "pesymistyczna": true,
    "status": "learning",
-   "transakcji": 205,
-   "wypelnialnosc": 0.7527472527472527,
-   "zwrot_na_runde_pb": -84.17043133623504
+   "transakcji": 123,
+   "wypelnialnosc": 0.7277777777777777,
+   "zwrot_na_runde_pb": -81.36347625149034
   },
-  "stdout": "  Spread z bazy: 2.000 pb na rundę (średnia ze średnich per instrument, 2 instrumentów, 200 świec)\n    okno pomiaru: 2025-08-29 04:00..2026-10-03 04:00 UTC\n    rozkład po świecach: mediana 2.000 | q1 1.000 | q3 3.000 | max 3.000 pb\n    skrajne instrumenty: BTCUSDC 1.000 pb, ETHUSDC 3.000 pb\n  Model wypełnień PESYMISTYCZNY: limit z ceny 1h po opóźnieniu 20 min ± pół spreadu instrumentu, wypełnienie tylko w godzinie po wysyłce\n    spread per instrument (pb): ADAUSDC 2.00  BTCUSDC 1.00  DOGEUSDC 2.00  ETHUSDC 3.00  LINKUSDC 2.00  SOLUSDC 2.00  SUIUSDC 2.00  XRPUSDC 2.00\n    bez pomiaru, średnia uniwersum 2.00 pb: ADAUSDC, DOGEUSDC, LINKUSDC, SOLUSDC, SUIUSDC, XRPUSDC\n  prowizja: 0.200% (taryfa gieldy)\n  niewypelnienie: NIE ZMIERZONO — symulacja przyjmuje, ze limit wchodzi ZAWSZE, gdy swieca dotknela ceny; `exec.fill` nie zawiera zlecen, ktore nie weszly\n  wyjscie takerem: NIE ZMIERZONO — udzial wyjsc zlozonych agresywnie razy (taker - maker) na jednej nodze; symulacja zaklada makera na obu\n  spread: 0.020% (pomiar)\n  pyl: 0.005% (zalozenie)\n  razem CO NAJMNIEJ 0.225% rundy — bez niewypelnienie, wyjscie takerem. Prawdziwy koszt jest WIEKSZY o nieznana wartosc; ta liczba jest dolnym oszacowaniem, nie kosztem.\n  pył per instrument (pb na rundę; notional 975 z test 0.260, cena = maksimum okna):\n    ADAUSDC 0.38  BTCUSDC 0.10  DOGEUSDC 0.50  ETHUSDC 0.18  LINKUSDC 1.21  SOLUSDC 0.24  SUIUSDC 0.61  XRPUSDC 0.78\n    do karty: średnia 0.50 pb (maksimum 1.21 pb)\n  Miary okien OOS i bramka statusu PO dopłacie 2.50 pb na rundę (ta sama KWOTA co w DSR); selekcja wag in-sample liczona BRUTTO; V[SR_n] miesza przebiegi brutto sprzed 2026-10-02 z przebiegami po dopłacie; kup-i-trzymaj po 2.04 pb na swoją jedną rundę. Liczby „brutto” = przed dopłatą, tylko do porównania.\n  dopłata z karty 2.50 pb na rundę (w tym: spread 2.00 pb, pyl 0.50 pb) — karta BEZ: niewypelnienie (NIEZMIERZONE); wyjscie takerem (NIEZMIERZONE)\n  BTCUSDC      2,399 punktów panelu\n  ETHUSDC      2,399 punktów panelu\n  SOLUSDC      2,399 punktów panelu\n  ADAUSDC      2,399 punktów panelu\n  XRPUSDC      2,399 punktów panelu\n  DOGEUSDC     2,399 punktów panelu\n  LINKUSDC     2,399 punktów panelu\n  SUIUSDC      2,399 punktów panelu\n  świece 1h do modelu wypełnień: 76,800\n  rewizje po czasie decyzji: 201 z 249,496 wartości cech (0.081%) — na tych silnik widział inną liczbę niż ta, na której uczy się trener\n  sygnały bez zmienności na danych, wyłączone z kalibracji: news_shock, pozycjonowanie_tlumu\n  progi wejścia (per reżim, percentyl 0.88, min. 50 próbek): high_vol=0.1801 (n=1569), range=0.2516 (n=532), trend_down=0.2740 (n=2273), trend_up=0.3463 (n=2531); BEZ PROGU WEJŚCIA: news_shock\n  okno  0  02-25–03-27  Sharpe/transakcję=-0.7814  transakcje=20  reżim=trend_down  powroty=10%  [brutto: Sharpe/transakcję=-0.7630, zwrot -0.22%]  [strategia -0.23% przy ekspozycji 0.3% vs kup-i-trzymaj -4.54% → przy tej samej ekspozycji -0.01%]  bije B1=nie B2=nie B3=nie\n  okno  1  03-27–04-26  Sharpe/transakcję=-0.2208  transakcje=28  reżim=trend_down  powroty=18%  [brutto: Sharpe/transakcję=-0.2085, zwrot -0.21%]  [strategia -0.22% przy ekspozycji 0.4% vs kup-i-trzymaj -0.84% → przy tej samej ekspozycji -0.00%]  bije B1=nie B2=nie B3=nie\n  okno  2  04-26–05-26  Sharpe/transakcję=-0.1543  transakcje=47  reżim=trend_up  powroty=28%  [brutto: Sharpe/transakcję=-0.1464, zwrot -0.19%]  [strategia -0.20% przy ekspozycji 1.1% vs kup-i-trzymaj +12.28% → przy tej samej ekspozycji +0.14%]  bije B1=nie B2=nie B3=nie\n  okno  3  05-26–06-25  Sharpe/transakcję=-0.1210  transakcje=63  reżim=trend_up  powroty=21%  [brutto: Sharpe/transakcję=-0.1135, zwrot -0.25%]  [strategia -0.26% przy ekspozycji 1.3% vs kup-i-trzymaj +20.68% → przy tej samej ekspozycji +0.26%]  bije B1=nie B2=nie B3=nie\n  okno  4  06-25–07-25  Sharpe/transakcję=-0.7300  transakcje=47  reżim=trend_down  powroty=17%  [brutto: Sharpe/transakcję=-0.7205, zwrot -0.94%]  [strategia -0.96% przy ekspozycji 0.7% vs kup-i-trzymaj -7.27% → przy tej samej ekspozycji -0.05%]  bije B1=nie B2=nie B3=nie\n  okno  5  07-25–08-24  Sharpe/transakcję=+0.0000  transakcje=0  reżim=trend_up  (poniżej 12 transakcji — pominięte w ocenie)\n  okno  6  08-24–09-23  Sharpe/transakcję=+0.0000  transakcje=2  reżim=trend_down  powroty=0%  (poniżej 12 transakcji — pominięte w ocenie)\ndryf cech: okno nowe 30 dni wobec poprzedzających 90, świeca 4h, odcisk uniwersum 29172a93\n  (dryf cech pominięty — przebieg z pliku panelu)\n\nProgi wejścia dla produkcji (mediana po oknach, percentyl 0.88): trend_up=0.3450 (7 okien), trend_down=0.2712 (7 okien), range=0.2468 (7 okien), high_vol=0.1786 (7 okien)\n\nWariant wyboru: ic — bez losowania, jeden kandydat na każde z 7 okien\nŚrednia ekspozycja: 0.51% kapitału (limit łączny: 15% kapitału)\n  = w rynku 37.2% świec × 1.18 pozycji na świecę w rynku × 1.06% kapitału na pozycję = 0.47%\n    do wykorzystania: 8 pozycji × 1.88% = 15.0% kapitału. Zajęte: 1.18 pozycji (15% miejsc) po 57% budżetu, przez 37% czasu\nPokonano kup-i-trzymaj PRZY TEJ SAMEJ EKSPOZYCJI w 0/5 oknach (0.0%)   przedział 95%: 0.0%–43.4%\n  dla porównania, wobec odniesienia zaangażowanego w 100%: 3/5 (60.0%) — ta liczba jest funkcją znaku rynku, nie strategii\nOkna: 5, dodatnie: 0 (0.0%)   przedział ufności 95%: 0.0%–43.4%\nMediana Sharpe (OOS): -0.221\nWypełnialność zleceń z limitem w symulacji OOS: 75.3% (411 weszło, 135 nie; w tym 0 bez świecy 1h). Produkcja demo: ok. 65%.\n  prowizja: 0.200% (taryfa gieldy)\n  niewypelnienie: 0.543% (pomiar)\n  spread: 0.020% (pomiar)\n  pyl: 0.005% (zalozenie)\n  razem: 0.768% rundy\nBije B1 przy tej samej ekspozycji (przenoszonej): 0/5 okien (0%, przedział 95% 0%–43%)\nBije B2 przy tej samej ekspozycji (przenoszonej): 0/5 okien (0%, przedział 95% 0%–43%)\nBije B3 przy tej samej ekspozycji (przenoszonej): 0/5 okien (0%, przedział 95% 0%–43%)\nB0 (gotówka): zwrot > 0 w 0/5 okien; ponad 4% w skali roku na CAŁYM kapitale w 0/5\n  brutto (przed dopłatą 2.50 pb, NIE do bramki): dodatnie 0/5, mediana Sharpe -0.208, kup-i-trzymaj przy tej samej ekspozycji pokonane w 0/5\nDeflowany Sharpe: Deflowany Sharpe 0.0000 przy progu 0.95 (Sharpe -0.2889 z 205 transakcji, 2 przetestowanych konfiguracji — N SELEKCJI tego przebiegu, nie licznik kumulatywny; poprzeczka selekcji +0.0400, skośność +0.506, kurtoza 4.100). ODPORNOŚĆ WERDYKTU: do progu 0.95 brakuje 0.4407 Sharpe'a na transakcję, czyli 6.31 błędu standardowego (1/√205 = 0.0698). Po uwzględnieniu liczby prób wynik nie jest odróżnialny od najlepszego z tylu losowych — promocja wstrzymana. DSR policzony PO doliczeniu 2.50 pb na rundę, których symulacja nie nalicza; nadal NIE ZMIERZONO: niewypelnienie, wyjscie takerem, więc ta liczba jest GÓRNYM oszacowaniem. N = 2 rozróżnialnych konfiguracji z learn.model_version (count(DISTINCT params) po wersjach candidate/active/retired plus wersja tego przebiegu; wersje, które nigdy nie wyszły ze statusu `training`, NIE są próbami — nie doszły do wyniku, więc selekcja nie mogła się na nich oprzeć: dla toru 4h to 7 z 59, zmierzone 2026-09-27) — DOLNA GRANICA: `kind` i `limit` nie były zapisywane do 2026-09-26, więc przebiegi różniące się samym cennikiem zlewały się w jedną. Licznik learn.hypothesis_trial (120 wektorów wag) NIE jest tu mianownikiem: jego kandydaci byli oceniani in-sample, a walk-forward już za nich zapłacił, licząc wynik poza oknem wyboru. Rozrzut Sharpe'ow miedzy konfiguracjami NIE ZMIERZONY: podstawiono wariancje samego estymatora pod H0 (sd = 0.0770), bo konfiguracji z policzonym Sharpe'em OOS jest 0, a prog to 20. Konfiguracje roznia sie nie tylko szumem, wiec PRAWDZIWY rozrzut jest wiekszy, poprzeczka wyzsza, a prawdziwy DSR NIZSZY niz ten — zmierzone 2026-09-27 na torze 4h: 0,0266 wobec podlogi 0,0260, czyli o 2,7%, a nie o rzad wielkosci. Liczone po DISTINCT learn.model_version.params, czyli po tej samej WIELKOSCI, ktora jest N — nie po oknach: rozrzut miedzy OKNAMI jest dziesieciokrotnie wieksszy (0,2627 wobec 0,0266 zmierzonych 2026-09-27) i nie jest rozrzutem konfiguracji.\nNajgorsze obsunięcie: -0.97%\n\nPRZEWAGA BRUTTO — po kosztach, które symulacja naliczyła (prowizja, poślizg, finansowanie), PRZED dopłatą z karty:\n  brutto: Sharpe/transakcję ze ZŁĄCZONEJ próby 205 transakcji: -0.2803\n  brutto: ta sama miara jako ŚREDNIA PO 5 OKNACH: -0.3904 — inna liczba niż wyżej, bo średnia ilorazów nie jest ilorazem; okno o kilku transakcjach waży w niej tyle samo, co okno o dwustu\n  brutto: rozkład okien: mediana -0.2085, kwartyle [-0.7205, -0.1464]\n  brutto: okien ujemnych: 5/5 (100.0%)\n  brutto: profit factor ZBIORCZY: 0.4819\n  brutto: średni zwrot z transakcji: -0.8167%, trafnych 34.1%\n\nPO DOPŁACIE (dopłata z karty 2.50 pb na rundę (w tym: spread 2.00 pb, pyl 0.50 pb) — karta BEZ: niewypelnienie (NIEZMIERZONE); wyjscie takerem (NIEZMIERZONE)) — tak liczy bramka i DSR:\n  po dopłacie: Sharpe/transakcję ze ZŁĄCZONEJ próby: -0.2889\n  po dopłacie: średnia po 5 oknach -0.3947, mediana okien -0.2169, okien ujemnych 5/5 (odchylenie PRÓBKOWE, jak w drabinie; bramka bierze medianę z `portfolio.metrics`, czyli populacyjne)\n  po dopłacie: średni zwrot z transakcji: -0.8417%, trafnych 34.1%\n\nRACHUNEK KOSZTU RUNDY — SKŁADNIK PO SKŁADNIKU, Z POCHODZENIEM:\n  prowizja: 0.200% (taryfa gieldy)\n  niewypelnienie: NIE ZMIERZONO — symulacja przyjmuje, ze limit wchodzi ZAWSZE, gdy swieca dotknela ceny; `exec.fill` nie zawiera zlecen, ktore nie weszly\n  wyjscie takerem: NIE ZMIERZONO — udzial wyjsc zlozonych agresywnie razy (taker - maker) na jednej nodze; symulacja zaklada makera na obu\n  spread: 0.020% (pomiar)\n  pyl: 0.005% (zalozenie)\n  razem CO NAJMNIEJ 0.225% rundy — bez niewypelnienie, wyjscie takerem. Prawdziwy koszt jest WIEKSZY o nieznana wartosc; ta liczba jest dolnym oszacowaniem, nie kosztem.\n\nKOSZT PROGOWY (z brutto): -81.67 pb na rundę — UJEMNY. Przewagi nie ma JUŻ przy kosztach, które symulacja nalicza; nienaliczone składniki (niewypelnienie, wyjscie takerem) mogą ją tylko pogłębić.\n\nSHARPE PRZY RÓŻNYCH WARTOŚCIACH TEGO, CZEGO NIE ZMIERZONO (dopłata na rundę):\n  dopłata |  zbiorczy | średnia po oknach\n     0.0 pb |   -0.2803 |           -0.3838   <- brutto (sama symulacja)\n     2.0 pb |   -0.2872 |           -0.3925\n     2.5 pb |   -0.2889 |           -0.3947   <- dopłata z karty: tak liczy bramka\n     5.0 pb |   -0.2975 |           -0.4056\n    10.0 pb |   -0.3147 |           -0.4274\n    20.0 pb |   -0.3490 |           -0.4711\n  Obie kolumny liczone tym samym odchyleniem PRÓBKOWYM (n−1). `portfolio.metrics` liczy populacyjne (n), czyli przy medianie dwudziestu transakcji na okno zawyża każdy Sharpe o ok. 2,6% — zawsze w górę.\n\nSTRONA DŁUGA KONTRA KRÓTKA (złączona próba OOS, po kosztach):\n  długa                      n=205   Sharpe/transakcję -0.2889 ±0.0698  trafność 34.1%  średnia -0.8417%\n  krótka                     n=0     — za mało transakcji, żeby policzyć Sharpe'a\n  udział krótkich w transakcjach: 0.0%\n  po reżimach (reżim DOMINUJĄCY w oknie, nie w chwili wejścia):\n    trend_down\n    długa                      n=95    Sharpe/transakcję -0.5568 ±0.1026  trafność 25.3%  średnia -1.3057%\n    krótka                     n=0     — za mało transakcji, żeby policzyć Sharpe'a\n    trend_up\n    długa                      n=110   Sharpe/transakcję -0.1342 ±0.0953  trafność 41.8%  średnia -0.4410%\n    krótka                     n=0     — za mało transakcji, żeby policzyć Sharpe'a\n  RÓŻNICA STRON NIE JEST TU TESTEM: przedziały ±1/√n liczone na transakcjach, które NIE są niezależne (te same świece, te same okna). Liczba mówi, czy warto pytać dalej.\n\nWYNIK WOBEC POKRYCIA WAG (złączona próba OOS, po kosztach):\n  pokrycie 0.9–1.0               n=205   Sharpe/transakcję -0.2889 ±0.0698  trafność 34.1%  średnia -0.8417%\n  po reżimach — TU rozdziela się reżim od pokrycia:\n    trend_down — pokrycie NIE ZMIENIA SIĘ w tym reżimie, więc nie rozdziela niczego\n    pokrycie 0.9–1.0             n=95    Sharpe/transakcję -0.5568 ±0.1026  trafność 25.3%  średnia -1.3057%\n    trend_up — pokrycie NIE ZMIENIA SIĘ w tym reżimie, więc nie rozdziela niczego\n    pokrycie 0.9–1.0             n=110   Sharpe/transakcję -0.1342 ±0.0953  trafność 41.8%  średnia -0.4410%\n  To NIE JEST test: transakcje nie są niezależne, a kubełków jest cztery razy tyle, ile reżimów. Służy do postawienia progu, nie do jego uzasadnienia.\nUdział w transakcjach (6 największych z 8): XRPUSDC 15%  ETHUSDC 14%  DOGEUSDC 14%  ADAUSDC 12%  SOLUSDC 12%  SUIUSDC 12%\nPrzetestowanych konfiguracji: 120\nStan: learning — Za mało informatywnych okien: 5 z wymaganych 20. Strategia zawiera zbyt mało transakcji, żeby cokolwiek orzec — to nie jest wynik ujemny, to brak wyniku. Deflowany Sharpe 0.0000 przy progu 0.95 (Sharpe -0.2889 z 205 transakcji, 2 przetestowanych konfiguracji — N SELEKCJI tego przebiegu, nie licznik kumulatywny; poprzeczka selekcji +0.0400, skośność +0.506, kurtoza 4.100). ODPORNOŚĆ WERDYKTU: do progu 0.95 brakuje 0.4407 Sharpe'a na transakcję, czyli 6.31 błędu standardowego (1/√205 = 0.0698). Po uwzględnieniu liczby prób wynik nie jest odróżnialny od najlepszego z tylu losowych — promocja wstrzymana. DSR policzony PO doliczeniu 2.50 pb na rundę, których symulacja nie nalicza; nadal NIE ZMIERZONO: niewypelnienie, wyjscie takerem, więc ta liczba jest GÓRNYM oszacowaniem. N = 2 rozróżnialnych konfiguracji z learn.model_version (count(DISTINCT params) po wersjach candidate/active/retired plus wersja tego przebiegu; wersje, które nigdy nie wyszły ze statusu `training`, NIE są próbami — nie doszły do wyniku, więc selekcja nie mogła się na nich oprzeć: dla toru 4h to 7 z 59, zmierzone 2026-09-27) — DOLNA GRANICA: `kind` i `limit` nie były zapisywane do 2026-09-26, więc przebiegi różniące się samym cennikiem zlewały się w jedną. Licznik learn.hypothesis_trial (120 wektorów wag) NIE jest tu mianownikiem: jego kandydaci byli oceniani in-sample, a walk-forward już za nich zapłacił, licząc wynik poza oknem wyboru. Rozrzut Sharpe'ow miedzy konfiguracjami NIE ZMIERZONY: podstawiono wariancje samego estymatora pod H0 (sd = 0.0770), bo konfiguracji z policzonym Sharpe'em OOS jest 0, a prog to 20. Konfiguracje roznia sie nie tylko szumem, wiec PRAWDZIWY rozrzut jest wiekszy, poprzeczka wyzsza, a prawdziwy DSR NIZSZY niz ten — zmierzone 2026-09-27 na torze 4h: 0,0266 wobec podlogi 0,0260, czyli o 2,7%, a nie o rzad wielkosci. Liczone po DISTINCT learn.model_version.params, czyli po tej samej WIELKOSCI, ktora jest N — nie po oknach: rozrzut miedzy OKNAMI jest dziesieciokrotnie wieksszy (0,2627 wobec 0,0266 zmierzonych 2026-09-27) i nie jest rozrzutem konfiguracji.\nPODSUMOWANIE_JSON {\"days\": 400, \"od\": \"2025-08-29 04:00\", \"do\": \"2026-10-03 04:00\", \"pesymistyczna\": true, \"opoznienie_min\": 20, \"limit\": true, \"okna\": 5, \"dodatnie\": 0, \"transakcji\": 205, \"zwrot_na_runde_pb\": -84.17043133623504, \"doplata_pb\": 2.4994552304595214, \"dsr\": 9.779419954722146e-06, \"n_selekcji\": 2, \"mediana_sharpe\": -0.2208, \"wypelnialnosc\": 0.7527472527472527, \"niewypelnienie_pb\": 54.28101578206927, \"brak_swiec_1h\": 0, \"bije_b1\": [0, 5], \"bije_b2\": [0, 5], \"bije_b3\": [0, 5], \"b0_dodatnie\": [0, 5], \"status\": \"learning\", \"odniesienia\": {\"strategia\": [-0.37348, 0.0074616000000000005, 0, 5], \"B1\": [4.061588075519732, 1.0, 2, 5], \"B2\": [1.534374577912767, 0.4960893854748603, 2, 5], \"B3\": [-0.10251771610897856, 0.04793296089385475, 2, 5]}}\n"
+  "stdout": "  Spread z bazy: 2.000 pb na rundę (średnia ze średnich per instrument, 2 instrumentów, 200 świec)\n    okno pomiaru: 2025-08-29 04:00..2026-10-03 04:00 UTC\n    rozkład po świecach: mediana 2.000 | q1 1.000 | q3 3.000 | max 3.000 pb\n    skrajne instrumenty: BTCUSDC 1.000 pb, ETHUSDC 3.000 pb\n  Model wypełnień PESYMISTYCZNY: limit z ceny 1h po opóźnieniu 20 min ± pół spreadu instrumentu, wypełnienie tylko w godzinie po wysyłce\n    spread per instrument (pb): ADAUSDC 2.00  BTCUSDC 1.00  DOGEUSDC 2.00  ETHUSDC 3.00  LINKUSDC 2.00  SOLUSDC 2.00  SUIUSDC 2.00  XRPUSDC 2.00\n    bez pomiaru, średnia uniwersum 2.00 pb: ADAUSDC, DOGEUSDC, LINKUSDC, SOLUSDC, SUIUSDC, XRPUSDC\n  prowizja: 0.200% (taryfa gieldy)\n  niewypelnienie: NIE ZMIERZONO — symulacja przyjmuje, ze limit wchodzi ZAWSZE, gdy swieca dotknela ceny; `exec.fill` nie zawiera zlecen, ktore nie weszly\n  wyjscie takerem: NIE ZMIERZONO — udzial wyjsc zlozonych agresywnie razy (taker - maker) na jednej nodze; symulacja zaklada makera na obu\n  spread: 0.020% (pomiar)\n  pyl: 0.005% (zalozenie)\n  razem CO NAJMNIEJ 0.225% rundy — bez niewypelnienie, wyjscie takerem. Prawdziwy koszt jest WIEKSZY o nieznana wartosc; ta liczba jest dolnym oszacowaniem, nie kosztem.\n  pył per instrument (pb na rundę; notional 975 z test 0.260, cena = maksimum okna):\n    ADAUSDC 0.38  BTCUSDC 0.10  DOGEUSDC 0.50  ETHUSDC 0.18  LINKUSDC 1.21  SOLUSDC 0.24  SUIUSDC 0.61  XRPUSDC 0.78\n    do karty: średnia 0.50 pb (maksimum 1.21 pb)\n  Miary okien OOS i bramka statusu PO dopłacie 2.50 pb na rundę (ta sama KWOTA co w DSR); selekcja wag in-sample liczona BRUTTO; V[SR_n] miesza przebiegi brutto sprzed 2026-10-02 z przebiegami po dopłacie; kup-i-trzymaj po 2.04 pb na swoją jedną rundę. Liczby „brutto” = przed dopłatą, tylko do porównania.\n  dopłata z karty 2.50 pb na rundę (w tym: spread 2.00 pb, pyl 0.50 pb) — karta BEZ: niewypelnienie (NIEZMIERZONE); wyjscie takerem (NIEZMIERZONE)\n  BTCUSDC      2,399 punktów panelu\n  ETHUSDC      2,399 punktów panelu\n  SOLUSDC      2,399 punktów panelu\n  ADAUSDC      2,399 punktów panelu\n  XRPUSDC      2,399 punktów panelu\n  DOGEUSDC     2,399 punktów panelu\n  LINKUSDC     2,399 punktów panelu\n  SUIUSDC      2,399 punktów panelu\n  świece 1h do modelu wypełnień: 76,800\n  rewizje po czasie decyzji: 201 z 249,496 wartości cech (0.081%) — na tych silnik widział inną liczbę niż ta, na której uczy się trener\n  sygnały bez zmienności na danych, wyłączone z kalibracji: news_shock, pozycjonowanie_tlumu\n  progi wejścia (per reżim, percentyl 0.88, min. 50 próbek): high_vol=0.3779 (n=1671), trend_down=0.2619 (n=2382), trend_up=0.2462 (n=1089); BEZ PROGU WEJŚCIA: range, news_shock\n  okno  0  02-25–03-27  Sharpe/transakcję=-0.5619  transakcje=24  reżim=trend_down  powroty=12%  [brutto: Sharpe/transakcję=-0.5457, zwrot -0.25%]  [strategia -0.25% przy ekspozycji 0.3% vs kup-i-trzymaj -4.54% → przy tej samej ekspozycji -0.01%]  bije B1=nie B2=nie B3=nie\n  okno  1  03-27–04-26  Sharpe/transakcję=-0.4682  transakcje=15  reżim=trend_down  powroty=0%  [brutto: Sharpe/transakcję=-0.4557, zwrot -0.14%]  [strategia -0.14% przy ekspozycji 0.2% vs kup-i-trzymaj -0.84% → przy tej samej ekspozycji -0.00%]  bije B1=nie B2=nie B3=nie\n  okno  2  04-26–05-26  Sharpe/transakcję=+0.0087  transakcje=19  reżim=trend_up  powroty=5%  [brutto: Sharpe/transakcję=+0.0156, zwrot +0.03%]  [strategia +0.02% przy ekspozycji 0.6% vs kup-i-trzymaj +12.28% → przy tej samej ekspozycji +0.07%]  bije B1=nie B2=tak B3=nie\n  okno  3  05-26–06-25  Sharpe/transakcję=+0.0092  transakcje=21  reżim=trend_up  powroty=5%  [brutto: Sharpe/transakcję=+0.0188, zwrot -0.05%]  [strategia -0.06% przy ekspozycji 0.4% vs kup-i-trzymaj +20.68% → przy tej samej ekspozycji +0.08%]  bije B1=nie B2=nie B3=nie\n  okno  4  06-25–07-25  Sharpe/transakcję=-0.8412  transakcje=32  reżim=trend_down  powroty=16%  [brutto: Sharpe/transakcję=-0.8300, zwrot -0.66%]  [strategia -0.67% przy ekspozycji 0.4% vs kup-i-trzymaj -7.27% → przy tej samej ekspozycji -0.03%]  bije B1=nie B2=nie B3=nie\n  okno  5  07-25–08-24  Sharpe/transakcję=-0.3237  transakcje=12  reżim=trend_up  powroty=0%  [brutto: Sharpe/transakcję=-0.3081, zwrot -0.04%]  [strategia -0.04% przy ekspozycji 0.1% vs kup-i-trzymaj +5.94% → przy tej samej ekspozycji +0.01%]  bije B1=nie B2=nie B3=nie\n  okno  6  08-24–09-23  Sharpe/transakcję=+0.0000  transakcje=9  reżim=trend_down  powroty=0%  (poniżej 12 transakcji — pominięte w ocenie)\ndryf cech: okno nowe 30 dni wobec poprzedzających 90, świeca 4h, odcisk uniwersum 29172a93\n  (dryf cech pominięty — przebieg z pliku panelu)\n  reżimy bez progu wejścia (próba poniżej 50 obserwacji), liczba okien — range: 2\n\nProgi wejścia dla produkcji (mediana po oknach, percentyl 0.88): trend_up=0.2087 (7 okien), trend_down=0.1553 (7 okien), range=0.1939 (5 okien), high_vol=0.3779 (7 okien)\n\nWariant wyboru: ic — bez losowania, jeden kandydat na każde z 7 okien\nŚrednia ekspozycja: 0.20% kapitału (limit łączny: 15% kapitału)\n  = w rynku 13.5% świec × 1.06 pozycji na świecę w rynku × 1.23% kapitału na pozycję = 0.18%\n    do wykorzystania: 8 pozycji × 1.88% = 15.0% kapitału. Zajęte: 1.06 pozycji (13% miejsc) po 66% budżetu, przez 14% czasu\nPokonano kup-i-trzymaj PRZY TEJ SAMEJ EKSPOZYCJI w 0/6 oknach (0.0%)   przedział 95%: 0.0%–39.0%\n  dla porównania, wobec odniesienia zaangażowanego w 100%: 3/6 (50.0%) — ta liczba jest funkcją znaku rynku, nie strategii\nOkna: 6, dodatnie: 2 (33.3%)   przedział ufności 95%: 9.7%–70.0%\nMediana Sharpe (OOS): -0.396\nWypełnialność zleceń z limitem w symulacji OOS: 72.8% (262 weszło, 98 nie; w tym 0 bez świecy 1h). Produkcja demo: ok. 65%.\n  prowizja: 0.200% (taryfa gieldy)\n  niewypelnienie: 0.426% (pomiar)\n  spread: 0.020% (pomiar)\n  pyl: 0.005% (zalozenie)\n  razem: 0.651% rundy\nBije B1 przy tej samej ekspozycji (przenoszonej): 0/6 okien (0%, przedział 95% 0%–39%)\nBije B2 przy tej samej ekspozycji (przenoszonej): 1/6 okien (17%, przedział 95% 3%–56%)\nBije B3 przy tej samej ekspozycji (przenoszonej): 0/6 okien (0%, przedział 95% 0%–39%)\nB0 (gotówka): zwrot > 0 w 1/6 okien; ponad 4% w skali roku na CAŁYM kapitale w 0/6\n  brutto (przed dopłatą 2.50 pb, NIE do bramki): dodatnie 2/6, mediana Sharpe -0.382, kup-i-trzymaj przy tej samej ekspozycji pokonane w 0/6\nDeflowany Sharpe: Deflowany Sharpe 0.0000 przy progu 0.95 (Sharpe -0.3251 z 123 transakcji, 2 przetestowanych konfiguracji — N SELEKCJI tego przebiegu, nie licznik kumulatywny; poprzeczka selekcji +0.0477, skośność -0.160, kurtoza 4.001). ODPORNOŚĆ WERDYKTU: do progu 0.95 brakuje 0.5272 Sharpe'a na transakcję, czyli 5.85 błędu standardowego (1/√123 = 0.0902). Po uwzględnieniu liczby prób wynik nie jest odróżnialny od najlepszego z tylu losowych — promocja wstrzymana. DSR policzony PO doliczeniu 2.50 pb na rundę, których symulacja nie nalicza; nadal NIE ZMIERZONO: niewypelnienie, wyjscie takerem, więc ta liczba jest GÓRNYM oszacowaniem. N = 2 rozróżnialnych konfiguracji z learn.model_version (count(DISTINCT params) po wersjach candidate/active/retired plus wersja tego przebiegu; wersje, które nigdy nie wyszły ze statusu `training`, NIE są próbami — nie doszły do wyniku, więc selekcja nie mogła się na nich oprzeć: dla toru 4h to 7 z 59, zmierzone 2026-09-27) — DOLNA GRANICA: `kind` i `limit` nie były zapisywane do 2026-09-26, więc przebiegi różniące się samym cennikiem zlewały się w jedną. Licznik learn.hypothesis_trial (120 wektorów wag) NIE jest tu mianownikiem: jego kandydaci byli oceniani in-sample, a walk-forward już za nich zapłacił, licząc wynik poza oknem wyboru. Rozrzut Sharpe'ow miedzy konfiguracjami NIE ZMIERZONY: podstawiono wariancje samego estymatora pod H0 (sd = 0.0918), bo konfiguracji z policzonym Sharpe'em OOS jest 0, a prog to 20. Konfiguracje roznia sie nie tylko szumem, wiec PRAWDZIWY rozrzut jest wiekszy, poprzeczka wyzsza, a prawdziwy DSR NIZSZY niz ten — zmierzone 2026-09-27 na torze 4h: 0,0266 wobec podlogi 0,0260, czyli o 2,7%, a nie o rzad wielkosci. Liczone po DISTINCT learn.model_version.params, czyli po tej samej WIELKOSCI, ktora jest N — nie po oknach: rozrzut miedzy OKNAMI jest dziesieciokrotnie wieksszy (0,2627 wobec 0,0266 zmierzonych 2026-09-27) i nie jest rozrzutem konfiguracji.\nNajgorsze obsunięcie: -0.67%\n\nPRZEWAGA BRUTTO — po kosztach, które symulacja naliczyła (prowizja, poślizg, finansowanie), PRZED dopłatą z karty:\n  brutto: Sharpe/transakcję ze ZŁĄCZONEJ próby 123 transakcji: -0.3151\n  brutto: ta sama miara jako ŚREDNIA PO 6 OKNACH: -0.3508 — inna liczba niż wyżej, bo średnia ilorazów nie jest ilorazem; okno o kilku transakcjach waży w niej tyle samo, co okno o dwustu\n  brutto: rozkład okien: mediana -0.3819, kwartyle [-0.5232, -0.0653]\n  brutto: okien ujemnych: 4/6 (66.7%)\n  brutto: profit factor ZBIORCZY: 0.4138\n  brutto: średni zwrot z transakcji: -0.7886%, trafnych 33.3%\n\nPO DOPŁACIE (dopłata z karty 2.50 pb na rundę (w tym: spread 2.00 pb, pyl 0.50 pb) — karta BEZ: niewypelnienie (NIEZMIERZONE); wyjscie takerem (NIEZMIERZONE)) — tak liczy bramka i DSR:\n  po dopłacie: Sharpe/transakcję ze ZŁĄCZONEJ próby: -0.3251\n  po dopłacie: średnia po 6 oknach -0.3538, mediana okien -0.3811, okien ujemnych 4/6 (odchylenie PRÓBKOWE, jak w drabinie; bramka bierze medianę z `portfolio.metrics`, czyli populacyjne)\n  po dopłacie: średni zwrot z transakcji: -0.8136%, trafnych 33.3%\n\nRACHUNEK KOSZTU RUNDY — SKŁADNIK PO SKŁADNIKU, Z POCHODZENIEM:\n  prowizja: 0.200% (taryfa gieldy)\n  niewypelnienie: NIE ZMIERZONO — symulacja przyjmuje, ze limit wchodzi ZAWSZE, gdy swieca dotknela ceny; `exec.fill` nie zawiera zlecen, ktore nie weszly\n  wyjscie takerem: NIE ZMIERZONO — udzial wyjsc zlozonych agresywnie razy (taker - maker) na jednej nodze; symulacja zaklada makera na obu\n  spread: 0.020% (pomiar)\n  pyl: 0.005% (zalozenie)\n  razem CO NAJMNIEJ 0.225% rundy — bez niewypelnienie, wyjscie takerem. Prawdziwy koszt jest WIEKSZY o nieznana wartosc; ta liczba jest dolnym oszacowaniem, nie kosztem.\n\nKOSZT PROGOWY (z brutto): -78.86 pb na rundę — UJEMNY. Przewagi nie ma JUŻ przy kosztach, które symulacja nalicza; nienaliczone składniki (niewypelnienie, wyjscie takerem) mogą ją tylko pogłębić.\n\nSHARPE PRZY RÓŻNYCH WARTOŚCIACH TEGO, CZEGO NIE ZMIERZONO (dopłata na rundę):\n  dopłata |  zbiorczy | średnia po oknach\n     0.0 pb |   -0.3151 |           -0.3422   <- brutto (sama symulacja)\n     2.0 pb |   -0.3231 |           -0.3515\n     2.5 pb |   -0.3251 |           -0.3538   <- dopłata z karty: tak liczy bramka\n     5.0 pb |   -0.3351 |           -0.3655\n    10.0 pb |   -0.3551 |           -0.3888\n    20.0 pb |   -0.3951 |           -0.4354\n  Obie kolumny liczone tym samym odchyleniem PRÓBKOWYM (n−1). `portfolio.metrics` liczy populacyjne (n), czyli przy medianie dwudziestu transakcji na okno zawyża każdy Sharpe o ok. 2,6% — zawsze w górę.\n\nSTRONA DŁUGA KONTRA KRÓTKA (złączona próba OOS, po kosztach):\n  długa                      n=123   Sharpe/transakcję -0.3251 ±0.0902  trafność 33.3%  średnia -0.8136%\n  krótka                     n=0     — za mało transakcji, żeby policzyć Sharpe'a\n  udział krótkich w transakcjach: 0.0%\n  po reżimach (reżim DOMINUJĄCY w oknie, nie w chwili wejścia):\n    trend_down\n    długa                      n=71    Sharpe/transakcję -0.6529 ±0.1187  trafność 22.5%  średnia -1.3372%\n    krótka                     n=0     — za mało transakcji, żeby policzyć Sharpe'a\n    trend_up\n    długa                      n=52    Sharpe/transakcję -0.0342 ±0.1387  trafność 48.1%  średnia -0.0987%\n    krótka                     n=0     — za mało transakcji, żeby policzyć Sharpe'a\n  RÓŻNICA STRON NIE JEST TU TESTEM: przedziały ±1/√n liczone na transakcjach, które NIE są niezależne (te same świece, te same okna). Liczba mówi, czy warto pytać dalej.\n\nWYNIK WOBEC POKRYCIA WAG (złączona próba OOS, po kosztach):\n  pokrycie 0.9–1.0               n=123   Sharpe/transakcję -0.3251 ±0.0902  trafność 33.3%  średnia -0.8136%\n  po reżimach — TU rozdziela się reżim od pokrycia:\n    trend_down — pokrycie NIE ZMIENIA SIĘ w tym reżimie, więc nie rozdziela niczego\n    pokrycie 0.9–1.0             n=71    Sharpe/transakcję -0.6529 ±0.1187  trafność 22.5%  średnia -1.3372%\n    trend_up — pokrycie NIE ZMIENIA SIĘ w tym reżimie, więc nie rozdziela niczego\n    pokrycie 0.9–1.0             n=52    Sharpe/transakcję -0.0342 ±0.1387  trafność 48.1%  średnia -0.0987%\n  To NIE JEST test: transakcje nie są niezależne, a kubełków jest cztery razy tyle, ile reżimów. Służy do postawienia progu, nie do jego uzasadnienia.\nUdział w transakcjach (6 największych z 8): SUIUSDC 17%  DOGEUSDC 14%  XRPUSDC 14%  ADAUSDC 13%  ETHUSDC 13%  SOLUSDC 13%\nPrzetestowanych konfiguracji: 120\nStan: learning — Za mało informatywnych okien: 6 z wymaganych 20. Strategia zawiera zbyt mało transakcji, żeby cokolwiek orzec — to nie jest wynik ujemny, to brak wyniku. Deflowany Sharpe 0.0000 przy progu 0.95 (Sharpe -0.3251 z 123 transakcji, 2 przetestowanych konfiguracji — N SELEKCJI tego przebiegu, nie licznik kumulatywny; poprzeczka selekcji +0.0477, skośność -0.160, kurtoza 4.001). ODPORNOŚĆ WERDYKTU: do progu 0.95 brakuje 0.5272 Sharpe'a na transakcję, czyli 5.85 błędu standardowego (1/√123 = 0.0902). Po uwzględnieniu liczby prób wynik nie jest odróżnialny od najlepszego z tylu losowych — promocja wstrzymana. DSR policzony PO doliczeniu 2.50 pb na rundę, których symulacja nie nalicza; nadal NIE ZMIERZONO: niewypelnienie, wyjscie takerem, więc ta liczba jest GÓRNYM oszacowaniem. N = 2 rozróżnialnych konfiguracji z learn.model_version (count(DISTINCT params) po wersjach candidate/active/retired plus wersja tego przebiegu; wersje, które nigdy nie wyszły ze statusu `training`, NIE są próbami — nie doszły do wyniku, więc selekcja nie mogła się na nich oprzeć: dla toru 4h to 7 z 59, zmierzone 2026-09-27) — DOLNA GRANICA: `kind` i `limit` nie były zapisywane do 2026-09-26, więc przebiegi różniące się samym cennikiem zlewały się w jedną. Licznik learn.hypothesis_trial (120 wektorów wag) NIE jest tu mianownikiem: jego kandydaci byli oceniani in-sample, a walk-forward już za nich zapłacił, licząc wynik poza oknem wyboru. Rozrzut Sharpe'ow miedzy konfiguracjami NIE ZMIERZONY: podstawiono wariancje samego estymatora pod H0 (sd = 0.0918), bo konfiguracji z policzonym Sharpe'em OOS jest 0, a prog to 20. Konfiguracje roznia sie nie tylko szumem, wiec PRAWDZIWY rozrzut jest wiekszy, poprzeczka wyzsza, a prawdziwy DSR NIZSZY niz ten — zmierzone 2026-09-27 na torze 4h: 0,0266 wobec podlogi 0,0260, czyli o 2,7%, a nie o rzad wielkosci. Liczone po DISTINCT learn.model_version.params, czyli po tej samej WIELKOSCI, ktora jest N — nie po oknach: rozrzut miedzy OKNAMI jest dziesieciokrotnie wieksszy (0,2627 wobec 0,0266 zmierzonych 2026-09-27) i nie jest rozrzutem konfiguracji.\nPODSUMOWANIE_JSON {\"days\": 400, \"od\": \"2025-08-29 04:00\", \"do\": \"2026-10-03 04:00\", \"pesymistyczna\": true, \"opoznienie_min\": 20, \"limit\": true, \"okna\": 6, \"dodatnie\": 2, \"transakcji\": 123, \"zwrot_na_runde_pb\": -81.36347625149034, \"doplata_pb\": 2.4994552304595214, \"dsr\": 2.4228804774774354e-05, \"n_selekcji\": 2, \"mediana_sharpe\": -0.39595, \"wypelnialnosc\": 0.7277777777777777, \"niewypelnienie_pb\": 42.64448044620346, \"brak_swiec_1h\": 0, \"bije_b1\": [0, 6], \"bije_b2\": [1, 6], \"bije_b3\": [0, 6], \"b0_dodatnie\": [1, 6], \"status\": \"learning\", \"odniesienia\": {\"strategia\": [-0.18999999999999997, 0.0032261666666666667, 1, 6], \"B1\": [4.375324729788546, 1.0, 3, 6], \"B2\": [0.7980705702791138, 0.4692737430167597, 2, 6], \"B3\": [-0.17878955634282864, 0.04273743016759777, 2, 6]}}\n"
+ },
+ "ic_siatka": {
+  "json": {
+   "b0_dodatnie": [
+    2,
+    6
+   ],
+   "bije_b1": [
+    2,
+    6
+   ],
+   "bije_b2": [
+    1,
+    6
+   ],
+   "bije_b3": [
+    3,
+    6
+   ],
+   "brak_swiec_1h": 0,
+   "days": 398,
+   "do": "2026-10-03 04:00",
+   "dodatnie": 2,
+   "doplata_pb": 2.4994552304595214,
+   "dsr": 0.12351031677867788,
+   "limit": true,
+   "mediana_sharpe": -0.14525,
+   "n_selekcji": 2,
+   "niewypelnienie_pb": null,
+   "od": "2025-08-31 04:00",
+   "od_siatki": "2022-09-01",
+   "odniesienia": {
+    "B1": [
+     6.063116337362929,
+     1.0,
+     5,
+     6
+    ],
+    "B2": [
+     -0.0784835886254492,
+     0.39013035381750466,
+     3,
+     6
+    ],
+    "B3": [
+     -0.1044227602073421,
+     0.03808193668528864,
+     2,
+     6
+    ],
+    "strategia": [
+     -0.008099999999999998,
+     0.004450333333333333,
+     2,
+     6
+    ]
+   },
+   "okna": 6,
+   "opoznienie_min": 0,
+   "pesymistyczna": false,
+   "przesuniecia": {
+    "+0": {
+     "b0_dodatnie": [
+      2,
+      6
+     ],
+     "bije_b1": [
+      2,
+      6
+     ],
+     "bije_b2": [
+      1,
+      6
+     ],
+     "bije_b3": [
+      3,
+      6
+     ],
+     "brak_swiec_1h": 0,
+     "days": 398,
+     "do": "2026-10-03 04:00",
+     "dodatnie": 2,
+     "doplata_pb": 2.4994552304595214,
+     "dsr": 0.12351031677867788,
+     "limit": true,
+     "mediana_sharpe": -0.14525,
+     "n_selekcji": 2,
+     "niewypelnienie_pb": null,
+     "od": "2025-08-31 04:00",
+     "odniesienia": {
+      "B1": [
+       6.063116337362929,
+       1.0,
+       5,
+       6
+      ],
+      "B2": [
+       -0.0784835886254492,
+       0.39013035381750466,
+       3,
+       6
+      ],
+      "B3": [
+       -0.1044227602073421,
+       0.03808193668528864,
+       2,
+       6
+      ],
+      "strategia": [
+       -0.008099999999999998,
+       0.004450333333333333,
+       2,
+       6
+      ]
+     },
+     "okna": 6,
+     "opoznienie_min": 0,
+     "pesymistyczna": false,
+     "start_siatki": "2025-09-15 00:00",
+     "status": "learning",
+     "transakcji": 211,
+     "wypelnialnosc": 1.0,
+     "zwrot_na_runde_pb": -9.572027388591184
+    },
+    "+1": {
+     "b0_dodatnie": [
+      4,
+      6
+     ],
+     "bije_b1": [
+      2,
+      6
+     ],
+     "bije_b2": [
+      3,
+      6
+     ],
+     "bije_b3": [
+      4,
+      6
+     ],
+     "brak_swiec_1h": 0,
+     "days": 398,
+     "do": "2026-10-03 04:00",
+     "dodatnie": 4,
+     "doplata_pb": 2.4994552304595214,
+     "dsr": 0.39987980916098237,
+     "limit": true,
+     "mediana_sharpe": 0.0776,
+     "n_selekcji": 2,
+     "niewypelnienie_pb": null,
+     "od": "2025-08-31 04:00",
+     "odniesienia": {
+      "B1": [
+       6.066536346459173,
+       1.0,
+       5,
+       6
+      ],
+      "B2": [
+       -2.6273788696561273,
+       0.3845437616387337,
+       1,
+       6
+      ],
+      "B3": [
+       -0.08979823876129182,
+       0.03808193668528864,
+       2,
+       6
+      ],
+      "strategia": [
+       0.03176666666666667,
+       0.004343833333333333,
+       4,
+       6
+      ]
+     },
+     "okna": 6,
+     "opoznienie_min": 0,
+     "pesymistyczna": false,
+     "start_siatki": "2025-09-16 00:00",
+     "status": "learning",
+     "transakcji": 200,
+     "wypelnialnosc": 1.0,
+     "zwrot_na_runde_pb": 3.996814223812618
+    },
+    "+2": {
+     "b0_dodatnie": [
+      2,
+      6
+     ],
+     "bije_b1": [
+      2,
+      6
+     ],
+     "bije_b2": [
+      1,
+      6
+     ],
+     "bije_b3": [
+      3,
+      6
+     ],
+     "brak_swiec_1h": 0,
+     "days": 398,
+     "do": "2026-10-03 04:00",
+     "dodatnie": 2,
+     "doplata_pb": 2.4994552304595214,
+     "dsr": 0.07649426111351644,
+     "limit": true,
+     "mediana_sharpe": -0.059149999999999994,
+     "n_selekcji": 2,
+     "niewypelnienie_pb": null,
+     "od": "2025-08-31 04:00",
+     "odniesienia": {
+      "B1": [
+       5.528633363109376,
+       1.0,
+       5,
+       6
+      ],
+      "B2": [
+       0.4311593073718114,
+       0.3789571694599628,
+       3,
+       6
+      ],
+      "B3": [
+       0.002242093174832598,
+       0.03808193668528864,
+       2,
+       6
+      ],
+      "strategia": [
+       -0.030866666666666664,
+       0.004367166666666667,
+       2,
+       6
+      ]
+     },
+     "okna": 6,
+     "opoznienie_min": 0,
+     "pesymistyczna": false,
+     "start_siatki": "2025-09-17 00:00",
+     "status": "learning",
+     "transakcji": 203,
+     "wypelnialnosc": 1.0,
+     "zwrot_na_runde_pb": -13.888972763111262
+    },
+    "-1": {
+     "b0_dodatnie": [
+      2,
+      6
+     ],
+     "bije_b1": [
+      1,
+      6
+     ],
+     "bije_b2": [
+      1,
+      6
+     ],
+     "bije_b3": [
+      2,
+      6
+     ],
+     "brak_swiec_1h": 0,
+     "days": 398,
+     "do": "2026-10-03 04:00",
+     "dodatnie": 2,
+     "doplata_pb": 2.4994552304595214,
+     "dsr": 0.05537851908346894,
+     "limit": true,
+     "mediana_sharpe": -0.14145,
+     "n_selekcji": 2,
+     "niewypelnienie_pb": null,
+     "od": "2025-08-31 04:00",
+     "odniesienia": {
+      "B1": [
+       5.870293317017224,
+       1.0,
+       6,
+       6
+      ],
+      "B2": [
+       2.958435012351494,
+       0.3947858472998138,
+       4,
+       6
+      ],
+      "B3": [
+       -0.12297352546897321,
+       0.03803538175046555,
+       2,
+       6
+      ],
+      "strategia": [
+       -0.03808333333333333,
+       0.004406666666666666,
+       2,
+       6
+      ]
+     },
+     "okna": 6,
+     "opoznienie_min": 0,
+     "pesymistyczna": false,
+     "start_siatki": "2025-09-14 00:00",
+     "status": "learning",
+     "transakcji": 214,
+     "wypelnialnosc": 1.0,
+     "zwrot_na_runde_pb": -14.777326727327925
+    },
+    "-2": {
+     "b0_dodatnie": [
+      2,
+      6
+     ],
+     "bije_b1": [
+      2,
+      6
+     ],
+     "bije_b2": [
+      2,
+      6
+     ],
+     "bije_b3": [
+      2,
+      6
+     ],
+     "brak_swiec_1h": 0,
+     "days": 398,
+     "do": "2026-10-03 04:00",
+     "dodatnie": 2,
+     "doplata_pb": 2.4994552304595214,
+     "dsr": 0.1287361325860883,
+     "limit": true,
+     "mediana_sharpe": -0.0838,
+     "n_selekcji": 2,
+     "niewypelnienie_pb": null,
+     "od": "2025-08-31 04:00",
+     "odniesienia": {
+      "B1": [
+       5.8216476430167345,
+       1.0,
+       5,
+       6
+      ],
+      "B2": [
+       1.3164962953765569,
+       0.3947858472998138,
+       3,
+       6
+      ],
+      "B3": [
+       -0.11715360710022359,
+       0.037756052141527004,
+       2,
+       6
+      ],
+      "strategia": [
+       -0.010399999999999998,
+       0.004067333333333333,
+       2,
+       6
+      ]
+     },
+     "okna": 6,
+     "opoznienie_min": 0,
+     "pesymistyczna": false,
+     "start_siatki": "2025-09-13 00:00",
+     "status": "learning",
+     "transakcji": 207,
+     "wypelnialnosc": 1.0,
+     "zwrot_na_runde_pb": -8.908661590070245
+    }
+   },
+   "stabilny": {
+    "dodatnie_pct": [
+     33.33333333333333,
+     39.99999999999999,
+     66.66666666666666
+    ],
+    "dsr": [
+     0.05537851908346894,
+     0.15679980774454677,
+     0.39987980916098237
+    ],
+    "status": "learning"
+   },
+   "status": "learning",
+   "transakcji": 211,
+   "wypelnialnosc": 1.0,
+   "zwrot_na_runde_pb": -9.572027388591184
+  },
+  "stdout": "  Spread z bazy: 2.000 pb na rundę (średnia ze średnich per instrument, 2 instrumentów, 200 świec)\n    okno pomiaru: 2025-08-29 04:00..2026-10-03 04:00 UTC\n    rozkład po świecach: mediana 2.000 | q1 1.000 | q3 3.000 | max 3.000 pb\n    skrajne instrumenty: BTCUSDC 1.000 pb, ETHUSDC 3.000 pb\n  prowizja: 0.200% (taryfa gieldy)\n  niewypelnienie: NIE ZMIERZONO — symulacja przyjmuje, ze limit wchodzi ZAWSZE, gdy swieca dotknela ceny; `exec.fill` nie zawiera zlecen, ktore nie weszly\n  wyjscie takerem: NIE ZMIERZONO — udzial wyjsc zlozonych agresywnie razy (taker - maker) na jednej nodze; symulacja zaklada makera na obu\n  spread: 0.020% (pomiar)\n  pyl: 0.005% (zalozenie)\n  razem CO NAJMNIEJ 0.225% rundy — bez niewypelnienie, wyjscie takerem. Prawdziwy koszt jest WIEKSZY o nieznana wartosc; ta liczba jest dolnym oszacowaniem, nie kosztem.\n  pył per instrument (pb na rundę; notional 975 z test 0.260, cena = maksimum okna):\n    ADAUSDC 0.38  BTCUSDC 0.10  DOGEUSDC 0.50  ETHUSDC 0.18  LINKUSDC 1.21  SOLUSDC 0.24  SUIUSDC 0.61  XRPUSDC 0.78\n    do karty: średnia 0.50 pb (maksimum 1.21 pb)\n  Miary okien OOS i bramka statusu PO dopłacie 2.50 pb na rundę (ta sama KWOTA co w DSR); selekcja wag in-sample liczona BRUTTO; V[SR_n] miesza przebiegi brutto sprzed 2026-10-02 z przebiegami po dopłacie; kup-i-trzymaj po 2.04 pb na swoją jedną rundę. Liczby „brutto” = przed dopłatą, tylko do porównania.\n  dopłata z karty 2.50 pb na rundę (w tym: spread 2.00 pb, pyl 0.50 pb) — karta BEZ: niewypelnienie (NIEZMIERZONE); wyjscie takerem (NIEZMIERZONE)\n  BTCUSDC      2,399 punktów panelu\n  ETHUSDC      2,399 punktów panelu\n  SOLUSDC      2,399 punktów panelu\n  ADAUSDC      2,399 punktów panelu\n  XRPUSDC      2,399 punktów panelu\n  DOGEUSDC     2,399 punktów panelu\n  LINKUSDC     2,399 punktów panelu\n  SUIUSDC      2,399 punktów panelu\n  rewizje po czasie decyzji: 201 z 249,496 wartości cech (0.081%) — na tych silnik widział inną liczbę niż ta, na której uczy się trener\n  siatka okien zakotwiczona: 2022-09-01 + k×30 dni, pierwsze okno od 2025-09-15 00:00; przesunięcia -2, -1, +0, +1, +2 dni\n  sygnały bez zmienności na danych, wyłączone z kalibracji: news_shock, pozycjonowanie_tlumu\n  progi wejścia (per reżim, percentyl 0.88, min. 50 próbek): high_vol=0.4006 (n=1660), range=0.1931 (n=58), trend_down=0.1817 (n=1740), trend_up=0.2890 (n=1330); BEZ PROGU WEJŚCIA: news_shock\n  okno  0  03-14–04-13  Sharpe/transakcję=-0.2495  transakcje=37  reżim=trend_up  powroty=8%  [brutto: Sharpe/transakcję=-0.2279, zwrot -0.07%]  [strategia -0.08% przy ekspozycji 0.3% vs kup-i-trzymaj +3.73% → przy tej samej ekspozycji +0.01%]  bije B1=nie B2=nie B3=nie\n  okno  1  04-13–05-13  Sharpe/transakcję=+0.0604  transakcje=37  reżim=trend_down  powroty=16%  [brutto: Sharpe/transakcję=+0.0697, zwrot +0.14%]  [strategia +0.13% przy ekspozycji 0.6% vs kup-i-trzymaj +2.29% → przy tej samej ekspozycji +0.01%]  bije B1=tak B2=nie B3=tak\n  okno  2  05-13–06-12  Sharpe/transakcję=+0.2164  transakcje=26  reżim=trend_up  powroty=4%  [brutto: Sharpe/transakcję=+0.2254, zwrot +0.20%]  [strategia +0.20% przy ekspozycji 0.6% vs kup-i-trzymaj +21.45% → przy tej samej ekspozycji +0.14%]  bije B1=tak B2=tak B3=tak\n  okno  3  06-12–07-12  Sharpe/transakcję=-0.1327  transakcje=36  reżim=trend_down  powroty=11%  [brutto: Sharpe/transakcję=-0.1227, zwrot -0.09%]  [strategia -0.10% przy ekspozycji 0.5% vs kup-i-trzymaj +4.47% → przy tej samej ekspozycji +0.02%]  bije B1=nie B2=nie B3=nie\n  okno  4  07-12–08-11  Sharpe/transakcję=-0.1578  transakcje=40  reżim=trend_up  powroty=12%  [brutto: Sharpe/transakcję=-0.1438, zwrot -0.13%]  [strategia -0.14% przy ekspozycji 0.5% vs kup-i-trzymaj +5.63% → przy tej samej ekspozycji +0.03%]  bije B1=nie B2=nie B3=tak\n  okno  5  08-11–09-10  Sharpe/transakcję=-0.1939  transakcje=35  reżim=trend_down  powroty=6%  [brutto: Sharpe/transakcję=-0.1727, zwrot -0.05%]  [strategia -0.06% przy ekspozycji 0.2% vs kup-i-trzymaj -1.19% → przy tej samej ekspozycji -0.00%]  bije B1=nie B2=nie B3=nie\ndryf cech: okno nowe 30 dni wobec poprzedzających 90, świeca 4h, odcisk uniwersum 29172a93\n  (dryf cech pominięty — przebieg z pliku panelu)\n\nProgi wejścia dla produkcji (mediana po oknach, percentyl 0.88): trend_up=0.2137 (6 okien), trend_down=0.1821 (6 okien), range=0.1940 (6 okien), high_vol=0.3935 (6 okien)\nPrzesunięcia siatki okien (dni): okna, dodatnie, bije B2, DSR, status\n  -2:   6 okien, dodatnie   2 (33%), bije B2 2/6, DSR 0.1287, learning\n  -1:   6 okien, dodatnie   2 (33%), bije B2 1/6, DSR 0.0554, learning\n  +0:   6 okien, dodatnie   2 (33%), bije B2 1/6, DSR 0.1235, learning\n  +1:   6 okien, dodatnie   4 (67%), bije B2 3/6, DSR 0.3999, learning\n  +2:   6 okien, dodatnie   2 (33%), bije B2 1/6, DSR 0.0765, learning\n\nWariant wyboru: ic — bez losowania, jeden kandydat na każde z 6 okien\nŚrednia ekspozycja: 0.24% kapitału (limit łączny: 15% kapitału)\n  = w rynku 16.0% świec × 1.10 pozycji na świecę w rynku × 1.26% kapitału na pozycję = 0.22%\n    do wykorzystania: 8 pozycji × 1.88% = 15.0% kapitału. Zajęte: 1.10 pozycji (14% miejsc) po 67% budżetu, przez 16% czasu\nPokonano kup-i-trzymaj PRZY TEJ SAMEJ EKSPOZYCJI w 2/6 oknach (33.3%)   przedział 95%: 9.7%–70.0%\n  dla porównania, wobec odniesienia zaangażowanego w 100%: 1/6 (16.7%) — ta liczba jest funkcją znaku rynku, nie strategii\nOkna: 6, dodatnie: 2 (33.3%)   przedział ufności 95%: 9.7%–70.0%\nMediana Sharpe (OOS): -0.145\nNiewypełnione zlecenia z limitem w symulacji OOS: 0 (wejścia + wyjścia, wszystkie okna). Ich KOSZT nie jest w dopłacie — w karcie stoi jako NIEZMIERZONE.\nBije B1 przy tej samej ekspozycji (przenoszonej): 2/6 okien (33%, przedział 95% 10%–70%)\nBije B2 przy tej samej ekspozycji (przenoszonej): 1/6 okien (17%, przedział 95% 3%–56%)\nBije B3 przy tej samej ekspozycji (przenoszonej): 3/6 okien (50%, przedział 95% 19%–81%)\nB0 (gotówka): zwrot > 0 w 2/6 okien; ponad 4% w skali roku na CAŁYM kapitale w 0/6\n  brutto (przed dopłatą 2.50 pb, NIE do bramki): dodatnie 2/6, mediana Sharpe -0.133, kup-i-trzymaj przy tej samej ekspozycji pokonane w 2/6\nDeflowany Sharpe: Deflowany Sharpe 0.1235 przy progu 0.95 (Sharpe -0.0452 z 211 transakcji, 2 przetestowanych konfiguracji — N SELEKCJI tego przebiegu, nie licznik kumulatywny; poprzeczka selekcji +0.0368, skośność +1.144, kurtoza 7.120). ODPORNOŚĆ WERDYKTU: do progu 0.95 brakuje 0.1878 Sharpe'a na transakcję, czyli 2.73 błędu standardowego (1/√211 = 0.0688). Po uwzględnieniu liczby prób wynik nie jest odróżnialny od najlepszego z tylu losowych — promocja wstrzymana. DSR policzony PO doliczeniu 2.50 pb na rundę, których symulacja nie nalicza; nadal NIE ZMIERZONO: niewypelnienie, wyjscie takerem, więc ta liczba jest GÓRNYM oszacowaniem. N = 2 rozróżnialnych konfiguracji z learn.model_version (count(DISTINCT params) po wersjach candidate/active/retired plus wersja tego przebiegu; wersje, które nigdy nie wyszły ze statusu `training`, NIE są próbami — nie doszły do wyniku, więc selekcja nie mogła się na nich oprzeć: dla toru 4h to 7 z 59, zmierzone 2026-09-27) — DOLNA GRANICA: `kind` i `limit` nie były zapisywane do 2026-09-26, więc przebiegi różniące się samym cennikiem zlewały się w jedną. Licznik learn.hypothesis_trial (120 wektorów wag) NIE jest tu mianownikiem: jego kandydaci byli oceniani in-sample, a walk-forward już za nich zapłacił, licząc wynik poza oknem wyboru. Rozrzut Sharpe'ow miedzy konfiguracjami NIE ZMIERZONY: podstawiono wariancje samego estymatora pod H0 (sd = 0.0709), bo konfiguracji z policzonym Sharpe'em OOS jest 0, a prog to 20. Konfiguracje roznia sie nie tylko szumem, wiec PRAWDZIWY rozrzut jest wiekszy, poprzeczka wyzsza, a prawdziwy DSR NIZSZY niz ten — zmierzone 2026-09-27 na torze 4h: 0,0266 wobec podlogi 0,0260, czyli o 2,7%, a nie o rzad wielkosci. Liczone po DISTINCT learn.model_version.params, czyli po tej samej WIELKOSCI, ktora jest N — nie po oknach: rozrzut miedzy OKNAMI jest dziesieciokrotnie wieksszy (0,2627 wobec 0,0266 zmierzonych 2026-09-27) i nie jest rozrzutem konfiguracji.\nNajgorsze obsunięcie: -0.30%\n\nPRZEWAGA BRUTTO — po kosztach, które symulacja naliczyła (prowizja, poślizg, finansowanie), PRZED dopłatą z karty:\n  brutto: Sharpe/transakcję ze ZŁĄCZONEJ próby 211 transakcji: -0.0334\n  brutto: ta sama miara jako ŚREDNIA PO 6 OKNACH: -0.0620 — inna liczba niż wyżej, bo średnia ilorazów nie jest ilorazem; okno o kilku transakcjach waży w niej tyle samo, co okno o dwustu\n  brutto: rozkład okien: mediana -0.1333, kwartyle [-0.1655, +0.0216]\n  brutto: okien ujemnych: 4/6 (66.7%)\n  brutto: profit factor ZBIORCZY: 0.9114\n  brutto: średni zwrot z transakcji: -0.0707%, trafnych 47.4%\n\nPO DOPŁACIE (dopłata z karty 2.50 pb na rundę (w tym: spread 2.00 pb, pyl 0.50 pb) — karta BEZ: niewypelnienie (NIEZMIERZONE); wyjscie takerem (NIEZMIERZONE)) — tak liczy bramka i DSR:\n  po dopłacie: Sharpe/transakcję ze ZŁĄCZONEJ próby: -0.0452\n  po dopłacie: średnia po 6 oknach -0.0753, mediana okien -0.1433, okien ujemnych 4/6 (odchylenie PRÓBKOWE, jak w drabinie; bramka bierze medianę z `portfolio.metrics`, czyli populacyjne)\n  po dopłacie: średni zwrot z transakcji: -0.0957%, trafnych 47.4%\n\nRACHUNEK KOSZTU RUNDY — SKŁADNIK PO SKŁADNIKU, Z POCHODZENIEM:\n  prowizja: 0.200% (taryfa gieldy)\n  niewypelnienie: NIE ZMIERZONO — symulacja przyjmuje, ze limit wchodzi ZAWSZE, gdy swieca dotknela ceny; `exec.fill` nie zawiera zlecen, ktore nie weszly\n  wyjscie takerem: NIE ZMIERZONO — udzial wyjsc zlozonych agresywnie razy (taker - maker) na jednej nodze; symulacja zaklada makera na obu\n  spread: 0.020% (pomiar)\n  pyl: 0.005% (zalozenie)\n  razem CO NAJMNIEJ 0.225% rundy — bez niewypelnienie, wyjscie takerem. Prawdziwy koszt jest WIEKSZY o nieznana wartosc; ta liczba jest dolnym oszacowaniem, nie kosztem.\n\nKOSZT PROGOWY (z brutto): -7.07 pb na rundę — UJEMNY. Przewagi nie ma JUŻ przy kosztach, które symulacja nalicza; nienaliczone składniki (niewypelnienie, wyjscie takerem) mogą ją tylko pogłębić.\n\nSHARPE PRZY RÓŻNYCH WARTOŚCIACH TEGO, CZEGO NIE ZMIERZONO (dopłata na rundę):\n  dopłata |  zbiorczy | średnia po oknach\n     0.0 pb |   -0.0334 |           -0.0614   <- brutto (sama symulacja)\n     2.0 pb |   -0.0428 |           -0.0725\n     2.5 pb |   -0.0452 |           -0.0753   <- dopłata z karty: tak liczy bramka\n     5.0 pb |   -0.0570 |           -0.0893\n    10.0 pb |   -0.0806 |           -0.1172\n    20.0 pb |   -0.1279 |           -0.1731\n  Obie kolumny liczone tym samym odchyleniem PRÓBKOWYM (n−1). `portfolio.metrics` liczy populacyjne (n), czyli przy medianie dwudziestu transakcji na okno zawyża każdy Sharpe o ok. 2,6% — zawsze w górę.\n\nSTRONA DŁUGA KONTRA KRÓTKA (złączona próba OOS, po kosztach):\n  długa                      n=211   Sharpe/transakcję -0.0452 ±0.0688  trafność 47.4%  średnia -0.0957%\n  krótka                     n=0     — za mało transakcji, żeby policzyć Sharpe'a\n  udział krótkich w transakcjach: 0.0%\n  po reżimach (reżim DOMINUJĄCY w oknie, nie w chwili wejścia):\n    trend_down\n    długa                      n=108   Sharpe/transakcję -0.0573 ±0.0962  trafność 44.4%  średnia -0.1293%\n    krótka                     n=0     — za mało transakcji, żeby policzyć Sharpe'a\n    trend_up\n    długa                      n=103   Sharpe/transakcję -0.0307 ±0.0985  trafność 50.5%  średnia -0.0605%\n    krótka                     n=0     — za mało transakcji, żeby policzyć Sharpe'a\n  RÓŻNICA STRON NIE JEST TU TESTEM: przedziały ±1/√n liczone na transakcjach, które NIE są niezależne (te same świece, te same okna). Liczba mówi, czy warto pytać dalej.\n\nWYNIK WOBEC POKRYCIA WAG (złączona próba OOS, po kosztach):\n  pokrycie 0.9–1.0               n=211   Sharpe/transakcję -0.0452 ±0.0688  trafność 47.4%  średnia -0.0957%\n  po reżimach — TU rozdziela się reżim od pokrycia:\n    trend_down — pokrycie NIE ZMIENIA SIĘ w tym reżimie, więc nie rozdziela niczego\n    pokrycie 0.9–1.0             n=108   Sharpe/transakcję -0.0573 ±0.0962  trafność 44.4%  średnia -0.1293%\n    trend_up — pokrycie NIE ZMIENIA SIĘ w tym reżimie, więc nie rozdziela niczego\n    pokrycie 0.9–1.0             n=103   Sharpe/transakcję -0.0307 ±0.0985  trafność 50.5%  średnia -0.0605%\n  To NIE JEST test: transakcje nie są niezależne, a kubełków jest cztery razy tyle, ile reżimów. Służy do postawienia progu, nie do jego uzasadnienia.\nUdział w transakcjach (6 największych z 8): ETHUSDC 18%  XRPUSDC 13%  DOGEUSDC 13%  BTCUSDC 12%  LINKUSDC 12%  SOLUSDC 12%\nPrzetestowanych konfiguracji: 120\nStan: learning — Werdykt z 5 przesunięć siatki okien (-2…+2 dni): learning 5/5; okna dodatnie min/śr/max 33/40/67%; DSR min/śr/max 0.0554/0.1568/0.3999 → status learning (zmienia się tylko, gdy MINIMUM z przesunięć przekracza próg). Przesunięcie 0: Za mało informatywnych okien: 6 z wymaganych 20. Strategia zawiera zbyt mało transakcji, żeby cokolwiek orzec — to nie jest wynik ujemny, to brak wyniku. Deflowany Sharpe 0.1235 przy progu 0.95 (Sharpe -0.0452 z 211 transakcji, 2 przetestowanych konfiguracji — N SELEKCJI tego przebiegu, nie licznik kumulatywny; poprzeczka selekcji +0.0368, skośność +1.144, kurtoza 7.120). ODPORNOŚĆ WERDYKTU: do progu 0.95 brakuje 0.1878 Sharpe'a na transakcję, czyli 2.73 błędu standardowego (1/√211 = 0.0688). Po uwzględnieniu liczby prób wynik nie jest odróżnialny od najlepszego z tylu losowych — promocja wstrzymana. DSR policzony PO doliczeniu 2.50 pb na rundę, których symulacja nie nalicza; nadal NIE ZMIERZONO: niewypelnienie, wyjscie takerem, więc ta liczba jest GÓRNYM oszacowaniem. N = 2 rozróżnialnych konfiguracji z learn.model_version (count(DISTINCT params) po wersjach candidate/active/retired plus wersja tego przebiegu; wersje, które nigdy nie wyszły ze statusu `training`, NIE są próbami — nie doszły do wyniku, więc selekcja nie mogła się na nich oprzeć: dla toru 4h to 7 z 59, zmierzone 2026-09-27) — DOLNA GRANICA: `kind` i `limit` nie były zapisywane do 2026-09-26, więc przebiegi różniące się samym cennikiem zlewały się w jedną. Licznik learn.hypothesis_trial (120 wektorów wag) NIE jest tu mianownikiem: jego kandydaci byli oceniani in-sample, a walk-forward już za nich zapłacił, licząc wynik poza oknem wyboru. Rozrzut Sharpe'ow miedzy konfiguracjami NIE ZMIERZONY: podstawiono wariancje samego estymatora pod H0 (sd = 0.0709), bo konfiguracji z policzonym Sharpe'em OOS jest 0, a prog to 20. Konfiguracje roznia sie nie tylko szumem, wiec PRAWDZIWY rozrzut jest wiekszy, poprzeczka wyzsza, a prawdziwy DSR NIZSZY niz ten — zmierzone 2026-09-27 na torze 4h: 0,0266 wobec podlogi 0,0260, czyli o 2,7%, a nie o rzad wielkosci. Liczone po DISTINCT learn.model_version.params, czyli po tej samej WIELKOSCI, ktora jest N — nie po oknach: rozrzut miedzy OKNAMI jest dziesieciokrotnie wieksszy (0,2627 wobec 0,0266 zmierzonych 2026-09-27) i nie jest rozrzutem konfiguracji.\nPODSUMOWANIE_JSON {\"days\": 398, \"od\": \"2025-08-31 04:00\", \"do\": \"2026-10-03 04:00\", \"pesymistyczna\": false, \"opoznienie_min\": 0, \"limit\": true, \"okna\": 6, \"dodatnie\": 2, \"transakcji\": 211, \"zwrot_na_runde_pb\": -9.572027388591184, \"doplata_pb\": 2.4994552304595214, \"dsr\": 0.12351031677867788, \"n_selekcji\": 2, \"mediana_sharpe\": -0.14525, \"wypelnialnosc\": 1.0, \"niewypelnienie_pb\": null, \"brak_swiec_1h\": 0, \"bije_b1\": [2, 6], \"bije_b2\": [1, 6], \"bije_b3\": [3, 6], \"b0_dodatnie\": [2, 6], \"status\": \"learning\", \"odniesienia\": {\"strategia\": [-0.008099999999999998, 0.004450333333333333, 2, 6], \"B1\": [6.063116337362929, 1.0, 5, 6], \"B2\": [-0.0784835886254492, 0.39013035381750466, 3, 6], \"B3\": [-0.1044227602073421, 0.03808193668528864, 2, 6]}, \"od_siatki\": \"2022-09-01\", \"przesuniecia\": {\"-2\": {\"days\": 398, \"od\": \"2025-08-31 04:00\", \"do\": \"2026-10-03 04:00\", \"pesymistyczna\": false, \"opoznienie_min\": 0, \"limit\": true, \"okna\": 6, \"dodatnie\": 2, \"transakcji\": 207, \"zwrot_na_runde_pb\": -8.908661590070245, \"doplata_pb\": 2.4994552304595214, \"dsr\": 0.1287361325860883, \"n_selekcji\": 2, \"mediana_sharpe\": -0.0838, \"wypelnialnosc\": 1.0, \"niewypelnienie_pb\": null, \"brak_swiec_1h\": 0, \"bije_b1\": [2, 6], \"bije_b2\": [2, 6], \"bije_b3\": [2, 6], \"b0_dodatnie\": [2, 6], \"status\": \"learning\", \"odniesienia\": {\"strategia\": [-0.010399999999999998, 0.004067333333333333, 2, 6], \"B1\": [5.8216476430167345, 1.0, 5, 6], \"B2\": [1.3164962953765569, 0.3947858472998138, 3, 6], \"B3\": [-0.11715360710022359, 0.037756052141527004, 2, 6]}, \"start_siatki\": \"2025-09-13 00:00\"}, \"-1\": {\"days\": 398, \"od\": \"2025-08-31 04:00\", \"do\": \"2026-10-03 04:00\", \"pesymistyczna\": false, \"opoznienie_min\": 0, \"limit\": true, \"okna\": 6, \"dodatnie\": 2, \"transakcji\": 214, \"zwrot_na_runde_pb\": -14.777326727327925, \"doplata_pb\": 2.4994552304595214, \"dsr\": 0.05537851908346894, \"n_selekcji\": 2, \"mediana_sharpe\": -0.14145, \"wypelnialnosc\": 1.0, \"niewypelnienie_pb\": null, \"brak_swiec_1h\": 0, \"bije_b1\": [1, 6], \"bije_b2\": [1, 6], \"bije_b3\": [2, 6], \"b0_dodatnie\": [2, 6], \"status\": \"learning\", \"odniesienia\": {\"strategia\": [-0.03808333333333333, 0.004406666666666666, 2, 6], \"B1\": [5.870293317017224, 1.0, 6, 6], \"B2\": [2.958435012351494, 0.3947858472998138, 4, 6], \"B3\": [-0.12297352546897321, 0.03803538175046555, 2, 6]}, \"start_siatki\": \"2025-09-14 00:00\"}, \"+0\": {\"days\": 398, \"od\": \"2025-08-31 04:00\", \"do\": \"2026-10-03 04:00\", \"pesymistyczna\": false, \"opoznienie_min\": 0, \"limit\": true, \"okna\": 6, \"dodatnie\": 2, \"transakcji\": 211, \"zwrot_na_runde_pb\": -9.572027388591184, \"doplata_pb\": 2.4994552304595214, \"dsr\": 0.12351031677867788, \"n_selekcji\": 2, \"mediana_sharpe\": -0.14525, \"wypelnialnosc\": 1.0, \"niewypelnienie_pb\": null, \"brak_swiec_1h\": 0, \"bije_b1\": [2, 6], \"bije_b2\": [1, 6], \"bije_b3\": [3, 6], \"b0_dodatnie\": [2, 6], \"status\": \"learning\", \"odniesienia\": {\"strategia\": [-0.008099999999999998, 0.004450333333333333, 2, 6], \"B1\": [6.063116337362929, 1.0, 5, 6], \"B2\": [-0.0784835886254492, 0.39013035381750466, 3, 6], \"B3\": [-0.1044227602073421, 0.03808193668528864, 2, 6]}, \"start_siatki\": \"2025-09-15 00:00\"}, \"+1\": {\"days\": 398, \"od\": \"2025-08-31 04:00\", \"do\": \"2026-10-03 04:00\", \"pesymistyczna\": false, \"opoznienie_min\": 0, \"limit\": true, \"okna\": 6, \"dodatnie\": 4, \"transakcji\": 200, \"zwrot_na_runde_pb\": 3.996814223812618, \"doplata_pb\": 2.4994552304595214, \"dsr\": 0.39987980916098237, \"n_selekcji\": 2, \"mediana_sharpe\": 0.0776, \"wypelnialnosc\": 1.0, \"niewypelnienie_pb\": null, \"brak_swiec_1h\": 0, \"bije_b1\": [2, 6], \"bije_b2\": [3, 6], \"bije_b3\": [4, 6], \"b0_dodatnie\": [4, 6], \"status\": \"learning\", \"odniesienia\": {\"strategia\": [0.03176666666666667, 0.004343833333333333, 4, 6], \"B1\": [6.066536346459173, 1.0, 5, 6], \"B2\": [-2.6273788696561273, 0.3845437616387337, 1, 6], \"B3\": [-0.08979823876129182, 0.03808193668528864, 2, 6]}, \"start_siatki\": \"2025-09-16 00:00\"}, \"+2\": {\"days\": 398, \"od\": \"2025-08-31 04:00\", \"do\": \"2026-10-03 04:00\", \"pesymistyczna\": false, \"opoznienie_min\": 0, \"limit\": true, \"okna\": 6, \"dodatnie\": 2, \"transakcji\": 203, \"zwrot_na_runde_pb\": -13.888972763111262, \"doplata_pb\": 2.4994552304595214, \"dsr\": 0.07649426111351644, \"n_selekcji\": 2, \"mediana_sharpe\": -0.059149999999999994, \"wypelnialnosc\": 1.0, \"niewypelnienie_pb\": null, \"brak_swiec_1h\": 0, \"bije_b1\": [2, 6], \"bije_b2\": [1, 6], \"bije_b3\": [3, 6], \"b0_dodatnie\": [2, 6], \"status\": \"learning\", \"odniesienia\": {\"strategia\": [-0.030866666666666664, 0.004367166666666667, 2, 6], \"B1\": [5.528633363109376, 1.0, 5, 6], \"B2\": [0.4311593073718114, 0.3789571694599628, 3, 6], \"B3\": [0.002242093174832598, 0.03808193668528864, 2, 6]}, \"start_siatki\": \"2025-09-17 00:00\"}}, \"stabilny\": {\"status\": \"learning\", \"dsr\": [0.05537851908346894, 0.15679980774454677, 0.39987980916098237], \"dodatnie_pct\": [33.33333333333333, 39.99999999999999, 66.66666666666666]}}\n"
  },
  "ic_wspolny": {
   "json": {
    "b0_dodatnie": [
     2,
-    4
+    5
    ],
    "bije_b1": [
     1,
-    4
+    5
    ],
    "bije_b2": [
-    2,
-    4
+    3,
+    5
    ],
    "bije_b3": [
-    3,
-    4
+    4,
+    5
    ],
    "brak_swiec_1h": 0,
    "days": 400,
    "do": "2026-10-03 04:00",
    "dodatnie": 2,
    "doplata_pb": 2.4994552304595214,
-   "dsr": 0.4853067216772369,
+   "dsr": 0.38770686907947405,
    "limit": true,
-   "mediana_sharpe": -0.0062500000000000056,
+   "mediana_sharpe": -0.0372,
    "n_selekcji": 2,
    "niewypelnienie_pb": null,
    "od": "2025-08-29 04:00",
    "odniesienia": {
     "B1": [
-     6.212001072346841,
+     6.158402458103995,
      1.0,
-     2,
-     4
+     3,
+     5
     ],
     "B2": [
-     0.3572035363450144,
-     0.39385474860335196,
+     -0.29092706450181915,
+     0.38212290502793295,
      1,
-     4
+     5
     ],
     "B3": [
-     0.04602685098480769,
-     0.04399441340782123,
+     -0.07520827071456963,
+     0.038547486033519554,
      2,
-     4
+     5
     ],
     "strategia": [
-     0.054075,
-     0.0067735,
+     0.032639999999999995,
+     0.0047014,
      2,
-     4
+     5
     ]
    },
-   "okna": 4,
+   "okna": 5,
    "opoznienie_min": 0,
    "pesymistyczna": false,
    "status": "learning",
-   "transakcji": 115,
+   "transakcji": 107,
    "wypelnialnosc": 1.0,
-   "zwrot_na_runde_pb": 15.174869314324246
+   "zwrot_na_runde_pb": 6.834952186246743
   },
-  "stdout": "  Spread z bazy: 2.000 pb na rundę (średnia ze średnich per instrument, 2 instrumentów, 200 świec)\n    okno pomiaru: 2025-08-29 04:00..2026-10-03 04:00 UTC\n    rozkład po świecach: mediana 2.000 | q1 1.000 | q3 3.000 | max 3.000 pb\n    skrajne instrumenty: BTCUSDC 1.000 pb, ETHUSDC 3.000 pb\n  prowizja: 0.200% (taryfa gieldy)\n  niewypelnienie: NIE ZMIERZONO — symulacja przyjmuje, ze limit wchodzi ZAWSZE, gdy swieca dotknela ceny; `exec.fill` nie zawiera zlecen, ktore nie weszly\n  wyjscie takerem: NIE ZMIERZONO — udzial wyjsc zlozonych agresywnie razy (taker - maker) na jednej nodze; symulacja zaklada makera na obu\n  spread: 0.020% (pomiar)\n  pyl: 0.005% (zalozenie)\n  razem CO NAJMNIEJ 0.225% rundy — bez niewypelnienie, wyjscie takerem. Prawdziwy koszt jest WIEKSZY o nieznana wartosc; ta liczba jest dolnym oszacowaniem, nie kosztem.\n  pył per instrument (pb na rundę; notional 975 z test 0.260, cena = maksimum okna):\n    ADAUSDC 0.38  BTCUSDC 0.10  DOGEUSDC 0.50  ETHUSDC 0.18  LINKUSDC 1.21  SOLUSDC 0.24  SUIUSDC 0.61  XRPUSDC 0.78\n    do karty: średnia 0.50 pb (maksimum 1.21 pb)\n  Miary okien OOS i bramka statusu PO dopłacie 2.50 pb na rundę (ta sama KWOTA co w DSR); selekcja wag in-sample liczona BRUTTO; V[SR_n] miesza przebiegi brutto sprzed 2026-10-02 z przebiegami po dopłacie; kup-i-trzymaj po 2.04 pb na swoją jedną rundę. Liczby „brutto” = przed dopłatą, tylko do porównania.\n  dopłata z karty 2.50 pb na rundę (w tym: spread 2.00 pb, pyl 0.50 pb) — karta BEZ: niewypelnienie (NIEZMIERZONE); wyjscie takerem (NIEZMIERZONE)\n  BTCUSDC      2,399 punktów panelu\n  ETHUSDC      2,399 punktów panelu\n  SOLUSDC      2,399 punktów panelu\n  ADAUSDC      2,399 punktów panelu\n  XRPUSDC      2,399 punktów panelu\n  DOGEUSDC     2,399 punktów panelu\n  LINKUSDC     2,399 punktów panelu\n  SUIUSDC      2,399 punktów panelu\n  rewizje po czasie decyzji: 201 z 249,496 wartości cech (0.081%) — na tych silnik widział inną liczbę niż ta, na której uczy się trener\n  sygnały bez zmienności na danych, wyłączone z kalibracji: news_shock, pozycjonowanie_tlumu\n  progi wejścia (WSPÓLNY dla reżimów, percentyl 0.88, min. 50 próbek): high_vol=0.2937 (n=1569), news_shock=0.2937 (n=0), range=0.2937 (n=532), trend_down=0.2937 (n=2273), trend_up=0.2937 (n=2531)\n  okno  0  02-25–03-27  Sharpe/transakcję=+0.0000  transakcje=9  reżim=trend_down  powroty=22%  (poniżej 12 transakcji — pominięte w ocenie)\n  okno  1  03-27–04-26  Sharpe/transakcję=-0.1610  transakcje=19  reżim=trend_down  powroty=16%  [brutto: Sharpe/transakcję=-0.1488, zwrot -0.10%]  [strategia -0.11% przy ekspozycji 0.3% vs kup-i-trzymaj -0.84% → przy tej samej ekspozycji -0.00%]  bije B1=nie B2=nie B3=tak\n  okno  2  04-26–05-26  Sharpe/transakcję=+0.1571  transakcje=34  reżim=trend_up  powroty=29%  [brutto: Sharpe/transakcję=+0.1637, zwrot +0.32%]  [strategia +0.31% przy ekspozycji 1.0% vs kup-i-trzymaj +12.28% → przy tej samej ekspozycji +0.12%]  bije B1=tak B2=tak B3=tak\n  okno  3  05-26–06-25  Sharpe/transakcję=+0.1020  transakcje=37  reżim=trend_up  powroty=11%  [brutto: Sharpe/transakcję=+0.1092, zwrot +0.16%]  [strategia +0.15% przy ekspozycji 0.9% vs kup-i-trzymaj +20.68% → przy tej samej ekspozycji +0.20%]  bije B1=nie B2=tak B3=nie\n  okno  4  06-25–07-25  Sharpe/transakcję=-0.1145  transakcje=25  reżim=trend_down  powroty=8%  [brutto: Sharpe/transakcję=-0.1071, zwrot -0.12%]  [strategia -0.13% przy ekspozycji 0.5% vs kup-i-trzymaj -7.27% → przy tej samej ekspozycji -0.04%]  bije B1=nie B2=nie B3=tak\n  okno  5  07-25–08-24  Sharpe/transakcję=+0.0000  transakcje=0  reżim=trend_up  (poniżej 12 transakcji — pominięte w ocenie)\n  okno  6  08-24–09-23  Sharpe/transakcję=+0.0000  transakcje=0  reżim=trend_down  (poniżej 12 transakcji — pominięte w ocenie)\ndryf cech: okno nowe 30 dni wobec poprzedzających 90, świeca 4h, odcisk uniwersum 29172a93\n  (dryf cech pominięty — przebieg z pliku panelu)\n\nProgi wejścia dla produkcji (mediana po oknach, percentyl 0.88): trend_up=0.2894 (7 okien), trend_down=0.2894 (7 okien), range=0.2894 (7 okien), high_vol=0.2894 (7 okien), news_shock=0.2894 (7 okien)\n\nWariant wyboru: ic — bez losowania, jeden kandydat na każde z 7 okien\nŚrednia ekspozycja: 0.47% kapitału (limit łączny: 15% kapitału)\n  = w rynku 29.9% świec × 1.11 pozycji na świecę w rynku × 1.36% kapitału na pozycję = 0.45%\n    do wykorzystania: 8 pozycji × 1.88% = 15.0% kapitału. Zajęte: 1.11 pozycji (14% miejsc) po 73% budżetu, przez 30% czasu\nPokonano kup-i-trzymaj PRZY TEJ SAMEJ EKSPOZYCJI w 1/4 oknach (25.0%)   przedział 95%: 4.6%–69.9%\n  dla porównania, wobec odniesienia zaangażowanego w 100%: 2/4 (50.0%) — ta liczba jest funkcją znaku rynku, nie strategii\nOkna: 4, dodatnie: 2 (50.0%)   przedział ufności 95%: 15.0%–85.0%\nMediana Sharpe (OOS): -0.006\nNiewypełnione zlecenia z limitem w symulacji OOS: 0 (wejścia + wyjścia, wszystkie okna). Ich KOSZT nie jest w dopłacie — w karcie stoi jako NIEZMIERZONE.\nBije B1 przy tej samej ekspozycji (przenoszonej): 1/4 okien (25%, przedział 95% 5%–70%)\nBije B2 przy tej samej ekspozycji (przenoszonej): 2/4 okien (50%, przedział 95% 15%–85%)\nBije B3 przy tej samej ekspozycji (przenoszonej): 3/4 okien (75%, przedział 95% 30%–95%)\nB0 (gotówka): zwrot > 0 w 2/4 okien; ponad 4% w skali roku na CAŁYM kapitale w 0/4\n  brutto (przed dopłatą 2.50 pb, NIE do bramki): dodatnie 2/4, mediana Sharpe +0.001, kup-i-trzymaj przy tej samej ekspozycji pokonane w 1/4\nDeflowany Sharpe: Deflowany Sharpe 0.4853 przy progu 0.95 (Sharpe +0.0447 z 115 transakcji, 2 przetestowanych konfiguracji — N SELEKCJI tego przebiegu, nie licznik kumulatywny; poprzeczka selekcji +0.0481, skośność +0.596, kurtoza 3.517). ODPORNOŚĆ WERDYKTU: do progu 0.95 brakuje 0.1502 Sharpe'a na transakcję, czyli 1.61 błędu standardowego (1/√115 = 0.0933). Po uwzględnieniu liczby prób wynik nie jest odróżnialny od najlepszego z tylu losowych — promocja wstrzymana. DSR policzony PO doliczeniu 2.50 pb na rundę, których symulacja nie nalicza; nadal NIE ZMIERZONO: niewypelnienie, wyjscie takerem, więc ta liczba jest GÓRNYM oszacowaniem. N = 2 rozróżnialnych konfiguracji z learn.model_version (count(DISTINCT params) po wersjach candidate/active/retired plus wersja tego przebiegu; wersje, które nigdy nie wyszły ze statusu `training`, NIE są próbami — nie doszły do wyniku, więc selekcja nie mogła się na nich oprzeć: dla toru 4h to 7 z 59, zmierzone 2026-09-27) — DOLNA GRANICA: `kind` i `limit` nie były zapisywane do 2026-09-26, więc przebiegi różniące się samym cennikiem zlewały się w jedną. Licznik learn.hypothesis_trial (120 wektorów wag) NIE jest tu mianownikiem: jego kandydaci byli oceniani in-sample, a walk-forward już za nich zapłacił, licząc wynik poza oknem wyboru. Rozrzut Sharpe'ow miedzy konfiguracjami NIE ZMIERZONY: podstawiono wariancje samego estymatora pod H0 (sd = 0.0925), bo konfiguracji z policzonym Sharpe'em OOS jest 0, a prog to 20. Konfiguracje roznia sie nie tylko szumem, wiec PRAWDZIWY rozrzut jest wiekszy, poprzeczka wyzsza, a prawdziwy DSR NIZSZY niz ten — zmierzone 2026-09-27 na torze 4h: 0,0266 wobec podlogi 0,0260, czyli o 2,7%, a nie o rzad wielkosci. Liczone po DISTINCT learn.model_version.params, czyli po tej samej WIELKOSCI, ktora jest N — nie po oknach: rozrzut miedzy OKNAMI jest dziesieciokrotnie wieksszy (0,2627 wobec 0,0266 zmierzonych 2026-09-27) i nie jest rozrzutem konfiguracji.\nNajgorsze obsunięcie: -0.30%\n\nPRZEWAGA BRUTTO — po kosztach, które symulacja naliczyła (prowizja, poślizg, finansowanie), PRZED dopłatą z karty:\n  brutto: Sharpe/transakcję ze ZŁĄCZONEJ próby 115 transakcji: +0.0520\n  brutto: ta sama miara jako ŚREDNIA PO 4 OKNACH: +0.0043 — inna liczba niż wyżej, bo średnia ilorazów nie jest ilorazem; okno o kilku transakcjach waży w niej tyle samo, co okno o dwustu\n  brutto: rozkład okien: mediana +0.0011, kwartyle [-0.1175, +0.1228]\n  brutto: okien ujemnych: 2/4 (50.0%)\n  brutto: profit factor ZBIORCZY: 1.1470\n  brutto: średni zwrot z transakcji: +0.1767%, trafnych 46.1%\n\nPO DOPŁACIE (dopłata z karty 2.50 pb na rundę (w tym: spread 2.00 pb, pyl 0.50 pb) — karta BEZ: niewypelnienie (NIEZMIERZONE); wyjscie takerem (NIEZMIERZONE)) — tak liczy bramka i DSR:\n  po dopłacie: Sharpe/transakcję ze ZŁĄCZONEJ próby: +0.0447\n  po dopłacie: średnia po 4 oknach -0.0034, mediana okien -0.0058, okien ujemnych 2/4 (odchylenie PRÓBKOWE, jak w drabinie; bramka bierze medianę z `portfolio.metrics`, czyli populacyjne)\n  po dopłacie: średni zwrot z transakcji: +0.1517%, trafnych 46.1%\n\nRACHUNEK KOSZTU RUNDY — SKŁADNIK PO SKŁADNIKU, Z POCHODZENIEM:\n  prowizja: 0.200% (taryfa gieldy)\n  niewypelnienie: NIE ZMIERZONO — symulacja przyjmuje, ze limit wchodzi ZAWSZE, gdy swieca dotknela ceny; `exec.fill` nie zawiera zlecen, ktore nie weszly\n  wyjscie takerem: NIE ZMIERZONO — udzial wyjsc zlozonych agresywnie razy (taker - maker) na jednej nodze; symulacja zaklada makera na obu\n  spread: 0.020% (pomiar)\n  pyl: 0.005% (zalozenie)\n  razem CO NAJMNIEJ 0.225% rundy — bez niewypelnienie, wyjscie takerem. Prawdziwy koszt jest WIEKSZY o nieznana wartosc; ta liczba jest dolnym oszacowaniem, nie kosztem.\n\nKOSZT PROGOWY (z brutto): +17.67 pb na rundę. Tyle wynosi cały zapas na to, czego symulacja NIE liczy. Jeśli spread, niewypełnienie i finansowanie sumują się do więcej, przewagi nie ma — i nikt dotąd nie zmierzył, czy sumują się do mniej.\n  dla skali: koszt naliczony to 22.50 pb rundy, czyli 1.27× próg\n\nSHARPE PRZY RÓŻNYCH WARTOŚCIACH TEGO, CZEGO NIE ZMIERZONO (dopłata na rundę):\n  dopłata |  zbiorczy | średnia po oknach\n     0.0 pb |   +0.0520 |           +0.0048   <- brutto (sama symulacja)\n     2.0 pb |   +0.0461 |           -0.0017\n     2.5 pb |   +0.0447 |           -0.0034   <- dopłata z karty: tak liczy bramka\n     5.0 pb |   +0.0373 |           -0.0116\n    10.0 pb |   +0.0226 |           -0.0279\n    20.0 pb |   -0.0068 |           -0.0607\n  Obie kolumny liczone tym samym odchyleniem PRÓBKOWYM (n−1). `portfolio.metrics` liczy populacyjne (n), czyli przy medianie dwudziestu transakcji na okno zawyża każdy Sharpe o ok. 2,6% — zawsze w górę.\n\nSTRONA DŁUGA KONTRA KRÓTKA (złączona próba OOS, po kosztach):\n  długa                      n=115   Sharpe/transakcję +0.0447 ±0.0933  trafność 46.1%  średnia +0.1517%\n  krótka                     n=0     — za mało transakcji, żeby policzyć Sharpe'a\n  udział krótkich w transakcjach: 0.0%\n  po reżimach (reżim DOMINUJĄCY w oknie, nie w chwili wejścia):\n    trend_down\n    długa                      n=44    Sharpe/transakcję -0.1244 ±0.1508  trafność 43.2%  średnia -0.3611%\n    krótka                     n=0     — za mało transakcji, żeby policzyć Sharpe'a\n    trend_up\n    długa                      n=71    Sharpe/transakcję +0.1285 ±0.1187  trafność 47.9%  średnia +0.4696%\n    krótka                     n=0     — za mało transakcji, żeby policzyć Sharpe'a\n  RÓŻNICA STRON NIE JEST TU TESTEM: przedziały ±1/√n liczone na transakcjach, które NIE są niezależne (te same świece, te same okna). Liczba mówi, czy warto pytać dalej.\n\nWYNIK WOBEC POKRYCIA WAG (złączona próba OOS, po kosztach):\n  pokrycie 0.9–1.0               n=115   Sharpe/transakcję +0.0447 ±0.0933  trafność 46.1%  średnia +0.1517%\n  po reżimach — TU rozdziela się reżim od pokrycia:\n    trend_down — pokrycie NIE ZMIENIA SIĘ w tym reżimie, więc nie rozdziela niczego\n    pokrycie 0.9–1.0             n=44    Sharpe/transakcję -0.1244 ±0.1508  trafność 43.2%  średnia -0.3611%\n    trend_up — pokrycie NIE ZMIENIA SIĘ w tym reżimie, więc nie rozdziela niczego\n    pokrycie 0.9–1.0             n=71    Sharpe/transakcję +0.1285 ±0.1187  trafność 47.9%  średnia +0.4696%\n  To NIE JEST test: transakcje nie są niezależne, a kubełków jest cztery razy tyle, ile reżimów. Służy do postawienia progu, nie do jego uzasadnienia.\nUdział w transakcjach (6 największych z 8): DOGEUSDC 16%  SUIUSDC 15%  SOLUSDC 14%  ETHUSDC 13%  LINKUSDC 13%  XRPUSDC 12%\nPrzetestowanych konfiguracji: 120\nStan: learning — Za mało informatywnych okien: 4 z wymaganych 20. Strategia zawiera zbyt mało transakcji, żeby cokolwiek orzec — to nie jest wynik ujemny, to brak wyniku. Deflowany Sharpe 0.4853 przy progu 0.95 (Sharpe +0.0447 z 115 transakcji, 2 przetestowanych konfiguracji — N SELEKCJI tego przebiegu, nie licznik kumulatywny; poprzeczka selekcji +0.0481, skośność +0.596, kurtoza 3.517). ODPORNOŚĆ WERDYKTU: do progu 0.95 brakuje 0.1502 Sharpe'a na transakcję, czyli 1.61 błędu standardowego (1/√115 = 0.0933). Po uwzględnieniu liczby prób wynik nie jest odróżnialny od najlepszego z tylu losowych — promocja wstrzymana. DSR policzony PO doliczeniu 2.50 pb na rundę, których symulacja nie nalicza; nadal NIE ZMIERZONO: niewypelnienie, wyjscie takerem, więc ta liczba jest GÓRNYM oszacowaniem. N = 2 rozróżnialnych konfiguracji z learn.model_version (count(DISTINCT params) po wersjach candidate/active/retired plus wersja tego przebiegu; wersje, które nigdy nie wyszły ze statusu `training`, NIE są próbami — nie doszły do wyniku, więc selekcja nie mogła się na nich oprzeć: dla toru 4h to 7 z 59, zmierzone 2026-09-27) — DOLNA GRANICA: `kind` i `limit` nie były zapisywane do 2026-09-26, więc przebiegi różniące się samym cennikiem zlewały się w jedną. Licznik learn.hypothesis_trial (120 wektorów wag) NIE jest tu mianownikiem: jego kandydaci byli oceniani in-sample, a walk-forward już za nich zapłacił, licząc wynik poza oknem wyboru. Rozrzut Sharpe'ow miedzy konfiguracjami NIE ZMIERZONY: podstawiono wariancje samego estymatora pod H0 (sd = 0.0925), bo konfiguracji z policzonym Sharpe'em OOS jest 0, a prog to 20. Konfiguracje roznia sie nie tylko szumem, wiec PRAWDZIWY rozrzut jest wiekszy, poprzeczka wyzsza, a prawdziwy DSR NIZSZY niz ten — zmierzone 2026-09-27 na torze 4h: 0,0266 wobec podlogi 0,0260, czyli o 2,7%, a nie o rzad wielkosci. Liczone po DISTINCT learn.model_version.params, czyli po tej samej WIELKOSCI, ktora jest N — nie po oknach: rozrzut miedzy OKNAMI jest dziesieciokrotnie wieksszy (0,2627 wobec 0,0266 zmierzonych 2026-09-27) i nie jest rozrzutem konfiguracji.\nPODSUMOWANIE_JSON {\"days\": 400, \"od\": \"2025-08-29 04:00\", \"do\": \"2026-10-03 04:00\", \"pesymistyczna\": false, \"opoznienie_min\": 0, \"limit\": true, \"okna\": 4, \"dodatnie\": 2, \"transakcji\": 115, \"zwrot_na_runde_pb\": 15.174869314324246, \"doplata_pb\": 2.4994552304595214, \"dsr\": 0.4853067216772369, \"n_selekcji\": 2, \"mediana_sharpe\": -0.0062500000000000056, \"wypelnialnosc\": 1.0, \"niewypelnienie_pb\": null, \"brak_swiec_1h\": 0, \"bije_b1\": [1, 4], \"bije_b2\": [2, 4], \"bije_b3\": [3, 4], \"b0_dodatnie\": [2, 4], \"status\": \"learning\", \"odniesienia\": {\"strategia\": [0.054075, 0.0067735, 2, 4], \"B1\": [6.212001072346841, 1.0, 2, 4], \"B2\": [0.3572035363450144, 0.39385474860335196, 1, 4], \"B3\": [0.04602685098480769, 0.04399441340782123, 2, 4]}}\n"
+  "stdout": "  Spread z bazy: 2.000 pb na rundę (średnia ze średnich per instrument, 2 instrumentów, 200 świec)\n    okno pomiaru: 2025-08-29 04:00..2026-10-03 04:00 UTC\n    rozkład po świecach: mediana 2.000 | q1 1.000 | q3 3.000 | max 3.000 pb\n    skrajne instrumenty: BTCUSDC 1.000 pb, ETHUSDC 3.000 pb\n  prowizja: 0.200% (taryfa gieldy)\n  niewypelnienie: NIE ZMIERZONO — symulacja przyjmuje, ze limit wchodzi ZAWSZE, gdy swieca dotknela ceny; `exec.fill` nie zawiera zlecen, ktore nie weszly\n  wyjscie takerem: NIE ZMIERZONO — udzial wyjsc zlozonych agresywnie razy (taker - maker) na jednej nodze; symulacja zaklada makera na obu\n  spread: 0.020% (pomiar)\n  pyl: 0.005% (zalozenie)\n  razem CO NAJMNIEJ 0.225% rundy — bez niewypelnienie, wyjscie takerem. Prawdziwy koszt jest WIEKSZY o nieznana wartosc; ta liczba jest dolnym oszacowaniem, nie kosztem.\n  pył per instrument (pb na rundę; notional 975 z test 0.260, cena = maksimum okna):\n    ADAUSDC 0.38  BTCUSDC 0.10  DOGEUSDC 0.50  ETHUSDC 0.18  LINKUSDC 1.21  SOLUSDC 0.24  SUIUSDC 0.61  XRPUSDC 0.78\n    do karty: średnia 0.50 pb (maksimum 1.21 pb)\n  Miary okien OOS i bramka statusu PO dopłacie 2.50 pb na rundę (ta sama KWOTA co w DSR); selekcja wag in-sample liczona BRUTTO; V[SR_n] miesza przebiegi brutto sprzed 2026-10-02 z przebiegami po dopłacie; kup-i-trzymaj po 2.04 pb na swoją jedną rundę. Liczby „brutto” = przed dopłatą, tylko do porównania.\n  dopłata z karty 2.50 pb na rundę (w tym: spread 2.00 pb, pyl 0.50 pb) — karta BEZ: niewypelnienie (NIEZMIERZONE); wyjscie takerem (NIEZMIERZONE)\n  BTCUSDC      2,399 punktów panelu\n  ETHUSDC      2,399 punktów panelu\n  SOLUSDC      2,399 punktów panelu\n  ADAUSDC      2,399 punktów panelu\n  XRPUSDC      2,399 punktów panelu\n  DOGEUSDC     2,399 punktów panelu\n  LINKUSDC     2,399 punktów panelu\n  SUIUSDC      2,399 punktów panelu\n  rewizje po czasie decyzji: 201 z 249,496 wartości cech (0.081%) — na tych silnik widział inną liczbę niż ta, na której uczy się trener\n  sygnały bez zmienności na danych, wyłączone z kalibracji: news_shock, pozycjonowanie_tlumu\n  progi wejścia (WSPÓLNY dla reżimów, percentyl 0.88, min. 50 próbek): high_vol=0.3158 (n=1671), news_shock=0.3158 (n=0), range=0.3158 (n=41), trend_down=0.3158 (n=2382), trend_up=0.3158 (n=1089)\n  okno  0  02-25–03-27  Sharpe/transakcję=+0.0000  transakcje=7  reżim=trend_down  powroty=14%  (poniżej 12 transakcji — pominięte w ocenie)\n  okno  1  03-27–04-26  Sharpe/transakcję=-0.1707  transakcje=14  reżim=trend_down  powroty=7%  [brutto: Sharpe/transakcję=-0.1593, zwrot -0.09%]  [strategia -0.09% przy ekspozycji 0.2% vs kup-i-trzymaj -0.84% → przy tej samej ekspozycji -0.00%]  bije B1=nie B2=nie B3=tak\n  okno  2  04-26–05-26  Sharpe/transakcję=+0.1447  transakcje=30  reżim=trend_up  powroty=23%  [brutto: Sharpe/transakcję=+0.1511, zwrot +0.28%]  [strategia +0.27% przy ekspozycji 0.9% vs kup-i-trzymaj +12.28% → przy tej samej ekspozycji +0.11%]  bije B1=tak B2=tak B3=tak\n  okno  3  05-26–06-25  Sharpe/transakcję=+0.0841  transakcje=21  reżim=trend_up  powroty=0%  [brutto: Sharpe/transakcję=+0.0942, zwrot +0.08%]  [strategia +0.07% przy ekspozycji 0.6% vs kup-i-trzymaj +20.68% → przy tej samej ekspozycji +0.13%]  bije B1=nie B2=tak B3=nie\n  okno  4  06-25–07-25  Sharpe/transakcję=-0.0372  transakcje=21  reżim=trend_down  powroty=10%  [brutto: Sharpe/transakcję=-0.0303, zwrot -0.05%]  [strategia -0.06% przy ekspozycji 0.5% vs kup-i-trzymaj -7.27% → przy tej samej ekspozycji -0.03%]  bije B1=nie B2=tak B3=tak\n  okno  5  07-25–08-24  Sharpe/transakcję=-0.2569  transakcje=21  reżim=trend_up  powroty=0%  [brutto: Sharpe/transakcję=-0.2346, zwrot -0.03%]  [strategia -0.03% przy ekspozycji 0.1% vs kup-i-trzymaj +5.94% → przy tej samej ekspozycji +0.01%]  bije B1=nie B2=nie B3=tak\n  okno  6  08-24–09-23  Sharpe/transakcję=+0.0000  transakcje=11  reżim=trend_down  powroty=9%  (poniżej 12 transakcji — pominięte w ocenie)\ndryf cech: okno nowe 30 dni wobec poprzedzających 90, świeca 4h, odcisk uniwersum 29172a93\n  (dryf cech pominięty — przebieg z pliku panelu)\n\nProgi wejścia dla produkcji (mediana po oknach, percentyl 0.88): trend_up=0.3067 (7 okien), trend_down=0.3067 (7 okien), range=0.3067 (7 okien), high_vol=0.3067 (7 okien), news_shock=0.3067 (7 okien)\n\nWariant wyboru: ic — bez losowania, jeden kandydat na każde z 7 okien\nŚrednia ekspozycja: 0.32% kapitału (limit łączny: 15% kapitału)\n  = w rynku 20.0% świec × 1.06 pozycji na świecę w rynku × 1.32% kapitału na pozycję = 0.28%\n    do wykorzystania: 8 pozycji × 1.88% = 15.0% kapitału. Zajęte: 1.06 pozycji (13% miejsc) po 71% budżetu, przez 20% czasu\nPokonano kup-i-trzymaj PRZY TEJ SAMEJ EKSPOZYCJI w 1/5 oknach (20.0%)   przedział 95%: 3.6%–62.4%\n  dla porównania, wobec odniesienia zaangażowanego w 100%: 2/5 (40.0%) — ta liczba jest funkcją znaku rynku, nie strategii\nOkna: 5, dodatnie: 2 (40.0%)   przedział ufności 95%: 11.8%–76.9%\nMediana Sharpe (OOS): -0.037\nNiewypełnione zlecenia z limitem w symulacji OOS: 0 (wejścia + wyjścia, wszystkie okna). Ich KOSZT nie jest w dopłacie — w karcie stoi jako NIEZMIERZONE.\nBije B1 przy tej samej ekspozycji (przenoszonej): 1/5 okien (20%, przedział 95% 4%–62%)\nBije B2 przy tej samej ekspozycji (przenoszonej): 3/5 okien (60%, przedział 95% 23%–88%)\nBije B3 przy tej samej ekspozycji (przenoszonej): 4/5 okien (80%, przedział 95% 38%–96%)\nB0 (gotówka): zwrot > 0 w 2/5 okien; ponad 4% w skali roku na CAŁYM kapitale w 0/5\n  brutto (przed dopłatą 2.50 pb, NIE do bramki): dodatnie 2/5, mediana Sharpe -0.030, kup-i-trzymaj przy tej samej ekspozycji pokonane w 1/5\nDeflowany Sharpe: Deflowany Sharpe 0.3877 przy progu 0.95 (Sharpe +0.0226 z 107 transakcji, 2 przetestowanych konfiguracji — N SELEKCJI tego przebiegu, nie licznik kumulatywny; poprzeczka selekcji +0.0500, skośność +0.877, kurtoza 4.167). ODPORNOŚĆ WERDYKTU: do progu 0.95 brakuje 0.1754 Sharpe'a na transakcję, czyli 1.81 błędu standardowego (1/√107 = 0.0967). Po uwzględnieniu liczby prób wynik nie jest odróżnialny od najlepszego z tylu losowych — promocja wstrzymana. DSR policzony PO doliczeniu 2.50 pb na rundę, których symulacja nie nalicza; nadal NIE ZMIERZONO: niewypelnienie, wyjscie takerem, więc ta liczba jest GÓRNYM oszacowaniem. N = 2 rozróżnialnych konfiguracji z learn.model_version (count(DISTINCT params) po wersjach candidate/active/retired plus wersja tego przebiegu; wersje, które nigdy nie wyszły ze statusu `training`, NIE są próbami — nie doszły do wyniku, więc selekcja nie mogła się na nich oprzeć: dla toru 4h to 7 z 59, zmierzone 2026-09-27) — DOLNA GRANICA: `kind` i `limit` nie były zapisywane do 2026-09-26, więc przebiegi różniące się samym cennikiem zlewały się w jedną. Licznik learn.hypothesis_trial (120 wektorów wag) NIE jest tu mianownikiem: jego kandydaci byli oceniani in-sample, a walk-forward już za nich zapłacił, licząc wynik poza oknem wyboru. Rozrzut Sharpe'ow miedzy konfiguracjami NIE ZMIERZONY: podstawiono wariancje samego estymatora pod H0 (sd = 0.0962), bo konfiguracji z policzonym Sharpe'em OOS jest 0, a prog to 20. Konfiguracje roznia sie nie tylko szumem, wiec PRAWDZIWY rozrzut jest wiekszy, poprzeczka wyzsza, a prawdziwy DSR NIZSZY niz ten — zmierzone 2026-09-27 na torze 4h: 0,0266 wobec podlogi 0,0260, czyli o 2,7%, a nie o rzad wielkosci. Liczone po DISTINCT learn.model_version.params, czyli po tej samej WIELKOSCI, ktora jest N — nie po oknach: rozrzut miedzy OKNAMI jest dziesieciokrotnie wieksszy (0,2627 wobec 0,0266 zmierzonych 2026-09-27) i nie jest rozrzutem konfiguracji.\nNajgorsze obsunięcie: -0.24%\n\nPRZEWAGA BRUTTO — po kosztach, które symulacja naliczyła (prowizja, poślizg, finansowanie), PRZED dopłatą z karty:\n  brutto: Sharpe/transakcję ze ZŁĄCZONEJ próby 107 transakcji: +0.0308\n  brutto: ta sama miara jako ŚREDNIA PO 5 OKNACH: -0.0358 — inna liczba niż wyżej, bo średnia ilorazów nie jest ilorazem; okno o kilku transakcjach waży w niej tyle samo, co okno o dwustu\n  brutto: rozkład okien: mediana -0.0303, kwartyle [-0.1593, +0.0942]\n  brutto: okien ujemnych: 3/5 (60.0%)\n  brutto: profit factor ZBIORCZY: 1.0857\n  brutto: średni zwrot z transakcji: +0.0933%, trafnych 42.1%\n\nPO DOPŁACIE (dopłata z karty 2.50 pb na rundę (w tym: spread 2.00 pb, pyl 0.50 pb) — karta BEZ: niewypelnienie (NIEZMIERZONE); wyjscie takerem (NIEZMIERZONE)) — tak liczy bramka i DSR:\n  po dopłacie: Sharpe/transakcję ze ZŁĄCZONEJ próby: +0.0226\n  po dopłacie: średnia po 5 oknach -0.0454, mediana okien -0.0364, okien ujemnych 3/5 (odchylenie PRÓBKOWE, jak w drabinie; bramka bierze medianę z `portfolio.metrics`, czyli populacyjne)\n  po dopłacie: średni zwrot z transakcji: +0.0683%, trafnych 42.1%\n\nRACHUNEK KOSZTU RUNDY — SKŁADNIK PO SKŁADNIKU, Z POCHODZENIEM:\n  prowizja: 0.200% (taryfa gieldy)\n  niewypelnienie: NIE ZMIERZONO — symulacja przyjmuje, ze limit wchodzi ZAWSZE, gdy swieca dotknela ceny; `exec.fill` nie zawiera zlecen, ktore nie weszly\n  wyjscie takerem: NIE ZMIERZONO — udzial wyjsc zlozonych agresywnie razy (taker - maker) na jednej nodze; symulacja zaklada makera na obu\n  spread: 0.020% (pomiar)\n  pyl: 0.005% (zalozenie)\n  razem CO NAJMNIEJ 0.225% rundy — bez niewypelnienie, wyjscie takerem. Prawdziwy koszt jest WIEKSZY o nieznana wartosc; ta liczba jest dolnym oszacowaniem, nie kosztem.\n\nKOSZT PROGOWY (z brutto): +9.33 pb na rundę. Tyle wynosi cały zapas na to, czego symulacja NIE liczy. Jeśli spread, niewypełnienie i finansowanie sumują się do więcej, przewagi nie ma — i nikt dotąd nie zmierzył, czy sumują się do mniej.\n  dla skali: koszt naliczony to 22.50 pb rundy, czyli 2.41× próg\n\nSHARPE PRZY RÓŻNYCH WARTOŚCIACH TEGO, CZEGO NIE ZMIERZONO (dopłata na rundę):\n  dopłata |  zbiorczy | średnia po oknach\n     0.0 pb |   +0.0308 |           -0.0343   <- brutto (sama symulacja)\n     2.0 pb |   +0.0242 |           -0.0432\n     2.5 pb |   +0.0226 |           -0.0454   <- dopłata z karty: tak liczy bramka\n     5.0 pb |   +0.0143 |           -0.0566\n    10.0 pb |   -0.0022 |           -0.0788\n    20.0 pb |   -0.0352 |           -0.1233\n  Obie kolumny liczone tym samym odchyleniem PRÓBKOWYM (n−1). `portfolio.metrics` liczy populacyjne (n), czyli przy medianie dwudziestu transakcji na okno zawyża każdy Sharpe o ok. 2,6% — zawsze w górę.\n\nSTRONA DŁUGA KONTRA KRÓTKA (złączona próba OOS, po kosztach):\n  długa                      n=107   Sharpe/transakcję +0.0226 ±0.0967  trafność 42.1%  średnia +0.0683%\n  krótka                     n=0     — za mało transakcji, żeby policzyć Sharpe'a\n  udział krótkich w transakcjach: 0.0%\n  po reżimach (reżim DOMINUJĄCY w oknie, nie w chwili wejścia):\n    trend_down\n    długa                      n=35    Sharpe/transakcję -0.0729 ±0.1690  trafność 45.7%  średnia -0.2310%\n    krótka                     n=0     — za mało transakcji, żeby policzyć Sharpe'a\n    trend_up\n    długa                      n=72    Sharpe/transakcję +0.0719 ±0.1179  trafność 40.3%  średnia +0.2139%\n    krótka                     n=0     — za mało transakcji, żeby policzyć Sharpe'a\n  RÓŻNICA STRON NIE JEST TU TESTEM: przedziały ±1/√n liczone na transakcjach, które NIE są niezależne (te same świece, te same okna). Liczba mówi, czy warto pytać dalej.\n\nWYNIK WOBEC POKRYCIA WAG (złączona próba OOS, po kosztach):\n  pokrycie 0.9–1.0               n=107   Sharpe/transakcję +0.0226 ±0.0967  trafność 42.1%  średnia +0.0683%\n  po reżimach — TU rozdziela się reżim od pokrycia:\n    trend_down — pokrycie NIE ZMIENIA SIĘ w tym reżimie, więc nie rozdziela niczego\n    pokrycie 0.9–1.0             n=35    Sharpe/transakcję -0.0729 ±0.1690  trafność 45.7%  średnia -0.2310%\n    trend_up — pokrycie NIE ZMIENIA SIĘ w tym reżimie, więc nie rozdziela niczego\n    pokrycie 0.9–1.0             n=72    Sharpe/transakcję +0.0719 ±0.1179  trafność 40.3%  średnia +0.2139%\n  To NIE JEST test: transakcje nie są niezależne, a kubełków jest cztery razy tyle, ile reżimów. Służy do postawienia progu, nie do jego uzasadnienia.\nUdział w transakcjach (6 największych z 8): ADAUSDC 15%  DOGEUSDC 14%  ETHUSDC 14%  LINKUSDC 14%  SUIUSDC 12%  XRPUSDC 12%\nPrzetestowanych konfiguracji: 120\nStan: learning — Za mało informatywnych okien: 5 z wymaganych 20. Strategia zawiera zbyt mało transakcji, żeby cokolwiek orzec — to nie jest wynik ujemny, to brak wyniku. Deflowany Sharpe 0.3877 przy progu 0.95 (Sharpe +0.0226 z 107 transakcji, 2 przetestowanych konfiguracji — N SELEKCJI tego przebiegu, nie licznik kumulatywny; poprzeczka selekcji +0.0500, skośność +0.877, kurtoza 4.167). ODPORNOŚĆ WERDYKTU: do progu 0.95 brakuje 0.1754 Sharpe'a na transakcję, czyli 1.81 błędu standardowego (1/√107 = 0.0967). Po uwzględnieniu liczby prób wynik nie jest odróżnialny od najlepszego z tylu losowych — promocja wstrzymana. DSR policzony PO doliczeniu 2.50 pb na rundę, których symulacja nie nalicza; nadal NIE ZMIERZONO: niewypelnienie, wyjscie takerem, więc ta liczba jest GÓRNYM oszacowaniem. N = 2 rozróżnialnych konfiguracji z learn.model_version (count(DISTINCT params) po wersjach candidate/active/retired plus wersja tego przebiegu; wersje, które nigdy nie wyszły ze statusu `training`, NIE są próbami — nie doszły do wyniku, więc selekcja nie mogła się na nich oprzeć: dla toru 4h to 7 z 59, zmierzone 2026-09-27) — DOLNA GRANICA: `kind` i `limit` nie były zapisywane do 2026-09-26, więc przebiegi różniące się samym cennikiem zlewały się w jedną. Licznik learn.hypothesis_trial (120 wektorów wag) NIE jest tu mianownikiem: jego kandydaci byli oceniani in-sample, a walk-forward już za nich zapłacił, licząc wynik poza oknem wyboru. Rozrzut Sharpe'ow miedzy konfiguracjami NIE ZMIERZONY: podstawiono wariancje samego estymatora pod H0 (sd = 0.0962), bo konfiguracji z policzonym Sharpe'em OOS jest 0, a prog to 20. Konfiguracje roznia sie nie tylko szumem, wiec PRAWDZIWY rozrzut jest wiekszy, poprzeczka wyzsza, a prawdziwy DSR NIZSZY niz ten — zmierzone 2026-09-27 na torze 4h: 0,0266 wobec podlogi 0,0260, czyli o 2,7%, a nie o rzad wielkosci. Liczone po DISTINCT learn.model_version.params, czyli po tej samej WIELKOSCI, ktora jest N — nie po oknach: rozrzut miedzy OKNAMI jest dziesieciokrotnie wieksszy (0,2627 wobec 0,0266 zmierzonych 2026-09-27) i nie jest rozrzutem konfiguracji.\nPODSUMOWANIE_JSON {\"days\": 400, \"od\": \"2025-08-29 04:00\", \"do\": \"2026-10-03 04:00\", \"pesymistyczna\": false, \"opoznienie_min\": 0, \"limit\": true, \"okna\": 5, \"dodatnie\": 2, \"transakcji\": 107, \"zwrot_na_runde_pb\": 6.834952186246743, \"doplata_pb\": 2.4994552304595214, \"dsr\": 0.38770686907947405, \"n_selekcji\": 2, \"mediana_sharpe\": -0.0372, \"wypelnialnosc\": 1.0, \"niewypelnienie_pb\": null, \"brak_swiec_1h\": 0, \"bije_b1\": [1, 5], \"bije_b2\": [3, 5], \"bije_b3\": [4, 5], \"b0_dodatnie\": [2, 5], \"status\": \"learning\", \"odniesienia\": {\"strategia\": [0.032639999999999995, 0.0047014, 2, 5], \"B1\": [6.158402458103995, 1.0, 3, 5], \"B2\": [-0.29092706450181915, 0.38212290502793295, 1, 5], \"B3\": [-0.07520827071456963, 0.038547486033519554, 2, 5]}}\n"
  }
 }

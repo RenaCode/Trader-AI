@@ -82,7 +82,8 @@ def test_sucho_nie_zatwierdza_niczego_w_kodzie():
     assert len(gole(tr.zapisz_okno)) == 1
     zrodlo_train = inspect.getsource(tr.train)
     assert zrodlo_train.count("zapisz_okno(") == 1
-    assert "if not sucho:\n            zapisz_okno(" in zrodlo_train
+    assert ("zapis = (None if sucho else\n"
+            "             lambda i, okno, m: zapisz_okno(") in zrodlo_train
     # żadna inna funkcja modułu nie zatwierdza transakcji
     reszta = [n for n, f in inspect.getmembers(tr, inspect.isfunction)
               if f.__module__ == tr.__name__ and gole(f)

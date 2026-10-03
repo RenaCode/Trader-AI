@@ -109,17 +109,18 @@ def test_test_permutacyjny_umie_mierzyc_STRATEGIE_PRODUKCYJNA():
     ~50 i został odczytany jako „brak timingu" — mówił tylko, że strategia bez
     przewagi nie ma timingu. `--wagi ic` ma iść DOKŁADNIE ścieżką trenera:
     martwe sygnały, bramki z wag bazowych po wyzerowaniu martwych, handel
-    wagami ic z okna treningowego."""
+    wagami ic z okna treningowego. Od 2026-10-03 (audyt Fable F-2.1) bramki
+    licza sie na wagach, ktorymi sie handluje, jak w `train.walk_forward`."""
     assert '"--wagi"' in TIMING and '"ic"' in TIMING
     assert "martwe = martwe_sygnaly(cache_tr)" in TIMING
     assert "bazowe = _bez_martwych(DEFAULT_WEIGHTS, martwe)" in TIMING
-    assert "ic_weights(trening, cache_tr, martwe)" in TIMING
-    # Bramki z wag BAZOWYCH i PER REZIM - dokladnie jak w trenerze. Od
+    assert "ic_weights(trening, cache_tr, martwe, h.ic_horizon_bars)" in TIMING
+    # Bramki z wag HANDLOWANYCH i PER REZIM - dokladnie jak w trenerze. Od
     # 2026-09-27 prog liczy sie osobno dla kazdego rezimu (`bramki_okna`);
     # `score_threshold` liczylo jeden prog dla wszystkich i gdyby diagnostyka
     # zostala przy nim, mierzylaby strategie, ktorej produkcja nie wykonuje.
-    assert "bramki_okna(" in TIMING and "bazowe, prog, h," in TIMING, (
-        "bramki z wag BAZOWYCH i per reżim jak w trenerze")
+    assert "bramki_okna(" in TIMING and "wagi, prog, h," in TIMING, (
+        "bramki z wag handlowanych i per reżim jak w trenerze")
     assert "score_threshold" not in TIMING, (
         "diagnostyka wróciła do jednego progu wspólnego dla reżimów")
     assert "simulate_portfolio(test, wagi," in TIMING

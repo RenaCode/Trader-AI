@@ -770,9 +770,24 @@ probaCron:
 # obliczenia nie moga ginac przy wdrozeniach.
 trainerCron:
   enabled: true
-  schedule: "40 4 * * *"        # codziennie 04:40 czasu lokalnego, po kopii zapasowej
+  # RAZ W TYGODNIU, W NIEDZIELE 04:40 (audyt Fable F-2.3 / T8, 2026-10-03).
+  # Do tego dnia codziennie. Nocny trening dokladal 6 swiec do ~8 400 (0,07%
+  # danych) - przeliczal ten sam zbior, a kazdy przebieg to wersja modelu,
+  # wpis w `hypothesis_trial` i szansa na zmiane statusu z szumu granic okien
+  # (13 zmian w 35 przebiegach). Raport, sekcja 13 pkt 4: nie trenowac i nie
+  # promowac co noc. Po T4 (stala siatka + minimum z 5 przesuniec) tygodniowy
+  # przebieg nie jest rzutem moneta. Godzina bez zmian - po kopii zapasowej.
+  # Dryf cech nadal liczy trener, wiec czujka dryfu dostaje odczyt raz w tygodniu.
+  schedule: "40 4 * * 0"
   bar: "4h"
   days: 1400
+  # KOTWICA SIATKI OKIEN (audyt Fable F-2.2 / T4, 2026-10-03). Granice okien
+  # walk-forward = od + k * step_days, a nie `now - days`: dwa nocne przebiegi
+  # licza te same okna, a werdykt idzie z MINIMUM po przesunieciach siatki
+  # o -2..+2 dni (`train.PRZESUNIECIA_SIATKI`). Ta sama data co
+  # `train.KOTWICA_SIATKI` (test `test_siatka_okien.py`); zmiana daty to nowa
+  # siatka, czyli inne okna - nie robic tego bez wpisu w docs/hipotezy.md.
+  od: "2022-09-01"
   # SPREAD LICZY SIE Z BAZY, NIE STOI TUTAJ.
   #
   # Do 2026-09-27 bylo tu `spreadBps: 5.85` i `spreadObcaKsiega: true`. Liczba

@@ -237,18 +237,20 @@ def main() -> int:
         trening = {s: [r for r in panels[s] if start <= r["t"] < train_to] for s in test}
         prog = {s: atr_threshold(trening[s]) for s in test}
         cache_tr = precompute_panels(trening, prog, h)
-        # DOKLADNIE TA SAMA SCIEZKA CO W TRENERZE (train.py, petla okien):
-        # martwe sygnaly poza kalibracja, bramki z wag bazowych po
-        # wyzerowaniu martwych, handel wagami `ic` z okna treningowego.
-        # Rozjazd w ktorymkolwiek z tych trzech krokow mierzylby inna
+        # DOKLADNIE TA SAMA SCIEZKA CO W TRENERZE (train.walk_forward):
+        # martwe sygnaly poza kalibracja, handel wagami `ic` z okna
+        # treningowego (horyzont zwrotu `h.ic_horizon_bars`), bramki NA TYCH
+        # SAMYCH WAGACH (od 2026-10-03, audyt Fable F-2.1; wczesniej na
+        # bazowych). Rozjazd w ktorymkolwiek z tych krokow mierzylby inna
         # strategie niz ta, ktora chodzi na produkcji.
         martwe = martwe_sygnaly(cache_tr)
         bazowe = _bez_martwych(DEFAULT_WEIGHTS, martwe)
-        wagi = ic_weights(trening, cache_tr, martwe) if args.wagi == "ic" else bazowe
+        wagi = (ic_weights(trening, cache_tr, martwe, h.ic_horizon_bars)
+                if args.wagi == "ic" else bazowe)
         # PROGI PER REZIM, z tej samej funkcji, ktorej uzywa trener - inaczej
         # diagnostyka mierzylaby prog wspolny, ktorego produkcja od 2026-09-27
         # nie stosuje.
-        gates = bramki_okna({s: trening[s] for s in test}, bazowe, prog, h,
+        gates = bramki_okna({s: trening[s] for s in test}, wagi, prog, h,
                             {s: cache_tr[s] for s in test})
         cache_te = precompute_panels(test, prog, h)
 

@@ -1423,8 +1423,42 @@ def rezim_dominujacy(rezimy: list[str]) -> str | None:
     return min(licznik, key=lambda r: (-licznik[r], kolejnosc.get(r, len(REGIMES)), r))
 
 
+# PRZEWAGA NAD B2 (audyt Fable F-3.4 / T8, 2026-10-03). Momentum przekrojowe
+# z filtrem trendu (`baseline.b2_momentum`, parametry w docs/hipotezy.md H-B2)
+# to odniesienie o porownywalnej prostocie: strategia, ktora go nie bije przy
+# tej samej ekspozycji, nie uzasadnia swojej zlozonosci. Prog 60% okien to
+# kryterium STOP/GO 1 z planu audytu, zapisane przed pomiarem (H-1).
+PROG_BIJE_B2 = 0.60
+
+
+def kryteria_blokujace(total: int, positive: int, median: float | None,
+                       bije_odniesienie: bool, dsr_ok: bool,
+                       udzial_b2: float | None) -> list[str]:
+    """Ktore warunki `validated` NIE sa spelnione - nazwane, do `reason`.
+    CZYSTA FUNKCJA; pusta lista = wszystkie spelnione."""
+    if total < MIN_WINDOWS_FOR_VALIDATION:
+        return [f"za mało okien ({total} < {MIN_WINDOWS_FOR_VALIDATION})"]
+    pct = positive / total * 100
+    blokuje = []
+    if pct < 70:
+        blokuje.append(f"okna dodatnie {pct:.0f}% < 70%")
+    if median is None or median <= 0.05:
+        blokuje.append("mediana Sharpe'a ≤ 0,05" if median is not None
+                       else "brak mediany Sharpe'a")
+    if not bije_odniesienie:
+        blokuje.append("nie bije kup-i-trzymaj przy tej samej ekspozycji")
+    if udzial_b2 is None:
+        blokuje.append("brak porównania z B2")
+    elif udzial_b2 < PROG_BIJE_B2:
+        blokuje.append(f"bije B2 w {udzial_b2:.0%} okien < {PROG_BIJE_B2:.0%}")
+    if not dsr_ok:
+        blokuje.append("DSR poniżej progu")
+    return blokuje
+
+
 def status_walidacji(total: int, positive: int, median: float | None,
-                     bije_odniesienie: bool, dsr_ok: bool) -> str:
+                     bije_odniesienie: bool, dsr_ok: bool,
+                     udzial_b2: float | None = None) -> str:
     """Werdykt bramki jako CZYSTA FUNKCJA - zeby dal sie sprawdzic testem.
 
     Do 2026-09-26 ten warunek byl wyrazeniem wpisanym w srodek `train()`
@@ -1435,13 +1469,17 @@ def status_walidacji(total: int, positive: int, median: float | None,
       * `pct >= 70` - odsetek okien dodatnich,
       * `median > 0,05` - skala wyniku w typowym oknie,
       * `bije_odniesienie` - przewaga nad kup-i-trzymaj przy TEJ SAMEJ ekspozycji,
-      * `dsr_ok` - deflowany Sharpe powyzej progu, patrz `bramka_dsr`.
+      * `dsr_ok` - deflowany Sharpe powyzej progu, patrz `bramka_dsr`,
+      * `udzial_b2 >= PROG_BIJE_B2` - bije B2 (momentum z filtrem) przy tej
+        samej ekspozycji w co najmniej 60% okien; brak porownania (None)
+        blokuje, bo "nie zmierzono" nie jest przewaga (od 2026-10-03, T8).
+    Ktory warunek blokuje - `kryteria_blokujace`.
     """
     if total < MIN_WINDOWS_FOR_VALIDATION:
         return "learning"
     pct = positive / total * 100
-    if (pct >= 70 and median is not None and median > 0.05
-            and bije_odniesienie and dsr_ok):
+    if not kryteria_blokujace(total, positive, median, bije_odniesienie, dsr_ok,
+                              udzial_b2):
         return "validated"
     return "degraded" if pct < 40 else "learning"
 
@@ -1758,6 +1796,10 @@ def ic_weights(panels: dict[str, list[dict]], cache: dict[str, list[tuple]],
                martwe: set[str], horyzont_swiec: int = 3) -> dict[str, dict[str, float]]:
     """Wagi WYLICZONE ze zdolnosci predykcyjnej sygnalow, nie wylosowane.
 
+    `horyzont_swiec` - zwrot, z ktorym korelujemy wynik sygnalu. Trener podaje
+    `h.ic_horizon_bars` (12 godzin na kazdym horyzoncie, audyt Fable F-2.6);
+    domyslne 3 to wartosc toru 4h, zostawiona dla wywolan diagnostycznych.
+
     DLACZEGO LOSOWE PRZESZUKIWANIE NIE DZIALALO
 
     Przestrzen wag ma 40 wymiarow (8 sygnalow x 5 rezimow). Szescdziesiat
@@ -1913,7 +1955,53 @@ def tryb_handlu(cur, engine: str) -> str:
     return "live" if cur.fetchone()["zywe"] else "demo"
 
 
-def status_nowej_wersji(status: str, tryb: str, zgoda: bool = False) -> tuple[str, str]:
+# BRAMKA STRUKTURY (audyt Fable F-3.1 / T8, 2026-10-03).
+#
+# 28.09 format parametrow zmienil sie deployem kodu (progi per rezim: `range`
+# 0,28 -> 0,35, `high_vol` 0,28 -> 0,21) i w demo wszedl sam, bo kazda wersja
+# nie-`degraded` byla `active`. Od tej chwili produkcja handlowala inna
+# strategia (`high_vol` 36,5% -> 10,8% sygnalow ponad progiem), bez zadnej
+# bramki. Teraz wersja, ktorej `params` maja inny ZESTAW KLUCZY, inna
+# konfiguracje albo progi per rezim rozne o >= 10% od aktywnej, zostaje
+# `candidate`; dozor wysyla `learning.zmiana_struktury` (migracja 0090).
+#
+# Klucze WYNIKOWE (wagi, progi, ich liczby okien) zmieniaja wartosc co
+# przebieg i porownuje sie je osobno: wagi wcale (sa stabilne i nie zmieniaja
+# struktury), progi - wzglednie, z tolerancja.
+KLUCZE_WYNIKOWE = frozenset({"weights", "enter_threshold", "exit_threshold",
+                             "enter_threshold_per_regime", "enter_threshold_windows",
+                             "min_confidence"})
+TOLERANCJA_PROGOW = 0.10
+
+
+def zmiana_struktury(aktywne: dict | None, nowe: dict) -> str | None:
+    """Czym nowe `params` roznia sie STRUKTURALNIE od aktywnej wersji; None,
+    gdy niczym (albo nie ma aktywnej wersji - pierwsza wersja nie ma z czym
+    sie porownac). CZYSTA FUNKCJA."""
+    if aktywne is None:
+        return None
+    czesci = []
+    dodane = sorted(set(nowe) - set(aktywne))
+    usuniete = sorted(set(aktywne) - set(nowe))
+    if dodane or usuniete:
+        czesci.append("klucze params: " + ", ".join(
+            [f"+{k}" for k in dodane] + [f"−{k}" for k in usuniete]))
+    for k in sorted((set(nowe) & set(aktywne)) - KLUCZE_WYNIKOWE):
+        if nowe[k] != aktywne[k]:
+            czesci.append(f"{k}: {aktywne[k]!r} → {nowe[k]!r}")
+    stare_p = aktywne.get("enter_threshold_per_regime") or {}
+    nowe_p = nowe.get("enter_threshold_per_regime") or {}
+    if set(stare_p) != set(nowe_p):
+        czesci.append(f"reżimy z progiem wejścia: {sorted(stare_p)} → {sorted(nowe_p)}")
+    for r in sorted(set(stare_p) & set(nowe_p)):
+        a, b = float(stare_p[r]), float(nowe_p[r])
+        if a and abs(b - a) / abs(a) >= TOLERANCJA_PROGOW:
+            czesci.append(f"próg {r} {a:.4f} → {b:.4f} ({(b - a) / a:+.0%})")
+    return "; ".join(czesci) or None
+
+
+def status_nowej_wersji(status: str, tryb: str, zgoda: bool = False,
+                        zmiana: str | None = None) -> tuple[str, str]:
     """Czy nowa wersja wchodzi do produkcji sama: ('active'|'candidate', powod).
 
     Czysta funkcja, tak jak `dozor.zmiany`: caly werdykt bramki da sie
@@ -1933,6 +2021,12 @@ def status_nowej_wersji(status: str, tryb: str, zgoda: bool = False) -> tuple[st
         # Zachowanie sprzed bramki, zostawione bez zmian: wynik bez przewagi
         # nie promuje sie w zadnym trybie.
         return "candidate", "wynik degraded — wersja zostaje kandydatem"
+    # ZMIANA STRUKTURY - w KAZDYM trybie, takze w demo (`zmiana_struktury`).
+    # Zgoda czlowieka (`--zatwierdz-promocje`, po wpisie w docs/hipotezy.md)
+    # przepuszcza ja tak samo jak w live.
+    if zmiana and not zgoda:
+        return "candidate", (f"zmiana struktury modelu ({zmiana}) — wymaga wpisu "
+                             f"w docs/hipotezy.md i `--zatwierdz-promocje`")
     if tryb == "live" and not zgoda:
         return "candidate", ("tryb live — nowa wersja czeka na zatwierdzenie "
                              "człowieka (`--zatwierdz-promocje`)")
@@ -2350,6 +2444,16 @@ def params_przebiegu(h: Horizon, trials_per_window: int, wybor: str, kind: str,
         "progi": "per_rezim" if progi_per_rezim else "wspolny",
         "limit": bool(egzekucja.limit),
         "sygnaly_eksperymentalne": eksperymenty}
+    # PROGI NA WAGACH, KTORYMI SIE HANDLUJE (audyt Fable F-2.1, 2026-10-03).
+    # Zmienia progi produkcji przy tych samych wagach - inna strategia, wiec
+    # inne `params` i nowa proba w N. Klucz tylko dla `ic`: przy `argmax`
+    # i `bazowe` progi dalej licza sie na zalozeniach poczatkowych.
+    if wybor == "ic":
+        params_przebiegu["progi_na_wagach"] = "ic"
+    # Horyzont zwrotu w IC (F-2.6) - klucz tylko poza wartoscia sprzed zmiany
+    # (3 swiece), czyli dzis wylacznie dla 1h (12 swiec) i 5m.
+    if h.ic_horizon_bars != 3:
+        params_przebiegu["ic_horizon_bars"] = h.ic_horizon_bars
     if egzekucja.pesymistyczna:
         params_przebiegu["egzekucja_pesymistyczna"] = True
     if egzekucja.opoznienie_min:
@@ -2650,12 +2754,16 @@ class DaneOkna:
     cache_te: dict
     martwe: set[str]
     bazowe: dict[str, dict[str, float]]
-    gates: Bramki
+    gates: Bramki | None
 
 
-def przygotuj_okno(kt: Kontekst, okno: Okno) -> DaneOkna:
+def przygotuj_okno(kt: Kontekst, okno: Okno, z_bramkami: bool = True) -> DaneOkna:
     """Wycinki treningowy i testowy, rezimy i sygnaly okna oraz progi wejscia
-    liczone WYLACZNIE na oknie treningowym."""
+    liczone WYLACZNIE na oknie treningowym.
+
+    `z_bramkami=False` - progi policzy wolajacy na wagach, ktorymi sie handluje
+    (`bramki_na_wagach`), `gates` zostaje None.
+    """
     h, panels, aktywne = kt.h, kt.panels, okno.aktywne
     progi_per_rezim = kt.progi_per_rezim
     train_from, train_to = okno.train_from, okno.train_to
@@ -2686,8 +2794,9 @@ def przygotuj_okno(kt: Kontekst, okno: Okno) -> DaneOkna:
     # ~120, co nie bylo zmiana strategii, tylko rozjazdem miedzy progiem
     # a tym, co go przekracza.
     bazowe = _bez_martwych(DEFAULT_WEIGHTS, martwe)
-    gates = bramki_okna({s: train_slices[s] for s in aktywne}, bazowe,
-                        thresholds, h, cache_tr, per_rezim=progi_per_rezim)
+    gates = (bramki_okna({s: train_slices[s] for s in aktywne}, bazowe,
+                         thresholds, h, cache_tr, per_rezim=progi_per_rezim)
+             if z_bramkami else None)
     return DaneOkna(train_slices, test_slices, thresholds, cache_tr, cache_te,
                     martwe, bazowe, gates)
 
@@ -2734,8 +2843,8 @@ def _zapis_hipotez(cur, sucho: bool, model_id: int | None):
 
 def kandydat_wag(train_slices: dict[str, list[dict]], cache_tr: dict, martwe: set[str],
                  wybor: str, *, bazowe: dict[str, dict[str, float]], ocen,
-                 zapisz_hipoteze, rng: random.Random,
-                 trials_per_window: int) -> tuple[dict[str, dict[str, float]], int]:
+                 zapisz_hipoteze, rng: random.Random, trials_per_window: int,
+                 horyzont_swiec: int = 3) -> tuple[dict[str, dict[str, float]], int]:
     """Wagi na jedno okno, dobrane WYLACZNIE na oknie treningowym.
 
     Zwraca (wagi, 1 gdy wygraly wagi z IC, inaczej 0). `ocen(w, wycinki, cache)`
@@ -2757,7 +2866,7 @@ def kandydat_wag(train_slices: dict[str, list[dict]], cache_tr: dict, martwe: se
         best_w = bazowe
         zapisz_hipoteze(bazowe)
     elif wybor == "ic":
-        best_w = ic_weights(train_slices, cache_tr, martwe)
+        best_w = ic_weights(train_slices, cache_tr, martwe, horyzont_swiec)
         zapisz_hipoteze(best_w)
         wybrane_ic += 1
     else:
@@ -2784,7 +2893,7 @@ def kandydat_wag(train_slices: dict[str, list[dict]], cache_tr: dict, martwe: se
 
         # Kandydat WYLICZONY, nie wylosowany: wagi proporcjonalne do zdolnosci
         # predykcyjnej sygnalow na tym oknie. Patrz komentarz przy ic_weights().
-        ic_w = ic_weights(train_slices, cache_tr, martwe)
+        ic_w = ic_weights(train_slices, cache_tr, martwe, horyzont_swiec)
         ic_score = ocen(ic_w, train_slices, cache_tr)["sharpe"]
         zapisz_hipoteze(ic_w)
         if ic_score > best_score:
@@ -3438,6 +3547,7 @@ class Status:
     ci_hi: float
     odn_lo: float
     odn_hi: float
+    dsr: float | None = None
 
 
 def werdykt(z: Przebieg, *, karta: Karta, n: int, trials: int, sd_prob,
@@ -3553,6 +3663,10 @@ def werdykt(z: Przebieg, *, karta: Karta, n: int, trials: int, sd_prob,
     # nie jest z gory znana.
     odn_lo, odn_hi = wilson(pokonane_odniesienie, porownywalne) if porownywalne else (0.0, 1.0)
     bije_odniesienie = porownywalne >= MIN_WINDOWS_FOR_VALIDATION and odn_lo > 0.5
+    pob_b2, por_b2 = z.bije_odn["B2"]
+    udzial_b2 = pob_b2 / por_b2 if por_b2 else None
+    blokuje = kryteria_blokujace(total, positive, median, bije_odniesienie, dsr_ok,
+                                 udzial_b2)
 
     if total < MIN_WINDOWS_FOR_VALIDATION:
         status = "learning"
@@ -3561,7 +3675,8 @@ def werdykt(z: Przebieg, *, karta: Karta, n: int, trials: int, sd_prob,
                   f"żeby cokolwiek orzec — to nie jest wynik ujemny, to brak wyniku. "
                   + opis_dsr)
     else:
-        status = status_walidacji(total, positive, median, bije_odniesienie, dsr_ok)
+        status = status_walidacji(total, positive, median, bije_odniesienie, dsr_ok,
+                                  udzial_b2)
         # Przedzial podajemy ZAWSZE razem z odsetkiem. Sam odsetek zacheca do
         # czytania roznicy dwoch punktow jako sygnalu, a przy 40 oknach
         # przedzial ma szerokosc okolo 30 punktow procentowych.
@@ -3597,6 +3712,10 @@ def werdykt(z: Przebieg, *, karta: Karta, n: int, trials: int, sd_prob,
         # `dozor.py`; mediana Sharpe'a bez DSR obok czyta sie jak wynik, ktory
         # uwzglednia liczbe prob, a nie uwzglednia jej w niczym.
         skala += " " + opis_dsr
+        # KTORE KRYTERIUM BLOKUJE - wprost, przy kazdym statusie poza
+        # `validated` (audyt Fable F-3.4): sam status nie mowi, czego brakuje.
+        if blokuje:
+            skala += " Blokuje: " + "; ".join(blokuje) + "."
         reason = {
             "validated": f"Dodatnie {positive}/{total} okien out-of-sample ({pct:.0f}%).{ci}"
                          f" Kryteria spełnione — strategia ma przewagę NA JEDNOSTKĘ "
@@ -3607,8 +3726,10 @@ def werdykt(z: Przebieg, *, karta: Karta, n: int, trials: int, sd_prob,
             "degraded": f"Dodatnie tylko {positive}/{total} okien ({pct:.0f}%).{ci} "
                         f"Strategia nie wykazuje przewagi.{skala}",
         }[status]
+    dsr = przewaga_dsr(zwroty_po_doplacie(wszystkie_zwroty, karta.doplata_poza_symulacja),
+                       n, sd_prob).get("dsr")
     return Status(status, reason, opis_dsr, total, positive, pct, median,
-                  ci_lo, ci_hi, odn_lo, odn_hi)
+                  ci_lo, ci_hi, odn_lo, odn_hi, dsr)
 
 
 @dataclass(frozen=True)
@@ -3733,7 +3854,19 @@ def zapisz_wynik(cur, conn, sucho: bool, engine: str, h: Horizon,
         # wycofanie poprzedniej wersji i promocja nowej dla kazdego wyniku poza
         # `degraded` - patrz komentarz przy `status_nowej_wersji`.
         tryb = tryb_handlu(cur, engine)
-        docelowy, powod_bramki = status_nowej_wersji(status, tryb, zgoda_na_promocje)
+        cur.execute("SELECT params FROM learn.model_version"
+                    " WHERE model_id=%s AND id<>%s AND status='active'", (model_id, mv_id))
+        aktywna = cur.fetchone()
+        cur.execute("SELECT params FROM learn.model_version WHERE id=%s", (mv_id,))
+        zmiana = zmiana_struktury(aktywna["params"] if aktywna else None,
+                                  cur.fetchone()["params"])
+        if zmiana:
+            # Kolumna (0090), nie klucz w `params`: `params` jest mianownikiem N.
+            cur.execute("UPDATE learn.model_version SET zmiana_struktury=%s WHERE id=%s",
+                        (zmiana, mv_id))
+            print(f"  ZMIANA STRUKTURY względem aktywnej wersji: {zmiana}")
+        docelowy, powod_bramki = status_nowej_wersji(status, tryb, zgoda_na_promocje,
+                                                     zmiana)
         zostaje = wersja_produkcyjna(cur, model_id, mv_id) if docelowy != "active" else None
         zapisz_promocje(cur, model_id, mv_id, docelowy)
         # POWOD IDZIE DO `reason`, czyli do jedynego pola stanu nauki, ktore
@@ -3966,6 +4099,146 @@ def podsumowanie_przebiegu(z: Przebieg, w: Status, k: Koszty, *, days: int, now:
     return podsumowanie
 
 
+# STALA SIATKA OKIEN I PIEC PRZESUNIEC (audyt Fable F-2.2 / T4, 2026-10-03).
+#
+# Do tego dnia siatka zaczynala sie w `now - --days`, czyli przesuwala sie
+# o dobe z kazdym nocnym przebiegiem. Werdykt zalezal od tego, gdzie wypadly
+# granice okien, nie od danych: DSR 0,9155-0,979 wokol progu 0,95 przy
+# przesunieciu o dobe, 13 zmian statusu w 35 przebiegach (`learning_state_log`).
+#
+# Teraz granice sa zakotwiczone w kalendarzu: KOTWICA_SIATKI + k * step_days,
+# pierwszy punkt nie wczesniej niz poczatek panelu. Dwa przebiegi w odstepie
+# doby licza te same okna (nowe okno dochodzi raz na krok siatki). Werdykt
+# liczy sie dla przesuniec siatki o {-2..+2} dni w jednym przebiegu, a status
+# przyjmuje wartosc z MINIMUM: `validated` tylko wtedy, gdy przechodzi kazde
+# przesuniecie (czyli minimum kazdej miary przekracza prog), `degraded` tylko
+# wtedy, gdy kazde przesuniecie jest `degraded`. Wszystko pomiedzy to `learning`.
+#
+# Wagi, progi produkcji, okna w `learn.wf_window` i Sharpe OOS do
+# `hypothesis_trial` pochodza z przesuniecia 0. Pozostale przesuniecia sa
+# WYLACZNIE pomiarem odpornosci werdyktu: nie dokladaja konfiguracji (ta sama
+# metoda na przesunietych granicach, nie nowa hipoteza), nie zapisuja niczego.
+KOTWICA_SIATKI = datetime(2022, 9, 1, tzinfo=timezone.utc)
+PRZESUNIECIA_SIATKI = (-2, -1, 0, 1, 2)
+
+
+def poczatek_siatki(kotwica: datetime | None, od_panelu: datetime,
+                    step_days: int) -> datetime:
+    """Pierwszy punkt `kotwica + k * step_days` nie wczesniej niz `od_panelu`.
+    CZYSTA FUNKCJA. `kotwica=None` - siatka od `od_panelu` (zachowanie sprzed
+    T4, tylko do pomiarow `--sucho`)."""
+    if kotwica is None:
+        return od_panelu
+    krok = timedelta(days=step_days)
+    return kotwica + math.ceil((od_panelu - kotwica) / krok) * krok
+
+
+def bramki_na_wagach(kt: Kontekst, dane: DaneOkna,
+                     wagi: dict[str, dict[str, float]]) -> Bramki:
+    """Progi wejscia per rezim na wagach, KTORYMI SIE HANDLUJE (audyt Fable F-2.1).
+
+    Do 2026-10-03 progi liczyly sie na `bazowe` (zalozenia poczatkowe po
+    wyzerowaniu martwych sygnalow) takze przy `--wybor ic`, a symulacja
+    i produkcja handlowaly wagami IC. Uzasadnienie - jeden prog dla wszystkich
+    kandydatow w oknie, zeby zaden nie dostal progu dobranego pod siebie -
+    dotyczy `argmax`; przy `ic` kandydat jest jeden. Skutek zmierzony po
+    28.09: udzial decyzji ponad progiem `high_vol` 10,8%, `trend_up` 8,2%,
+    `range` 0,0% (n=72) wobec zamiaru 12%. Wagi IC sa z okna TRENINGOWEGO,
+    wiec prog na nich nie zaglada w przyszlosc.
+    """
+    return bramki_okna(dane.train_slices, wagi, dane.thresholds, kt.h,
+                       dane.cache_tr, per_rezim=kt.progi_per_rezim)
+
+
+def walk_forward(kt: Kontekst, okna: list[Okno], *, wybor: str, trials_per_window: int,
+                 zapisz_hipoteze, glowny: bool, zapis_okna=None) -> tuple[Przebieg, int]:
+    """Petla okien jednej siatki. `glowny` - wydruk okien (przesuniecie 0);
+    `zapis_okna(idx, okno, m)` - zapis do bazy, None przy `--sucho`
+    i przesunieciach pomiarowych. Zwraca (liczniki, liczba ocenionych okien)."""
+    rng = random.Random(SEED)
+    z = Przebieg()
+    idx = 0
+    for okno in okna:
+        dane = przygotuj_okno(kt, okno, z_bramkami=(wybor != "ic"))
+        if glowny and dane.martwe and idx == 0:
+            print(f"  sygnały bez zmienności na danych, wyłączone z kalibracji: "
+                  f"{', '.join(sorted(dane.martwe))}")
+        best_w, z_ic = kandydat_wag(
+            dane.train_slices, dane.cache_tr, dane.martwe, wybor, bazowe=dane.bazowe,
+            ocen=_ocena_treningowa(kt, dane), zapisz_hipoteze=zapisz_hipoteze,
+            rng=rng, trials_per_window=trials_per_window,
+            horyzont_swiec=kt.h.ic_horizon_bars)
+        if dane.gates is None:
+            dane = dc_replace(dane, gates=bramki_na_wagach(kt, dane, best_w))
+        if glowny and idx == 0:
+            rodzaj = "per reżim" if kt.progi_per_rezim else "WSPÓLNY dla reżimów"
+            print(f"  progi wejścia ({rodzaj}, percentyl {ENTER_PCTL:.2f}, "
+                  f"min. {MIN_PROB_PROGU} próbek): {dane.gates.opis()}")
+        z.wybrane_ic += z_ic
+        m = ocen_okno(kt, okno, dane, best_w)
+        z.dodaj_wypelnienia(m)
+        if m.pusty:
+            continue
+        z.dodaj(m, okno, kt.h, kt.waluta_symbolu, best_w)
+        if zapis_okna is not None:
+            zapis_okna(idx, okno, m)
+        z.dodaj_progi(dane.gates, best_w, dane.martwe)
+        if glowny:
+            print(opis_okna(idx, okno, m, kt.h, kt.doplata))
+        idx += 1
+    return z, idx
+
+
+def _min_sr_max(wartosci: list[float]) -> tuple[float, float, float] | None:
+    return (min(wartosci), statistics.fmean(wartosci), max(wartosci)) if wartosci else None
+
+
+def werdykt_stabilny(statusy: dict[int, Status]) -> tuple[str, str]:
+    """Jeden status z przesuniec siatki: (status, zdanie). CZYSTA FUNKCJA.
+
+    `validated` wylacznie, gdy `validated` jest KAZDE przesuniecie - to samo,
+    co "minimum kazdej miary przekracza prog", bo `status_walidacji` jest
+    koniunkcja progow. `degraded` wylacznie, gdy `degraded` jest kazde.
+    Inaczej `learning`. Przy jednym przesunieciu - jego status, bez zdania.
+    """
+    wszystkie = list(statusy.values())
+    if len(wszystkie) == 1:
+        return wszystkie[0].status, ""
+    rodzaje = [w.status for w in wszystkie]
+    if all(r == "validated" for r in rodzaje):
+        status = "validated"
+    elif all(r == "degraded" for r in rodzaje):
+        status = "degraded"
+    else:
+        status = "learning"
+    n = len(wszystkie)
+    liczniki = ", ".join(f"{r} {rodzaje.count(r)}/{n}"
+                         for r in ("validated", "learning", "degraded") if r in rodzaje)
+    pct = _min_sr_max([w.pct for w in wszystkie if w.total])
+    dsr = _min_sr_max([w.dsr or 0.0 for w in wszystkie])
+    zakres = f"{min(statusy):+d}…{max(statusy):+d}"
+    zdanie = (f"Werdykt z {n} przesunięć siatki okien ({zakres} dni): {liczniki}"
+              + (f"; okna dodatnie min/śr/max {pct[0]:.0f}/{pct[1]:.0f}/{pct[2]:.0f}%"
+                 if pct else "")
+              + (f"; DSR min/śr/max {dsr[0]:.4f}/{dsr[1]:.4f}/{dsr[2]:.4f}" if dsr else "")
+              + f" → status {status} (zmienia się tylko, gdy MINIMUM z przesunięć "
+                f"przekracza próg).")
+    return status, zdanie
+
+
+def opis_przesuniec(statusy: dict[int, Status], liczniki: dict[int, Przebieg]) -> list[str]:
+    """Tabela przesuniec siatki do wydruku."""
+    linie = ["Przesunięcia siatki okien (dni): okna, dodatnie, bije B2, DSR, status"]
+    for s in sorted(statusy):
+        w, z = statusy[s], liczniki[s]
+        pob, por = z.bije_odn["B2"]
+        b2 = f"{pob}/{por}" if por else "—"
+        linie.append(f"  {s:+d}: {w.total:>3} okien, dodatnie {w.positive:>3} "
+                     f"({w.pct:.0f}%), bije B2 {b2}, DSR "
+                     + (f"{w.dsr:.4f}" if w.dsr is not None else "—") + f", {w.status}")
+    return linie
+
+
 def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
           kind: str = "spot", egzekucja: Egzekucja | None = None,
           sucho: bool = False, wybor: str = "argmax",
@@ -3975,8 +4248,19 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
           spread_bps: float | None = None,
           spread_nasza_ksiega: bool = True,
           progi_per_rezim: bool = True,
-          panel: dict | None = None) -> dict:
-    """Walk-forward jednego toru: orkiestrator etapow opisanych wyzej."""
+          panel: dict | None = None,
+          od: datetime | None = None,
+          przesuniecia: tuple[int, ...] = (0,),
+          hipoteza: str | None = None) -> dict:
+    """Walk-forward jednego toru: orkiestrator etapow opisanych wyzej.
+
+    `od` - kotwica siatki okien (`--od`, produkcja: KOTWICA_SIATKI); None to
+    siatka od `now - days`, jak przed T4. `przesuniecia` - przesuniecia siatki
+    w dniach, dla ktorych liczy sie werdykt (produkcja: PRZESUNIECIA_SIATKI);
+    musi zawierac 0 - z niego pochodza wagi, progi i zapisy.
+    """
+    if 0 not in przesuniecia:
+        raise ValueError("przesuniecia siatki musza zawierac 0")
     # `panel` - dane z `panel_plik.wczytaj` (harness offline, `--panel`).
     # Wtedy NIC nie idzie do bazy: `conn` moze byc None, a wszystko, co
     # przebieg z bazy czyta, przychodzi z pliku. Zapisy pomijamy, bo przebieg
@@ -3985,12 +4269,13 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
     if plik is not None and not sucho:
         raise ValueError("przebieg z pliku panelu (--panel) jest zawsze suchy")
     cur = conn.cursor() if plik is None else None
-    rng = random.Random(SEED)
     now = datetime.now(timezone.utc) if plik is None else plik["do"]
     egzekucja = egzekucja or Egzekucja()
     z_godzin = bool(egzekucja.opoznienie_min or egzekucja.pesymistyczna)
 
-    instruments = _uniwersum(cur, plik, engine, h, days, tylko)
+    # Zapas panelu przed `now - days`, zeby przesuniecia ujemne mialy dane.
+    zapas = max(0, -min(przesuniecia))
+    instruments = _uniwersum(cur, plik, engine, h, days + zapas, tylko)
     k = _koszty(cur, plik, engine, kind, h, instruments, now, days, egzekucja,
                 spread_bps, spread_nasza_ksiega, zakladane_pozycje)
     egzekucja = k.egzekucja
@@ -4000,62 +4285,158 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
     model_id, mv_id, run_id = _zaloz_wersje(cur, conn, plik, sucho, engine, h, fp,
                                             params, now, days)
     panels, swiece_wykonania, inst_ids = _wczytaj_panele(
-        cur, plik, instruments, h, fp, now, days, z_godzin)
+        cur, plik, instruments, h, fp, now, days + zapas, z_godzin)
     _sprawdz_panele(cur, conn, sucho, plik, panels, inst_ids, h, now, run_id)
 
     kt = Kontekst(h, kind, egzekucja, zakladane_pozycje, swiece_wykonania, inst_ids,
                   panels, waluta_symbolu, k.doplata, k.doplata_odniesienia, k.karta,
                   progi_per_rezim)
-    z = Przebieg()
-    zapisz_hipoteze = _zapis_hipotez(cur, sucho, model_id)
-    idx = 0
-    for okno in okna_wf(panels, h, now - timedelta(days=days), now):
-        dane = przygotuj_okno(kt, okno)
-        if dane.martwe and idx == 0:
-            print(f"  sygnały bez zmienności na danych, wyłączone z kalibracji: "
-                  f"{', '.join(sorted(dane.martwe))}")
-        if idx == 0:
-            rodzaj = "per reżim" if progi_per_rezim else "WSPÓLNY dla reżimów"
-            print(f"  progi wejścia ({rodzaj}, percentyl {ENTER_PCTL:.2f}, "
-                  f"min. {MIN_PROB_PROGU} próbek): {dane.gates.opis()}")
-        best_w, z_ic = kandydat_wag(
-            dane.train_slices, dane.cache_tr, dane.martwe, wybor, bazowe=dane.bazowe,
-            ocen=_ocena_treningowa(kt, dane), zapisz_hipoteze=zapisz_hipoteze,
-            rng=rng, trials_per_window=trials_per_window)
-        z.wybrane_ic += z_ic
-        m = ocen_okno(kt, okno, dane, best_w)
-        z.dodaj_wypelnienia(m)
-        if m.pusty:
-            continue
-        z.dodaj(m, okno, h, waluta_symbolu, best_w)
-        if not sucho:
-            zapisz_okno(cur, conn, run_id, idx, okno, m)
-        z.dodaj_progi(dane.gates, best_w, dane.martwe)
-        print(opis_okna(idx, okno, m, h, k.doplata))
-        idx += 1
+    start = poczatek_siatki(od, now - timedelta(days=days), h.step_days)
+    if od is not None:
+        print(f"  siatka okien zakotwiczona: {od:%Y-%m-%d} + k×{h.step_days} dni, "
+              f"pierwsze okno od {start:%Y-%m-%d %H:%M}; przesunięcia "
+              f"{', '.join(f'{p:+d}' for p in sorted(przesuniecia))} dni")
+    zapis = (None if sucho else
+             lambda i, okno, m: zapisz_okno(cur, conn, run_id, i, okno, m))
+    z, idx = walk_forward(kt, okna_wf(panels, h, start, now), wybor=wybor,
+                          trials_per_window=trials_per_window,
+                          zapisz_hipoteze=_zapis_hipotez(cur, sucho, model_id),
+                          glowny=True, zapis_okna=zapis)
+    liczniki = {0: z}
+    for p in sorted(set(przesuniecia) - {0}):
+        liczniki[p], _ = walk_forward(
+            kt, okna_wf(panels, h, start + timedelta(days=p), now), wybor=wybor,
+            trials_per_window=trials_per_window, zapisz_hipoteze=lambda w: None,
+            glowny=False)
 
     _zapisz_oos(cur, conn, sucho, model_id, z.oos_wg_konfiguracji)
     ece = kalibracja(z.predictions, cur, mv_id)
     max_psi = dryf_cech(cur, instruments, h, fp, now, mv_id)
     trials, sd_prob, konfiguracji_z_oos, n_selekcji = _mianowniki_dsr(
         cur, plik, model_id, mv_id, params)
-    w = werdykt(z, karta=k.karta, n=n_selekcji, trials=trials, sd_prob=sd_prob,
-                konfiguracji_z_oos=konfiguracji_z_oos)
+    statusy = {p: werdykt(zp, karta=k.karta, n=n_selekcji, trials=trials, sd_prob=sd_prob,
+                          konfiguracji_z_oos=konfiguracji_z_oos)
+               for p, zp in liczniki.items()}
+    stabilny, zdanie = werdykt_stabilny(statusy)
+    w = statusy[0]
+    if zdanie:
+        w = dc_replace(w, status=stabilny,
+                       reason=f"{zdanie} Przesunięcie 0: {w.reason}")
     prod = parametry_produkcji(z)
     for linia in prod.linie:
         print(linia)
     reason = zapisz_wynik(cur, conn, sucho, engine, h, model_id, mv_id, run_id, w, prod,
                           worst_dd=z.worst_dd, ece=ece, max_psi=max_psi, trials=trials,
                           zgoda_na_promocje=zgoda_na_promocje)
+    if zdanie:
+        for linia in opis_przesuniec(statusy, liczniki):
+            print(linia)
     wypelnialnosc, koszt_niewyp = wypisz_podsumowanie(
         z, w, k, kind=kind, wybor=wybor, idx=idx, opis_dsr=w.opis_dsr, trials=trials,
         reason=reason)
     podsumowanie = podsumowanie_przebiegu(
         z, w, k, days=days, now=now, n_selekcji=n_selekcji, sd_prob=sd_prob,
         wypelnialnosc=wypelnialnosc, koszt_niewyp=koszt_niewyp)
+    if zdanie:
+        podsumowanie["od_siatki"] = f"{od:%Y-%m-%d}" if od is not None else None
+        podsumowanie["przesuniecia"] = {
+            f"{p:+d}": podsumowanie_przebiegu(
+                liczniki[p], statusy[p], k, days=days, now=now, n_selekcji=n_selekcji,
+                sd_prob=sd_prob, koszt_niewyp=None,
+                wypelnialnosc=wypelnialnosc_symulacji(liczniki[p].wypelnione_oos,
+                                                      liczniki[p].niewypelnione_oos))
+            for p in sorted(liczniki)}
+        for p in liczniki:
+            podsumowanie["przesuniecia"][f"{p:+d}"]["start_siatki"] = (
+                f"{start + timedelta(days=p):%Y-%m-%d %H:%M}")
+        podsumowanie["stabilny"] = {
+            "status": stabilny,
+            "dsr": _min_sr_max([statusy[p].dsr or 0.0 for p in statusy]),
+            "dodatnie_pct": _min_sr_max([statusy[p].pct for p in statusy if statusy[p].total]),
+        }
+    if hipoteza:
+        podsumowanie["hipoteza"] = hipoteza
     print("PODSUMOWANIE_JSON " + json.dumps(podsumowanie, ensure_ascii=False))
     return podsumowanie
 
+
+
+# REJESTR HIPOTEZ (audyt Fable F-3.3 / T8). Kazdy `--sucho` mierzy jakas
+# hipoteze; bez numeru przebieg porownawczy nie zostawia sladu, PRZED ktorym
+# zapisano kryterium - a wtedy "wariant wygral" da sie powiedziec o dowolnym.
+REJESTR_HIPOTEZ = Path(__file__).resolve().parents[2] / "docs" / "hipotezy.md"
+WZOR_HIPOTEZY = r"H-[A-Za-z0-9]+(?:\.[0-9]+)?"
+
+
+def sprawdz_hipoteze(hipoteza: str, rejestr: Path = REJESTR_HIPOTEZ) -> str | None:
+    """Blad do wypisania albo None. Numer musi miec postac `H-n` i - gdy
+    rejestr jest w obrazie - wiersz w tabeli `docs/hipotezy.md`."""
+    import re
+    if not re.fullmatch(WZOR_HIPOTEZY, hipoteza or ""):
+        return f"--hipoteza: oczekiwano numeru w postaci H-n, dostałem {hipoteza!r}"
+    if rejestr.exists():
+        tresc = rejestr.read_text(encoding="utf-8")
+        if not re.search(rf"^\|\s*{re.escape(hipoteza)}\s*\|", tresc, re.M):
+            return (f"--hipoteza {hipoteza}: brak wiersza w {rejestr.name} - "
+                    f"zapisz hipotezę i kryterium PRZED przebiegiem")
+    return None
+
+
+def _sprawdz_argumenty(ap: argparse.ArgumentParser, args) -> tuple[datetime | None,
+                                                               tuple[int, ...]]:
+    """Odmowy wariantow bez `--sucho` i rozbior `--od` / `--przesuniecia`."""
+    if args.sucho or args.panel:
+        blad = sprawdz_hipoteze(args.hipoteza)
+        if blad:
+            sys.exit(blad)
+    try:
+        od = (None if args.od == "teraz"
+              else datetime.fromisoformat(args.od).replace(tzinfo=timezone.utc))
+        przesuniecia = tuple(sorted({int(p) for p in args.przesuniecia.split(",")
+                                     if p.strip()}))
+    except ValueError as e:
+        sys.exit(f"--od / --przesuniecia: {e}")
+    if 0 not in przesuniecia:
+        sys.exit("--przesuniecia musza zawierac 0 (z niego pochodza wagi i progi)")
+    # Kotwica i przesuniecia sa METODA POMIARU werdyktu produkcji - wariant
+    # wolno zmierzyc, nie wolno nim promowac (ten sam powod co przy --wybor).
+    if ((args.od != ap.get_default("od") or przesuniecia != PRZESUNIECIA_SIATKI)
+            and not args.sucho and not args.panel):
+        sys.exit("--od / --przesuniecia inne niz domyslne wymagaja --sucho")
+
+    if args.panel and not args.sucho:
+        print("--panel: przebieg z pliku jest zawsze suchy (--sucho wymuszone)")
+        args.sucho = True
+    if (args.pesymistyczna or args.opoznienie_min) and not args.limit:
+        sys.exit("--egzekucja-pesymistyczna i --opoznienie dotycza zlecen "
+                 "z limitem - podaj --limit")
+    if (args.pesymistyczna or args.opoznienie_min) and not args.sucho:
+        sys.exit("--egzekucja-pesymistyczna i --opoznienie wymagaja --sucho "
+                 "(wariant pomiaru, nie produkcja)")
+    if args.opoznienie_min < 0:
+        sys.exit("--opoznienie nie moze byc ujemne")
+
+    # Wariant eksperymentalny NIE MOZE promowac wersji modelu ani nadpisywac
+    # stanu nauki - inaczej jeden przebieg porownawczy po cichu zmienialby to,
+    # czym handluje produkcja.
+    #
+    # Porownanie idzie z DOMYSLNA wartoscia, nie z nazwa wpisana na sztywno:
+    # gdy pomiar wskaze inny wariant i domyslny sie zmieni, blokada przesuwa
+    # sie razem z nim, zamiast zaczac blokowac wlasna produkcje.
+    domyslny = ap.get_default("wybor")
+    if args.wybor != domyslny and not args.sucho:
+        sys.exit(f"--wybor inny niz {domyslny} wymaga --sucho")
+    # Ten sam powod: uniwersum produkcyjne zmienia sie migracja, nie flaga.
+    if args.instrumenty and not args.sucho:
+        sys.exit("--instrumenty nadpisuje uniwersum decyzyjne i wymaga --sucho")
+    # I ten sam: wielkosc pozycji jest decyzja o ryzyku, nie parametrem przebiegu.
+    if args.zakladane_pozycje and not args.sucho:
+        sys.exit("--zakladane-pozycje zmienia wielkosc pozycji i wymaga --sucho")
+    # I ten sam: prog wspolny to arytmetyka sprzed 2026-09-27. Wolno nim
+    # ZMIERZYC roznice, nie wolno nim wytrenowac modelu do handlu.
+    if args.progi != ap.get_default("progi") and not args.sucho:
+        sys.exit(f"--progi inne niz {ap.get_default('progi')} wymaga --sucho")
+    return od, przesuniecia
 
 
 def main() -> int:
@@ -4156,40 +4537,24 @@ def main() -> int:
     ap.add_argument("--panel", default="",
                     help="plik z scripts/eksport_paneli.py - przebieg BEZ BAZY "
                          "(harness offline); wymusza --sucho")
+    ap.add_argument("--od", default=f"{KOTWICA_SIATKI:%Y-%m-%d}",
+                    help="kotwica siatki okien walk-forward (data UTC): granice "
+                         "okien = od + k*step_days, niezalezne od godziny "
+                         "uruchomienia (audyt Fable F-2.2). `teraz` = siatka od "
+                         "now - --days, jak przed 2026-10-03. Inna niz domyslna "
+                         "wymaga --sucho")
+    ap.add_argument("--przesuniecia",
+                    default=",".join(str(p) for p in PRZESUNIECIA_SIATKI),
+                    help="przesuniecia siatki w dniach, dla ktorych liczy sie "
+                         "werdykt; status z MINIMUM. Musi zawierac 0. Wartosci "
+                         "ujemne podawac jako --przesuniecia=-2,-1,0. Inne niz "
+                         "domyslne wymagaja --sucho")
+    ap.add_argument("--hipoteza", default="",
+                    help="numer hipotezy z docs/hipotezy.md (np. H-1), ktora ten "
+                         "przebieg mierzy. WYMAGANY przy --sucho i --panel: "
+                         "wiersz z kryterium zapisany PRZED przebiegiem")
     args = ap.parse_args()
-
-    if args.panel and not args.sucho:
-        print("--panel: przebieg z pliku jest zawsze suchy (--sucho wymuszone)")
-        args.sucho = True
-    if (args.pesymistyczna or args.opoznienie_min) and not args.limit:
-        sys.exit("--egzekucja-pesymistyczna i --opoznienie dotycza zlecen "
-                 "z limitem - podaj --limit")
-    if (args.pesymistyczna or args.opoznienie_min) and not args.sucho:
-        sys.exit("--egzekucja-pesymistyczna i --opoznienie wymagaja --sucho "
-                 "(wariant pomiaru, nie produkcja)")
-    if args.opoznienie_min < 0:
-        sys.exit("--opoznienie nie moze byc ujemne")
-
-    # Wariant eksperymentalny NIE MOZE promowac wersji modelu ani nadpisywac
-    # stanu nauki - inaczej jeden przebieg porownawczy po cichu zmienialby to,
-    # czym handluje produkcja.
-    #
-    # Porownanie idzie z DOMYSLNA wartoscia, nie z nazwa wpisana na sztywno:
-    # gdy pomiar wskaze inny wariant i domyslny sie zmieni, blokada przesuwa
-    # sie razem z nim, zamiast zaczac blokowac wlasna produkcje.
-    domyslny = ap.get_default("wybor")
-    if args.wybor != domyslny and not args.sucho:
-        sys.exit(f"--wybor inny niz {domyslny} wymaga --sucho")
-    # Ten sam powod: uniwersum produkcyjne zmienia sie migracja, nie flaga.
-    if args.instrumenty and not args.sucho:
-        sys.exit("--instrumenty nadpisuje uniwersum decyzyjne i wymaga --sucho")
-    # I ten sam: wielkosc pozycji jest decyzja o ryzyku, nie parametrem przebiegu.
-    if args.zakladane_pozycje and not args.sucho:
-        sys.exit("--zakladane-pozycje zmienia wielkosc pozycji i wymaga --sucho")
-    # I ten sam: prog wspolny to arytmetyka sprzed 2026-09-27. Wolno nim
-    # ZMIERZYC roznice, nie wolno nim wytrenowac modelu do handlu.
-    if args.progi != ap.get_default("progi") and not args.sucho:
-        sys.exit(f"--progi inne niz {ap.get_default('progi')} wymaga --sucho")
+    od, przesuniecia = _sprawdz_argumenty(ap, args)
 
     plik = panel_plik.wczytaj(args.panel) if args.panel else None
     url = os.environ.get("DATABASE_URL")
@@ -4229,7 +4594,8 @@ def main() -> int:
               zgoda_na_promocje=args.zgoda_na_promocje,
               spread_bps=args.spread_bps,
               spread_nasza_ksiega=not args.spread_obca_ksiega,
-              panel=plik)
+              panel=plik, od=od, przesuniecia=przesuniecia,
+              hipoteza=args.hipoteza or None)
     return 0
 
 

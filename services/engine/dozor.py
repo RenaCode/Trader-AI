@@ -548,6 +548,60 @@ async def sprawdz_tor_niegotowy(fetch_all, notify, sucho: bool = False, *,
     return 0
 
 
+SQL_ZMIANA_STRUKTURY = """
+SELECT v.id, v.version, v.zmiana_struktury,
+       EXISTS (SELECT 1 FROM notify.notification n
+                WHERE n.event_code = 'learning.zmiana_struktury'
+                  AND n.data->>'model_version_id' = v.id::text) AS zgloszona
+  FROM learn.model_version v
+  JOIN learn.model m ON m.id = v.model_id
+ WHERE m.name = %s AND v.status = 'candidate' AND v.zmiana_struktury IS NOT NULL
+ ORDER BY v.id DESC
+ LIMIT 1
+"""
+
+
+def ocen_zmiane_struktury(wiersz: dict | None) -> str | None:
+    """Zdanie powiadomienia o zmianie struktury modelu albo None. CZYSTA FUNKCJA.
+
+    Zglaszana jest NAJNOWSZA wersja-kandydat ze zmiana struktury (audyt Fable
+    F-3.1, `train.zmiana_struktury`), raz na wersje. Przy treningu tygodniowym
+    daje to przypomnienie co tydzien, dopoki czlowiek nie zdecyduje - kazdy
+    przebieg tworzy nowego kandydata o tej samej zmianie.
+    """
+    if not wiersz or wiersz.get("zgloszona"):
+        return None
+    return (f"wersja {wiersz['version']} ma inną strukturę niż aktywna: "
+            f"{wiersz['zmiana_struktury']}")
+
+
+async def sprawdz_zmiane_struktury(fetch_all, notify, sucho: bool = False, *,
+                                   engine: str, bar: str) -> int:
+    """`learning.zmiana_struktury` po treningu - wolane z galezi stanu nauki."""
+    wiersze = await fetch_all(SQL_ZMIANA_STRUKTURY,
+                              (f"{engine}_signal_weighting_{bar}",))
+    wiersz = wiersze[0] if wiersze else None
+    powod = ocen_zmiane_struktury(wiersz)
+    if powod is None:
+        print("Struktura modelu: bez nowej zmiany do zgłoszenia.")
+        return 0
+    print(f"Struktura modelu: {powod}")
+    if sucho:
+        print("Tryb suchy — powiadomienie nie wysyłane.")
+        return 1
+    odbiorcy = await fetch_all('SELECT id FROM app."user" WHERE is_active')
+    tresc = (f"{powod}.\n\nWersja została kandydatem, produkcja handluje dalej "
+             f"aktywną. Promocja: wpis w docs/hipotezy.md i ręczny przebieg "
+             f"`train.py --zatwierdz-promocje`.")
+    for u in odbiorcy:
+        await notify(u["id"], "learning.zmiana_struktury",
+                     f"Zmiana struktury modelu ({engine}/{bar})", tresc,
+                     engine=engine, data={"model_version_id": str(wiersz["id"]),
+                                          "bar": bar})
+    print(f"Powiadomiono odbiorców: {len(odbiorcy)}")
+    return 1
+
+
 def ocen_stan_nauki(wiersze: list[dict]) -> tuple[list[str], int]:
     """Werdykt `--co stan-nauki` z wierszy dziennika (najnowszy pierwszy).
 
@@ -3752,6 +3806,11 @@ async def main() -> int:
             return await sprawdz_tor_niegotowy(fetch_all, notify, sucho=args.sucho,
                                                engine=args.engine, bar=args.bar)
 
+        # ZMIANA STRUKTURY MODELU (T8) - niezaleznie od tego, czy stan nauki
+        # sie zmienil: nowa struktura moze przyjsc przy tym samym statusie.
+        if not args.kod_trenera:
+            await sprawdz_zmiane_struktury(fetch_all, notify, sucho=args.sucho,
+                                           engine=args.engine, bar=args.bar)
         wiersze = await fetch_all(SQL_STAN_NAUKI,
                                   (args.engine, args.bar, STAN_NAUKI_WSTECZ))
         if not wiersze:

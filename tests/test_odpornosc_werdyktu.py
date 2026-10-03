@@ -191,3 +191,44 @@ def test_odpornosc_NIE_ZMIENIA_werdyktu():
         ok_bez, _ = bramka_dsr(wynik)
         assert ok_z_opisem == ok_bez == (wynik["dsr"] >= PROG_DSR), (
             f"werdykt zależy od tego, czy policzono odporność (Sharpe {cel})")
+
+
+# ===================================== PIEC PRZESUNIEC -> JEDEN STATUS (T4)
+#
+# Tabela z naglowka tego pliku: 3 x `validated`, 2 x `learning` przy tych
+# samych nastawach. `train.werdykt_stabilny` sklada piec przesuniec w jeden
+# status, ktory zmienia sie tylko, gdy przekroczy prog MINIMUM.
+
+def _st(status: str, dsr: float, pct: float = 72.0):
+    from services.engine.train import Status
+    return Status(status, "", "", 40, int(pct * 0.4), pct, 0.1, 0.5, 0.8, 0.5, 0.7, dsr)
+
+
+def test_piec_przesuniec_z_tabeli_27_09_daje_JEDEN_status_learning():
+    from services.engine.train import werdykt_stabilny
+    statusy = {-2: _st("validated", 0.9524), -1: _st("validated", 0.9732),
+               0: _st("learning", 0.9342), 1: _st("learning", 0.9362),
+               2: _st("validated", 0.9790)}
+    status, zdanie = werdykt_stabilny(statusy)
+    assert status == "learning"
+    assert "validated 3/5" in zdanie and "learning 2/5" in zdanie
+    assert "DSR min/śr/max 0.9342/" in zdanie and "/0.9790" in zdanie
+
+
+def test_validated_tylko_gdy_minimum_przechodzi():
+    from services.engine.train import werdykt_stabilny
+    assert werdykt_stabilny({p: _st("validated", 0.96) for p in range(-2, 3)})[0] == "validated"
+    prawie = {p: _st("validated", 0.99) for p in range(-2, 3)} | {1: _st("learning", 0.949)}
+    assert werdykt_stabilny(prawie)[0] == "learning"
+
+
+def test_degraded_tylko_gdy_degraded_wszedzie():
+    from services.engine.train import werdykt_stabilny
+    assert werdykt_stabilny({p: _st("degraded", 0.0, 30) for p in range(-2, 3)})[0] == "degraded"
+    mieszane = {p: _st("degraded", 0.0, 30) for p in range(-2, 3)} | {0: _st("learning", 0.1, 45)}
+    assert werdykt_stabilny(mieszane)[0] == "learning"
+
+
+def test_jedno_przesuniecie_to_status_bez_zdania():
+    from services.engine.train import werdykt_stabilny
+    assert werdykt_stabilny({0: _st("validated", 0.97)}) == ("validated", "")
