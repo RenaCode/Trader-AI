@@ -320,39 +320,60 @@ class Karta:
         return not self.nieznane
 
 
-def pyl_rundy(kroki: dict[str, float | None], ceny: dict[str, float | None],
-              notional: float) -> float | None:
-    """Oczekiwana strata na PYLE jako ulamek rundy - KONSERWATYWNIE po uniwersum.
+def pyl_per_instrument(kroki: dict[str, float | None],
+                       ceny: dict[str, float | None],
+                       notional: float) -> dict[str, float] | None:
+    """Oczekiwana strata na PYLE per instrument, jako ulamek rundy.
 
-    Na jednym instrumencie: reszta po sprzedazy lezy w [0, krok), srednio
-    krok/2, czyli `krok * cena / 2` w walucie, a wzgledem notionalu pozycji
-    `krok * cena / (2 * notional)`. Placona raz na runde (przy wyjsciu).
+    Reszta po sprzedazy lezy w [0, krok), srednio krok/2 - zmierzone na 12
+    resztach demo: srednia reszta/krok = 0,500. W walucie `krok * cena / 2`,
+    wzgledem notionalu pozycji `krok * cena / (2 * notional)`. Placona raz na
+    runde (przy wyjsciu).
 
-    DLACZEGO MAKSIMUM PO UNIWERSUM, a nie srednia wazona liczba transakcji.
-    Karta jest JEDNA na tor i doplate trzeba znac PRZED walk-forwardem, bo
-    odejmuje sie ja okno po oknie - liczby transakcji na instrument jeszcze nie
-    ma. Srednia z wagami rownymi bylaby zalozeniem o tym, kto handluje, i to
-    zalozeniem w strone TANSZEGO wyniku (pyl rozni sie miedzy instrumentami
-    o rzad: krok ADA 0,1 przy cenie 0,25 wobec kroku BTC przy cenie 100 000).
-    Maksimum zawyza koszt instrumentow o malym pyle, nigdy go nie zaniza.
-    Przy wartosciach rzedu 0,3 pb skala bledu jest ponizej szumu pomiaru
-    spreadu, a kierunek jest wlasciwy.
-
-    `ceny` - wolajacy podaje NAJWYZSZA cene z okna przebiegu: przy stalym
-    notionalu pyl rosnie z cena, wiec to tez jest strona konserwatywna.
-
-    None, gdy dla KTOREGOKOLWIEK instrumentu brakuje kroku albo ceny: maksimum
-    po zbiorze z dziura nie jest maksimum, a zero byloby klamstwem.
+    None, gdy dla KTOREGOKOLWIEK instrumentu brakuje kroku albo ceny: srednia
+    po zbiorze z dziura nie jest srednia po uniwersum, a zero byloby klamstwem.
     """
     if not kroki or notional <= 0:
         return None
-    wartosci = []
+    out = {}
     for sym, krok in kroki.items():
         cena = ceny.get(sym)
         if krok is None or cena is None or krok <= 0 or cena <= 0:
             return None
-        wartosci.append(float(krok) * float(cena) / (2 * notional))
-    return max(wartosci)
+        out[sym] = float(krok) * float(cena) / (2 * notional)
+    return out
+
+
+def pyl_rundy(kroki: dict[str, float | None], ceny: dict[str, float | None],
+              notional: float) -> float | None:
+    """Pyl jako JEDNA liczba karty toru: SREDNIA po uniwersum.
+
+    DO 2026-10-03 BYLO TU MAKSIMUM i to bylo zawyzenie, ktore zmierzylismy.
+    Tor crypto 4h, ceny max okna 1400 dni, notional 750: maksimum 3,29 pb
+    (ETHUSDC) wobec sredniej 1,42 pb - przy demo 0,23 pb na runde (CI 0,11-0,36,
+    14 rund). Maksimum zakladalo, ze kazda transakcja jest na instrumencie
+    o najwiekszym pyle; tymczasem w walk-forwardzie (6 przesuniec, 240 okien)
+    udzial instrumentu w rundach to 0,069-0,117 przy rownym 0,100, a srednia
+    wazona tymi udzialami rozni sie od zwyklej o 1% (1,434 wobec 1,416 pb).
+    Srednia rowna jest wiec srednia wazona z dokladnoscia ponizej szumu - i nie
+    wymaga znajomosci liczby transakcji, ktorej przed walk-forwardem nie ma.
+
+    RESZTA ROZJAZDU Z DEMO TO CENA, NIE WZOR. Ten sam wzor (z „/2") przy
+    cenach biezacych daje srednio 0,544 pb, przy cenach maksymalnych okna
+    1,343 pb - roznica x2,4 pochodzi w calosci z ceny. Ceny biezacej nie
+    bierzemy, bo lamie warunek „model >= demo": NEARUSDC przy cenie biezacej
+    0,294 pb wobec zmierzonego maksimum 0,337 pb.
+
+    KIERUNEK ZOSTAJE OSTROZNY gdzie indziej: cena to maksimum okna, a notional
+    liczony z mediany progow wejscia lezy ponizej zrealizowanego (patrz
+    `train.pyl_toru`). Po zmianie model (1,34 pb przy notionalu 792) nadal stoi
+    ponad gorna granica pomiaru demo dla KAZDEGO instrumentu, ktory ma rundy
+    (najwyzej SOLUSDC 0,71 pb).
+    """
+    per = pyl_per_instrument(kroki, ceny, notional)
+    if per is None:
+        return None
+    return sum(per.values()) / len(per)
 
 
 def zwroty_po_doplacie(zwroty: list[float], doplata: float) -> list[float]:

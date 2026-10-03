@@ -293,6 +293,11 @@ ORDER BY l.run_at DESC LIMIT %s
 STAN_NAUKI_WSTECZ = 14
 
 
+# Ile musi sie zmienic doplata miedzy dwoma porownywanymi przebiegami, zeby
+# dozor o tym wspomnial - patrz `zmiany`.
+PROG_ZMIANY_DOPLATY_PB = 0.5
+
+
 def miara_przebiegu(wiersz: dict) -> str:
     """Ktora definicja miar okien stoi za wierszem dziennika stanu nauki."""
     doplata = wiersz.get("doplata_pb")
@@ -365,6 +370,7 @@ def zmiany(poprzedni: dict | None, biezacy: dict,
         bezposredni = poprzedni
 
     powody: list[str] = []
+    kontekst_doplaty: str | None = None
 
     if poprzedni is None and pominiete_inna_miara:
         powody.append(
@@ -384,6 +390,24 @@ def zmiany(poprzedni: dict | None, biezacy: dict,
         powody.append(f"status: {bezposredni['status']} → {biezacy['status']}{dopisek}")
 
     if poprzedni is not None:
+        # DOPLATA ZMIENILA SIE W OBREBIE TEJ SAMEJ KLASY MIARY - zdanie
+        # INFORMACYJNE, porownanie ponizej idzie dalej. Klasa jest ta sama (obie
+        # liczby po karcie), ale spread mierzony co noc chodzi, a od 2026-10-03
+        # doszedl skladnik pylu: przesuniecie odsetka albo mediany o kilka
+        # punktow bez tego zdania wygladaloby jak zmiana rynku, a moze byc
+        # w calosci zmiana kosztu. Prog 0,5 pb: ponizej tego rzad nocnego
+        # wahania pomiaru spreadu, powyzej - wiecej niz caly pyl.
+        #
+        # KONTEKST, NIE POWOD. Zdanie dopisujemy na koncu i TYLKO wtedy, gdy
+        # jest juz inny powod: sama zmiana doplaty przy niezmienionych miarach
+        # nie jest zdarzeniem, a kazdy nocny przeskok spreadu o 0,6 pb
+        # konczylby sie powiadomieniem - czujka, ktora miga, uczy pomijania.
+        dp, db = poprzedni.get("doplata_pb"), biezacy.get("doplata_pb")
+        if (dp is not None and db is not None
+                and abs(db - dp) > PROG_ZMIANY_DOPLATY_PB):
+            kontekst_doplaty = (f"dopłata zmieniła się z {dp:.2f} na {db:.2f} pb "
+                                f"na rundę — część zmian powyżej może pochodzić "
+                                f"z kosztu, nie z rynku")
         # Prog z pomiaru, nie z przeczucia: dobowa roznica odsetka miesci sie
         # w szumie, wyjscie poza przedzial poprzedniego przebiegu - nie.
         lo, hi = poprzedni.get("positive_ci_low"), poprzedni.get("positive_ci_high")
@@ -415,6 +439,8 @@ def zmiany(poprzedni: dict | None, biezacy: dict,
     if pb > PSI_PROG and pb > pp:
         powody.append(f"dryf cech {pb:.2f} powyzej progu {PSI_PROG} i rosnie")
 
+    if powody and kontekst_doplaty:
+        powody.append(kontekst_doplaty)
     return powody
 
 

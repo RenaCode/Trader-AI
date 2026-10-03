@@ -1071,10 +1071,73 @@ GROUP BY i.symbol, i.lot_size
 """
 
 
+_SQL_PROGI_OSTATNIEJ_WERSJI = """
+SELECT v.params->'enter_threshold_per_regime' AS progi
+FROM learn.model_version v JOIN learn.model m ON m.id = v.model_id
+WHERE m.name = %s AND v.status IN ('candidate','active','retired')
+  AND v.params ? 'enter_threshold_per_regime'
+ORDER BY v.id DESC LIMIT 1
+"""
+
+
+def prog_dla_pylu(cur, nazwa_modelu: str) -> tuple[float, str]:
+    """Prog wejscia, z ktorego liczymy notional pozycji dla pylu. (prog, skad).
+
+    MEDIANA PROGOW PER REZIM z ostatniej ZAKONCZONEJ wersji tego modelu - ta
+    sama liczba, ktora produkcja przyklada do wyniku. Brak wersji z progami
+    (pierwszy przebieg toru, inna baza) -> `PROG_WEJSCIA_POCZATKOWY`, nazwany.
+
+    Zmierzone 2026-10-03, crypto 4h: progi 0,208 / 0,244 / 0,284 / 0,350,
+    mediana 0,264 -> udzial 0,528 -> notional 792 przy budzecie 1 500. Wobec
+    zrealizowanego `sr_notional` (mediana 1 150 po 240 oknach) to nadal
+    ZANIZONY notional, czyli zawyzony pyl: transakcja wchodzi przy wyniku
+    POWYZEJ progu, a nie rownym mu.
+
+    FORMALNY PRZECIEK W WALK-FORWARDZIE - NAZWANY, POMIJALNY. Progi pochodza
+    z ostatniej wersji modelu, wytrenowanej na danych obejmujacych okna testowe
+    BIEZACEGO przebiegu, i ustalaja notional pylu dla wszystkich jego okien.
+    Skala: notional 750 (prog poczatkowy) -> 791 (mediana), czyli pyl w karcie
+    1,416 -> 1,343 pb, roznica ~0,07 pb przy doplacie rzedu 6 pb (~1%).
+    Kierunek: wyzszy prog daje WIEKSZY notional i MNIEJSZY pyl, wiec przeciek
+    lagodzi koszt o te 0,07 pb - i nic poza tym; wagi, progi okien i wybor
+    konfiguracji go nie widza.
+
+    SAVEPOINT, NIE GOLY `except`. Trener chodzi w JEDNEJ transakcji psycopg
+    (`autocommit` wylaczony), a blad zapytania w Postgresie psuje ja calą:
+    do 2026-10-03 `except` tu polykal wyjatek, a NASTEPNE zapytanie trenera
+    padalo z `InFailedSqlTransaction` - czyli "brak progow" zamienial sie
+    w przerwany przebieg. `conn.transaction()` w otwartej transakcji to
+    SAVEPOINT: przy bledzie cofa sie wylacznie to jedno zapytanie.
+    """
+    # `connection` ma kursor psycopg; atrapy kursora w testach - nie zawsze.
+    conn = getattr(cur, "connection", None)
+    try:
+        if conn is not None and hasattr(conn, "transaction"):
+            with conn.transaction():
+                cur.execute(_SQL_PROGI_OSTATNIEJ_WERSJI, (nazwa_modelu,))
+                w = cur.fetchone()
+        else:
+            cur.execute(_SQL_PROGI_OSTATNIEJ_WERSJI, (nazwa_modelu,))
+            w = cur.fetchone()
+    except Exception:  # noqa: BLE001 - brak odczytu = prog poczatkowy, nazwany
+        w = None
+    progi = (w or {}).get("progi") if isinstance(w, dict) else None
+    wartosci = sorted(float(v) for v in (progi or {}).values()
+                      if isinstance(v, (int, float)) and v > 0)
+    if not wartosci:
+        return PROG_WEJSCIA_POCZATKOWY, "próg początkowy (brak wersji z progami)"
+    return statistics.median(wartosci), (f"mediana {len(wartosci)} progów "
+                                         f"ostatniej wersji modelu")
+
+
 def pyl_toru(cur, kind: str, instruments: list[dict], h: Horizon,
              od: datetime, do: datetime,
-             zakladane_pozycje: int | None) -> tuple[float | None, float | None]:
-    """Skladnik „pyl" karty dla strategii i dla kup-i-trzymaj. Para ulamkow rundy.
+             zakladane_pozycje: int | None,
+             nazwa_modelu: str | None = None,
+             ) -> tuple[float | None, float | None, list[str]]:
+    """Skladnik „pyl" karty dla strategii i dla kup-i-trzymaj, plus wydruk.
+
+    Oddaje (pyl strategii, pyl odniesienia, linie opisu per instrument).
 
     Tylko dla rodzajow z prowizja w walucie bazowej (`koszty.prowizja_w_bazowej`);
     dla pozostalych None i skladnika w karcie po prostu nie ma.
@@ -1086,19 +1149,20 @@ def pyl_toru(cur, kind: str, instruments: list[dict], h: Horizon,
         rosnie z cena przy stalym notionalu),
       * notional strategii: budzet na pozycje z TEJ SAMEJ reguly co symulacja
         (`position_budget(DEFAULT_LIMITS, ...)`, kapital START_EQUITY) razy
-        `udzial_budzetu(PROG_WEJSCIA_POCZATKOWY)`. Liczba instrumentow to cale
-        uniwersum przebiegu (w oknie bywa ich mniej, czyli budzet wiekszy), a
-        prog poczatkowy 0,25 lezy ponizej zmierzonych progow 0,28-0,57 - obie
-        strony daja MNIEJSZY notional, czyli WIEKSZY pyl. ZALOZENIE, nazwane.
+        `udzial_budzetu(prog)`, gdzie prog to mediana zmierzonych progow
+        (`prog_dla_pylu`; do 2026-10-03 stale 0,25). Liczba instrumentow to
+        cale uniwersum przebiegu (w oknie bywa ich mniej, czyli budzet
+        wiekszy), a prog lezy ponizej wyniku, przy ktorym transakcja naprawde
+        wchodzi - obie strony daja MNIEJSZY notional, czyli WIEKSZY pyl.
       * notional odniesienia: kup-i-trzymaj angazuje START_EQUITY / n na
         instrument, raz na runde.
 
     Brak kroku albo ceny dla jakiegokolwiek instrumentu -> None, czyli
     skladnik NIEZMIERZONE (patrz `koszty.pyl_rundy`).
     """
-    from services.engine.koszty import koszty as cennik, pyl_rundy
+    from services.engine.koszty import koszty as cennik, pyl_per_instrument, pyl_rundy
     if not cennik(kind).prowizja_w_bazowej or not instruments:
-        return None, None
+        return None, None, []
     cur.execute(_SQL_KROK_I_CENA, (h.source_timeframe, od, do,
                                    [i["id"] for i in instruments]))
     wiersze = cur.fetchall() or []
@@ -1112,10 +1176,26 @@ def pyl_toru(cur, kind: str, instruments: list[dict], h: Horizon,
     n = zakladane_pozycje or len(instruments)
     baza = position_budget(DEFAULT_LIMITS, n, Decimal(str(START_EQUITY)))
     if baza is None:
-        return None, None
-    notional = float(baza) * udzial_budzetu(PROG_WEJSCIA_POCZATKOWY)
+        return None, None, ["  pył: budżetu na pozycję nie da się policzyć — NIEZMIERZONY"]
+    prog, skad = (prog_dla_pylu(cur, nazwa_modelu) if nazwa_modelu
+                  else (PROG_WEJSCIA_POCZATKOWY, "próg początkowy"))
+    notional = float(baza) * udzial_budzetu(prog)
+    # PYL PER INSTRUMENT DO LOGU - karta niesie jedna liczbe (srednia), ale
+    # rozrzut miedzy instrumentami jest rzedu 10x i to on mowi, gdzie pomiar
+    # demo ma szanse model potwierdzic albo obalic.
+    per = pyl_per_instrument(kroki, ceny, notional)
+    if per is None:
+        brak = sorted(s for s, k in kroki.items()
+                      if k is None or ceny.get(s) is None)
+        linie = [f"  pył: NIEZMIERZONY — brak kroku albo ceny dla: {', '.join(brak)}"]
+    else:
+        linie = [f"  pył per instrument (pb na rundę; notional {notional:,.0f} z "
+                 f"{skad} {prog:.3f}, cena = maksimum okna):",
+                 "    " + "  ".join(f"{s} {v * 1e4:.2f}" for s, v in sorted(per.items())),
+                 f"    do karty: średnia {sum(per.values()) / len(per) * 1e4:.2f} pb "
+                 f"(maksimum {max(per.values()) * 1e4:.2f} pb)"]
     return (pyl_rundy(kroki, ceny, notional),
-            pyl_rundy(kroki, ceny, START_EQUITY / len(instruments)))
+            pyl_rundy(kroki, ceny, START_EQUITY / len(instruments)), linie)
 
 
 def opis_doplaty(karta: Karta) -> str:
@@ -1432,6 +1512,17 @@ def load_panel(cur, instrument_id: int, h: Horizon,
     a starej wartosci i tak nie mamy, bo nadpisanie jest w miejscu. Panel
     niesie wiec tylko LICZNIK (`rewizje` w wierszu): trener raportuje odsetek,
     czyli to, jak bardzo to, czego sie uczy, rozni sie od tego, co silnik widzial.
+
+    LICZNIK W ROLACH, NIE W WIERSZACH (2026-10-03). Mianownik odsetka to
+    `len(r["f"])`, czyli KLUCZE po `jsonb_object_agg` - jedna wartosc na role,
+    bo tyle trafia do sygnalow. Do tej zmiany licznik byl `count(*)`, czyli
+    WIERSZE: dwie aktywne definicje tej samej roli (np. cecha bez odcisku
+    i wariant z odciskiem uniwersum) dawaly 2 rewizje przy 1 kluczu, a odsetek
+    mogl przekroczyc 100%. `count(DISTINCT role)` liczy role, w ktorych
+    ktorykolwiek wiersz zostal zrewidowany. Przy zdublowanej roli to jest
+    GORNE oszacowanie: `jsonb_object_agg` bez ORDER BY bierze jedna z wartosci
+    nieokreslonym porzadkiem, wiec nie wiadomo, czy uczymy sie na tej
+    zrewidowanej - liczymy ja, bo kierunek ostrozny to "rozjazd wiekszy".
     """
     if h.aggregate:
         price_cte = """
@@ -1468,7 +1559,7 @@ def load_panel(cur, instrument_id: int, h: Horizon,
         ),
         p AS ({price_cte})
         SELECT f.event_time AS t, jsonb_object_agg(f.role, f.value) AS feats,
-               count(*) FILTER (WHERE f.po_decyzji) AS rewizje,
+               count(DISTINCT f.role) FILTER (WHERE f.po_decyzji) AS rewizje,
                p.close, p.high, p.low
         FROM f JOIN p ON p.t = f.event_time
         GROUP BY f.event_time, p.close, p.high, p.low ORDER BY f.event_time
@@ -1484,6 +1575,9 @@ def load_panel(cur, instrument_id: int, h: Horizon,
 
 def rewizje_po_decyzji(panels: dict[str, list[dict]]) -> tuple[int, int]:
     """(wartosci zrewidowane po chwili decyzji, wszystkie wartosci) w panelach.
+
+    OBIE LICZBY W TEJ SAMEJ JEDNOSTCE: role w wierszu panelu, czyli wartosci,
+    na ktorych trener sie uczy (patrz "LICZNIK W ROLACH" w `load_panel`).
 
     Rozjazd "silnik widzial X, trener uczy sie na Y" - patrz `load_panel`.
     `.get`, bo panel spoza `load_panel` (atrapy, narzedzia) moze nie miec pola,
@@ -1987,13 +2081,15 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
     # symulacja nie nalicza, zamiast wliczac je jako zera - patrz `koszty.py`.
     # `spread_bps` zostaje None, gdy pomiaru NIE MA - wymyslona liczba
     # zamienilaby tu "nie wiem" na "wiem i wynosi tyle".
-    pyl, pyl_odniesienia = pyl_toru(cur, kind, instruments, h,
-                                    now - timedelta(days=days), now,
-                                    zakladane_pozycje)
+    pyl, pyl_odniesienia, linie_pylu = pyl_toru(
+        cur, kind, instruments, h, now - timedelta(days=days), now,
+        zakladane_pozycje, f"{engine}_signal_weighting_{h.bar}")
     karta = karta_rundy(kind, (egzekucja or Egzekucja()).limit,
                         spread_bps=spread_bps,
                         spread_nasza_ksiega=spread_nasza_ksiega, pyl=pyl)
     for linia in opis_karty(karta):
+        print(linia)
+    for linia in linie_pylu:
         print(linia)
 
     # WSZYSTKIE MIARY OKIEN PO TEJ SAMEJ DOPLACIE, KTORA ODEJMUJE DSR.

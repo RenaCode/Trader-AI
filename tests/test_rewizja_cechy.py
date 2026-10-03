@@ -109,7 +109,8 @@ def test_load_panel_niesie_licznik_rewizji_i_NIE_wyrzuca_wiersza():
     sql = " ".join(kursor.sql.split())
     assert "fv.revised_at > fv.event_time + 2 * %(bar)s::interval" in sql, (
         "tolerancja rewizji w load_panel rozjechała się ze strażą ingested_at")
-    assert "count(*) FILTER (WHERE f.po_decyzji) AS rewizje" in sql
+    # Licznik w ROLACH, jak mianownik (`len(f)` po jsonb_object_agg) - nie w wierszach.
+    assert "count(DISTINCT f.role) FILTER (WHERE f.po_decyzji) AS rewizje" in sql
     # Straż `ingested_at` stoi dalej — rewizja jej nie zastępuje.
     assert "fv.ingested_at <= fv.event_time + 2 * %(bar)s::interval" in sql
 
@@ -307,4 +308,35 @@ def test_PRAWDZIWA_BAZA_zapytanie_kontroli_startowej_silnika_sie_wykonuje():
         r = cur.fetchone()
         assert r["n"] == 0
         assert r["zrewidowane"] >= 1, "kontrola nie widzi rewizji po czasie decyzji"
+        conn.rollback()
+
+
+@wymaga_bazy
+def test_PRAWDZIWA_BAZA_dwie_definicje_tej_samej_roli_licza_sie_RAZ():
+    """Licznik i mianownik w tej samej jednostce: ROLE. Dwie aktywne definicje
+    roli `rsi` (bez odcisku i z odciskiem uniwersum) daja w panelu JEDEN klucz,
+    wiec zrewidowane obie maja dac jedna rewizje - na starym kodzie (`count(*)`)
+    wychodzily dwie przy jednym kluczu, czyli odsetek do 200%."""
+    h = H1H
+    t0 = T
+    with _polacz() as conn:
+        cur = conn.cursor()
+        iid, fid = _zasiej(cur, h, t0, 2)
+        cur.execute(
+            "INSERT INTO feat.feature_def (name, params, code_ref, active)"
+            " VALUES (%s, %s::jsonb, 'test', true) RETURNING id",
+            (f"rsi__{h.bar}_{iid}_x",
+             '{"role": "rsi", "bar": "' + h.bar + '", "uniwersum": "x"}'))
+        fid2 = cur.fetchone()["id"]
+        for f in (fid, fid2):
+            features.insert_values(cur, [(f, iid, t0 + i * timedelta(hours=1),
+                                          float(i), znane_od(t0 + i * timedelta(hours=1), h))
+                                         for i in range(2)])
+            # Poprawka swiecy t0 w OBU definicjach.
+            features.insert_values(cur, [(f, iid, t0, 42.0, znane_od(t0, h))])
+        panel = train.load_panel(cur, iid, h, t0, t0 + timedelta(hours=2), fp="x")
+        assert [len(p["f"]) for p in panel] == [1, 1]
+        assert [p["rewizje"] for p in panel] == [1, 0]
+        zrew, wszystkie = train.rewizje_po_decyzji({"X": panel})
+        assert zrew <= wszystkie, "odsetek rewizji ponad 100%"
         conn.rollback()

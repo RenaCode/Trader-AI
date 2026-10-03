@@ -93,3 +93,33 @@ def test_dozor_i_trener_uzywaja_TEJ_SAMEJ_nazwy_metryki():
     dozor = (KORZEN / "services/engine/dozor.py").read_text(encoding="utf-8")
     assert "wybierz_poprzedni(wiersze)" in dozor
     assert "ORDER BY run_at DESC LIMIT 2" not in dozor
+
+
+# ------------------------------------------------- zmiana dopłaty w tej samej klasie
+
+def test_zmiana_doplaty_ponad_pol_pb_jest_NAZWANA_a_porownanie_idzie_dalej():
+    """Ta sama klasa miary (oba po karcie), ale dopłata 5,85 -> 7,10 pb.
+    Zdanie informacyjne MUSI być, a porównanie znaku mediany - nadal."""
+    wiersze = [_wiersz(0, doplata_pb=7.10, mediana=-0.01, dodatnie=36),
+               _wiersz(1, doplata_pb=5.85, mediana=+0.02, dodatnie=37)]
+    poprzedni, pominiete = wybierz_poprzedni(wiersze)
+    assert poprzedni is wiersze[1]
+    powody = zmiany(poprzedni, wiersze[0], pominiete)
+    assert any("dopłata zmieniła się z 5.85 na 7.10 pb" in p for p in powody), powody
+    assert any("zmienila znak" in p for p in powody), (
+        "zdanie o dopłacie zastąpiło porównanie zamiast mu towarzyszyć")
+
+
+def test_wahanie_doplaty_ponizej_progu_to_cisza():
+    wiersze = [_wiersz(0, doplata_pb=6.20, mediana=0.02, dodatnie=36),
+               _wiersz(1, doplata_pb=5.85, mediana=0.02, dodatnie=36)]
+    poprzedni, pominiete = wybierz_poprzedni(wiersze)
+    assert zmiany(poprzedni, wiersze[0], pominiete) == []
+
+
+def test_SAMA_zmiana_doplaty_nie_wywoluje_powiadomienia():
+    """Kontekst, nie powód: 5,85 -> 7,10 pb przy niezmienionych miarach to cisza."""
+    wiersze = [_wiersz(0, doplata_pb=7.10, mediana=0.02, dodatnie=36),
+               _wiersz(1, doplata_pb=5.85, mediana=0.02, dodatnie=36)]
+    poprzedni, pominiete = wybierz_poprzedni(wiersze)
+    assert zmiany(poprzedni, wiersze[0], pominiete) == []
