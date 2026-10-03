@@ -27,6 +27,8 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import re
+import math
 import sys
 from pathlib import Path
 
@@ -85,12 +87,39 @@ def zrzut():
     return json.loads(ZRZUT.read_text(encoding="utf-8"))
 
 
+# TOLERANCJA ZMIENNOPRZECINKOWA, NIE ROWNOSC BITOWA. Ta sama logika na innej
+# wersji Pythona/numpy (CI: 3.12, lokalnie: 3.14) sumuje w innej kolejnosci
+# i rozni sie na 15-16 cyfrze znaczacej (zmierzone 2026-10-03: 2.4994552304595206
+# vs ...214). Refaktor, ktory zmienia logike, przesuwa wyniki o rzedy wiecej,
+# wiec 1e-9 wzglednie nadal go lapie.
+_LICZBA = re.compile(r"-?\d+\.\d+(?:[eE][-+]?\d+)?")
+
+
+def _bliskie(a, b, sciezka="") -> None:
+    if isinstance(a, dict) and isinstance(b, dict):
+        assert set(a) == set(b), f"{sciezka}: klucze {sorted(set(a) ^ set(b))}"
+        for k in a:
+            _bliskie(a[k], b[k], f"{sciezka}.{k}")
+    elif isinstance(a, list) and isinstance(b, list):
+        assert len(a) == len(b), f"{sciezka}: dlugosc {len(a)} != {len(b)}"
+        for i, (x, y) in enumerate(zip(a, b)):
+            _bliskie(x, y, f"{sciezka}[{i}]")
+    elif (isinstance(a, float) or isinstance(b, float)) and not isinstance(a, bool):
+        assert math.isclose(a, b, rel_tol=1e-9, abs_tol=1e-12), f"{sciezka}: {a} != {b}"
+    else:
+        assert a == b, f"{sciezka}: {a!r} != {b!r}"
+
+
+def _znormalizuj(tekst: str) -> list[str]:
+    return [_LICZBA.sub(lambda m: f"{float(m.group()):.9g}", w) for w in tekst.splitlines()]
+
+
 @pytest.mark.parametrize("wariant", sorted(WARIANTY))
 def test_wynik_identyczny_z_referencja(plik, zrzut, wariant):
     teraz = przebieg(plik, wariant)
     ref = zrzut[wariant]
-    assert teraz["json"] == ref["json"]
-    assert teraz["stdout"].splitlines() == ref["stdout"].splitlines()
+    _bliskie(teraz["json"], ref["json"])
+    assert _znormalizuj(teraz["stdout"]) == _znormalizuj(ref["stdout"])
 
 
 def test_referencja_ma_okna_i_transakcje(zrzut):
