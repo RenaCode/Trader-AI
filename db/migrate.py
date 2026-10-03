@@ -98,7 +98,35 @@ def ustaw_hasla_rol(conn) -> None:
         print(f"Haslo roli {rola} ustawione.")
 
 
+def oczekujace_z(pliki: list[Path], zastosowane: set[str]) -> list[str]:
+    """Wersje z katalogu, ktorych baza jeszcze nie ma. CZYSTA FUNKCJA."""
+    return [p.stem for p in pliki if p.stem not in zastosowane]
+
+
+def zapisz_oczekujace(plik_wyjscia: str) -> int:
+    """`--oczekujace PLIK`: lista migracji do zastosowania, BEZ stosowania.
+
+    Dla kopii przed migracja (audyt Fable U-13, templates/kopia-przed-migracja
+    .yaml): zadanie robi zrzut tylko wtedy, gdy ten plik nie jest pusty. Tylko
+    odczyt `schema_migrations` - bez BOOTSTRAP, wiec wystarcza rola czujki
+    (0050). Brak tabeli = baza pusta = wszystko oczekuje.
+    """
+    pliki = sorted(MIGRATIONS_DIR.glob("*.sql"))
+    with psycopg.connect(dsn(), autocommit=True) as conn:
+        istnieje = conn.execute(
+            "SELECT to_regclass('public.schema_migrations') IS NOT NULL").fetchone()[0]
+        zastosowane = ({r[0] for r in conn.execute("SELECT version FROM schema_migrations")}
+                       if istnieje else set())
+    lista = oczekujace_z(pliki, zastosowane)
+    Path(plik_wyjscia).write_text("".join(f"{v}\n" for v in lista))
+    print(f"Migracji do zastosowania: {len(lista)}"
+          + (f" ({', '.join(lista)})" if lista else ""))
+    return 0
+
+
 def main() -> int:
+    if len(sys.argv) == 3 and sys.argv[1] == "--oczekujace":
+        return zapisz_oczekujace(sys.argv[2])
     files = sorted(MIGRATIONS_DIR.glob("*.sql"))
     if not files:
         sys.exit(f"Brak migracji w {MIGRATIONS_DIR}")

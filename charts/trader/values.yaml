@@ -708,6 +708,13 @@ workers:
 strefaCzasowa: "Europe/Warsaw"
 
 # Kopia zapasowa bazy. Zrzut trafia na dysk hosta, poza wolumen bazy danych.
+# KOPIA PRZED MIGRACJA - hook Argo CD `PreSync` (audyt Fable U-13,
+# templates/kopia-przed-migracja.yaml). Zrzut tylko, gdy obraz niesie nowe
+# migracje; nieudany zrzut ZATRZYMUJE synchronizacje. Wylaczone do decyzji
+# wlasciciela, bo zmienia zachowanie kazdego wdrozenia.
+kopiaPrzedMigracja:
+  enabled: false
+
 backup:
   enabled: true
   # GODZINY SA LOKALNE (Europe/Warsaw), NIE UTC — zmierzone, nie zalozone.

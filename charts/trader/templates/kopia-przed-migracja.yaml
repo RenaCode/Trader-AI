@@ -1,0 +1,120 @@
+{{- if .Values.kopiaPrzedMigracja.enabled }}
+# KOPIA PRZED MIGRACJA (audyt Fable U-13, 2026-10-03).
+#
+# Migracje ida jako initContainer `migrate` w podzie API, przy kazdym
+# wdrozeniu z nowym plikiem w `db/migrations` (77 w 37 dni), i sa
+# nieodwracalne (bez `down`). Najblizsza kopia byla do tej pory nocna - zla
+# migracja o 15:00 znaczyla utrate dnia dziennika decyzji albo odtwarzanie
+# reczne.
+#
+# HOOK ARGO CD `PreSync`, NIE INITCONTAINER W PODZIE API. Initcontainer
+# wymagalby katalogu kopii (hostPath) w podzie wystawionym do internetu -
+# przejete API mogloby skasowac kopie - i trzymalby API wylaczone przez czas
+# zrzutu (~3 min). Hook to osobny pod z rola wlasciciela tylko na czas zrzutu.
+#
+# ZRZUT TYLKO, GDY SA NOWE MIGRACJE. Pierwszy kontener (obraz API z NOWYM
+# tagiem, czyli z nowym katalogiem migracji) wypisuje oczekujace wersje
+# (`db/migrate.py --oczekujace`, rola czujki, sam odczyt). Pusty plik =
+# zadanie konczy sie po kilku sekundach. Hook chodzi przy KAZDEJ synchronizacji.
+#
+# FAIL-CLOSED: nieudany zrzut zatrzymuje synchronizacje (Argo CD nie wdroi
+# migracji bez kopii). Retencje plikow `trader-*` robi `trader-backup`.
+#
+# DOMYSLNIE WYLACZONE: wlaczenie zmienia zachowanie wdrozen (hook blokujacy
+# sync) i wymaga decyzji wlasciciela - `kopiaPrzedMigracja.enabled: true`.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "trader.fullname" . }}-kopia-przed-migracja
+  labels: {{- include "trader.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 1800
+  template:
+    metadata:
+      labels: {{- include "trader.etykietyZadania" . | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      initContainers:
+        - name: oczekujace
+          image: "{{ .Values.api.image.repository }}:{{ .Values.api.image.tag }}"
+          imagePullPolicy: {{ .Values.api.image.pullPolicy }}
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          command: ["python", "db/migrate.py", "--oczekujace", "/wspolne/oczekujace"]
+          env:
+            {{- include "trader.rolaDbEnv" (dict "ctx" $ "rola" "czujka") | nindent 12 }}
+          volumeMounts:
+            - name: wspolne
+              mountPath: /wspolne
+        - name: przygotuj-katalog
+          image: busybox:1.36
+          command: ["sh", "-c", "chown 1000:1000 /backup && chmod 750 /backup"]
+          securityContext:
+            runAsUser: 0
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+              add: ["CHOWN", "FOWNER"]
+          volumeMounts:
+            - name: backup
+              mountPath: /backup
+      containers:
+        - name: kopia
+          image: "{{ include "trader.obrazBazy" . }}"
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          env:
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef: { name: {{ .Values.secretName }}, key: POSTGRES_PASSWORD }
+          command:
+            - sh
+            - -c
+            - |
+              set -eu
+              if [ ! -s /wspolne/oczekujace ]; then
+                echo "==> brak nowych migracji - kopia niepotrzebna"
+                exit 0
+              fi
+              echo "==> nowe migracje: $(tr '\n' ' ' < /wspolne/oczekujace)"
+              PLIK="/backup/trader-przedmigracja-$(date -u +%Y%m%dT%H%M%SZ).dump"
+              pg_dump -h {{ include "trader.fullname" . }}-db -U {{ .Values.db.username }} \
+                      -d {{ .Values.db.database }} --format=custom --compress=9 --file="$PLIK"
+              pg_restore --list "$PLIK" > /dev/null
+              echo "==> kopia przed migracja: $PLIK ($(stat -c %s "$PLIK") B), czytelna"
+          resources:
+            limits:   { cpu: 1000m, memory: 512Mi }
+            requests: { cpu: 100m,  memory: 128Mi }
+          volumeMounts:
+            - name: wspolne
+              mountPath: /wspolne
+            - name: backup
+              mountPath: /backup
+      volumes:
+        - name: wspolne
+          emptyDir:
+            sizeLimit: 1Mi
+        - name: backup
+          hostPath:
+            path: {{ .Values.backup.hostPath | quote }}
+            type: DirectoryOrCreate
+{{- end }}
