@@ -71,7 +71,8 @@ from services.engine.statystyka import (
     MIN_PROB_ROZRZUTU, PROG_DSR, deflowany_sharpe, profit_factor, rozklad,
     rozrzut_sharpeow, sharpe as sharpe_proby, sharpe_dla_dsr, spearman, wilson,
 )
-from services.engine.uniwersum import odcisk
+from services.engine.uniwersum import (odcisk, opis_wykluczen, srednie_spready,
+                                       za_szeroki_spread)
 from services.engine.signals import (
     DEFAULT_WEIGHTS, REGIMES, SIGNALS, classify_regime, combine, evaluate,
     wlaczone_eksperymenty,
@@ -2095,6 +2096,16 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
         print(f"  Spread PODANY Z LINII POLECEN: {spread_bps:.3f} pb na rundę "
               f"(nadpisanie awaryjne, nie pomiar z bazy; księga "
               f"{'nasza' if spread_nasza_ksiega else 'OBCA'})")
+
+    # INSTRUMENTY BEZ WEJSC Z POWODU SPREADU (F-1.5) - ta sama regula, ktora
+    # stosuje petla (`uniwersum.za_szeroki_spread`), na tych samych 7 dniach.
+    # Tylko do logu: symulacja nadal liczy cale uniwersum, bo regula patrzy na
+    # biezacy arkusz, a okna WF siegaja lat wstecz - wykluczenie dzisiejszym
+    # spreadem w 2023 roku byloby selekcja z przyszlosci.
+    wykluczone = za_szeroki_spread(srednie_spready(
+        cur, [i["id"] for i in instruments], h.bar, now))
+    for linia in opis_wykluczen(wykluczone, {i["id"]: i["symbol"] for i in instruments}):
+        print(f"  {linia} — produkcja nie wchodzi, symulacja WF go liczy")
 
     # KARTA KOSZTU, NIE JEDNA LICZBA. Wymienia z nazwy skladniki, ktorych
     # symulacja nie nalicza, zamiast wliczac je jako zera - patrz `koszty.py`.

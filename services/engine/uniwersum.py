@@ -121,3 +121,72 @@ def uniwersum_decyzyjne(cur, engine: str) -> list[dict]:
     """Instrumenty, którymi silnik faktycznie obstawia. Wiersze z `ref.instrument`."""
     cur.execute(SQL_UNIWERSUM_DECYZYJNE, (engine,))
     return cur.fetchall()
+
+
+# WYKLUCZENIE ZE WZGLEDU NA SPREAD (audyt Fable F-1.5, 2026-10-03).
+#
+# Wlasna ksiega, 7 dni do 03.10: NEARUSDC srednio 21,2 pb, DOGE 7,6, reszta
+# <= 6 pb. NEAR dal 4 rundy gieldowe i -218 USD, czyli 59% straty gieldowej -
+# spread placony na rundzie byl wiekszy niz cala zmierzona przewaga strategii.
+#
+# CO TO WYKLUCZA, A CZEGO NIE. Wykluczony instrument nie dostaje NOWEGO wejscia
+# (petla: hold z powodem `szeroki_spread`). Wyjscie idzie dalej - blokada
+# wyjscia trzymalaby ryzyko, ktorego ta regula chce sie pozbyc. Warunek
+# uniwersum decyzyjnego wyzej (`WARUNEK_UNIWERSUM_DECYZYJNEGO`) ZOSTAJE BEZ
+# ZMIAN: z niego liczy sie `odcisk()`, a dynamiczna zmiana zbioru zmienilaby
+# nazwe cechy `rel_strength` - sygnal zniknalby bez sladu do czasu backfillu.
+#
+# SREDNIA, NIE MEDIANA - z tego samego powodu co w `spread.py`: koszt placi
+# kazda transakcja, wiec liczy sie wartosc oczekiwana.
+PROG_SPREADU_PB = 15.0
+OKNO_SPREADU_DNI = 7
+# Ponizej tylu swiec z arkuszem srednia mowi o chwili pomiaru, nie o rynku -
+# a brak pomiaru to nie powod do wykluczenia. 12 swiec 4h to dwie doby.
+MIN_SWIEC_SPREADU = 12
+
+_SQL_SREDNIE_SPREADY = """
+SELECT fv.instrument_id, avg(fv.value) AS srednia, count(*) AS n
+  FROM feat.feature_value fv
+  JOIN feat.feature_def fd ON fd.id = fv.feature_def_id
+ WHERE fd.active
+   AND fd.params->>'role' = 'book_spread_bps'
+   AND fd.params->>'bar'  = %(bar)s
+   AND fv.instrument_id = ANY(%(ids)s)
+   AND fv.event_time >= %(od)s AND fv.event_time < %(do)s
+   AND fv.ingested_at <= %(do)s
+   AND fv.value IS NOT NULL
+ GROUP BY fv.instrument_id
+"""
+
+
+def srednie_spready(cur, instrument_ids: list[int], bar: str,
+                    teraz) -> dict[int, tuple[float, int]]:
+    """Sredni `book_spread_bps` z ostatnich OKNO_SPREADU_DNI dni: id -> (pb, swiec)."""
+    from datetime import timedelta
+
+    if not instrument_ids:
+        return {}
+    cur.execute(_SQL_SREDNIE_SPREADY, {
+        "bar": bar, "ids": list(instrument_ids),
+        "od": teraz - timedelta(days=OKNO_SPREADU_DNI), "do": teraz})
+    wynik = {}
+    for w in cur.fetchall():
+        w = w if isinstance(w, dict) else dict(zip(("instrument_id", "srednia", "n"), w))
+        wynik[w["instrument_id"]] = (float(w["srednia"]), int(w["n"]))
+    return wynik
+
+
+def za_szeroki_spread(srednie: dict[int, tuple[float, int]],
+                      prog: float = PROG_SPREADU_PB,
+                      min_swiec: int = MIN_SWIEC_SPREADU) -> dict[int, float]:
+    """Instrumenty do wykluczenia z wejsc: id -> sredni spread. CZYSTA FUNKCJA."""
+    return {i: sr for i, (sr, n) in srednie.items() if n >= min_swiec and sr > prog}
+
+
+def opis_wykluczen(wykluczone: dict[int, float],
+                   symbole: dict[int, str]) -> list[str]:
+    """Linie logu: ktore instrumenty i z jakim spreadem nie dostaja wejsc."""
+    return [f"WYKLUCZONY Z WEJŚĆ: {symbole.get(i, i)} — średni spread "
+            f"{sr:.2f} pb z {OKNO_SPREADU_DNI} dni > {PROG_SPREADU_PB:.0f} pb "
+            f"(wyjścia bez zmian)" for i, sr in sorted(wykluczone.items(),
+                                                     key=lambda t: -t[1])]

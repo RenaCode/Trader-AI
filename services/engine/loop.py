@@ -42,7 +42,9 @@ from services.engine.risk import RiskKernel
 from services.engine.sesja import StanSesji, stan_sesji
 from services.ingest.features import wklady_newsow
 from services.ingest import puls
-from services.engine.uniwersum import odcisk, sql_uniwersum_decyzyjnego
+from services.engine.uniwersum import (odcisk, opis_wykluczen,
+                                       sql_uniwersum_decyzyjnego,
+                                       srednie_spready, za_szeroki_spread)
 from services.engine.koszty import POSLIZG_MAKER, POSLIZG_TAKER, koszty
 from services.engine.portfolio import _wypelnione
 from services.engine.risk_rules import (
@@ -178,6 +180,8 @@ OPIS_POWODU_HOLDU = {
     "rezim_bez_progu": "Nie wchodzimy: w tym reżimie próg wejścia NIE ZOSTAŁ "
                        "SKALIBROWANY — próba na oknach treningowych była za "
                        "mała, żeby percentyl cokolwiek znaczył.",
+    "szeroki_spread": "Nie wchodzimy: średni spread arkusza z 7 dni przekracza "
+                      "próg — runda kosztowałaby więcej niż zmierzona przewaga.",
 }
 
 
@@ -1966,6 +1970,9 @@ def nowe_stats(**flagi) -> dict:
              # dzialo. A wypadniecie jest tu decyzja projektowa (patrz
              # `services/engine/bramki.py`), wiec musi byc widoczne z zewnatrz.
              "rezim_bez_progu": 0,
+             # Wejscia zablokowane srednim spreadem z 7 dni (F-1.5,
+             # `uniwersum.za_szeroki_spread`).
+             "szeroki_spread": 0,
              # POMINIECIA Z ROZBICIEM NA POWOD. Obie te sciezki konczyly sie
              # samym `continue`: instrument wypadal z przebiegu, nie zostawiajac
              # ani wiersza, ani liczby. Tu odpowiadaja na pytanie "ile pominieto
@@ -2160,6 +2167,16 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
     cur.execute(sql_uniwersum_decyzyjnego("id, symbol, kind, quote_ccy"),
                 (engine,))
     instrumenty = cur.fetchall()
+    # WYKLUCZENIE ZE WZGLEDU NA SPREAD (audyt Fable F-1.5) - WYLACZNIE Z WEJSC.
+    # Sredni spread arkusza z 7 dni ponad prog: instrument nie dostaje nowej
+    # pozycji, ale wychodzi normalnie, a `instrumenty` (odcisk, przekroj,
+    # budzet) zostaja na pelnym zbiorze. Uzasadnienie w `uniwersum.py`.
+    szerokie_spready = za_szeroki_spread(srednie_spready(
+        cur, [i["id"] for i in instrumenty], h.bar, datetime.now(timezone.utc)))
+    if szerokie_spready and verbose:
+        for linia in opis_wykluczen(szerokie_spready,
+                                    {i["id"]: i["symbol"] for i in instrumenty}):
+            print(f"  {linia}")
 
     # BUDZET NA POZYCJE LICZY SIE Z KAPITALU, NIE ZE STALEJ.
     #
@@ -2543,6 +2560,14 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
         else:
             action = "hold"
             powod_holdu = "niska_pewnosc"
+
+        # SZEROKI SPREAD BLOKUJE WEJSCIE, NIE WYJSCIE (F-1.5). Po wyborze akcji,
+        # bo powod mowi wtedy prawde: sygnal BYL dosc mocny, wejscie zatrzymal
+        # koszt. Przed galezia ryzyka - to wlasnosc instrumentu, nie konta.
+        if action.startswith("enter") and iid in szerokie_spready:
+            action = "hold"
+            powod_holdu = "szeroki_spread"
+            stats["szeroki_spread"] += 1
 
         # Wielkosc pozycji rosnie z sila sygnalu, ale nigdy powyzej limitu -
         # o tym decyduje risk kernel, nie ten kod.

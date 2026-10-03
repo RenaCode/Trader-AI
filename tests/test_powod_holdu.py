@@ -36,7 +36,9 @@ MIGRACJA = KORZEN / "db/migrations/0040_powod_holdu.sql"
 # w 0067 o `rezim_bez_progu`). Trzymamy go tu raz, a testy niżej pilnują, żeby
 # kod, migracja i słownik opisów mówiły to samo.
 POWODY = {"slaby_wynik", "niska_pewnosc", "short_niewykonalny",
-          "trzyma_pozycje", "wstrzymanie_ryzykiem", "rezim_bez_progu"}
+          "trzyma_pozycje", "wstrzymanie_ryzykiem", "rezim_bez_progu",
+          # 0075: wejście zablokowane średnim spreadem z 7 dni (F-1.5)
+          "szeroki_spread"}
 
 
 def _migracja_definiujaca_check() -> Path:
@@ -98,8 +100,8 @@ def test_kazda_galaz_konczaca_sie_holdem_ustawia_powod():
                 f"zbioru dopuszczonego przez CHECK w migracji 0040")
     # Bez tego licznika test przechodzi także wtedy, gdy CAŁY blok wyboru akcji
     # zniknie z pliku - czyli nie sprawdza niczego.
-    assert holdy == 6, (
-        f"gałęzi kończących się holdem jest {holdy}, a nie 6 - jeśli to celowa "
+    assert holdy == 7, (
+        f"gałęzi kończących się holdem jest {holdy}, a nie 7 - jeśli to celowa "
         f"zmiana, popraw liczbę i sprawdź, czy CHECK w migracji (0040, ostatnio "
         f"przepisany w 0067) nadal pokrywa wszystkie powody")
 
