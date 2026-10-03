@@ -5,10 +5,17 @@ parametry, kryterium i sposób pomiaru. Wynik i decyzja dopisywane po przebiegu,
 zmiany parametrów ani kryterium. Zmiana parametrów po zobaczeniu wyniku to nowa
 hipoteza z nowym numerem i kolejna próba do licznika N (audyt Fable F-3.3, R3).
 
+Od 2026-10-03 (audyt Fable T8) `train.py --sucho`, `train.py --panel` i
+`scripts/eksperyment.py` wymagają `--hipoteza H-n` z wierszem w tej tabeli —
+przebieg bez numeru kończy się odmową. Wersja modelu ze zmianą struktury
+`params` względem aktywnej (`train.zmiana_struktury`) zostaje `candidate`
+i wchodzi dopiero ręcznym przebiegiem z `--zatwierdz-promocje`, po wpisie tutaj.
+
 | id | data | hipoteza | kryterium | wynik | decyzja |
 |---|---|---|---|---|---|
 | H-B2 | 2026-10-03 | Odniesienie B2 (momentum przekrojowe z filtrem trendu) jest baseline'em, który ensemble musi pobić | definicja, nie test | — | obowiązuje od pierwszego przebiegu |
 | H-1 | 2026-10-03 | Ensemble 4h ma przewagę pod uczciwym modelem wypełnień (STOP/GO 1) | zwrot/rundę po dopłacie > 0 w ≥ 3/5 przesunięć **i** bije B2 przy tej samej ekspozycji w ≥ 60% okien | zwrot/rundę −11,2 pb (0/5 przesunięć > 0), bije B2 w 61% okien | **STOP** — kalibracja wag ensemble zamknięta, dalej tylko R4 |
+| H-2 | 2026-10-03 | Zmiana METODY z audytu T4 (stała siatka okien + status z minimum 5 przesunięć, progi wejścia na wagach IC, horyzont IC przy `Horizon`): wpływ na werdykt toru 4h | opisowe — bez decyzji GO; wynik nie zmienia H-1 | patrz niżej | H-1 STOP obowiązuje |
 
 ---
 
@@ -164,3 +171,71 @@ Odtworzenie pomiaru: `scripts/odtworz_lokalnie.sh` (kopia lokalna) →
 --limit [--egzekucja-pesymistyczna --opoznienie 20]`. Równoważność pliku z bazą
 sprawdzona tego samego dnia: przebieg `--days 1400` z bazy i z pliku wyeksportowanego
 na tę samą chwilę dał identyczne `PODSUMOWANIE_JSON`.
+
+## H-2: zmiana metody T4 — wpływ na werdykt (2026-10-03)
+
+Zapisane przed przebiegiem, którego wynik stoi niżej. **Uczciwie:** jeden
+przebieg harnessu na kodzie T4 (weryfikacja, że kod działa) poszedł przed tym
+wpisem i jego wynik był widziany; wynik niżej pochodzi z przebiegu powtórzonego
+na końcowym kodzie (T4 + T8), z tymi samymi nastawami.
+
+- **Co się zmienia** (jedna zmiana metody, trzy części z audytu T4, wszystkie
+  wymagane przez audyt, nie dobrane pod wynik):
+  1. granice okien zakotwiczone w `KOTWICA_SIATKI` = 2022-09-01 (+ k × 30 dni),
+     werdykt z przesunięć −2…+2 dni, status z minimum (F-2.2);
+  2. progi wejścia per reżim liczone na wagach IC, którymi się handluje,
+     zamiast na założeniach początkowych (F-2.1) — to zmienia STRATEGIĘ
+     (progi produkcji), nie tylko pomiar;
+  3. horyzont zwrotu w IC przy `Horizon` (4h: 3 świece, bez zmiany; 1h: 12).
+- **Dane i nastawy**: ten sam panel co H-1 (`trader_prod_kopia`, dump
+  20261003T043403Z, 1402 dni), `scripts/eksperyment.py --kind spot_eu --limit
+  --trials 60 --wybor ic --days 1400`, warianty (a) model wypełnień sprzed T1,
+  (b) pesymistyczny `--opoznienie 20`; dla rozdzielenia części 1 i 2:
+  (c) = (b) z siatką sprzed T4 (`--od teraz`).
+- **Kryterium**: opisowe. H-1 (STOP) **nie** jest tym przebiegiem ponownie
+  rozstrzygana: część 2 zmienia strategię po zobaczeniu wyniku H-1, więc
+  dodatni wynik tutaj byłby wyborem po fakcie (sekcja 13 pkt 2 i 12 raportu).
+  Ponowne otwarcie kalibracji ensemble wymaga nowej hipotezy z kryterium
+  zapisanym przed pomiarem, na danych spoza tego panelu.
+
+### Wynik H-2 (2026-10-03)
+
+Kod: gałąź `fable-t2-t4-t8` (ee7a403), panel jak w H-1, `--days 1400`, przesunięcia
+−2…+2 dni, `n_selekcji` 60 (z eksportu + nowy klucz `progi_na_wagach`).
+
+| wariant | siatka | progi na | zwrot/rundę po dopłacie, pb (min / śr / max) | przesunięcia > 0 | DSR (min / max) | transakcji / przesunięcie | okna informatywne | statusy przesunięć → status |
+|---|---|---|---|---|---|---|---|---|
+| (a) wypełnienia sprzed T1 | kotwica | IC | +65,0 / +68,1 / +70,5 | 5/5 | 0,946 / 0,981 | 844–881 | 31–35 | validated 3/5, learning 2/5 → **learning** |
+| (b) pesymistyczny | kotwica | IC | −4,8 / +3,5 / +8,8 | 4/5 | 0,005 / 0,032 | 669–690 | 28–29 | learning 5/5 → **learning** |
+| (c) pesymistyczny | sprzed T4 | IC | −8,6 / −1,1 / +5,9 | 2/5 | 0,003 / 0,022 | 652–700 | 29–31 | degraded 1/5, learning 4/5 → **learning** |
+| (d) pesymistyczny | kotwica | bazowe (jak przed T4) | −19,7 / −15,6 / −11,8 | 0/5 | 0,0000 / 0,0000 | 1291–1311 | 35–37 | learning 5/5 → **learning** |
+
+Co mówi pomiar:
+
+- **Sama siatka nie zmienia wniosku H-1**: (d) to H-1 (b) na nowej siatce, −15,6 pb
+  wobec −11,2 pb, 0/5 przesunięć > 0.
+- **Progi na wagach IC zmieniają strategię**: liczba transakcji spada o połowę
+  (≈ 680 wobec ≈ 1300 na przesunięcie), średni zwrot na rundę przechodzi z −15,6 na
+  +3,5 pb, ale przesunięcia rozjeżdżają się od −4,8 do +8,8 pb, a ta sama zmiana na
+  siatce sprzed T4 (c) daje 2/5 > 0. DSR nigdzie nie przekracza 0,04 przy progu 0,95.
+  Okien informatywnych jest mniej (28–29 wobec 35–37): przy mniejszej liczbie
+  transakcji więcej okien spada poniżej `min_trades`. Średnie odniesień B1/B2 między
+  wariantami liczą się więc na INNYCH zbiorach okien i nie są porównywalne.
+- **(a) pokazuje wadę F-2.2 na liczbach**: przy tych samych nastawach trzy
+  przesunięcia dają `validated`, dwa `learning`. Stary trener pokazałby dowolny
+  z tych statusów zależnie od dnia. Nowy daje `learning`.
+- `scripts/eksperyment.py` wypisuje dla (b) mechanicznie „GO” (4/5 > 0, B2 68%).
+  To **nie** jest rozstrzygnięcie STOP/GO 1: kryterium H-1 dotyczyło strategii
+  sprzed zmiany progów, a ta zmiana przyszła po zobaczeniu wyniku H-1.
+
+**Decyzja:** H-1 STOP obowiązuje. Progi na wagach IC wchodzą do produkcji jako
+poprawka zgodności symulacja–produkcja (F-2.1), ale pierwsza wersja z nimi zostanie
+`candidate` (`learning.zmiana_struktury`: nowy klucz `progi_na_wagach` i progi per
+reżim). Promocja wymaga decyzji właściciela (`--zatwierdz-promocje`). Pytanie, czy
+ensemble z tymi progami ma przewagę, to nowa hipoteza z kryterium zapisanym przed
+pomiarem na danych spoza tego panelu (np. po 4 tygodniach nowych świec).
+
+Odtworzenie: `scripts/eksperyment.py --panel … --kind spot_eu --limit --trials 60
+--hipoteza H-2 [--egzekucja-pesymistyczna --opoznienie 20] [--od teraz]`; (d) to
+(b) z `train.bramki_na_wagach` podmienionym na progi z `dane.bazowe` (skrypt
+pomiarowy poza repo, jednorazowy).
