@@ -15,9 +15,12 @@ env:
   REGISTRY: ghcr.io
   IMAGE_OWNER: ${{ github.repository_owner }}
 
+# TYLKO ODCZYT GLOBALNIE (audyt Fable U-10, 2026-10-03). Zapis dostaja wylacznie
+# `build` (obrazy do GHCR) i `update-git` (commit z tagami) - joby, ktore
+# wykonuja kod repozytorium i jego zaleznosci (testy, smoke), nie moga pchnac
+# commita ani podmienic obrazu. Pilnuje tests/test_ci_uprawnienia.py.
 permissions:
-  contents: write
-  packages: write
+  contents: read
 
 jobs:
   changes:
@@ -197,6 +200,9 @@ jobs:
 
   build:
     name: Build ${{ matrix.name }}
+    permissions:
+      contents: read
+      packages: write
     needs: [changes, verify-migrations, smoke, testy]
     if: |
       always() &&
@@ -285,6 +291,8 @@ jobs:
   # kazde wdrozenie wywolywaloby nastepne - bez zmiany tresci, wiec i bez konca.
   update-git:
     name: Aktualizacja tagow w values.yaml
+    permissions:
+      contents: write
     needs: [changes, build]
     runs-on: ubuntu-latest
     steps:

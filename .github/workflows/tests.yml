@@ -20,6 +20,9 @@ on:
   # runnera; brak wlasnego wyzwalacza kosztowalby caly nadzor nad testami
   # w dniu, w ktorym tamten plik zostanie wylaczony albo zepsuty.
   workflow_call: {}
+# Tylko odczyt - te joby wykonuja kod repozytorium i zaleznosci (U-10).
+permissions:
+  contents: read
 jobs:
   pytest:
     runs-on: ubuntu-latest
