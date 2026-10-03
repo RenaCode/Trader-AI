@@ -31,7 +31,7 @@ import httpx
 import pytest
 
 from services.ingest import llm, news_worker
-from services.ingest.llm import DostawcaAnthropic, DostawcaGemini, Przeciazony
+from services.ingest.llm import DostawcaGemini, Przeciazony
 
 KORZEN = Path(__file__).resolve().parents[1]
 ZRODLO = (KORZEN / "services/ingest/llm.py").read_text(encoding="utf-8")

@@ -239,7 +239,7 @@ async def add_wallet(body: WalletBody, request: Request, user: dict = Depends(cu
         )
     except Exception as e:                                      # noqa: BLE001
         if "wallet_user_id_chain_label_key" in str(e):
-            raise HTTPException(409, "Portfel o tej etykiecie już istnieje")
+            raise HTTPException(409, "Portfel o tej etykiecie już istnieje") from e
         raise
 
     await audit("wallet.add", user_id=user["id"], entity="app.wallet",

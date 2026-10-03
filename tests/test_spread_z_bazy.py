@@ -36,8 +36,7 @@ CO PILNUJA TE TESTY
 from __future__ import annotations
 
 import os
-import re
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -46,7 +45,7 @@ import yaml
 from services.engine.koszty import INNY_RYNEK, POMIAR, karta_rundy
 from services.engine.spread import (
     DATA_WLASNEJ_KSIEGI, MIN_INSTRUMENTOW, MIN_SWIEC_NA_INSTRUMENT,
-    PROG_SPOJNOSCI, Pomiar, opis_pomiaru, zmierz_spread,
+    PROG_SPOJNOSCI, opis_pomiaru, zmierz_spread,
 )
 
 KORZEN = Path(__file__).resolve().parents[1]
@@ -54,48 +53,6 @@ BASE = (KORZEN / "services" / "exchanges" / "base.py").read_text(encoding="utf-8
 FEATURES = (KORZEN / "services" / "ingest" / "features.py").read_text(encoding="utf-8")
 WORKER = (KORZEN / "services" / "ingest" / "market_worker.py").read_text(encoding="utf-8")
 VALUES = yaml.safe_load((KORZEN / "charts" / "trader" / "values.yaml").read_text(encoding="utf-8"))
-
-
-# ================================================ ZNACZENIE CECHY
-#
-# Trzy ogniwa lancucha, kazde w innym pliku. Dopiero razem odpowiadaja na
-# pytanie "czy razy dwie nogi jest juz w srodku".
-
-def test_ksiega_oddaje_PELNY_spread_a_nie_polowe():
-    """`OrderBook.spread` to ask minus bid - cala szerokosc, nie polowa."""
-    assert "return self.asks[0].price - self.bids[0].price" in BASE, (
-        "definicja spreadu w `services/exchanges/base.py` zmienila sie — "
-        "cala interpretacja `book_spread_bps` (i koszt rundy) wisi na tym, "
-        "ze jest to ask MINUS bid, czyli PELNA szerokosc arkusza")
-
-
-def test_worker_zapisuje_spread_BEZ_przeliczania():
-    """Miedzy arkuszem a baza nie ma zadnego mnoznika."""
-    assert "book.mid, book.spread," in WORKER, (
-        "market_worker przestal zapisywac `book.spread` wprost — jesli "
-        "wstawil tu mnoznik, `book_spread_bps` znaczy co innego niz mysli "
-        "`services/engine/spread.py`")
-
-
-def test_cecha_to_ulamek_ceny_w_punktach_bazowych():
-    """avg(spread / mid) * 10000 - punkty bazowe pelnego spreadu."""
-    assert "avg(spread / NULLIF(mid, 0)) * 10000" in FEATURES, (
-        "agregacja cechy `book_spread_bps` zmienila sie; jesli mnoznik nie "
-        "jest 10000 albo licznik nie jest pelnym spreadem, liczba podana "
-        "do `karta_rundy` nie jest kosztem rundy")
-
-
-def test_karta_NIE_PODWAJA_podanego_spreadu():
-    """Runda placi pol spreadu na wejsciu i pol na wyjsciu - razem jeden pelny.
-
-    To jest ten blad, ktorego tu pilnujemy: dolozenie "razy dwie nogi" do
-    liczby, ktora juz jest pelnym spreadem, zawyzylo by doplate dwukrotnie -
-    i nic by sie nie wywrocilo.
-    """
-    k = karta_rundy("spot", maker=True, spread_bps=8.62)
-    s = next(x for x in k.skladniki if x.nazwa == "spread")
-    assert s.wartosc == pytest.approx(8.62e-4)
-    assert s.wartosc != pytest.approx(2 * 8.62e-4)
 
 
 # ================================================ ZNACZENIE CECHY

@@ -42,7 +42,7 @@ from __future__ import annotations
 import asyncio
 import os
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -417,7 +417,7 @@ def test_migracja_0064_nadaje_TYLKO_odczyt():
     nadania = re.findall(r"GRANT\s+([^;]+?)\s+ON\s+([^;]+?)\s+TO\s+([^;]+);",
                          kod, re.I | re.S)
     assert nadania, "migracja 0064 nie nadaje niczego"
-    for prawa, tabela, role in nadania:
+    for prawa, tabela, _role in nadania:
         assert prawa.strip().upper() == "SELECT", (
             f"0064 nadaje {prawa!r} — to ma być sam odczyt")
         assert tabela.strip() == "risk.limit_usage", (

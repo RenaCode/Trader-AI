@@ -38,7 +38,7 @@ from services.engine.risk_rules import (
     DEFAULT_LIMITS, RiskState, evaluate_account, evaluate_limits, position_budget,
 )
 from services.engine.bramki import Bramki, bramki_z_pary
-from services.engine.signals import classify_regime, combine, evaluate, precompute
+from services.engine.signals import classify_regime, combine, precompute
 
 # Parametry egzekucji. Prowizja i poslizg pochodza z services/engine/koszty.py,
 # bo zaleza od RODZAJU instrumentu i typu zlecenia - wczesniej byla tu jedna

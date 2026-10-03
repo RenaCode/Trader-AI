@@ -14,7 +14,6 @@ się jako awaria; objawia się jako strategia, która działa wyłącznie na pap
 """
 from datetime import datetime, timedelta, timezone
 
-import pytest
 
 from services.engine.horizons import get as get_horizon
 from services.ingest import features

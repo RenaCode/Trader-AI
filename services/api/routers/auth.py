@@ -19,7 +19,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
 from ..auth import (
-    CSRF_COOKIE, SESSION_IDLE_S, SQL_SESJE_AKTYWNE, adres_klienta, audit,
+    SESSION_IDLE_S, SQL_SESJE_AKTYWNE, adres_klienta, audit,
     clear_session_cookies, current_user, require_csrf, set_session_cookies,
 )
 from ..db import execute, fetch_all, fetch_one
@@ -548,7 +548,7 @@ async def totp_confirm(body: TotpConfirmBody, request: Request,
     await execute("DELETE FROM app.backup_code WHERE user_id = %s", (user["id"],))
 
     codes = new_backup_codes()
-    for raw, h in codes:
+    for _jawny, h in codes:
         await execute("INSERT INTO app.backup_code (user_id, code_hash) VALUES (%s,%s)",
                       (user["id"], h))
     await audit("auth.totp_enabled", user_id=user["id"], request=request)

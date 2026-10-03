@@ -124,7 +124,7 @@ def test_position_budget_WYMAGA_kapitalu_jawnie():
     """Kanarek na sygnaturę: gdyby ktoś przywrócił domyślną wartość, wywołanie
     bez kapitału znów przechodziłoby po cichu i cała wada (A) by wróciła."""
     with pytest.raises(TypeError):
-        position_budget(LIMITY, INSTRUMENTOW)      # noqa: 3. argument wymagany
+        position_budget(LIMITY, INSTRUMENTOW)      # 3. argument wymagany
 
 
 # ==================================================== atrapa bazy dla kernela

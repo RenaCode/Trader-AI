@@ -10,7 +10,6 @@ niz brak liczby, bo brak widac.
 import ast
 from pathlib import Path
 
-import pytest
 
 from services.engine.wartosc_krotkiej import przedzial
 

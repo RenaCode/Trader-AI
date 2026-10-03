@@ -32,10 +32,8 @@ i nie dotyka wyrażenia, o które chodzi.
 from __future__ import annotations
 
 import asyncio
-import re
 import sqlite3
 
-import pytest
 
 from services.api.routers import credentials as modul
 from services.exchanges.base import ConnectionCheck

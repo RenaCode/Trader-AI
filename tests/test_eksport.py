@@ -13,7 +13,6 @@ import csv
 import io
 from pathlib import Path
 
-import pytest
 
 from services.api.routers.eksport import (
     KOLUMNY_POZYCJI, KOLUMNY_WYPELNIEN, _czas, zloz_csv,

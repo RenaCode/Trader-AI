@@ -868,14 +868,14 @@ async def sprawdz_zywotnosc(fetch_all, notify, sucho: bool = False,
             await notify(
                 u["id"], "engine.down",
                 f"Proces nadzoru {nazwa} nie istnieje",
-                f"`risk.dozorca_heartbeat` nie ma ANI JEDNEGO uderzenia o tej "
-                f"nazwie, a `risk.limit_def` ma dla tej pary włączone limity "
-                f"konta.\n\nZnaczy to, że limity są egzekwowane wyłącznie "
-                f"z wnętrza pętli decyzyjnej: gdy pętla żyje i nic nie robi "
-                f"(zawieszona na zapytaniu), obsunięcia nie liczy nikt. "
-                f"Automatycznego zwolnienia kill-switcha też nie ma — `wznow()` "
-                f"jest wołane wyłącznie z services/engine/dozorca.py.\n\n"
-                f"Sprawdź: kubectl get deploy | grep dozorca",
+                "`risk.dozorca_heartbeat` nie ma ANI JEDNEGO uderzenia o tej "
+                "nazwie, a `risk.limit_def` ma dla tej pary włączone limity "
+                "konta.\n\nZnaczy to, że limity są egzekwowane wyłącznie "
+                "z wnętrza pętli decyzyjnej: gdy pętla żyje i nic nie robi "
+                "(zawieszona na zapytaniu), obsunięcia nie liczy nikt. "
+                "Automatycznego zwolnienia kill-switcha też nie ma — `wznow()` "
+                "jest wołane wyłącznie z services/engine/dozorca.py.\n\n"
+                "Sprawdź: kubectl get deploy | grep dozorca",
                 engine=None, severity="critical",
                 data={"proces": nazwa, "powod": "brak_wiersza_pulsu"})
         print(f"  powiadomiono o braku {nazwa}: {len(odbiorcy)} odbiorców")
@@ -1919,7 +1919,7 @@ async def sprawdz_swiezosc(fetch_all, notify, sucho: bool = False,
     # bez powiadomienia i bez czerwonego Joba. Cisza w logu byla by tu gorsza
     # od obu tych rzeczy.
     if await rynek_z_sesjami(fetch_all, engine):
-        for zrodlo, tytul, tresc in powody:
+        for _zrodlo, tytul, _tresc in powody:
             print(f"  {tytul}")
         print(f"  POMIAR BEZ ALARMU: dla `{engine}` wiek danych liczony wobec "
               f"`now()` nie jest miarą awarii potoku — po otwarciu sesji "
@@ -2049,9 +2049,9 @@ def ocen_egzekucje(stan: dict) -> list[tuple[str, str, str]]:
             f"a odrzuciła {odrzucone}.\n\n"
             f"Powody, po jednym na rodzaj:\n" + "\n".join(
                 f"  • {p}" for p in stan["powody"]) + "\n\n"
-            f"System nie handluje i NIE WYGLĄDA to na awarię: silnik bije, dane "
-            f"są świeże, kill-switch milczy. Odrzucone zlecenie w logu wygląda "
-            f"tak samo jak brak sygnału."))
+            "System nie handluje i NIE WYGLĄDA to na awarię: silnik bije, dane "
+            "są świeże, kill-switch milczy. Odrzucone zlecenie w logu wygląda "
+            "tak samo jak brak sygnału."))
     elif (odrzucone and przyjete and odrzucone >= przyjete
           and odrzucone + przyjete >= MIN_PROBA_ODRZUCEN):
         # MINIMUM PROBY I TRESC ZGODNA Z WARUNKIEM (2026-10-03, audyt 3 T10).
@@ -3173,19 +3173,19 @@ async def sprawdz_odlozone_decyzje(fetch_all, notify, sucho: bool = False, *,
     tytul = (f"{len(braki)} × świeca odłożona i NIEROZSTRZYGNIĘTA "
              f"({engine}/{mode}, świeca {minut} min)")
     tresc = (
-        f"Pętla odłożyła te świece z powodu niepełnych sygnałów i nigdy do nich "
-        f"nie wróciła — w żadnej z nich nie było ŻADNEJ decyzji, ani wejścia, "
-        f"ani wyjścia, ani `hold`:\n  "
+        "Pętla odłożyła te świece z powodu niepełnych sygnałów i nigdy do nich "
+        "nie wróciła — w żadnej z nich nie było ŻADNEJ decyzji, ani wejścia, "
+        "ani wyjścia, ani `hold`:\n  "
         + "\n  ".join(opis for _, opis in braki[:20])
         + (f"\n  … i {len(braki) - 20} więcej" if len(braki) > 20 else "")
-        + f"\n\nWartością odniesienia jest ZERO: na całej historii produkcji "
-          f"każde odłożenie kończyło się decyzją w swoim oknie (zmierzone "
-          f"2026-09-27, 40–120 odłożeń na dobę, zero nierozstrzygniętych).\n\n"
-          f"Handel stoi, ale nie z powodu rynku ani ryzyka — z powodu braku "
-          f"danych. Silnik bez wejść wygląda identycznie jak silnik na spokojnym "
-          f"rynku, dlatego ten stan ma własny alarm. Sprawdź pokrycie wag "
-          f"w `journal.decision.pokrycie_sygnalow` i świeżość cech "
-          f"w `feat.feature_value`; bramkę opisuje `MIN_POKRYCIE` w loop.py.")
+        + "\n\nWartością odniesienia jest ZERO: na całej historii produkcji "
+          "każde odłożenie kończyło się decyzją w swoim oknie (zmierzone "
+          "2026-09-27, 40–120 odłożeń na dobę, zero nierozstrzygniętych).\n\n"
+          "Handel stoi, ale nie z powodu rynku ani ryzyka — z powodu braku "
+          "danych. Silnik bez wejść wygląda identycznie jak silnik na spokojnym "
+          "rynku, dlatego ten stan ma własny alarm. Sprawdź pokrycie wag "
+          "w `journal.decision.pokrycie_sygnalow` i świeżość cech "
+          "w `feat.feature_value`; bramkę opisuje `MIN_POKRYCIE` w loop.py.")
     print(f"\n  {tytul}")
     for _, opis in braki[:20]:
         print(f"    {opis}")

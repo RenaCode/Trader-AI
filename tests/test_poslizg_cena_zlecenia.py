@@ -33,7 +33,6 @@ from decimal import Decimal as D
 
 from services.engine.koszty import POSLIZG_MAKER
 from services.engine.poslizg import (
-    NIEODROZNIALNE,
     ROZBIEZNE,
     TOZSAMOSC,
     ZAPYTANIE,

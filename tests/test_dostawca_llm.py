@@ -582,7 +582,6 @@ def test_zwarcie_jest_CZASOWE_a_nie_trwale():
 def test_UDANE_zapytanie_zeruje_licznik_odmow():
     """Bez zerowania odmowy rozsiane po całej dobie sumowałyby się i w końcu
     odcięłyby dostawcę, który działa poprawnie."""
-    from services.ingest.llm import Przeciazony
 
     ai, triaz, _ = _mieszany()
     _pytaj(ai, ai.model_triazu)

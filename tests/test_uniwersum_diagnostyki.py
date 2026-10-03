@@ -25,7 +25,6 @@ tego powiedzieć.
 import ast
 from pathlib import Path
 
-import pytest
 
 from services.engine.uniwersum import odcisk
 

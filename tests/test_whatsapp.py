@@ -16,7 +16,6 @@ CallMeBot ma dwie wlasciwosci, ktore prowadza dokladnie do takiej ciszy:
 Kazdy test ponizej pilnuje jednego z tych dwoch.
 """
 import asyncio
-import json
 
 import httpx
 import pytest

@@ -35,7 +35,6 @@ import re
 import sqlite3
 from pathlib import Path
 
-import pytest
 
 KORZEN = Path(__file__).resolve().parents[1]
 API_MAIN = KORZEN / "services/api/main.py"

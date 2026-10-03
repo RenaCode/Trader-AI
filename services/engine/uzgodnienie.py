@@ -746,7 +746,7 @@ async def uzgodnij(fetch_all, notify, adapter, engine: str = "crypto",
                 f"sie pobrac ({e2}) — uzgodnienie NIEWYKONALNE") from e2
         brak = pokrycie_wypelnien(wyp, najstarsze)
         if brak:
-            raise Nieuzgadnialne(f"ten host nie wystawia sald, a {brak}")
+            raise Nieuzgadnialne(f"ten host nie wystawia sald, a {brak}") from e
         salda = pozycje_z_wypelnien(wyp, baza)
         zrodlo = "wypelnienia"
 

@@ -58,7 +58,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import psycopg
 from psycopg.rows import dict_row
 
-from services.engine.horizons import DEFAULT_BAR, HORIZONS, Horizon, get as get_horizon
+from services.engine.horizons import DEFAULT_BAR, HORIZONS, get as get_horizon
 from services.engine.koszty import runda
 from services.engine.portfolio import Egzekucja, precompute_panels, simulate_portfolio
 from services.engine.risk_rules import MIN_CONFIDENCE

@@ -2,7 +2,6 @@
 import time
 
 import pyotp
-import pytest
 
 from services.api.security import TOTP_STEP, verify_totp
 

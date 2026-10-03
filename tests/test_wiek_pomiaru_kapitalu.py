@@ -17,7 +17,6 @@ i nikt tego nie odnotował.
 
 Te testy pilnują jednego zdania: STARY POMIAR NIE JEST POMIAREM.
 """
-from decimal import Decimal
 from pathlib import Path
 
 import pytest

@@ -858,10 +858,10 @@ def opis_zrodla_odchylenia(wynik: dict, n_konfiguracji_z_oos: int) -> str:
     # sd z 52 jest ZALOZENIEM, nie pomiarem, i musi byc widoczne w tym samym
     # zdaniu - inaczej czytelnik bierze obie liczby za jedna probe.
     n_selekcji = wynik.get("n_prob")
-    wspolne = (f" Liczone po DISTINCT learn.model_version.params, czyli po tej "
-               f"samej WIELKOSCI, ktora jest N — nie po oknach: rozrzut miedzy "
-               f"OKNAMI jest dziesieciokrotnie wieksszy (0,2627 wobec 0,0266 "
-               f"zmierzonych 2026-09-27) i nie jest rozrzutem konfiguracji.")
+    wspolne = (" Liczone po DISTINCT learn.model_version.params, czyli po tej "
+               "samej WIELKOSCI, ktora jest N — nie po oknach: rozrzut miedzy "
+               "OKNAMI jest dziesieciokrotnie wieksszy (0,2627 wobec 0,0266 "
+               "zmierzonych 2026-09-27) i nie jest rozrzutem konfiguracji.")
     # Zdanie o DWOCH POPULACJACH nalezy WYLACZNIE do galezi `pomiar`. W dwoch
     # pozostalych uzyta sd jest podloga H0, ktora nie pochodzi z zadnej proby
     # konfiguracji - doklejenie tam "rozrzut z N konfiguracji" bylo by falszem
@@ -2183,7 +2183,7 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
                 (h.bar, fp))
     if not cur.fetchone()["n"]:
         print(f"  UWAGA: brak cech przekrojowych dla tego uniwersum (odcisk {fp}).")
-        print(f"         Siła względna będzie martwa. Policz je najpierw:")
+        print("         Siła względna będzie martwa. Policz je najpierw:")
         print(f"         python services/ingest/features.py --bar {h.bar} --backfill "
               f"--days {days} --tylko-przekroj"
               + (f" --instrumenty {','.join(i['symbol'] for i in instruments)}"
@@ -2349,7 +2349,7 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
         print(f"\nPRZERWANO: {komunikat}")
         print(f"  ostatni punkt panelu:  {najnowszy:%Y-%m-%d %H:%M} UTC")
         print(f"  ostatnia świeca {h.source_timeframe}: {odniesienie:%Y-%m-%d %H:%M} UTC")
-        print(f"  sprawdź: kubectl logs deploy/trader-features --tail=30")
+        print("  sprawdź: kubectl logs deploy/trader-features --tail=30")
         cur.execute("UPDATE learn.training_run SET status='failed', finished_at=now(),"
                     " error=%s WHERE id=%s", (komunikat, run_id))
         _utrwal()
@@ -2516,8 +2516,10 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
         # limitowi lacznej ekspozycji i kill-switchowi, wiec uklad wag, ktory
         # wygląda dobrze na kazdym instrumencie z osobna, moze byc niewykonalny,
         # gdy wszystkie chca wejsc jednoczesnie.
+        # `thresholds` i `gates` z TEGO okna: `ocen` jest wolane wylacznie
+        # w tej samej iteracji petli, w ktorej powstaje (ruff B023 - falszywy).
         def ocen(w, sl, c):
-            res = simulate_portfolio(sl, w, thresholds, gates, h, MIN_CONF,
+            res = simulate_portfolio(sl, w, thresholds, gates, h, MIN_CONF,  # noqa: B023
                                      instrument_ids=inst_ids, cache=c,
                                      kind=kind, egzekucja=egzekucja,
                                      zakladane_pozycje=zakladane_pozycje)

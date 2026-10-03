@@ -18,7 +18,6 @@ from __future__ import annotations
 import asyncio
 import sys
 
-import pytest
 
 from services.exchanges.base import ExchangeError
 from services.ingest import market_worker

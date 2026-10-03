@@ -44,8 +44,7 @@ from services.engine.statystyka import (
     rozrzut_sharpeow,
 )
 from services.engine.train import (
-    _hash_konfiguracji, odchylenie_prob_z_bazy, opis_zrodla_odchylenia,
-    przewaga_dsr, werdykt_dsr, zapisz_oos_sharpe,
+    _hash_konfiguracji, odchylenie_prob_z_bazy, przewaga_dsr, werdykt_dsr, zapisz_oos_sharpe,
 )
 
 KORZEN = Path(__file__).resolve().parents[1]

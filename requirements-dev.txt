@@ -26,3 +26,6 @@
 #
 # CO TU NALEZY: wylacznie to, czego obraz produkcyjny NIE MA.
 pytest>=8.0
+# Lint w CI (`ruff check .`, reguly w ruff.toml). Wersja przypieta: nowa wersja
+# ruffa dokłada reguly do istniejacych kodow i zapalalaby CI bez zmiany kodu.
+ruff==0.16.10

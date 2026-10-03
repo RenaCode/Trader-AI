@@ -1,0 +1,24 @@
+# RUFF W CI (audyt Fable U-15, 2026-10-03). Reguły wąsko: F (pyflakes - nieużyte
+# importy, zmienne, redefinicje), B (bugbear - typowe pułapki) i E9 (błędy
+# składni). Pierwszy przebieg znalazł m.in. cztery testy w
+# `tests/test_spread_z_bazy.py` zdefiniowane dwa razy - pierwsza kopia nigdy
+# się nie wykonywała.
+target-version = "py312"
+
+[lint]
+select = ["F", "B", "E9"]
+ignore = [
+    # `Depends(...)`/`Query(...)` w argumentach domyślnych to idiom FastAPI.
+    "B008",
+    # `zip(strict=True)` zmienia zachowanie (wyjątek przy różnych długościach) -
+    # to decyzja per miejsce, nie poprawka hurtowa.
+    "B905",
+]
+
+[lint.per-file-ignores]
+# `pytest.raises(Exception)` w testach jest świadome: test pilnuje, ŻE coś
+# odmawia, a nie jak nazywa się wyjątek biblioteki kryptograficznej.
+"tests/**" = ["B017"]
+# Fikstura importowana z innego pliku testów i użyta jako parametr - pyflakes
+# widzi w tym redefinicję.
+"tests/test_proba_wynik_w_kolumnie.py" = ["F811"]

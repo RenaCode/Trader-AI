@@ -36,7 +36,6 @@ import ast
 import asyncio
 import re
 import time
-from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest

@@ -451,8 +451,11 @@ def test_prog_kapitalu_ma_regule_RECZNA_i_to_jest_decyzja():
     migracja = Path("db/migrations/0029_wznowienie_killswitcha.sql").read_text(encoding="utf-8")
     assert "po_ustaniu" in migracja and "max_daily_loss" in migracja
     assert "po_odbudowie" in migracja and "max_drawdown" in migracja
-    linie = [l for l in migracja.splitlines() if "min_equity" in l and "UPDATE" not in l]
-    assert any("reczne" in l for l in migracja.splitlines()), "brak reguły ręcznej"
+    # Do 2026-10-03 stała tu lista `linie` liczona i nieużywana (ruff F841),
+    # a asercja pytała o „reczne" GDZIEKOLWIEK w pliku - zaliczała ją sama
+    # wartość domyślna kolumny. Pytamy o regułę TEGO limitu.
+    assert re.search(r"SET wznowienie = 'reczne'\s+WHERE name = 'min_equity'",
+                     migracja), "min_equity nie ma reguły ręcznej"
 
 
 def test_licznik_wznowien_idzie_PRZED_warunkiem():

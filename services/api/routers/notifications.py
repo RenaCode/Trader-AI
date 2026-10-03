@@ -152,7 +152,7 @@ async def add_channel(body: ChannelBody, request: Request, user: dict = Depends(
         except WebhookNiedozwolony as e:
             print(f"[webhook] odrzucony przy zapisie: {e}", flush=True)
             raise HTTPException(
-                400, "Webhook wymaga publicznego adresu zaczynającego się od https://")
+                400, "Webhook wymaga publicznego adresu zaczynającego się od https://") from e
         config = {"url": body.url.strip(), "secret": (body.secret or "").strip()}
         hint = body.url.split("/")[2][:40]
 

@@ -34,7 +34,6 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal as D
 from pathlib import Path
 
-import pytest
 
 from services.engine.gielda_exec import rozstrzygnij_oczekujace, zloz_oczekujace
 from services.engine.horizons import get as get_horizon

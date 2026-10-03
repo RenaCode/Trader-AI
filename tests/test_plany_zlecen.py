@@ -14,7 +14,6 @@ zyskowne. Optymizm nie rozkładał się losowo.
 import re
 from pathlib import Path
 
-import pytest
 
 from services.engine.portfolio import _wypelnione
 

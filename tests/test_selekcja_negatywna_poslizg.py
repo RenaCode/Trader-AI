@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-from datetime import datetime, timezone
 from decimal import Decimal
 
 import pytest

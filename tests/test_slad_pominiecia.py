@@ -33,7 +33,6 @@ import ast
 import re
 from pathlib import Path
 
-import pytest
 
 KORZEN = Path(__file__).resolve().parents[1]
 LOOP = KORZEN / "services" / "engine" / "loop.py"
@@ -56,7 +55,7 @@ LICZNIKI = "stats"
 
 def _bloki(wezel: ast.AST):
     """Wszystkie listy instrukcji wewnątrz węzła (body, orelse, finalbody...)."""
-    for pole, wartosc in ast.iter_fields(wezel):
+    for _pole, wartosc in ast.iter_fields(wezel):
         if isinstance(wartosc, list) and any(isinstance(x, ast.stmt) for x in wartosc):
             yield wartosc
         elif isinstance(wartosc, ast.AST):

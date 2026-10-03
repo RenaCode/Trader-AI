@@ -22,7 +22,6 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
-import yaml
 
 from services.engine.dozor import (
     SWIEC_BEZ_DECYZJI, ZWLOKA_DECYZJI_MIN, ocen_decyzje_na_swiece,

@@ -162,7 +162,7 @@ def test_G3_ten_sam_klucz_NIE_przebudowuje(monkeypatch):
 
 
 def test_G3_klucz_usuniety_w_trakcie_to_awaria_cyklu(monkeypatch):
-    zbudowane = _z_gielda(monkeypatch)
+    _z_gielda(monkeypatch)
     stan = {"wolne": True, "klucze_blokady": [], "klucze_api": [7, None]}
     kod, cykle = _uruchom(monkeypatch, stan, ["--once", "--egzekucja", "gielda"])
     assert kod != 0 and cykle == []

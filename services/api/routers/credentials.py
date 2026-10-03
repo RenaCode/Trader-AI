@@ -122,7 +122,7 @@ async def add_credential(body: CredentialBody, request: Request,
         )
     except Exception as e:                                     # noqa: BLE001
         if "api_credential_venue_id_mode_label_key" in str(e):
-            raise HTTPException(409, "Klucz o tej etykiecie już istnieje dla tej giełdy i trybu")
+            raise HTTPException(409, "Klucz o tej etykiecie już istnieje dla tej giełdy i trybu") from e
         raise
 
     await audit("credential.create", user_id=user["id"], entity="api_credential",
@@ -184,7 +184,7 @@ async def test_credential(credential_id: int, request: Request,
                                         mode=row["mode"], demo_host=row["demo_host"],
                                         live_host=row["live_host"])
     except KeyError:
-        raise HTTPException(501, f"Adapter dla {row['venue_code']} nie jest jeszcze gotowy")
+        raise HTTPException(501, f"Adapter dla {row['venue_code']} nie jest jeszcze gotowy") from None
 
     try:
         check = await adapter.check_connection()

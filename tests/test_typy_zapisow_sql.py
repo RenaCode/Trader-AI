@@ -552,7 +552,7 @@ def test_zapisy_w_kodzie_SA_w_ogole_znajdowane():
     zapytania = miejsca = znane = 0
     for plik in sorted(ZRODLA.rglob("*.py")):
         drzewo = ast.parse(plik.read_text(encoding="utf-8"), filename=str(plik))
-        for sql, args, _ in _stale_zapytania(drzewo):
+        for sql, _args, _ in _stale_zapytania(drzewo):
             zapytania += 1
             for m in miejsca_parametrow(sql):
                 miejsca += 1

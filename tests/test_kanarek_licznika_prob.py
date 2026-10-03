@@ -25,7 +25,6 @@ import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-import pytest
 
 from services.ingest import news_worker
 from services.ingest.llm import BrakDostawcy

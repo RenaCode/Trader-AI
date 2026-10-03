@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 
 from services.engine.risk_rules import (
-    DEFAULT_LIMITS, RiskState, evaluate_account, START_EQUITY,
+    RiskState, evaluate_account, START_EQUITY,
 )
 
 

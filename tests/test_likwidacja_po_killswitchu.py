@@ -43,10 +43,9 @@ import httpx
 import pytest
 
 from services.engine.likwidacja import (
-    id_likwidacji, likwiduj_po_killswitchu, ocen_zdarzenie, stan_z_gieldy)
+    ocen_zdarzenie, stan_z_gieldy)
 from services.exchanges.base import (
-    BookLevel, ExchangeError, OdmowaGieldy, OrderBook, StanZlecenia,
-    ZlozoneZlecenie)
+    StanZlecenia)
 
 KORZEN = Path(__file__).resolve().parents[1]
 TEST_DB_URL = os.environ.get("TEST_DB_URL")

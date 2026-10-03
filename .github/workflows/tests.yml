@@ -69,6 +69,10 @@ jobs:
       # w `charts/trader/templates/api.yaml`. Hasla rol procesow sa tu
       # nieustawione - migrator wypisuje o tym ostrzezenie i idzie dalej,
       # bo w CI nikt sie tymi rolami nie loguje.
+      # LINT PRZED TESTAMI (audyt Fable U-15): reguly F/B/E9 z ruff.toml.
+      # Pierwszy przebieg znalazl cztery testy zdefiniowane dwa razy - pierwsza
+      # kopia nigdy sie nie wykonywala, a pytest tego nie zglasza.
+      - run: ruff check .
       - run: python -B db/migrate.py
         env:
           DATABASE_URL: postgresql://trader:ci@localhost:5432/trader

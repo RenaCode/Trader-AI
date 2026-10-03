@@ -43,7 +43,7 @@ def test_pusta_pamiec_nie_wywraca():
 
 def test_zerowanie_renormalizuje_do_jednosci():
     w = _bez_martwych(DEFAULT_WEIGHTS, {"news_shock"})
-    for rezim, wagi in w.items():
+    for wagi in w.values():
         assert wagi["news_shock"] == 0.0
         assert sum(wagi.values()) == pytest.approx(1.0, abs=1e-3)
         # Komplet sygnalow PRODUKCYJNYCH. Eksperymentalne celowo NIE MAJA wagi
