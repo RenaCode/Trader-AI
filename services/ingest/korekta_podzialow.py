@@ -136,8 +136,7 @@ async def pobierz_serie(adapter, symbol: str, timeframe: str, od: datetime,
         # repozytorium nigdy wyslany do Alpaki (ani backfill, ani market_worker
         # go nie podaja), wiec operacja na produkcyjnych danych nie jest
         # miejscem na jego pierwszy raz.
-        swiece = await adapter.fetch_candles(symbol, timeframe, limit=10_000,
-                                             start=kursor, korekta=korekta)
+        swiece = await _pobierz_cierpliwie(adapter, symbol, timeframe, kursor, korekta)
         if not swiece:
             break
         for c in swiece:
@@ -153,6 +152,30 @@ async def pobierz_serie(adapter, symbol: str, timeframe: str, od: datetime,
         kursor = ostatnia + step
     out.sort(key=lambda c: c.event_time)
     return out
+
+
+# Limit zapytan Alpaki jest minutowy, a ponowienia w adapterze trwaja razem
+# ok. 3,5 s - za malo, gdy ten sam klucz zuzywaja rownolegle workery equity.
+# Ta operacja nie ma terminu, wiec czeka do pelnej minuty, zamiast urywac
+# pomiar w polowie (2026-10-03: krok 1b padl dwa razy na "too many requests").
+CIERPLIWOSC_PROB = 6
+CIERPLIWOSC_S = 30.0
+
+
+async def _pobierz_cierpliwie(adapter, symbol, timeframe, kursor, korekta,
+                              *, prob: int = CIERPLIWOSC_PROB,
+                              pauza_s: float = CIERPLIWOSC_S):
+    for proba in range(prob):
+        try:
+            return await adapter.fetch_candles(symbol, timeframe, limit=10_000,
+                                               start=kursor, korekta=korekta)
+        except ExchangeError as e:
+            if not e.retryable or proba == prob - 1:
+                raise
+            print(f"  {symbol}: {e} - czekam {pauza_s:.0f} s (proba {proba + 1}/{prob})",
+                  file=sys.stderr)
+            await asyncio.sleep(pauza_s)
+    raise AssertionError("nieosiagalne")
 
 
 def stan_bazy(cur, instrument_id: int, timeframe: str) -> dict:
