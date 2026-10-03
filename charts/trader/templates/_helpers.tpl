@@ -247,7 +247,12 @@ pkg/controllers/netpol/policy.go, evalIPBlockPeer). Regula 2 zostaje mimo to:
 wedlug specyfikacji NetworkPolicy ipBlock nie musi obejmowac podow, wiec ruch
 w klastrze nie powinien od tego zalezec.
 */}}
-{{- define "trader.regulyEgress" -}}
+{{/*
+REGULY EGRESS BEZ INTERNETU - tylko DNS i klaster (audyt Fable U-16).
+Pierwsze dwie reguly `trader.regulyEgress`; dla podow, ktore nie lacza sie
+z zadnym API zewnetrznym (`networkPolicy.egress.bezInternetu`).
+*/}}
+{{- define "trader.regulyEgressKlaster" -}}
 - to:
     - namespaceSelector:
         matchLabels:
@@ -260,6 +265,10 @@ w klastrze nie powinien od tego zalezec.
     - { protocol: TCP, port: 53 }
 - to:
     - namespaceSelector: {}
+{{- end -}}
+
+{{- define "trader.regulyEgress" -}}
+{{ include "trader.regulyEgressKlaster" . }}
 - to:
     - ipBlock:
         cidr: 0.0.0.0/0

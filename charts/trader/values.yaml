@@ -221,6 +221,16 @@ networkPolicy:
     siecDomowa:
       - 192.168.3.0/24
       - 10.13.13.0/24
+    # BEZ INTERNETU - tylko DNS i klaster (audyt Fable U-16). Wylacznie
+    # komponenty, ktore na pewno nie lacza sie na zewnatrz:
+    #   db               - baza;
+    #   web              - nginx, proxy do `api` w klastrze;
+    #   features(-equity) - liczy z bazy, nie importuje adaptera, HTTP ani LLM.
+    # CELOWO NIE: dozorca* i trener (wolaja `notify()`, a kanal webhook/WhatsApp
+    # to internet), kapital-equity (Alpaca), engine/market/history (gielda),
+    # news (RSS + LLM), api (webhooki, test klucza gieldy). Wpis = nazwa
+    # Deploymentu bez prefiksu `trader-`.
+    bezInternetu: [db, web, features, features-equity]
 
 # MODELE I LIMITY ANALIZY WIADOMOSCI.
 #

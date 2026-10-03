@@ -166,7 +166,9 @@ def test_egress_obejmuje_KAZDY_pod_chartu():
     Pod pominiety przez selektor egress zostaje z ta sama luka."""
     docs = _render()
     p = _polityki(docs)
-    selektory = [p["trader-egress"]["podSelector"], p["trader-egress-zadania"]["podSelector"]]
+    selektory = [p["trader-egress"]["podSelector"], p["trader-egress-zadania"]["podSelector"],
+                 # pody bez internetu (U-16) - wezsza polityka, ale nadal polityka
+                 p["trader-egress-bez-internetu"]["podSelector"]]
     pody = list(_pody(docs))
     assert len(pody) >= 20
     for nazwa, etykiety, _ in pody:

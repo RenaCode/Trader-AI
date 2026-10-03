@@ -123,8 +123,20 @@ spec:
     matchLabels: {{- include "trader.etykietyZadania" . | nindent 6 }}
   policyTypes: [Ingress]
 {{- if .Values.networkPolicy.egress.enabled }}
+{{- /* Podzial na pody z internetem i bez (U-16). Polityki sie SUMUJA, wiec pod
+z listy `bezInternetu` nie moze trafic do pierwszej - inaczej dostalby
+internet z niej mimo drugiej. */}}
+{{- $bez := list }}
+{{- range .Values.networkPolicy.egress.bezInternetu }}
+{{- $bez = append $bez (printf "%s-%s" $pelna .) }}
+{{- end }}
+{{- $z := list }}
+{{- range (concat (list (printf "%s-db" $pelna) (printf "%s-api" $pelna) (printf "%s-web" $pelna)) $workery) }}
+{{- if not (has . $bez) }}{{ $z = append $z . }}{{ end }}
+{{- end }}
 ---
-# EGRESS: wszystkie Deploymenty chartu - bez sieci domowej, reszta bez zmian
+# EGRESS: Deploymenty, ktore lacza sie z API zewnetrznymi (gielda, LLM, RSS,
+# kanaly powiadomien) - bez sieci domowej, reszta bez zmian
 # (`networkPolicy.egress` w values.yaml). Osobny obiekt z `policyTypes:
 # [Egress]`, zeby nie mieszac sie z politykami ingress wyzej.
 apiVersion: networking.k8s.io/v1
@@ -138,14 +150,33 @@ spec:
       - key: app
         operator: In
         values:
-          - {{ $pelna }}-db
-          - {{ $pelna }}-api
-          - {{ $pelna }}-web
-          {{- range $workery }}
+          {{- range $z }}
           - {{ . }}
           {{- end }}
   policyTypes: [Egress]
   egress: {{- include "trader.regulyEgress" . | nindent 4 }}
+{{- if $bez }}
+---
+# EGRESS BEZ INTERNETU (audyt Fable U-16): tylko DNS i klaster. Pody, ktore
+# z definicji nie rozmawiaja z nikim poza baza i API w klastrze - przejety
+# proces nie wyniesie stad danych ani nie pobierze niczego.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $pelna }}-egress-bez-internetu
+  labels: {{- include "trader.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app
+        operator: In
+        values:
+          {{- range $bez }}
+          - {{ . }}
+          {{- end }}
+  policyTypes: [Egress]
+  egress: {{- include "trader.regulyEgressKlaster" . | nindent 4 }}
+{{- end }}
 ---
 # To samo dla podow CronJobow (i Jobow `--from=cronjob/...`).
 apiVersion: networking.k8s.io/v1
