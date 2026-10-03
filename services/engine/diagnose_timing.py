@@ -109,6 +109,49 @@ def zwrot_losowej(panel: list[dict], decyzja: int, dlugosc: int,
     return (p1 / p0 - 1) - koszt_rundy
 
 
+def transakcje_do_porownania(trades: list[dict], test: dict[str, list[dict]]
+                             ) -> tuple[list[float], list[tuple[str, int, int]]]:
+    """Zwroty faktyczne i wzorce (symbol, swieca decyzji, dlugosc) - TE SAME transakcje.
+
+    BEZ DOMKNIEC WYMUSZONYCH KONCEM OKNA. Pozycja otwarta na ostatniej swiecy
+    okna zamyka sie w `simulate_portfolio` po cenie TEJ swiecy, zleceniem
+    rynkowym, z poslizgiem i stawka taker - niezaleznie od trybu egzekucji.
+    `zwrot_losowej` przy limicie wychodzi po cenie swiecy `i1-1` i placi makera.
+    Do 2026-10-03 takie transakcje szly do obu stron porownania: faktyczna
+    z jednej sciezki, losowe z drugiej. Odtworzone na panelu testowym
+    (`_panel(20)`, limit): faktyczny +0,0553 wobec +0,0343 z tej samej swiecy
+    i dlugosci - percentyl mierzyl wtedy rozjazd sciezek, nie moment wejscia.
+    Wymuszone poznajemy po `closed_at == ostatnia swieca okna` (ta sama
+    `last_t`, ktora bierze symulacja: maksimum osi czasu wszystkich serii) i
+    wykluczamy z OBU stron - wzor: `tests/test_zwrot_losowej_jak_symulacja.py`.
+
+    Transakcja, ktorej swiec nie ma w serii instrumentu, tez wypada z obu stron:
+    srednia faktyczna z transakcji, ktorych losowe nie odtwarzaja, porownywalaby
+    rozne zbiory.
+    """
+    koniec = max((r["t"] for v in test.values() for r in v), default=None)
+    zwroty: list[float] = []
+    wzorce: list[tuple[str, int, int]] = []
+    for t in trades:
+        if t["closed_at"] == koniec:
+            continue
+        czasy = [r["t"] for r in test.get(t["symbol"], [])]
+        try:
+            i0, i1 = czasy.index(t["opened_at"]), czasy.index(t["closed_at"])
+        except ValueError:
+            continue
+        # KIERUNEK JEST ZAWSZE DLUGI i to nie jest uproszczenie tego testu.
+        #
+        # Na spocie nie da sie zajac krotkiej pozycji bez pozyczki marzowej,
+        # wiec simulate_portfolio ich nie otwiera (koszty.krotka_pozycja).
+        # Zapisuje to jawnie, zamiast wyliczac kierunek ze znaku zwrotu -
+        # taki wzor wygladalby na obsluge shortow, a faktycznie zwracalby
+        # jedynke zawsze.
+        zwroty.append(t["ret"])
+        wzorce.append((t["symbol"], i0, max(1, i1 - i0)))
+    return zwroty, wzorce
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--bar", default=DEFAULT_BAR, choices=sorted(HORIZONS))
@@ -216,28 +259,13 @@ def main() -> int:
             start += timedelta(days=h.step_days)
             continue
 
-        faktyczny = statistics.fmean(t["ret"] for t in res.trades)
-
-        # Dlugosc kazdej transakcji w swiecach - odtwarzana z panelu instrumentu.
-        wzorce = []
-        for t in res.trades:
-            seria = test[t["symbol"]]
-            czasy = [r["t"] for r in seria]
-            try:
-                i0, i1 = czasy.index(t["opened_at"]), czasy.index(t["closed_at"])
-            except ValueError:
-                continue
-            # KIERUNEK JEST ZAWSZE DLUGI i to nie jest uproszczenie tego testu.
-            #
-            # Na spocie nie da sie zajac krotkiej pozycji bez pozyczki marzowej,
-            # wiec simulate_portfolio ich nie otwiera (koszty.krotka_pozycja).
-            # Zapisuje to jawnie, zamiast wyliczac kierunek ze znaku zwrotu -
-            # taki wzor wygladalby na obsluge shortow, a faktycznie zwracalby
-            # jedynke zawsze.
-            wzorce.append((t["symbol"], i0, max(1, i1 - i0)))
+        # Dlugosc kazdej transakcji w swiecach - odtwarzana z panelu instrumentu,
+        # bez domkniec wymuszonych koncem okna (patrz `transakcje_do_porownania`).
+        zwroty_faktyczne, wzorce = transakcje_do_porownania(res.trades, test)
         if len(wzorce) < h.min_trades:
             start += timedelta(days=h.step_days)
             continue
+        faktyczny = statistics.fmean(zwroty_faktyczne)
 
         losowe = []
         dlugosci = [d for _, _, d in wzorce]

@@ -36,10 +36,17 @@ metadata:
   labels: {{- include "trader.labels" . | nindent 4 }}
 spec:
   schedule: {{ .Values.postmortemCron.schedule | quote }}
-  # STREFA JAWNIE, nie domyslnie. Bez `timeZone` k3s liczy harmonogram
-  # w strefie kontrolera, a nie w tej, w ktorej czyta sie wynik - przesuniecie
-  # myli przy zestawianiu chwil z dziennikiem wydatkow (ten liczy dobe w UTC).
-  timeZone: "Etc/UTC"
+  # STREFA JAWNIE, nie domyslnie - i od 2026-10-03 TA SAMA co w pozostalych
+  # zadaniach (`strefaCzasowa` w values.yaml).
+  #
+  # Wczesniej stalo tu `Etc/UTC`, jako jedyne zadanie w chartcie: reszta szla
+  # strefa hosta (Europe/Warsaw). Dwie strefy w jednym harmonogramie znaczyly,
+  # ze zmiana czasu przesuwala post-mortem wzgledem trenera - zapas 3 h 10 min
+  # latem, 2 h 10 min zima. Godzina w `postmortemCron.schedule` zostala
+  # przeliczona tak, zeby LETNIA pora uruchomienia sie nie zmienila
+  # (05:50 UTC = 07:50 CEST). Doba dziennika wydatkow liczona w UTC nie jest
+  # zagrozona: 07:50 Warszawy to zawsze 05:50-06:50 UTC, daleko od polnocy.
+  timeZone: {{ required "strefaCzasowa musi byc ustawiona wprost" .Values.strefaCzasowa | quote }}
   concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 1
   failedJobsHistoryLimit: 1
@@ -56,11 +63,16 @@ spec:
       template:
         spec:
           restartPolicy: Never
+          # Bez tokenu API klastra i bez roota - patrz `trader.podBezUprawnien`
+          # w _helpers.tpl. Zadanie nie rozmawia z API Kubernetesa.
+          automountServiceAccountToken: false
+          {{- include "trader.podBezUprawnien" . | nindent 10 }}
           terminationGracePeriodSeconds: 30
           containers:
             - name: postmortem
               image: "{{ .Values.api.image.repository }}:{{ .Values.api.image.tag }}"
               imagePullPolicy: {{ .Values.api.image.pullPolicy }}
+              {{- include "trader.kontenerBezUprawnien" . | nindent 14 }}
               command:
                 - sh
                 - -c

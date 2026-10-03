@@ -85,7 +85,10 @@ def test_dozor_i_trener_uzywaja_TEJ_SAMEJ_nazwy_metryki():
     """Rozjazd nazwy dałby po cichu „brutto" przy każdym przebiegu - i dozór
     wróciłby do porównywania wszystkiego ze wszystkim."""
     trener = (KORZEN / "services/engine/train.py").read_text(encoding="utf-8")
-    assert 'agg["doplata_pb"] = doplata * 1e4' in trener
+    assert "agg.update(znacznik_miary(karta))" in trener
+    assert '"doplata_pb": karta.doplata_poza_symulacja * 1e4' in trener
+    assert '"spread_niezmierzony"' in trener
+    assert "m.metric = 'spread_niezmierzony'" in SQL_STAN_NAUKI
     assert "m.metric = 'doplata_pb'" in SQL_STAN_NAUKI
     dozor = (KORZEN / "services/engine/dozor.py").read_text(encoding="utf-8")
     assert "wybierz_poprzedni(wiersze)" in dozor

@@ -1191,6 +1191,7 @@ def main() -> int:
     # bazy kazdy kolejny cykl padalby na tym samym zerwanym gniezdzie,
     # w nieskonczonosc - martwy proces wygladajacy na zywy.
     pod_rzad = 0
+    puls.zyje(args.interval)
     while True:
         t0 = datetime.now(timezone.utc)
         # OKNO LICZONE NA KAZDY CYKL. Wyliczone raz przed petla zamarzloby
@@ -1258,6 +1259,8 @@ def main() -> int:
         else:
             pod_rzad = 0
 
+        # Obrot petli, takze nieudany - sonda zywotnosci (`puls.zyje`).
+        puls.zyje(args.interval)
         if jednorazowo:
             return 1 if bledy else 0
         time.sleep(args.interval)

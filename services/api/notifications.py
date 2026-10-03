@@ -12,8 +12,12 @@ kontroli.
 """
 from __future__ import annotations
 
+import asyncio
+import ipaddress
 import json
+import socket
 from datetime import datetime, time, timedelta, timezone
+from urllib.parse import urlsplit, urlunsplit
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -71,21 +75,98 @@ async def _send_whatsapp(config: dict, title: str, body: str, severity: str) -> 
             raise RuntimeError(f"CallMeBot: {tresc}")
 
 
+# Jedyny komunikat, jaki uzytkownik dostaje o nieudanym webhooku. Rozne tresci
+# dla "nie ma takiego hosta", "odmowa polaczenia", "zly certyfikat" i "404"
+# zamienialy przycisk "Test kanalu" w skaner uslug TLS wewnatrz klastra:
+# odpowiedz mowila, pod ktorym adresem cos slucha. Szczegol idzie do logu.
+WEBHOOK_BLAD = "Webhook niedostępny albo odrzucił wiadomość"
+
+
+class WebhookNiedozwolony(RuntimeError):
+    """Adres webhooka prowadzi poza publiczny internet."""
+
+
+async def _rozwiaz(host: str, port: int) -> list[str]:
+    wyniki = await asyncio.get_running_loop().getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    # Adres IPv6 z zakresem (`fe80::1%eth0`) - `ip_address` nie zna sufiksu,
+    # a link-local i tak odpada na `is_global`.
+    return [w[4][0].split("%")[0] for w in wyniki]
+
+
+async def adres_webhooka(url: str) -> tuple[str, str, str]:
+    """(url_z_IP, naglowek_Host, nazwa_do_TLS) - po sprawdzeniu, ze KAZDY adres jest publiczny.
+
+    SSRF. Do 2026-10-03 jedynym warunkiem bylo `https://`, wiec webhook na
+    `https://kubernetes.default.svc` albo `https://10.43.0.1` wysylal z poda API
+    zadanie do wnetrza klastra. Rozwiazujemy nazwe SAMI i odrzucamy, gdy
+    ktorykolwiek z adresow nie jest `is_global` (prywatne, petla zwrotna,
+    link-local, CGNAT, adresy uslug k3s 10.43/16 i podow 10.42/16).
+
+    PRZYPIECIE ADRESU. Sprawdzenie nazwy, a potem polaczenie po NAZWIE,
+    zostawia okno na DNS rebinding: drugie rozwiazanie moze dac 10.43.0.1.
+    Dlatego laczymy sie z adresem, ktory wlasnie sprawdzilismy, a nazwe
+    podajemy osobno w `Host` i jako `sni_hostname` - certyfikat jest wtedy
+    nadal weryfikowany wobec nazwy, a nie wobec IP.
+    """
+    czesci = urlsplit(url)
+    if czesci.scheme != "https" or not czesci.hostname:
+        raise WebhookNiedozwolony("adres musi zaczynac sie od https:// i miec nazwe hosta")
+    host = czesci.hostname
+    port = czesci.port or 443
+    try:
+        adresy = {ipaddress.ip_address(a) for a in await _rozwiaz(host, port)}
+    except (OSError, ValueError) as e:
+        raise WebhookNiedozwolony(f"nazwa {host} sie nie rozwiazuje: {e}") from e
+    if not adresy:
+        raise WebhookNiedozwolony(f"nazwa {host} nie ma adresu")
+    niepubliczne = sorted(str(a) for a in adresy if not a.is_global)
+    if niepubliczne:
+        raise WebhookNiedozwolony(f"{host} prowadzi do adresu niepublicznego: {niepubliczne}")
+    ip = sorted(adresy, key=str)[0]
+    ip_url = f"[{ip}]" if ip.version == 6 else str(ip)
+    naglowek_host = host if czesci.port in (None, 443) else f"{host}:{czesci.port}"
+    return (urlunsplit(("https", f"{ip_url}:{port}", czesci.path or "/",
+                        czesci.query, "")), naglowek_host, host)
+
+
 async def _send_webhook(config: dict, payload: dict) -> None:
     headers = {"Content-Type": "application/json"}
     if config.get("secret"):
         # Prosty wspoldzielony sekret w naglowku - odbiorca moze odrzucic
         # zadania, ktore nie pochodza od nas.
         headers["X-Trader-Secret"] = config["secret"]
-    async with httpx.AsyncClient(timeout=15.0) as c:
-        r = await c.post(config["url"], json=payload, headers=headers)
+    try:
+        url, host, sni = await adres_webhooka(config["url"])
+        headers["Host"] = host
+        async with httpx.AsyncClient(timeout=15.0) as c:
+            r = await c.post(url, json=payload, headers=headers,
+                             extensions={"sni_hostname": sni})
         if r.status_code >= 400:
-            raise RuntimeError(f"Webhook zwrocil {r.status_code}")
+            raise RuntimeError(f"webhook zwrocil {r.status_code}")
+    except Exception as e:                                    # noqa: BLE001
+        print(f"[webhook] {config.get('url', '?')[:80]}: {type(e).__name__}: {e}",
+              flush=True)
+        raise RuntimeError(WEBHOOK_BLAD) from None
+
+
+# Zadania wysylki w tle. `create_task` trzyma tylko SLABA referencje, wiec
+# zadanie bez wpisu tutaj potrafi zostac zebrane przez GC w polowie wysylki -
+# dokumentacja asyncio mowi o tym wprost.
+_w_tle: set[asyncio.Task] = set()
+
+
+async def _powiadom_bez_wyjatku(user_id: int, event_code: str, title: str,
+                                body: str, kw: dict) -> None:
+    try:
+        await notify(user_id, event_code, title, body, **kw)
+    except Exception as e:                                    # noqa: BLE001
+        print(f"[powiadomienie] {event_code} nie zostało wysłane: "
+              f"{type(e).__name__}: {e}", flush=True)
 
 
 async def powiadom_o_bezpieczenstwie(user_id: int, event_code: str, title: str,
                                      body: str = "", **kw) -> None:
-    """Powiadomienie, ktore NIE MOZE przerwac operacji, o ktorej powiadamia.
+    """Powiadomienie, ktore NIE MOZE przerwac ani SPOWOLNIC operacji, o ktorej powiadamia.
 
     Zdarzenia bezpieczenstwa - nowe logowanie, zmiana klucza, zmiana hasla - sa
     zgłaszane W TRAKCIE obslugi zadania uzytkownika. Wyjatek z kanalu
@@ -95,13 +176,19 @@ async def powiadom_o_bezpieczenstwie(user_id: int, event_code: str, title: str,
     Mechanizm ostrzegania, ktory potrafi zablokowac chroniona operacje, jest
     gorszy niz jego brak: zamienia awarie kanalu powiadomien w awarie systemu.
 
+    POZA SCIEZKA ZADANIA. Do 2026-10-03 wysylka szla tu wprost (`await
+    notify`), a kanaly maja timeouty 15 s (webhook) i 20 s (CallMeBot). Martwy
+    kanal wydluzal logowanie i zmiane hasla do ok. 35 s - przy przejeciu konta,
+    kiedy wlasciciel zmienia haslo w pospiechu, to jest najgorszy moment na
+    zawieszony formularz. Teraz zadanie odpowiada od razu, a zapis i wysylka
+    ida w tle na tej samej petli (pula bazy jest wspolna).
+
     Blad jest polykany, ale nie milczaco - trafia do dziennika procesu.
     """
-    try:
-        await notify(user_id, event_code, title, body, **kw)
-    except Exception as e:                                    # noqa: BLE001
-        print(f"[powiadomienie] {event_code} nie zostało wysłane: "
-              f"{type(e).__name__}: {e}", flush=True)
+    zadanie = asyncio.create_task(
+        _powiadom_bez_wyjatku(user_id, event_code, title, body, kw))
+    _w_tle.add(zadanie)
+    zadanie.add_done_callback(_w_tle.discard)
 
 
 async def _zapisz_zdarzenie(user_id: int, event_code: str, sev: str, title: str,

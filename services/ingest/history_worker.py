@@ -208,6 +208,7 @@ async def main() -> int:
           f"co {args.interval} s")
 
     pod_rzad = 0
+    puls.zyje(args.interval)
     while True:
         t0 = datetime.now(timezone.utc)
         try:
@@ -247,6 +248,8 @@ async def main() -> int:
         else:
             pod_rzad = 0
 
+        # Obrot petli, takze nieudany - sonda zywotnosci (`puls.zyje`).
+        puls.zyje(args.interval)
         if args.once:
             return 1 if bledy else 0
         await asyncio.sleep(args.interval)

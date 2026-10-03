@@ -255,8 +255,17 @@ UBYTEK_OKIEN = 0.25
 # policzono. Wolajacy dociaga ja podzapytaniem (`SQL_STAN_NAUKI`). Brak metryki
 # = przebieg sprzed zmiany; zero = liczby identyczne z brutto, wiec to TA SAMA
 # miara co dawniej, a nie nowa.
+#
+# TRZECIA ETYKIETA OD 2026-10-03: karta liczona, ale spread NIEZMIERZONY
+# (`zmierz_spread` oddal `bps=None` przy luce w `book_snapshot`), wiec doplata
+# wyszla zero. Liczbowo to to samo co brutto - i dlatego jest z brutto
+# POROWNYWALNA (`klasa_miary`) - ale nazwana osobno: „brutto" w powiadomieniu
+# mowilo, ze przebieg wrocil do starej definicji, a prawda brzmi „zgubilismy
+# pomiar spreadu". Rozpoznaje ja metryka `spread_niezmierzony`
+# (`train.znacznik_miary`).
 MIARA_BRUTTO = "brutto (przed dopłatą z karty)"
 MIARA_PO_KARCIE = "po dopłacie z karty kosztu"
+MIARA_BEZ_SPREADU = "karta bez pomiaru spreadu (dopłata 0 — liczbowo jak brutto)"
 
 SQL_STAN_NAUKI = """
 SELECT l.status, l.windows_total, l.windows_positive, l.positive_ci_low,
@@ -266,7 +275,13 @@ SELECT l.status, l.windows_total, l.windows_positive, l.positive_ci_low,
           JOIN learn.wf_window w ON w.training_run_id = r.id
           JOIN learn.wf_metric m ON m.wf_window_id = w.id
          WHERE r.model_version_id = l.model_version_id
-           AND m.metric = 'doplata_pb') AS doplata_pb
+           AND m.metric = 'doplata_pb') AS doplata_pb,
+       (SELECT max(m.value)
+          FROM learn.training_run r
+          JOIN learn.wf_window w ON w.training_run_id = r.id
+          JOIN learn.wf_metric m ON m.wf_window_id = w.id
+         WHERE r.model_version_id = l.model_version_id
+           AND m.metric = 'spread_niezmierzony') AS spread_niezmierzony
 FROM learn.learning_state_log l
 WHERE l.engine = %s AND l.bar = %s
 ORDER BY l.run_at DESC LIMIT %s
@@ -281,7 +296,22 @@ STAN_NAUKI_WSTECZ = 14
 def miara_przebiegu(wiersz: dict) -> str:
     """Ktora definicja miar okien stoi za wierszem dziennika stanu nauki."""
     doplata = wiersz.get("doplata_pb")
-    return MIARA_PO_KARCIE if doplata else MIARA_BRUTTO
+    if doplata:
+        return MIARA_PO_KARCIE
+    if doplata is not None and wiersz.get("spread_niezmierzony"):
+        return MIARA_BEZ_SPREADU
+    return MIARA_BRUTTO
+
+
+def klasa_miary(wiersz: dict) -> str:
+    """Ktore przebiegi wolno porownywac liczbami: te o tej samej KLASIE.
+
+    Karta bez pomiaru spreadu ma doplate zero, wiec jej odsetek i mediana sa
+    tymi samymi liczbami co brutto - porownanie jest uczciwe. Rozni sie tylko
+    nazwa w komunikacie (`miara_przebiegu`).
+    """
+    m = miara_przebiegu(wiersz)
+    return MIARA_BRUTTO if m == MIARA_BEZ_SPREADU else m
 
 
 def wybierz_poprzedni(wiersze: list[dict]) -> tuple[dict | None, int]:
@@ -293,62 +323,86 @@ def wybierz_poprzedni(wiersze: list[dict]) -> tuple[dict | None, int]:
     przebiegu w historii.
     """
     biezacy = wiersze[0]
-    miara = miara_przebiegu(biezacy)
+    miara = klasa_miary(biezacy)
     pominiete = 0
     for w in wiersze[1:]:
-        if miara_przebiegu(w) == miara:
+        if klasa_miary(w) == miara:
             return w, pominiete
         pominiete += 1
     return None, pominiete
 
 
 def zmiany(poprzedni: dict | None, biezacy: dict,
-           pominiete_inna_miara: int = 0) -> list[str]:
+           pominiete_inna_miara: int = 0,
+           bezposredni: dict | None = None) -> list[str]:
     """Lista powodow, dla ktorych warto sie odezwac. Pusta = cisza.
 
     Funkcja jest czysta i to jest celowe: caly werdykt da sie przetestowac bez
     bazy, gieldy i sieci.
 
-    `poprzedni` MUSI byc liczony ta sama miara co `biezacy` - wybiera go
-    `wybierz_poprzedni`. Gdy takiego nie ma, a wczesniejsze przebiegi istnieja
-    (`pominiete_inna_miara`), mowimy to wprost RAZ, zamiast porownywac liczby
-    dwoch roznych definicji albo udawac pierwszy przebieg.
+    DWA POPRZEDNIKI, BO DWA RODZAJE LICZB
+
+    `poprzedni` - liczony TA SAMA miara co `biezacy` (`wybierz_poprzedni`).
+    Z nim porownujemy WYLACZNIE to, co od definicji miary zalezy: odsetek
+    dodatnich okien, przedzial ufnosci i znak mediany Sharpe'a.
+
+    `bezposredni` - wiersz tuz przed biezacym, BEZ WZGLEDU na miare (domyslnie
+    `poprzedni`). Z nim porownujemy status, liczbe okien i dryf: `windows_total`
+    i `max_psi` od miary nie zaleza wcale, a status bramkuje handel - jego
+    zmiana jest zdarzeniem niezaleznie od tego, czy wywolal ja rynek, czy nowa
+    definicja (wtedy mowimy to w tresci).
+
+    Do 2026-10-03 przebieg bez poprzednika tej samej miary konczyl sie TU
+    jednym zdaniem i `return`: status validated -> degraded, ubytek polowy okien
+    i dryf ponad progiem przechodzily bez slowa. A stan przejsciowy nie jest
+    jednorazowy - kazdy przeskok miedzy karta a luka w pomiarze spreadu wchodzi
+    w te galaz od nowa.
     """
     if biezacy["windows_total"] == 0:
         return ["przebieg nie dal ani jednego okna informatywnego"]
 
-    if poprzedni is None and pominiete_inna_miara:
-        return [f"pierwszy przebieg liczony miarą „{miara_przebiegu(biezacy)}” — "
-                f"{pominiete_inna_miara} wcześniejszych liczono inną definicją, "
-                f"więc porównanie odsetka, przedziału i znaku mediany POMINIĘTE; "
-                f"bieżący status: {biezacy['status']}"]
-
-    if poprzedni is None:
-        return ["pierwszy zapisany przebieg — nie ma z czym porownac"]
+    if bezposredni is None:
+        bezposredni = poprzedni
 
     powody: list[str] = []
 
-    if poprzedni["status"] != biezacy["status"]:
-        powody.append(f"status: {poprzedni['status']} → {biezacy['status']}")
-
-    # Prog z pomiaru, nie z przeczucia: dobowa roznica odsetka miesci sie
-    # w szumie, wyjscie poza przedzial poprzedniego przebiegu - nie.
-    lo, hi = poprzedni.get("positive_ci_low"), poprzedni.get("positive_ci_high")
-    odsetek = biezacy["windows_positive"] / biezacy["windows_total"]
-    if lo is not None and hi is not None and not (lo <= odsetek <= hi):
+    if poprzedni is None and pominiete_inna_miara:
         powody.append(
-            f"odsetek dodatnich okien {odsetek:.1%} poza przedzialem poprzedniego "
-            f"przebiegu ({lo:.1%}–{hi:.1%})")
+            f"pierwszy przebieg liczony miarą „{miara_przebiegu(biezacy)}” — "
+            f"{pominiete_inna_miara} wcześniejszych liczono inną definicją, "
+            f"więc porównanie odsetka, przedziału i znaku mediany POMINIĘTE; "
+            f"bieżący status: {biezacy['status']}")
 
-    poprz_okien = poprzedni["windows_total"]
+    if bezposredni is None:
+        # Bez zadnego wczesniejszego wiersza nie ma z czym porownac niczego.
+        return powody or ["pierwszy zapisany przebieg — nie ma z czym porownac"]
+
+    if bezposredni["status"] != biezacy["status"]:
+        m_przed, m_teraz = miara_przebiegu(bezposredni), miara_przebiegu(biezacy)
+        dopisek = (f" (zmiana definicji miary: {m_przed} → {m_teraz})"
+                   if klasa_miary(bezposredni) != klasa_miary(biezacy) else "")
+        powody.append(f"status: {bezposredni['status']} → {biezacy['status']}{dopisek}")
+
+    if poprzedni is not None:
+        # Prog z pomiaru, nie z przeczucia: dobowa roznica odsetka miesci sie
+        # w szumie, wyjscie poza przedzial poprzedniego przebiegu - nie.
+        lo, hi = poprzedni.get("positive_ci_low"), poprzedni.get("positive_ci_high")
+        odsetek = biezacy["windows_positive"] / biezacy["windows_total"]
+        if lo is not None and hi is not None and not (lo <= odsetek <= hi):
+            powody.append(
+                f"odsetek dodatnich okien {odsetek:.1%} poza przedzialem poprzedniego "
+                f"przebiegu ({lo:.1%}–{hi:.1%})")
+
+    poprz_okien = bezposredni["windows_total"]
     if poprz_okien and biezacy["windows_total"] < poprz_okien * (1 - UBYTEK_OKIEN):
         powody.append(
             f"ubylo okien informatywnych: {poprz_okien} → {biezacy['windows_total']} "
             f"— to ubytek dowodow, nie wyniku")
 
-    sp, sb = poprzedni.get("median_oos_sharpe"), biezacy.get("median_oos_sharpe")
-    if sp is not None and sb is not None and (sp > 0) != (sb > 0):
-        powody.append(f"mediana Sharpe zmienila znak: {sp:+.3f} → {sb:+.3f}")
+    if poprzedni is not None:
+        sp, sb = poprzedni.get("median_oos_sharpe"), biezacy.get("median_oos_sharpe")
+        if sp is not None and sb is not None and (sp > 0) != (sb > 0):
+            powody.append(f"mediana Sharpe zmienila znak: {sp:+.3f} → {sb:+.3f}")
 
     # WARUNEK WZROSTU ZOSTAJE - ale dopiero teraz jest bezpieczny.
     #
@@ -357,11 +411,129 @@ def zmiany(poprzedni: dict | None, biezacy: dict,
     # ten sam warunek uciszal stan trwale zly - bo stan, ktory stoi, nie rosnie.
     # Za "nadal jest zle" odpowiada `ocen_dryf_trwaly`; tutaj zostaje wylacznie
     # "wlasnie sie pogorszylo".
-    pp, pb = poprzedni.get("max_psi") or 0.0, biezacy.get("max_psi") or 0.0
+    pp, pb = bezposredni.get("max_psi") or 0.0, biezacy.get("max_psi") or 0.0
     if pb > PSI_PROG and pb > pp:
         powody.append(f"dryf cech {pb:.2f} powyzej progu {PSI_PROG} i rosnie")
 
     return powody
+
+
+# ----------------------------------------------------- tor niegotowy (kod 3)
+#
+# Kod trenera `train.KOD_TOR_NIEGOTOWY`. Kopia, nie import: `train.py` ciagnie
+# za soba symulacje i caly potok cech, a dozor bywa wolany sam. Rownosc pilnuje
+# `tests/test_dozor_tor_niegotowy.py`.
+KOD_TOR_NIEGOTOWY = 3
+
+# Po ilu dniach bez udanego przebiegu tor niegotowy przestaje byc stanem
+# przejsciowym. Jedna-dwie noce to normalny skutek nowego podzialu akcji
+# (`backfill.sprawdz_ponowna_korekte` zdejmuje znacznik, operator musi
+# przeliczyc) albo wdrozenia w trakcie; trzecia noc z rzedu znaczy, ze nikt
+# tego nie zrobil. Mniej - alarm po kazdym podziale, zanim ktokolwiek zdazy
+# zareagowac; wiecej - tydzien modelu, ktory sie nie uczy, bez slowa.
+TOR_NIEGOTOWY_DNI = 3
+
+# Rytm przypominania - ten sam co przy dryfie trwalym i z tego samego powodu:
+# stan znany i czekajacy na operatora nie moze dzwonic co noc.
+TOR_NIEGOTOWY_PRZYPOMNIENIE_DNI = 7
+
+
+def ocen_tor_niegotowy(ostatni_przebieg: datetime | None,
+                       ostatnie_zgloszenie: datetime | None,
+                       teraz: datetime) -> str | None:
+    """Czy tor, ktory trener odmowil liczyc (kod 3), stoi juz za dlugo.
+
+    DLACZEGO TO W OGOLE JEST CZUJKA. Kod 3 to NIE awaria - przebieg nie
+    wystartowal, bo nie wolno mu bylo (np. equity bez znacznika
+    `swiece_skorygowane_o_podzialy`). Do 2026-10-03 trainer-cron zapisywal go
+    wylacznie w echu Joba, a dozor dostawal `--kod-trenera 0`: tor equity stal
+    tygodniami z 0/20 znacznikow i jedynym sladem byl log, ktorego nikt nie
+    czyta.
+
+    `ostatni_przebieg` - `run_at` ostatniego wiersza dziennika stanu nauki dla
+    tej pary (engine, bar); None = nigdy. Brak wiersza liczy sie jak stan
+    dowolnie dlugi: torem, ktory nie przeszedl ani razu, nikt nie handluje
+    swiadomie. Funkcja czysta - werdykt i rytm testowalne bez bazy i zegara.
+    """
+    if ostatni_przebieg is not None:
+        dni = (teraz - ostatni_przebieg).total_seconds() / 86400.0
+        if dni < TOR_NIEGOTOWY_DNI:
+            return None
+        odkad = f"ostatni udany przebieg {dni:.1f} dnia temu"
+    else:
+        odkad = "tor nie ma ani jednego udanego przebiegu w dzienniku"
+    if ostatnie_zgloszenie is not None and (
+            teraz - ostatnie_zgloszenie).total_seconds() < (
+            TOR_NIEGOTOWY_PRZYPOMNIENIE_DNI * 86400):
+        return None
+    return (f"trener odmawia liczenia toru (kod {KOD_TOR_NIEGOTOWY}, tor "
+            f"niegotowy) — {odkad}, próg {TOR_NIEGOTOWY_DNI} dni")
+
+
+async def sprawdz_tor_niegotowy(fetch_all, notify, sucho: bool = False, *,
+                                engine: str, bar: str,
+                                teraz: datetime | None = None) -> int:
+    """`--kod-trenera 3`: ostrzezenie z tygodniowym rytmem, nie alarm krytyczny.
+
+    Rytm liczony z historii powiadomien (`data->>'powod'`), per (engine, bar) -
+    ten sam chwyt co przy `learning.drift_high`, bez nowej kolumny.
+    """
+    teraz = teraz or datetime.now(timezone.utc)
+    ostatni = await fetch_all(
+        "SELECT max(run_at) AS run_at FROM learn.learning_state_log"
+        " WHERE engine = %s AND bar = %s", (engine, bar))
+    ostatni_przebieg = ostatni[0]["run_at"] if ostatni else None
+    zgl = await fetch_all(
+        "SELECT created_at FROM notify.notification"
+        " WHERE event_code = 'learning.state_changed' AND engine::text = %s"
+        " AND data->>'powod' = 'tor_niegotowy' AND data->>'bar' = %s"
+        " ORDER BY created_at DESC LIMIT 1", (engine, bar))
+    ostatnie = zgl[0]["created_at"] if zgl else None
+
+    powod = ocen_tor_niegotowy(ostatni_przebieg, ostatnie, teraz)
+    print(f"Tor {engine}/{bar}: trener zakończył się kodem {KOD_TOR_NIEGOTOWY} "
+          f"(tor niegotowy — przebieg nie wystartował, nic nie zapisano)")
+    if powod is None:
+        # Cisza z powodem - inaczej nieodroznialna od czujki, ktora padla.
+        if ostatnie is not None:
+            print(f"  zgłoszone {ostatnie:%Y-%m-%d %H:%M} UTC, przypomnienie co "
+                  f"{TOR_NIEGOTOWY_PRZYPOMNIENIE_DNI} dni — cisza")
+        else:
+            print(f"  krócej niż {TOR_NIEGOTOWY_DNI} dni od udanego przebiegu — cisza")
+        return 0
+    print(f"  • {powod}")
+    if sucho:
+        print("Tryb suchy — powiadomienie nie wysyłane.")
+        return 0
+    odbiorcy = await fetch_all('SELECT id FROM app."user" WHERE is_active')
+    if not odbiorcy:
+        print("Brak odbiorców — powiadomienie nie ma do kogo pójść.")
+        return 0
+    tresc = (f"{powod}.\n\nTo nie jest awaria trenera, tylko warunek wstępny, "
+             f"którego nikt nie spełnił. Dla equity: procedura korekty podziałów "
+             f"(docs/08, „korekta podziałów”) i `korekta_podzialow.py --znacznik`.")
+    for u in odbiorcy:
+        await notify(u["id"], "learning.state_changed",
+                     f"Tor niegotowy ({engine}/{bar})", tresc, engine=engine,
+                     severity="warning",
+                     data={"powod": "tor_niegotowy", "bar": bar,
+                           "kod_trenera": KOD_TOR_NIEGOTOWY})
+    print(f"Powiadomiono odbiorców: {len(odbiorcy)}")
+    return 0
+
+
+def ocen_stan_nauki(wiersze: list[dict]) -> tuple[list[str], int]:
+    """Werdykt `--co stan-nauki` z wierszy dziennika (najnowszy pierwszy).
+
+    Wydzielone z `main`, zeby DOBOR POPRZEDNIKOW byl testowalny bez bazy:
+    poprzednik tej samej miary dla liczb od miary zaleznych i wiersz
+    bezposrednio wczesniejszy dla statusu, okien i dryfu (patrz `zmiany`).
+    Oddaje powody i liczbe przebiegow pominietych jako liczone inna miara.
+    """
+    biezacy = wiersze[0]
+    poprzedni, pominiete = wybierz_poprzedni(wiersze)
+    bezposredni = wiersze[1] if len(wiersze) > 1 else None
+    return zmiany(poprzedni, biezacy, pominiete, bezposredni), pominiete
 
 
 def ocen_dryf_trwaly(historia: list[dict], *,
@@ -3155,7 +3327,9 @@ async def main() -> int:
                     help="wypisz werdykt, nie wysylaj powiadomienia")
     ap.add_argument("--kod-trenera", type=int, default=0, dest="kod_trenera",
                     help="kod wyjscia trenera; niezerowy zawsze wywoluje "
-                         "powiadomienie")
+                         "powiadomienie - poza 3 (tor niegotowy), ktory daje "
+                         "ostrzezenie dopiero po TOR_NIEGOTOWY_DNI dniach bez "
+                         "udanego przebiegu, z tygodniowym rytmem")
     args = ap.parse_args()
 
     if not os.environ.get("DATABASE_URL"):
@@ -3204,6 +3378,14 @@ async def main() -> int:
                 fetch_all, notify, sucho=args.sucho, engine=args.engine,
                 mode=args.mode, okno_h=args.okno_h or 48)
 
+        if args.kod_trenera == KOD_TOR_NIEGOTOWY:
+            # PRZED odczytem dziennika: tor, ktory nigdy nie przeszedl, nie ma
+            # wierszy, a galaz nizej milczalaby wtedy „brak zapisanych
+            # przebiegow". I nie jako „trener zakonczyl sie bledem" - kod 3 to
+            # odmowa z powodu, nie awaria.
+            return await sprawdz_tor_niegotowy(fetch_all, notify, sucho=args.sucho,
+                                               engine=args.engine, bar=args.bar)
+
         wiersze = await fetch_all(SQL_STAN_NAUKI,
                                   (args.engine, args.bar, STAN_NAUKI_WSTECZ))
         if not wiersze:
@@ -3214,11 +3396,21 @@ async def main() -> int:
         biezacy = wiersze[0]
         # POPRZEDNIK TA SAMA MIARA, nie po prostu drugi wiersz - patrz
         # komentarz przy `MIARA_PO_KARCIE`.
-        poprzedni, pominiete = wybierz_poprzedni(wiersze)
+        powody, pominiete = ocen_stan_nauki(wiersze)
         if pominiete:
             print(f"pominięto {pominiete} przebieg(ów) liczonych inną miarą niż "
-                  f"bieżący ({miara_przebiegu(biezacy)})")
-        powody = zmiany(poprzedni, biezacy, pominiete)
+                  f"bieżący ({miara_przebiegu(biezacy)}) — dla odsetka, przedziału "
+                  f"i znaku mediany; status, okna i dryf porównane z poprzednim wierszem")
+        bezposredni = wiersze[1] if len(wiersze) > 1 else None
+        if bezposredni is not None and (bezposredni.get("doplata_pb")
+                                        != biezacy.get("doplata_pb")):
+            # Codzienny pomiar spreadu zmienia doplate miedzy przebiegami. Zmiana
+            # znaku mediany przy tej samej klasie miary moze wiec wynikac
+            # z KOSZTU, nie z rynku - liczba w logu pozwala to rozroznic.
+            def _pb(w):
+                v = w.get("doplata_pb")
+                return "brak" if v is None else f"{v:.2f} pb"
+            print(f"dopłata z karty: {_pb(bezposredni)} → {_pb(biezacy)}")
 
         # AWARIA TRENERA MUSI SIE ODEZWAC, choc nie jest zmiana stanu.
         #

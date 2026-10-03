@@ -58,6 +58,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import math
 import os
 import statistics
 import sys
@@ -219,6 +220,36 @@ def zapisz_slad(cur, r: Raport, timeframe: str, zdarzenie: str, adjustment: str,
 
 # --------------------------------------------------------------- cechy vs swiece
 
+# TOLERANCJA POROWNANIA CECH. Do 2026-10-03 stalo tu `przed[k] != v`, czyli
+# rownosc co do bitu dwoch liczb double policzonych W ROZNYCH CHWILACH: zapisana
+# wartosc i ta sama cecha przeliczona teraz. Ten sam kod na tych samych swiecach
+# potrafi dac roznice w ostatnich bitach (inna kolejnosc sumowania okna
+# kroczacego, inny poczatek zakresu `od`), a jedna taka roznica blokowala
+# `--znacznik` przy POPRAWNYCH danych - czyli tor equity zostawal martwy z powodu
+# szumu arytmetyki. Skala tego, co sprawdzenie ma wylapac, to skok x10 po
+# podziale (90%), wiec 1e-9 wzglednie jest o osiem rzedow ponizej sygnalu
+# i o kilka powyzej bledu zaokraglen double (~1e-16 na operacje). `abs_tol`
+# dla cech bliskich zera (zwrot, z-score), przy ktorych wzgledna tolerancja
+# traci sens.
+TOLERANCJA_WZGL = 1e-9
+TOLERANCJA_BEZWZGL = 1e-12
+
+
+def rozne(a, b) -> bool:
+    """Czy dwie wartosci cechy roznia sie ponad szum arytmetyki."""
+    if a is None or b is None:
+        return (a is None) != (b is None)
+    return not math.isclose(float(a), float(b), rel_tol=TOLERANCJA_WZGL,
+                            abs_tol=TOLERANCJA_BEZWZGL)
+
+
+def policz_rozjazd(przed: dict, po: dict) -> tuple[int, int]:
+    """(niezgodne, brakujace) dla dwoch odczytow tych samych kluczy."""
+    niezgodne = sum(1 for k, v in po.items() if k in przed and rozne(przed[k], v))
+    brakujace = sum(1 for k in po if k not in przed)
+    return niezgodne, brakujace
+
+
 def rozjazd_cech(conn, instrument_id: int, h, feat_ids: dict, od: datetime,
                  do: datetime) -> tuple[int, int]:
     """Ile ZAPISANYCH wartosci cech nie zgadza sie z policzonymi ze swiec.
@@ -248,9 +279,7 @@ def rozjazd_cech(conn, instrument_id: int, h, feat_ids: dict, od: datetime,
         po = wczytaj()
     finally:
         conn.rollback()
-    niezgodne = sum(1 for k, v in po.items() if k in przed and przed[k] != v)
-    brakujace = sum(1 for k in po if k not in przed)
-    return niezgodne, brakujace
+    return policz_rozjazd(przed, po)
 
 
 def rozjazd_przekroju(conn, h, feat_ids: dict, engine: str, od: datetime,
@@ -280,9 +309,7 @@ def rozjazd_przekroju(conn, h, feat_ids: dict, engine: str, od: datetime,
         po = wczytaj()
     finally:
         conn.rollback()
-    niezgodne = sum(1 for k, v in po.items() if k in przed and przed[k] != v)
-    brakujace = sum(1 for k in po if k not in przed)
-    return niezgodne, brakujace
+    return policz_rozjazd(przed, po)
 
 
 # --------------------------------------------------------------------- tryby

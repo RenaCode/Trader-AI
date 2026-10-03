@@ -28,6 +28,7 @@ wyszło — łącznie z tym, że nie wyszło nic.
 from __future__ import annotations
 
 import json
+import time
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
@@ -37,7 +38,7 @@ from services.engine.loop import (
     trwale_niesprzedawalna, zapisz_pominiecie, zapisz_wejscie, zapisz_wyjscie)
 from services.engine.zlecenia import (
     Filtry, Oferty, ocena_zwloki, sprawdz_zlecenie)
-from services.exchanges.base import ExchangeError, OdmowaGieldy
+from services.exchanges.base import ExchangeError, OdmowaGieldy, ZlozoneZlecenie
 # `recv_window` to jedyna liczba, ktora opisuje dopuszczalny rozjazd naszego
 # zegara z zegarem gieldy — ta sama, ktorej pilnuje `BybitAdapter.dryf_zegara`.
 from services.exchanges.bybit import RECV_WINDOW
@@ -280,6 +281,55 @@ async def prowizja_z_rejestru(adapter, *, symbol: str, id_wlasne: str,
 # `brak_ceny_wysylki` - poprawna odmowe, ktora w dzienniku czyta sie jak awaria.
 WIEK_ARKUSZA_MAX_S = 60
 
+# ILE NASZEGO CZASU MOZE MINAC MIEDZY ODCZYTEM ARKUSZA A POST-EM (2026-10-03).
+#
+# To jest INNY pomiar niz `WIEK_ARKUSZA_MAX_S`, i dlatego osobna stala, a nie
+# zacisniecie tamtej do 5 s. Tamta porownuje znacznik GIELDY z naszym zegarem,
+# wiec niesie rozjazd zegarow (zmierzone od -13,0 s do +3,9 s, opis wyzej) -
+# prog 5 s odrzucalby na niej zdrowe odczyty i spychal wejscia na `lastPrice`,
+# ktore na zleceniu 54 lezalo 11 tickow nad askiem. Ta mierzy `time.monotonic()`
+# miedzy KONCEM naszego odczytu a POCZATKIEM wysylki: rozjazd zegarow jej nie
+# dotyczy, a to jest dokladnie okno, w ktorym rynek moze przejsc o spread i tick
+# i zamienic cene pasywna w odrzucenie PostOnly (audyt 2026-10-03, E1).
+#
+# Do tej zmiany miedzy arkuszem a POST-em staly dwa GET-y `stan_zlecenia`
+# z ponowieniami po 1 s i 2 s (`bybit.py`), czyli kilka sekund w zlym dniu.
+# Dzis sprawdzenie stanu idzie PRZED arkuszem, a miedzy arkuszem a wysylka
+# jest juz tylko liczenie ceny. Prog lapie wiec wylacznie przypadek
+# nienormalny (zawieszona petla zdarzen, wolna baza przy zapisie pominiecia)
+# - i wtedy NIE WYSYLAMY, zamiast wysylac cene z odczytu, ktorego wiek znamy.
+WIEK_ODCZYTU_PRZY_WYSYLCE_S = 5.0
+
+# Zegar tego pomiaru jako nazwa modulu, zeby test mogl go podmienic bez
+# podmieniania `time.monotonic` calej petli zdarzen.
+_zegar_wysylki = time.monotonic
+
+
+class BladPrzedWyslaniem(Exception):
+    """Odczyt stanu zlecenia PRZED wysylka sie nie udal - NIC nie poszlo na gielde.
+
+    DLACZEGO TO NIE JEST `unknown`
+
+    Do 2026-10-03 wyjatek z wstepnego `stan_zlecenia` (wolanego w srodku
+    `zloz_zlecenie`) wpadal do tego samego `except ExchangeError` co timeout
+    POST-a i zapisywal `status='unknown'` z etapem `odpowiedz_nie_dotarla`.
+    Oba slowa byly nieprawda: nie wyslalismy niczego, wiec nie bylo czego
+    "nie dostac". A wiersz `unknown` zamyka plan przed ponowieniem, bo
+    `zloz_oczekujace` szuka planow BEZ wiersza zlecenia.
+
+    Dlatego wiersza nie ma: plan zostaje `pending` bez zlecenia, a nastepny
+    cykl sprobuje od nowa - "nie probowalismy" znaczy tu doslownie to, co
+    znaczy brak wiersza (docstring `zloz_oczekujace`). Etap trafia do licznika
+    `przed_wyslaniem` w pulsie silnika, zeby powtarzajaca sie awaria odczytu
+    nie wygladala jak spokoj.
+    """
+
+    def __init__(self, przyczyna: ExchangeError):
+        super().__init__(f"etap przed_wyslaniem: stanu zlecenia nie da się "
+                         f"odczytać ({przyczyna}) — NIC nie wysłano, plan "
+                         f"zostaje do ponowienia w następnym cyklu")
+        self.przyczyna = przyczyna
+
 
 async def arkusz_wysylki(adapter, symbol: str, kategoria: str, teraz: datetime
                          ) -> tuple[Oferty | None, str, dict]:
@@ -425,6 +475,32 @@ async def zloz_plan(cur, adapter, plan: dict, f: Filtry, *, engine: str,
     wyjscie = plan["trigger"]["rodzaj"] == "wyjscie"
     kupno = plan["side"] == "buy"
 
+    # STAN ZLECENIA NAJPIERW, ARKUSZ POTEM, POST ZARAZ PO ARKUSZU (2026-10-03).
+    #
+    # Idempotencja wymaga zapytania "czy gielda zna `tai-p{id}`" przed kazdym
+    # zlozeniem. Do tej zmiany zadawal je `zloz_zlecenie` w adapterze - czyli
+    # PO odczycie arkusza, a PRZED POST-em: dwa GET-y z ponowieniami po 1 s
+    # i 2 s staly dokladnie w oknie, w ktorym cena wyliczona jako bid-1 tick
+    # przestaje byc pasywna. Kolejnosc odwrocona: pytamy tu, a adapter dostaje
+    # `istnienie_sprawdzone=True` i wysyla bez drugiego pytania.
+    #
+    # ODPOWIEDZ SLUZY TEZ GALEZI ODMOWY nizej (zlecenie zywe mimo odmowy
+    # sprawdzenia), ktora dotad pytala o to samo drugi raz.
+    #
+    # Awaria wymagajaca czlowieka idzie w gore od razu. Zwykly blad odczytu
+    # zapamietujemy: galaz odmowy traktuje go jak dotad (odmowa i tak sie
+    # zapisuje), a sciezka wysylki NIE wysle bez odpowiedzi - patrz
+    # `BladPrzedWyslaniem`.
+    istnieje = None
+    blad_odczytu: ExchangeError | None = None
+    try:
+        istnieje = await adapter.stan_zlecenia(id_zlecenia(plan["id"]),
+                                               kategoria=kategoria)
+    except ExchangeError as e:
+        if e.wymaga_czlowieka:
+            raise
+        blad_odczytu = e
+
     # CENA ODNIESIENIA Z KSIEGI, W KTOREJ ZLECENIE WYLADUJE.
     #
     # Cena limitu powstaje ze swiec podmiotu GLOBALNEGO - to jego ksiega
@@ -453,6 +529,8 @@ async def zloz_plan(cur, adapter, plan: dict, f: Filtry, *, engine: str,
     # jednego endpointu wstrzymuje handel - gorsze lekarstwo niz choroba.
     oferty, skad_ceny, slad_arkusza = await arkusz_wysylki(
         adapter, plan["symbol"], kategoria, datetime.now(timezone.utc))
+    # Zegar MONOTONICZNY, nie `datetime.now` - patrz `WIEK_ODCZYTU_PRZY_WYSYLCE_S`.
+    odczyt_arkusza = _zegar_wysylki()
 
     # SLAD ZRODLA CENY WYPELNIA `sprawdz_zlecenie`, bo tam ten wybor zapada.
     # Odtworzenie go tutaj byloby druga kopia regul kolejnosci zrodel.
@@ -597,17 +675,10 @@ async def zloz_plan(cur, adapter, plan: dict, f: Filtry, *, engine: str,
         # wiersza `exec.position` i bez decyzji za nim — czyli ekspozycję poza
         # limitami, której kill-switch nie ma jak zdjąć.
         #
-        # `zloz_zlecenie` pyta o to samo dla idempotencji (`juz_istnialo`), więc
-        # tu tylko przenosimy to pytanie przed odmowę. Nieudany odczyt NIE
-        # blokuje odmowy: o zleceniu wtedy nic nie wiemy, a zatrzymanie
+        # Odpowiedz mamy juz z poczatku funkcji (`istnieje`). Nieudany odczyt
+        # NIE blokuje odmowy: o zleceniu wtedy nic nie wiemy, a zatrzymanie
         # rozstrzygania planu byłoby gorszym lekarstwem niż choroba — wiersz
         # `rejected` i tak zostaje z powodem.
-        istnieje = None
-        try:
-            istnieje = await adapter.stan_zlecenia(id_zlecenia(plan["id"]),
-                                                   kategoria=kategoria)
-        except ExchangeError:
-            istnieje = None
         if istnieje is not None:
             # ZLECENIE ZYJE (albo sie wypelnilo) MIMO ODMOWY SPRAWDZENIA.
             #
@@ -706,11 +777,37 @@ async def zloz_plan(cur, adapter, plan: dict, f: Filtry, *, engine: str,
                         f" instrument wraca do handlu")
         return False, powod
 
+    if blad_odczytu is not None:
+        # BEZ ODPOWIEDZI O STANIE NIE WYSYLAMY. Zlecenie o tym id moze juz lezec
+        # u gieldy (proces padl po POST-cie, a przed zapisem wiersza), a jedyna
+        # ochrona przed drugim jest to pytanie. Wiersza NIE zapisujemy - patrz
+        # `BladPrzedWyslaniem`.
+        raise BladPrzedWyslaniem(blad_odczytu)
+
+    if istnieje is not None:
+        # GIELDA JUZ ZNA TO ZLECENIE - ta sama odpowiedz, ktora dotad dawal
+        # `zloz_zlecenie` jako `juz_istnialo=True`, z tym samym zapisem nizej.
+        z = ZlozoneZlecenie(id_wlasne=id_zlecenia(plan["id"]),
+                            id_gieldy=istnieje.id_gieldy, status=istnieje.status,
+                            juz_istnialo=True)
+    else:
+        wiek_odczytu = _zegar_wysylki() - odczyt_arkusza
+        slad_arkusza = {**slad_arkusza, "wiek_przy_wysylce_s": round(wiek_odczytu, 3)}
+        if wiek_odczytu > WIEK_ODCZYTU_PRZY_WYSYLCE_S:
+            # Bez wiersza - plan wraca w nastepnym cyklu ze swiezym odczytem.
+            # Cena z odczytu sprzed kilku sekund to dokladnie odrzucenie
+            # PostOnly, ktorego ta kolejnosc ma unikac.
+            return False, (f"odczyt arkusza ma {wiek_odczytu:.1f} s naszego "
+                           f"czasu (granica {WIEK_ODCZYTU_PRZY_WYSYLCE_S:.0f} s) "
+                           f"— NIE wysyłam, plan wróci w następnym cyklu")
+        z = None
+
     try:
-        z = await adapter.zloz_zlecenie(
-            symbol=plan["symbol"], strona=plan["side"],
-            ilosc=ilosc, cena_limitu=cena, id_wlasne=id_zlecenia(plan["id"]),
-            kategoria=kategoria)
+        if z is None:
+            z = await adapter.zloz_zlecenie(
+                symbol=plan["symbol"], strona=plan["side"],
+                ilosc=ilosc, cena_limitu=cena, id_wlasne=id_zlecenia(plan["id"]),
+                kategoria=kategoria, istnienie_sprawdzone=True)
     except OdmowaGieldy as e:
         # GIELDA ODPOWIEDZIALA „NIE" — to jest wiedza, nie jej brak.
         # Cala obsluga jest nizej, w `odmowa_gieldy`; tutaj tylko rozdzielamy
@@ -722,10 +819,20 @@ async def zloz_plan(cur, adapter, plan: dict, f: Filtry, *, engine: str,
             odniesienie=odniesienie, atr=atr,
             slad_arkusza=slad_arkusza, slad_ceny=slad_ceny)
     except ExchangeError as e:
-        # NIE OZNACZAMY PLANU JAKO ODRZUCONEGO. Zlecenie moglo wejsc mimo bledu
-        # odpowiedzi; rozstrzygniecie w nastepnym cyklu zapyta gielde po naszym
-        # identyfikatorze i dowie sie prawdy. Oznaczenie go teraz odrzuconym
-        # byloby zapisaniem nieprawdy o stanie, ktorego nie znamy.
+        # MARTWY KLUCZ, ZLE IP, ZAMROZONE KONTO - W GORE, NIE DO `unknown`.
+        # Odpowiedz dotarla, wiec zlecenia nie ma; ale reakcja to czlowiek,
+        # a nie zapis i spokoj. Do 2026-10-03 te bledy konczyly sie tu
+        # wierszem `unknown` i cisza - ta sama klasa awarii, co 170131 przed
+        # 2026-09-24.
+        if e.wymaga_czlowieka:
+            raise
+        # NIE OZNACZAMY PLANU JAKO ODRZUCONEGO. Tu trafia juz WYLACZNIE stan
+        # naprawde nieznany - timeout, blad sieci, odpowiedz nie-JSON albo
+        # `retCode` 10000/10016 (`bybit.KODY_STAN_NIEZNANY`); kazdy inny kod
+        # jest odmowa (`bybit._blad_zlecenia`) i idzie galezia wyzej. Zlecenie
+        # moglo wejsc; `ponow_nieznane` w nastepnym cyklu zapyta gielde po
+        # naszym identyfikatorze i - jesli go nie zna, a plan jest wazny -
+        # zlozy je ponownie pod TYM SAMYM id.
         cur.execute(
             "INSERT INTO exec.order (decision_id, planned_order_id, engine, mode,"
             " instrument_id, client_order_id, side, order_type, qty, limit_price,"
@@ -927,8 +1034,32 @@ async def rozstrzygnij_plan(cur, adapter, plan: dict, f: Filtry, *, engine: str,
     stan = await adapter.stan_zlecenia(id_w, kategoria=kategoria)
 
     if stan is None:
-        # GIELDA NIE ZNA TEGO ZLECENIA. Skoro probowalismy je zlozyc, a ona go
-        # nie zna, to nie weszlo - i to jest jedyna bezpieczna interpretacja.
+        # GIELDA "NIE ZNA" ZLECENIA, KTOREMU SAMA NADALA NUMER = NIE WIEM.
+        #
+        # Wygaszamy wylacznie plan, ktorego zlecenie nie mialo kontaktu z gielda
+        # (brak wiersza albo wiersz bez `venue_order_id`): wtedy "nie zna"
+        # znaczy "nie weszlo" i to jest jedyna bezpieczna interpretacja.
+        #
+        # Wiersz z `venue_order_id` to zlecenie, ktore gielda PRZYJELA. Jej
+        # "nie ma" jest wtedy luka w odczycie, nie faktem: `/v5/order/realtime`
+        # bez `openOnly` oddaje tylko otwarte, a `/v5/order/history` "may
+        # delay" - zlecenie wypelnione chwile przed odczytem znika z obu. Do
+        # 2026-10-03 plan dostawal tu `expired`, a wiersz zostawal `new`;
+        # `posprzataj_zlecenia` widzialo potem `filled` i meldowalo "pozycja
+        # poza dziennikiem", ale NIE ksiegowalo - na gieldzie pozycja, w
+        # dzienniku nic, a risk kernel liczyl zanizona ekspozycje (audyt E3).
+        #
+        # Plan zostaje wiec `pending` i wraca tu w nastepnym cyklu. Gdyby luka
+        # trwala, `dozor.sprawdz_egzekucje` alarmuje o planach `pending` po
+        # terminie waznosci - niewiedza zostaje widoczna, zamiast zamienic sie
+        # w zgubiona pozycje.
+        cur.execute("SELECT id, venue_order_id FROM exec.order"
+                    " WHERE planned_order_id = %s ORDER BY id LIMIT 1", (plan["id"],))
+        wiersz = cur.fetchone()
+        if wiersz and wiersz.get("venue_order_id"):
+            return "nie_wiem", (f"giełda nie oddała zlecenia {wiersz['venue_order_id']},"
+                                f" które sama przyjęła — NIE WIEM, co się z nim stało;"
+                                f" plan zostaje do rozstrzygnięcia w następnym cyklu")
         cur.execute("UPDATE journal.planned_order SET status='expired',"
                     " resolved_at=%s WHERE id=%s", (teraz, plan["id"]))
         return "brak", "giełda nie zna tego zlecenia — plan wygasa"
@@ -1293,7 +1424,11 @@ async def zloz_oczekujace(cur, adapter, *, engine: str, mode: str,
     `h` JEST WYMAGANY, bo od niego zależy nazwa cechy ATR — a od ATR pasmo
     ceny. Wartość domyślna byłaby tu cichym „przy innym barze pasmo znika".
     """
-    st = {"zlozone": 0, "odrzucone": 0}
+    # `przed_wyslaniem` od 2026-10-03 - patrz `BladPrzedWyslaniem`. Zero tez
+    # jest wynikiem. Wiersze `unknown` waznych planow zwalnia wczesniej w tym
+    # samym cyklu `ponow_nieznane` (loop.run_once), wiec tu wracaja jako plany
+    # bez wiersza.
+    st = {"zlozone": 0, "odrzucone": 0, "przed_wyslaniem": 0}
     filtry = filtry_z_bazy(cur, engine)
     # NAZWA CECHY Z HORYZONTU, NIE NA SZTYWNO.
     #
@@ -1336,13 +1471,116 @@ async def zloz_oczekujace(cur, adapter, *, engine: str, mode: str,
             # ktory bez linijki na ekranie wyglada jak spokojny dzien.
             print(f"  UWAGA: {plan['symbol']} — brak {nazwa_atr} w feat."
                   f"feature_value; pasmo ceny będzie AWARYJNE (szersze)")
-        ok, msg = await zloz_plan(cur, adapter, plan, f, engine=engine,
-                                  mode=mode, kategoria=kategoria,
-                                  sesja=sesja)
+        try:
+            ok, msg = await zloz_plan(cur, adapter, plan, f, engine=engine,
+                                      mode=mode, kategoria=kategoria,
+                                      sesja=sesja)
+        except BladPrzedWyslaniem as e:
+            # Nic nie wyslano i nic nie zapisano - plan zostaje bez wiersza,
+            # wiec nastepny cykl sprobuje sam. Linia na ekranie ZAWSZE, takze
+            # przy --quiet: to awaria, nie rutyna.
+            st["przed_wyslaniem"] += 1
+            print(f"  [przed wysłaniem] {plan['symbol']} {plan['side']} — {e}")
+            continue
         st["zlozone" if ok else "odrzucone"] += 1
         if verbose:
             print(f"  [{'złożone' if ok else 'ODRZUCONE'}] {plan['symbol']} "
                   f"{plan['side']} — {msg}")
+    return st
+
+
+async def ponow_nieznane(cur, adapter, *, engine: str, mode: str, kategoria: str,
+                         verbose: bool = True, tylko_wyjscia: bool = False) -> dict:
+    """Zlecenia `unknown` waznego planu: odnajdz u gieldy albo zloz ponownie POD TYM SAMYM id.
+
+    DLACZEGO TO MUSI ISTNIEC
+
+    Wiersz `unknown` (timeout POST-a, `retCode` 10000/10016) zamykal plan przed
+    `zloz_oczekujace`, bo ono szuka planow BEZ wiersza zlecenia. Jesli zlecenie
+    naprawde nie weszlo, plan czekal bezczynnie do konca swiecy, a potem
+    wygasal - wyjscie przepadalo na cala swiece (1-4 h), choc wystarczylo
+    zapytac i wyslac jeszcze raz (audyt 2026-10-03, E2).
+
+    DLACZEGO TO JEST BEZPIECZNE
+
+    Identyfikator jest ten sam (`tai-p{id planu}`), a przed wysylka idzie
+    sprawdzenie stanu po nim (`zloz_plan`) - z trzecim odczytem `openOnly=1`,
+    ktory domyka luke "history may delay". Gdyby mimo to zlecenie bylo u gieldy,
+    Bybit odrzuci duplikat `orderLinkId` (170141), a `_blad_zlecenia` zamieni
+    to w stan nieznany, NIE w odmowe - wiec zywe zlecenie nie zostanie porzucone.
+
+    STARY WIERSZ ZOSTAJE, ZAMKNIETY I OPISANY. Baza ma UNIQUE (mode,
+    client_order_id), a `INSERT` w `zloz_plan` jest jedyna droga zapisu
+    zlozenia; drugi wiersz pod tym samym id wywrocilby transakcje cyklu.
+    Stary wiersz dostaje wiec dokladnie to, co dalo mu dotad sprzatanie
+    (`cancelled`, etap `zamkniete_bez_kontaktu_z_gielda` - czujka liczy go
+    w `bez_kontaktu`), a do tego `client_order_id` z sufiksem `~{id wiersza}`
+    i odpiety `planned_order_id`. Oryginalny identyfikator i plan zostaja
+    w `raw`, a sufiks jest jawny w nazwie - grep po `tai-p77` znajduje oba.
+
+    TYLKO PLAN WAZNY. Plan po terminie rozstrzyga `rozstrzygnij_oczekujace`
+    (idzie w cyklu wczesniej), a wiersz bez planu `pending` - sprzatanie.
+
+    WOLANE PRZED `zloz_oczekujace` (loop.run_once): plan zwolniony tutaj nie ma
+    juz wiersza, wiec ta sama wysylka zlozy go jeszcze w tym cyklu.
+    """
+    st = {"odnalezione": 0, "ponowione": 0, "unknown_bez_odczytu": 0}
+    cur.execute(
+        "SELECT o.id, o.client_order_id, o.status, o.reject_reason, p.id AS plan_id,"
+        "       i.symbol"
+        "  FROM exec.order o"
+        "  JOIN journal.planned_order p ON p.id = o.planned_order_id"
+        "  JOIN journal.decision d ON d.id = p.decision_id"
+        "  JOIN ref.instrument i ON i.id = p.instrument_id"
+        " WHERE d.engine = %s AND d.mode = %s"
+        "   AND p.status = 'pending'"
+        "   AND (p.valid_until IS NULL OR p.valid_until > now())"
+        "   AND o.status = 'unknown' AND o.venue_order_id IS NULL"
+        "   AND (NOT %s OR p.trigger->>'rodzaj' = 'wyjscie')"
+        " ORDER BY o.id", (engine, mode, tylko_wyjscia))
+    for o in cur.fetchall():
+        try:
+            stan = await adapter.stan_zlecenia(o["client_order_id"], kategoria=kategoria)
+        except ExchangeError as e:
+            if e.wymaga_czlowieka:
+                raise
+            st["unknown_bez_odczytu"] += 1
+            print(f"  [unknown] {o['symbol']}: stanu nadal nie da się odczytać "
+                  f"({e}) — ponowimy w następnym cyklu")
+            continue
+        if stan is not None:
+            # WESZLO. Od teraz wiersz jest zwyklym zlozonym zleceniem i
+            # rozstrzyga go `rozstrzygnij_oczekujace` jak kazde inne.
+            cur.execute(
+                "UPDATE exec.order SET status=%s, venue_order_id=%s, updated_at=now(),"
+                " raw = COALESCE(raw,'{}'::jsonb) || %s WHERE id=%s",
+                (stan.status, stan.id_gieldy,
+                 json.dumps({"etap": "odnalezione_po_unknown",
+                             "status_przed_odczytem": o["status"]}),
+                 o["id"]))
+            st["odnalezione"] += 1
+            if verbose:
+                print(f"  [unknown] {o['symbol']}: giełda zna zlecenie "
+                      f"(status {stan.status}) — wiersz uzupełniony")
+            continue
+        cur.execute(
+            "UPDATE exec.order SET status='cancelled', updated_at=now(),"
+            " planned_order_id=NULL, client_order_id = client_order_id || %s,"
+            " reject_reason=%s, raw = COALESCE(raw,'{}'::jsonb) || %s WHERE id=%s",
+            (f"~{o['id']}",
+             "ponowienie: giełda nie zna zlecenia o stanie nieznanym, a plan jest "
+             "ważny — ZLECENIE NIGDY NIE DOTARŁO DO GIEŁDY (brak venue_order_id); "
+             "plan złożony ponownie pod tym samym identyfikatorem",
+             json.dumps({"etap": "zamkniete_bez_kontaktu_z_gielda",
+                         "status_przed_sprzataniem": o["status"],
+                         "ponowione": True,
+                         "client_order_id_wyslany": o["client_order_id"],
+                         "planned_order_id": o["plan_id"],
+                         "poprzedni_powod": o["reject_reason"]}),
+             o["id"]))
+        st["ponowione"] += 1
+        print(f"  [unknown] {o['symbol']}: giełda nie zna {o['client_order_id']} "
+              f"— składam ponownie pod tym samym id")
     return st
 
 
@@ -1362,8 +1600,13 @@ async def rozstrzygnij_oczekujace(cur, adapter, *, engine: str, mode: str,
     # `nie_zdjete` i `wyjscie_bez_pozycji` SA W SLOWNIKU OD POCZATKU, z zerem.
     # Statystyka idzie do heartbeatu silnika; klucz pojawiajacy sie dopiero przy
     # awarii nie da sie odroznic od klucza, ktorego nikt nie liczy.
+    #
+    # `nie_wiem` (E3) i `blad_odczytu` (E5) dolaczyly 2026-10-03 z tego samego
+    # powodu: oba znacza "plan zostaje, wrocimy", i oba bez licznika wygladalyby
+    # w pulsie jak cykl bez zdarzen.
     st = {"wypelnione": 0, "niewypelnione": 0, "czekaja": 0, "czesciowe": 0,
-          "nie_do_zamkniecia": 0, "nie_zdjete": 0, "wyjscie_bez_pozycji": 0}
+          "nie_do_zamkniecia": 0, "nie_zdjete": 0, "wyjscie_bez_pozycji": 0,
+          "nie_wiem": 0, "blad_odczytu": 0}
     filtry = filtry_z_bazy(cur, engine)
     # SILNIK I TRYB Z DECYZJI, KTORA PLAN ZRODZILA.
     #
@@ -1399,9 +1642,27 @@ async def rozstrzygnij_oczekujace(cur, adapter, *, engine: str, mode: str,
             st["czekaja"] += 1
             continue
         f = filtry.get(plan["instrument_id"], Filtry())
-        rodzaj, powod = await rozstrzygnij_plan(
-            cur, adapter, plan, f, engine=engine, mode=mode,
-            kategoria=kategoria, teraz=now, kind=kind)
+        # JEDEN PLAN Z BLEDEM ODCZYTU NIE ZATRZYMUJE POZOSTALYCH (audyt E5).
+        #
+        # Bez tego `ExchangeError` z `stan_zlecenia` (po trzech ponowieniach)
+        # wychodzil z calego `run_once`: w tym cyklu nie zapadala decyzja dla
+        # ZADNEGO instrumentu, takze wyjscie, a piec takich cykli konczylo
+        # proces. Wyjatek lapiemy PRZED pierwszym zapisem tego planu - odczyt
+        # stanu jest w `rozstrzygnij_plan` pierwszy - wiec transakcja cyklu
+        # nie niesie polowy rozstrzygniecia. Awaria wymagajaca czlowieka idzie
+        # w gore, bo nie dotyczy jednego planu, tylko wszystkich.
+        try:
+            rodzaj, powod = await rozstrzygnij_plan(
+                cur, adapter, plan, f, engine=engine, mode=mode,
+                kategoria=kategoria, teraz=now, kind=kind)
+        except ExchangeError as e:
+            if e.wymaga_czlowieka:
+                raise
+            st["blad_odczytu"] += 1
+            print(f"  [błąd odczytu] {plan['symbol']} {plan['side']} — stanu "
+                  f"zlecenia nie da się odczytać ({e}); plan zostaje, "
+                  f"pozostałe rozstrzygamy dalej")
+            continue
         if rodzaj == "brak":
             st["niewypelnione"] += 1
         elif rodzaj == "nie_zdjete":
@@ -1410,6 +1671,8 @@ async def rozstrzygnij_oczekujace(cur, adapter, *, engine: str, mode: str,
             # `niewypelnione` mowiloby "zamkniete i nic nie weszlo", czyli
             # dokladnie to, czego jeszcze nie wiemy.
             st["nie_zdjete"] += 1
+        elif rodzaj == "nie_wiem":
+            st["nie_wiem"] += 1
         else:
             st["wypelnione"] += 1
             if rodzaj in st:

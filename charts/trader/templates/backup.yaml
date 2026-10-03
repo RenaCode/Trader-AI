@@ -29,6 +29,8 @@ metadata:
   labels: {{- include "trader.labels" . | nindent 4 }}
 spec:
   schedule: {{ .Values.backup.schedule | quote }}
+  # Strefa jawnie - patrz `strefaCzasowa` w values.yaml.
+  timeZone: {{ required "strefaCzasowa musi byc ustawiona wprost" .Values.strefaCzasowa | quote }}
   concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 1
   failedJobsHistoryLimit: 1
@@ -69,6 +71,14 @@ spec:
       template:
         spec:
           restartPolicy: OnFailure
+          # Bez tokenu API klastra - zadanie z nim nie rozmawia. Kontekstu
+          # `trader.podBezUprawnien` tu NIE MA: ten helper wpisuje uid obrazu
+          # API (10001), a ten pod ma dwa inne obrazy i dwoch innych
+          # uzytkownikow - kazdy kontener ustawia swoj nizej.
+          automountServiceAccountToken: false
+          securityContext:
+            seccompProfile:
+              type: RuntimeDefault
           # Katalog na hoscie tworzy kubelet jako root:root 0755, a obraz bazy
           # dziala jako uid 1000 (postgres) - bez tego kroku pg_dump dostaje
           # "Permission denied" i zadanie pada. Chown robi osobny kontener
@@ -77,14 +87,31 @@ spec:
             - name: przygotuj-katalog
               image: busybox:1.36
               command: ["sh", "-c", "chown 1000:1000 /backup && chmod 750 /backup"]
+              # Root JEST tu potrzebny (chown katalogu hosta), ale tylko do tych
+              # dwoch operacji: CHOWN na `chown`, FOWNER na `chmod` katalogu,
+              # ktory po `chown` nalezy juz do kogos innego. Reszta zdjeta.
               securityContext:
                 runAsUser: 0
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop: ["ALL"]
+                  add: ["CHOWN", "FOWNER"]
               volumeMounts:
                 - name: backup
                   mountPath: /backup
           containers:
             - name: dump
-              image: "{{ .Values.db.image.repository }}:{{ .Values.db.image.tag }}"
+              image: "{{ include "trader.obrazBazy" . }}"
+              # uid 1000 = `postgres` w timescaledb-ha - ten sam, ktoremu
+              # kontener wyzej oddaje katalog. Liczbowo z tego samego powodu co
+              # w `trader.podBezUprawnien`: przy `runAsNonRoot` kubelet nie
+              # sprawdzi uzytkownika podanego nazwa.
+              securityContext:
+                runAsNonRoot: true
+                runAsUser: 1000
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop: ["ALL"]
               env:
                 - name: PGPASSWORD
                   valueFrom:
@@ -106,10 +133,12 @@ spec:
                   #
                   # pg_dump pisze "CREATE EXTENSION timescaledb" BEZ klauzuli
                   # VERSION, a zrzucona zawartosc _timescaledb_catalog pasuje
-                  # tylko do tej wersji rozszerzenia, z ktorej pochodzi. Obraz
-                  # bazy jest przypiety do RUCHOMEGO tagu, wiec "ten sam tag"
-                  # za pol roku znaczy inna wersje - i odtwarzajacy nie ma skad
-                  # wziac tej, ktorej potrzebuje, poza tym plikiem.
+                  # tylko do tej wersji rozszerzenia, z ktorej pochodzi. Od
+                  # 2026-10-03 obraz bazy jest przypiety po digescie
+                  # (`trader.obrazBazy`), ale digest w values.yaml mozna podbic,
+                  # a kopia przezywa te zmiane - wersje zapisane OBOK zrzutu
+                  # zostaja jedynym pewnym zrodlem tego, czego odtwarzajacy
+                  # potrzebuje.
                   WERSJA_TS="$(psql -h {{ include "trader.fullname" . }}-db \
                                     -U {{ .Values.db.username }} -d {{ .Values.db.database }} \
                                     -tAc "SELECT extversion FROM pg_extension WHERE extname = 'timescaledb'")"
@@ -119,7 +148,7 @@ spec:
                                     -tAc "SHOW server_version")"
                   printf 'timescaledb=%s\npostgresql=%s\nobraz=%s\n' \
                          "$WERSJA_TS" "$WERSJA_PG" \
-                         "{{ .Values.db.image.repository }}:{{ .Values.db.image.tag }}" > "$PLIK_WERSJI"
+                         "{{ include "trader.obrazBazy" . }}" > "$PLIK_WERSJI"
                   echo "==> wersje: timescaledb $WERSJA_TS, postgresql $WERSJA_PG"
 
                   # OBIEKTY GLOBALNE KLASTRA - czyli ROLE, ktorych zrzut bazy

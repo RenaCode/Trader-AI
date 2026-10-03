@@ -40,6 +40,13 @@ def test_udany_cykl_z_once_daje_zero(monkeypatch):
         def cursor(self):
             return None
 
+        def execute(self, sql, params=None):
+            # Blokada cyklu (`loop.zajmij_cykl`) - wolna.
+            class Wynik:
+                def fetchone(self):
+                    return {"wolne": True}
+            return Wynik()
+
     async def sesja(*a, **k):
         class S:
             otwarta = True

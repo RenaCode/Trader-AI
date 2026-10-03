@@ -1601,6 +1601,7 @@ async def main() -> int:
         # procesu. Lista silnikow i tryb ida do `detail`, bo sa argumentem.
         PULS = "news"
 
+        puls.zyje(args.interval)
         try:
             while True:
                 started = datetime.now(timezone.utc)
@@ -1745,6 +1746,8 @@ async def main() -> int:
                               f"kończę proces, żeby restart był WIDOCZNY zamiast cichy")
                         return 1
 
+                # Obrot petli, takze nieudany - sonda zywotnosci (`puls.zyje`).
+                puls.zyje(args.interval)
                 if args.once:
                     return 0
                 await asyncio.sleep(args.interval)

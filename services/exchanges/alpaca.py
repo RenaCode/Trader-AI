@@ -584,7 +584,8 @@ class AlpacaAdapter:
                             cena_limitu: Decimal | None, id_wlasne: str,
                             kategoria: str = "spot",
                             time_in_force: str = "day",
-                            rynkowe: bool = False) -> ZlozoneZlecenie:
+                            rynkowe: bool = False,
+                            istnienie_sprawdzone: bool = False) -> ZlozoneZlecenie:
         """Zlecenie z limitem albo RYNKOWE, IDEMPOTENTNIE po `client_order_id`.
 
         SPRAWDZ, POTEM SKLADAJ - jak u Bybita. Alpaca sama odrzuca duplikat
@@ -614,10 +615,15 @@ class AlpacaAdapter:
                 f"gielda dostala")
         if not rynkowe and cena_limitu is None:
             raise ValueError("zlecenie z limitem bez ceny limitu")
-        istnieje = await self.stan_zlecenia(id_wlasne)
-        if istnieje is not None:
-            return ZlozoneZlecenie(id_wlasne=id_wlasne, id_gieldy=istnieje.id_gieldy,
-                                   status=istnieje.status, juz_istnialo=True)
+        # `istnienie_sprawdzone=True`: wolajacy zapytal o stan TUZ PRZED odczytem
+        # arkusza (`gielda_exec.zloz_plan`), zeby miedzy arkuszem a POST-em nie
+        # stalo zadne zapytanie. Drugie sprawdzenie tutaj wstawialoby z powrotem
+        # te sekundy, przez ktore cena PostOnly przestaje byc pasywna.
+        if not istnienie_sprawdzone:
+            istnieje = await self.stan_zlecenia(id_wlasne)
+            if istnieje is not None:
+                return ZlozoneZlecenie(id_wlasne=id_wlasne, id_gieldy=istnieje.id_gieldy,
+                                       status=istnieje.status, juz_istnialo=True)
         body = {"symbol": symbol, "qty": str(ilosc),
                 "side": "buy" if strona.lower() == "buy" else "sell",
                 "type": "market" if rynkowe else "limit",

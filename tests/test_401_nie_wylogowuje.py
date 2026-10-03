@@ -37,7 +37,9 @@ def test_zadne_401_nie_powstaje_poza_routerem_logowania():
 
 def test_odmowa_hasla_przy_wylogowaniu_urzadzen_to_403():
     t = (API / "routers" / "account.py").read_text(encoding="utf-8")
-    assert 'HTTPException(403, "Hasło jest nieprawidłowe")' in t
+    # Od 2026-10-03 haslo sprawdza wspolne `potwierdz_haslo` (licznik prob
+    # i audyt), a kod odmowy podaje wolajacy.
+    assert 'status=403, komunikat="Hasło jest nieprawidłowe"' in t
 
 
 def test_front_nadal_traktuje_401_jako_wygasniecie_sesji():

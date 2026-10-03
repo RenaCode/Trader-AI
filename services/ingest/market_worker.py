@@ -12,10 +12,10 @@ Ten modul jako jedyny z czterech workerow nie mial ZADNEGO z nich:
   * LICZNIK AWARII konczy proces po pieciu nieudanych cyklach pod rzad. Wpis
     w logu nie jest widocznoscia - logu poda nikt nie czyta o trzeciej w nocy,
     a po restarcie kontenera nie ma go juz wcale. Restart JEST widoczny: rosnie
-    licznik restartow i pod wpada w CrashLoopBackOff. Nieudane pobranie
-    pojedynczego instrumentu tez liczy sie jako awaria cyklu - tak samo jak
-    w history_worker, bo inaczej instrument, ktorego gielda nie zna, moglby
-    milczec miesiacami przy zerowym liczniku restartow.
+    licznik restartow i pod wpada w CrashLoopBackOff. Awaria cyklu to cykl,
+    w ktorym nie udalo sie NIC; pojedynczy instrument ma wlasny licznik
+    i po pieciu porazkach z rzedu trafia do pulsu jako `bez_danych` (patrz
+    `ocen_cykl` - do 2026-10-03 jeden symbol konczyl proces dla wszystkich).
   * PULS po kazdym UDANYM cyklu (`risk.worker_heartbeat`). Licznik broni przed
     procesem, ktory PADA; puls przed procesem, ktory STOI - zawieszony na
     gniezdzie bez limitu czasu nie konczy cyklu, wiec nie dolicza sie do zadnego
@@ -132,7 +132,8 @@ async def cycle(conn, adapter, instruments: list[dict], book_depth: int) -> dict
     # `bez_arkusza` JEST OSOBNA KOLUMNA TEGO RACHUNKU, nie czescia `bledy`.
     # Zlepienie ich konczy proces (patrz naglowek), rozdzielenie bez licznika
     # zamienia to w cisze - stad trzecia liczba, ktora idzie do pulsu.
-    stats = {"swiece": 0, "orderbooki": 0, "bledy": 0, "bez_arkusza": 0}
+    stats = {"swiece": 0, "orderbooki": 0, "bledy": 0, "bez_arkusza": 0,
+             "nieudane": []}
     now = datetime.now(timezone.utc)
 
     for inst in instruments:
@@ -140,6 +141,7 @@ async def cycle(conn, adapter, instruments: list[dict], book_depth: int) -> dict
             candles = await adapter.fetch_candles(inst["symbol"], "1m", limit=200)
         except ExchangeError as e:
             stats["bledy"] += 1
+            stats["nieudane"].append(inst["symbol"])
             print(f"  {inst['symbol']:10s} świece: {e}")
             continue
 
@@ -171,6 +173,7 @@ async def cycle(conn, adapter, instruments: list[dict], book_depth: int) -> dict
             continue
         except ExchangeError as e:
             stats["bledy"] += 1
+            stats["nieudane"].append(inst["symbol"])
             print(f"  {inst['symbol']:10s} orderbook: {e}")
             continue
 
@@ -206,6 +209,46 @@ async def cycle(conn, adapter, instruments: list[dict], book_depth: int) -> dict
     return stats
 
 
+def ocen_cykl(s: dict, instruments: list[dict],
+              pod_rzad_symbolu: dict[str, int]) -> tuple[str | None, list[str]]:
+    """Czy cykl sie udal - i ktore symbole milcza uporczywie.
+
+    JEDEN SYMBOL NIE JEST JUZ AWARIA CYKLU (2026-10-03, audyt G2).
+
+    Do tej daty kazde nieudane pobranie konczylo cykl porazka. Jeden instrument
+    z trwalym bledem gieldy (nieznany kod, zawieszony listing) dawal wiec piec
+    nieudanych cykli i koniec procesu - a CrashLoopBackOff zostawial dziury
+    w swiecach 1m i `book_snapshot` dla WSZYSTKICH instrumentow, nie tylko dla
+    tego jednego. Restart niczego tu nie naprawia: ten sam symbol pada znowu.
+
+    Cykl jest teraz porazka, gdy nie udalo sie NIC (wszystkie instrumenty
+    padly - to gielda albo siec, nie symbol), a pojedyncze symbole maja WLASNY
+    licznik pod rzad. Symbol, ktory padl `POD_RZAD_MAX` razy z rzedu, trafia
+    do `detail` pulsu jako `bez_danych` - ten sam powod co `bez_arkusza`:
+    cykl uznany za udany bez tej listy twierdzilby, ze zebrano wszystko,
+    a to zamienia awarie w cisze.
+
+    `pod_rzad_symbolu` jest modyfikowany w miejscu: symbol, ktory sie udal,
+    znika z licznika, a symbol, ktorego juz nie ma na liscie, tez.
+    """
+    nieudane = set(s.get("nieudane") or ())
+    obecne = {i["symbol"] for i in instruments}
+    for sym in list(pod_rzad_symbolu):
+        if sym not in nieudane or sym not in obecne:
+            del pod_rzad_symbolu[sym]
+    for sym in nieudane:
+        pod_rzad_symbolu[sym] = pod_rzad_symbolu.get(sym, 0) + 1
+    uporczywe = sorted(sym for sym, n in pod_rzad_symbolu.items()
+                       if n >= POD_RZAD_MAX)
+
+    if s["bledy"] and s["bledy"] >= len(instruments):
+        # WSZYSTKO PADLO - to nie jest symbol, tylko gielda, siec albo klucz.
+        # Licznik cyklu i koniec procesu po pieciu, jak dotad.
+        return (f"{s['bledy']} nieudanych pobrań na "
+                f"{len(instruments)} instrumentów"), uporczywe
+    return None, uporczywe
+
+
 async def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--interval", type=int, default=60)
@@ -222,106 +265,133 @@ async def main() -> int:
     if not url:
         sys.exit("DATABASE_URL nie jest ustawiony")
 
+    puls.zyje(args.interval)
     with psycopg.connect(url, row_factory=dict_row) as conn:
         adapter = adapter_danych(conn, args.engine)
     try:
-        with psycopg.connect(url, row_factory=dict_row) as conn:
-            cur = conn.cursor()
-            instruments = czytaj_instrumenty(cur, adapter.venue_code)
-            print(f"Obserwowane instrumenty: {', '.join(i['symbol'] for i in instruments)}")
-
-            pod_rzad = 0
-            lista_z = datetime.now(timezone.utc)
-            while True:
-                t0 = datetime.now(timezone.utc)
-                blad: str | None = None
-                try:
-                    # LISTA INSTRUMENTOW ODSWIEZANA W TRAKCIE PRACY.
-                    #
-                    # Do 2026-09-25 czytala sie RAZ, przed ta petla, wiec zmiana
-                    # w `ref.instrument` dzialala dopiero po restarcie poda -
-                    # a pod procesu tla nie restartuje sie sam. Instrument
-                    # wylaczony byl odpytywany dalej, a instrument DOPISANY nie
-                    # zbieral danych, dopoki ktos nie zauwazyl, ze ich nie ma.
-                    #
-                    # ODCZYT JEST W TYM SAMYM `try`, co cykl, i to nie jest
-                    # przypadek: zapytanie do bazy moze sie wywrocic, a awaria
-                    # odswiezenia listy jest awaria cyklu - inaczej proces
-                    # chodzilby na starej liscie, milczac o tym, ze nie umie jej
-                    # odczytac.
-                    if (t0 - lista_z).total_seconds() >= ODSWIEZANIE_LISTY_S:
-                        nowa = czytaj_instrumenty(cur, adapter.venue_code)
-                        lista_z = t0
-                        stare = {i["symbol"] for i in instruments}
-                        nowe = {i["symbol"] for i in nowa}
-                        # ROZNICE WYPISUJEMY Z NAZWY. Sama zmiana liczby nie mowi,
-                        # ktory instrument przyszedl, a ktory odszedl - a to jest
-                        # jedyny slad, po ktorym da sie potem odpowiedziec, od
-                        # kiedy dany szereg sie konczy albo zaczyna.
-                        if nowe - stare:
-                            print(f"[{t0:%H:%M:%S}] doszły: "
-                                  f"{', '.join(sorted(nowe - stare))}")
-                        if stare - nowe:
-                            print(f"[{t0:%H:%M:%S}] odeszły: "
-                                  f"{', '.join(sorted(stare - nowe))}")
-                        # Podmiana TAKZE gdy zbior symboli sie nie zmienil:
-                        # `tradeable` moglo sie przestawic przy tym samym
-                        # skladzie, a ta flaga wyznacza ksiege, ktorej pytamy
-                        # o arkusz.
-                        instruments = nowa
-                    s = await cycle(conn, adapter, instruments, args.depth)
-                    print(f"[{t0:%H:%M:%S}] świece +{s['swiece']}, orderbooki {s['orderbooki']}, "
-                          f"bez arkusza {s['bez_arkusza']}, błędy {s['bledy']}")
-                    if s["bledy"]:
-                        # JEDNO NIEUDANE POBRANIE TO AWARIA CYKLU. Opisy
-                        # poszczegolnych bledow poszly juz wyzej, do logu;
-                        # tutaj liczy sie sam fakt, ze cykl nie zebral
-                        # wszystkiego, co mial zebrac.
-                        blad = (f"{s['bledy']} nieudanych pobrań na "
-                                f"{len(instruments)} instrumentów")
-                    else:
-                        # PULS DOPIERO TU, po CALYM udanym cyklu. Bicie przed
-                        # petla albo po pierwszym instrumencie meldowaloby
-                        # zdrowie procesu, ktory zawiesil sie na drugim.
+        instruments: list[dict] | None = None
+        pod_rzad = 0
+        pod_rzad_symbolu: dict[str, int] = {}
+        lista_z = datetime.now(timezone.utc)
+        while True:
+            t0 = datetime.now(timezone.utc)
+            blad: str | None = None
+            # POLACZENIE NA KAZDY CYKL, jak w pozostalych workerach (2026-10-03).
+            #
+            # Do tej daty ten modul jako jedyny trzymal jedno polaczenie na caly
+            # proces. Po restarcie bazy zrywa sie ono raz i juz sie nie naprawia:
+            # kazdy kolejny cykl pada na martwym gniezdzie, az licznik skonczy
+            # proces - restart, ktorego przyczyna minela minute po awarii.
+            #
+            # `connect` jest pod `try`: baza, ktora nie odpowiada, jest awaria
+            # cyklu, a nie wyjatkiem konczacym proces z pominieciem licznika.
+            try:
+                with psycopg.connect(url, row_factory=dict_row) as conn:
+                    try:
+                        cur = conn.cursor()
+                        # LISTA INSTRUMENTOW ODSWIEZANA W TRAKCIE PRACY.
                         #
-                        # Blad zapisu pulsu celowo NIE jest lapiany osobno
-                        # (patrz `puls.bij`) - wpadnie do `except` nizej
-                        # i policzy sie jako awaria cyklu, bo nia jest.
+                        # Do 2026-09-25 czytala sie RAZ, przed ta petla, wiec zmiana
+                        # w `ref.instrument` dzialala dopiero po restarcie poda -
+                        # a pod procesu tla nie restartuje sie sam. Instrument
+                        # wylaczony byl odpytywany dalej, a instrument DOPISANY nie
+                        # zbieral danych, dopoki ktos nie zauwazyl, ze ich nie ma.
                         #
-                        # `bez_arkusza` JEST TU CZESCIA PULSU, A NIE OSOBNYM
-                        # WPISEM. Cykl policzyl sie jako udany, wiec bez tej
-                        # liczby baza twierdzilaby, ze zebrano wszystko - a to
-                        # zamienia awarie w cisze. Log nie wystarcza: ginie przy
-                        # restarcie, a ta liczba ma byc odczytywalna bez poda.
-                        puls.bij(conn, puls_nazwa, args.interval,
-                                 {"instrumenty": len(instruments),
-                                  "swiece": s["swiece"],
-                                  "orderbooki": s["orderbooki"],
-                                  "bez_arkusza": s["bez_arkusza"],
-                                  "glebokosc": args.depth})
-                except Exception as e:                        # noqa: BLE001
-                    conn.rollback()
+                        # ODCZYT JEST W TYM SAMYM `try`, co cykl, i to nie jest
+                        # przypadek: zapytanie do bazy moze sie wywrocic, a awaria
+                        # odswiezenia listy jest awaria cyklu - inaczej proces
+                        # chodzilby na starej liscie, milczac o tym, ze nie umie jej
+                        # odczytac.
+                        if instruments is None:
+                            instruments = czytaj_instrumenty(cur, adapter.venue_code)
+                            lista_z = t0
+                            print(f"Obserwowane instrumenty: "
+                                  f"{', '.join(i['symbol'] for i in instruments)}")
+                        elif (t0 - lista_z).total_seconds() >= ODSWIEZANIE_LISTY_S:
+                            nowa = czytaj_instrumenty(cur, adapter.venue_code)
+                            lista_z = t0
+                            stare = {i["symbol"] for i in instruments}
+                            nowe = {i["symbol"] for i in nowa}
+                            # ROZNICE WYPISUJEMY Z NAZWY. Sama zmiana liczby nie mowi,
+                            # ktory instrument przyszedl, a ktory odszedl - a to jest
+                            # jedyny slad, po ktorym da sie potem odpowiedziec, od
+                            # kiedy dany szereg sie konczy albo zaczyna.
+                            if nowe - stare:
+                                print(f"[{t0:%H:%M:%S}] doszły: "
+                                      f"{', '.join(sorted(nowe - stare))}")
+                            if stare - nowe:
+                                print(f"[{t0:%H:%M:%S}] odeszły: "
+                                      f"{', '.join(sorted(stare - nowe))}")
+                            # Podmiana TAKZE gdy zbior symboli sie nie zmienil:
+                            # `tradeable` moglo sie przestawic przy tym samym
+                            # skladzie, a ta flaga wyznacza ksiege, ktorej pytamy
+                            # o arkusz.
+                            instruments = nowa
+                        s = await cycle(conn, adapter, instruments, args.depth)
+                        print(f"[{t0:%H:%M:%S}] świece +{s['swiece']}, orderbooki {s['orderbooki']}, "
+                              f"bez arkusza {s['bez_arkusza']}, błędy {s['bledy']}")
+                        blad, uporczywe = ocen_cykl(s, instruments, pod_rzad_symbolu)
+                        if uporczywe:
+                            print(f"[{t0:%H:%M:%S}] bez danych od {POD_RZAD_MAX}+ cykli: "
+                                  f"{', '.join(uporczywe)}")
+                        if not blad:
+                            # PULS DOPIERO TU, po CALYM udanym cyklu. Bicie przed
+                            # petla albo po pierwszym instrumencie meldowaloby
+                            # zdrowie procesu, ktory zawiesil sie na drugim.
+                            #
+                            # Blad zapisu pulsu celowo NIE jest lapiany osobno
+                            # (patrz `puls.bij`) - wpadnie do `except` nizej
+                            # i policzy sie jako awaria cyklu, bo nia jest.
+                            #
+                            # `bez_arkusza` i `bez_danych` SA TU CZESCIA PULSU,
+                            # A NIE OSOBNYM WPISEM. Cykl policzyl sie jako udany, wiec
+                            # bez tych liczb baza twierdzilaby, ze zebrano wszystko -
+                            # a to zamienia awarie w cisze. Log nie wystarcza: ginie
+                            # przy restarcie, a ta lista ma byc odczytywalna bez poda.
+                            puls.bij(conn, puls_nazwa, args.interval,
+                                     {"instrumenty": len(instruments),
+                                      "swiece": s["swiece"],
+                                      "orderbooki": s["orderbooki"],
+                                      "bez_arkusza": s["bez_arkusza"],
+                                      "bledy": s["bledy"],
+                                      "bez_danych": uporczywe,
+                                      "glebokosc": args.depth})
+                    except Exception as e:                # noqa: BLE001
+                        conn.rollback()
+                        blad = f"{type(e).__name__}: {e}"
+                        print(f"[{t0:%H:%M:%S}] cykl przerwany: {blad}")
+                    if blad:
+                        pod_rzad += 1
+                        # `last_beat_at` NIE RUSZA SIE - rosna tylko kolumny
+                        # awarii. Puls „zyje" przy pieciu awariach pod rzad
+                        # jest gorszy niz jego brak: mowi czujce dokladnie to,
+                        # co czujka chce uslyszec, w chwili gdy jest
+                        # najbardziej nieprawdziwe.
+                        puls.zglos_awarie(conn, puls_nazwa, args.interval,
+                                          pod_rzad, blad)
+            except Exception as e:                        # noqa: BLE001
+                # Tu trafia wylacznie `connect` (cykl ma wlasny `try` wyzej):
+                # baza nie odpowiada. Awaria cyklu, ale bez wpisu do pulsu -
+                # nie ma go czym zapisac, a `last_beat_at` i tak stoi.
+                if blad is None:
                     blad = f"{type(e).__name__}: {e}"
-                    print(f"[{t0:%H:%M:%S}] cykl przerwany: {blad}")
-
-                if blad:
                     pod_rzad += 1
-                    # `last_beat_at` NIE RUSZA SIE - rosna tylko kolumny awarii.
-                    # Puls „zyje" przy pieciu awariach pod rzad jest gorszy niz
-                    # jego brak: mowi czujce dokladnie to, co czujka chce
-                    # uslyszec, w chwili gdy jest najbardziej nieprawdziwe.
-                    puls.zglos_awarie(conn, puls_nazwa, args.interval, pod_rzad, blad)
-                    print(f"[{t0:%H:%M:%S}] cykl nieudany ({pod_rzad}/{POD_RZAD_MAX})")
-                    if pod_rzad >= POD_RZAD_MAX:
-                        print(f"{POD_RZAD_MAX} cykli pod rząd zakończonych błędem — "
-                              f"kończę proces, żeby restart był WIDOCZNY zamiast cichy")
-                        return 1
-                else:
-                    pod_rzad = 0
+                print(f"[{t0:%H:%M:%S}] brak połączenia z bazą: {type(e).__name__}: {e}")
 
-                if args.once:
-                    return 1 if blad else 0
-                await asyncio.sleep(args.interval)
+            if blad:
+                print(f"[{t0:%H:%M:%S}] cykl nieudany ({pod_rzad}/{POD_RZAD_MAX})")
+                if pod_rzad >= POD_RZAD_MAX:
+                    print(f"{POD_RZAD_MAX} cykli pod rząd zakończonych błędem — "
+                          f"kończę proces, żeby restart był WIDOCZNY zamiast cichy")
+                    return 1
+            else:
+                pod_rzad = 0
+
+            # Obrot petli, takze nieudany - patrz `puls.zyje`.
+            puls.zyje(args.interval)
+            if args.once:
+                return 1 if blad else 0
+            await asyncio.sleep(args.interval)
     finally:
         await adapter.close()
 

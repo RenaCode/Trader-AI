@@ -5,7 +5,9 @@ przejrzec bez czytania logiki aplikacji.
 """
 from __future__ import annotations
 
+import asyncio
 import base64
+import functools
 import hashlib
 import hmac
 import os
@@ -25,6 +27,14 @@ _hasher = PasswordHasher(time_cost=3, memory_cost=64 * 1024, parallelism=4)
 
 SESSION_TTL = timedelta(hours=12)
 SESSION_COOKIE = "trader_session"
+
+# Limit BEZCZYNNOSCI, osobny od `SESSION_TTL`. Do 2026-10-03 sesja zyla pelne
+# 12 godzin niezaleznie od tego, czy ktos z niej korzystal - laptop zostawiony
+# otwarty po poludniu dawal dostep do kluczy gieldy do nocy. Ruch odnotowujemy
+# w `app.session.last_seen_at` (migracja 0069) najwyzej raz na
+# `SESSION_TOUCH_EVERY`, zeby kazde zadanie panelu nie bylo zapisem do bazy.
+SESSION_IDLE = timedelta(minutes=30)
+SESSION_TOUCH_EVERY = timedelta(minutes=1)
 
 
 # ----------------------------------------------------------------- hasla
@@ -47,6 +57,43 @@ def verify_password(stored_hash: str, password: str) -> tuple[bool, str | None]:
     if _hasher.check_needs_rehash(stored_hash):
         return True, _hasher.hash(password)
     return True, None
+
+
+@functools.cache
+def _atrapa_hasha() -> str:
+    """Hash hasla, ktorego nikt nie zna - do weryfikacji przy NIEISTNIEJACYM loginie.
+
+    Do 2026-10-03 nieistniejace konto dostawalo `asyncio.sleep(0.25)` zamiast
+    Argon2. Czas odpowiedzi zalezal wtedy od obciazenia serwera tylko po jednej
+    stronie: prawdziwa weryfikacja trwa tyle, ile trwa liczenie 64 MiB pamieci,
+    a sen zawsze tyle samo. Roznica wystarczala, zeby odroznic konto istniejace
+    od nieistniejacego. Atrapa liczy TEN SAM koszt tymi samymi parametrami.
+
+    Liczona leniwie i raz: import modulu nie ma placic kilkuset milisekund.
+    """
+    return _hasher.hash(secrets.token_urlsafe(32))
+
+
+async def sprawdz_haslo(stored_hash: str | None, password: str) -> tuple[bool, str | None]:
+    """`verify_password` poza petla zdarzen; `None` w miejscu hasha = atrapa.
+
+    Argon2 64 MiB / t=3 to kilkaset milisekund CPU. Wolany wprost w handlerze
+    `async` blokowal cala petle zdarzen - kazda proba logowania zatrzymywala
+    na ten czas wszystkie inne zadania API, wiec seria zlych hasel byla
+    tanim wzmacniaczem obciazenia. `to_thread` przenosi koszt do puli watkow.
+
+    Przy `stored_hash is None` (login nie istnieje) weryfikujemy atrape
+    i zawsze zwracamy porazke - ten sam czas, ten sam wynik.
+    """
+    if stored_hash is None:
+        await asyncio.to_thread(verify_password, _atrapa_hasha(), password)
+        return False, None
+    return await asyncio.to_thread(verify_password, stored_hash, password)
+
+
+async def hash_password_async(password: str) -> str:
+    """`hash_password` poza petla zdarzen - powod jak w `sprawdz_haslo`."""
+    return await asyncio.to_thread(hash_password, password)
 
 
 # ----------------------------------------------------------------- sesje

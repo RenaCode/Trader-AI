@@ -92,7 +92,11 @@ class OdmowaGieldy(ExchangeError):
                      jest wieksza niz stan rachunku; wyjscie ma o ten stan
                      ZAPYTAC, a nie powtarzac te sama liczbe bez konca,
       * 'parametr' - ksztalt zlecenia lamie regule gieldy (krok, precyzja,
-                     minimum). Powtorzenie tej samej liczby da to samo.
+                     minimum). Powtorzenie tej samej liczby da to samo,
+      * 'inne'     - odpowiedz DOTARLA z kodem, ktorego nie zaliczamy do zadnej
+                     rodziny wyzej (limit zapytan, recv_window, nieznane
+                     170xxx). Zlecenia nie ma; kod jest w `code` doslownie
+                     (`bybit._blad_zlecenia`, 2026-10-03).
 
     `wymaga_czlowieka` zostaje FALSZEM: to nie jest awaria klucza ani konta,
     tylko zlecenie, ktorego gielda nie przyjela. Czlowieka budzi dopiero

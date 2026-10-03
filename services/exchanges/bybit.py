@@ -371,6 +371,65 @@ def _blad_z_kodu(ret, msg: str) -> ExchangeError:
     return ExchangeError(f"{msg} (kod {kod})", code=kod)
 
 
+# STAN NAPRAWDE NIEZNANY PRZY ZLECENIU - jedyne dwa `retCode`, ktore NIE sa
+# odpowiedzia "nie". 10000 to "Server Timeout", 10016 to "Server error" - oba
+# znacza, ze silnik dopasowania mogl zlecenie przyjac, zanim brama oddala blad.
+# Do tej rodziny naleza jeszcze timeout, blad sieci i odpowiedz nie-JSON (5xx
+# z posrednika), ale te nie maja `retCode` i obsluguje je `_post` osobno.
+KODY_STAN_NIEZNANY = {"10000", "10016"}
+
+# "Ten orderLinkId juz istnieje" (spot 170141, kontrakty 110072). To NIE jest
+# odmowa: znaczy, ze zlecenie o naszym identyfikatorze JEST u gieldy - np. po
+# timeoucie, ktorego odpowiedz nie dotarla, a nasz odczyt stanu jeszcze go nie
+# widzial. Zapisanie tego jako `rejected` porzuciloby zywe zlecenie, wiec
+# zostaje ogolnym `ExchangeError` (stan `unknown`), a nastepne sprawdzenie
+# stanu po naszym id je odnajdzie.
+KODY_DUPLIKAT_ID = {"170141", "110072"}
+
+# "Zlecenia nie ma" przy anulowaniu. 110001 to kod KONTRAKTOW; spot V5 oddaje
+# 170213 ("Order does not exist"). Do 2026-10-03 stal tu wylacznie 110001,
+# a testy mockowaly ten sam kod, wiec na spocie (czyli w calym tym systemie)
+# wyscig "wypelnilo sie / anulujemy" konczyl sie falszywym "anulowanie nie
+# powiodlo sie" i jednym zbednym cyklem. Kodu spotowego nie zweryfikowano
+# jeszcze na demo - stad oba w zbiorze, a nie podmiana.
+KODY_ZLECENIA_NIE_MA = {"110001", "170213"}
+
+
+def _blad_zlecenia(ret, msg: str) -> ExchangeError:
+    """`retCode` != 0 na zlozeniu albo anulowaniu: ODPOWIEDZ DOTARLA, wiec to jest "nie".
+
+    DLACZEGO OSOBNO OD `_blad_z_kodu`
+
+    Na odczycie ogolny `ExchangeError` jest uczciwy - odczyt sie nie udal i nic
+    sie nie zmienilo. Na ZAPISIE ogolny `ExchangeError` czytany jest przez
+    `gielda_exec.zloz_plan` jako "odpowiedz nie dotarla" i konczy sie wierszem
+    `unknown`, ktorego nikt juz nie ponawia (`zloz_oczekujace` szuka planow BEZ
+    wiersza zlecenia). Do 2026-10-03 tak konczyl sie kazdy kod spoza dwoch
+    zbiorow odmowy: limit zapytan, 10002 (recv_window), nieznane 170xxx - a to
+    sa odpowiedzi, ktore DOTARLY i mowia, ze zlecenia nie przyjeto.
+
+    Zostawiamy klasy, ktore niosa `wymaga_czlowieka` (martwy klucz, IP, konto):
+    one tez znacza "nie", ale ich obsluga jest eskalacja, nie zapis i spokoj.
+    Wszystko inne poza `KODY_STAN_NIEZNANY` staje sie `OdmowaGieldy` rodzaju
+    "inne" z kodem doslownie - wolajacy zapisuje `rejected` i kod, zamiast
+    nieprawdy o stanie, ktory akurat znamy.
+    """
+    kod = str(ret)
+    blad = _blad_z_kodu(ret, msg)
+    if kod in KODY_DUPLIKAT_ID:
+        return ExchangeError(
+            f"{msg} (kod {kod}) — zlecenie o tym orderLinkId JUZ JEST u gieldy; "
+            f"stan sprawdzimy po naszym id, nie wolno go uznac za odrzucone",
+            code=kod)
+    if kod in KODY_STAN_NIEZNANY or isinstance(blad, OdmowaGieldy) or blad.wymaga_czlowieka:
+        return blad
+    return OdmowaGieldy(
+        f"{msg} (kod {kod}) — GIELDA ODMOWILA bez powodu, ktory rozpoznajemy: "
+        f"odpowiedz DOTARLA, wiec zlecenie NIE WESZLO. Kod zapisany doslownie; "
+        f"jesli sie powtarza, dopisz go do wlasciwego zbioru w `bybit.py`.",
+        code=kod, rodzaj="inne", retryable=blad.retryable)
+
+
 
 def _strona_bybita(strona: str) -> str:
     """'buy'/'sell' -> 'Buy'/'Sell'. Nieznana wartosc KONCZY SIE BLEDEM.
@@ -990,8 +1049,9 @@ class BybitAdapter:
         if ret != 0:
             # Ta sama klasyfikacja co przy GET. Wazniejsza tutaj: to na sciezce
             # skladania zlecen martwy klucz albo zamrozone konto zatrzymuje nie
-            # tylko WEJSCIA, ale i WYJSCIA z otwartych pozycji.
-            raise _blad_z_kodu(ret, data.get("retMsg", "nieznany blad"))
+            # tylko WEJSCIA, ale i WYJSCIA z otwartych pozycji. Kod spoza
+            # znanych zbiorow jest tu ODMOWA, nie niewiedza - `_blad_zlecenia`.
+            raise _blad_zlecenia(ret, data.get("retMsg", "nieznany blad"))
         return data.get("result") or {}
 
     async def stan_zlecenia(self, id_wlasne: str, kategoria: str = "spot") -> StanZlecenia | None:
@@ -1018,9 +1078,17 @@ class BybitAdapter:
         go nie złożyli, bo `juz_istnialo=True` kończy sprawę bez śladu awarii.
         Jedno porównanie zamienia to w błąd zamiast w pozycję, na obu endpointach.
         """
-        for sciezka in ("/v5/order/realtime", "/v5/order/history"):
+        # TRZECI ODCZYT: `openOnly=1`. Bez niego `/v5/order/realtime` oddaje
+        # WYLACZNIE zlecenia otwarte, a `/v5/order/history` wedlug dokumentacji
+        # Bybita "may delay" - zlecenie wypelnione chwile przed odczytem potrafi
+        # zniknac z obu. `openOnly=1` czyta ostatnie 500 zamknietych z pamieci
+        # podrecznej silnika, czyli dokladnie te luke. Pytamy o nia tylko, gdy
+        # dwa pierwsze odczyty nic nie znalazly.
+        for sciezka, dodatkowe in (("/v5/order/realtime", {}),
+                                   ("/v5/order/history", {}),
+                                   ("/v5/order/realtime", {"openOnly": "1"})):
             odp = await self._get(sciezka, {"category": kategoria,
-                                            "orderLinkId": id_wlasne})
+                                            "orderLinkId": id_wlasne, **dodatkowe})
             lista = odp.get("list") or []
             nasze = [o for o in lista if (o.get("orderLinkId") or "") == id_wlasne]
             if lista and not nasze:
@@ -1066,7 +1134,8 @@ class BybitAdapter:
     async def zloz_zlecenie(self, *, symbol: str, strona: str, ilosc: Decimal,
                             cena_limitu: Decimal | None, id_wlasne: str,
                             kategoria: str = "spot",
-                            rynkowe: bool = False) -> ZlozoneZlecenie:
+                            rynkowe: bool = False,
+                            istnienie_sprawdzone: bool = False) -> ZlozoneZlecenie:
         """Składa zlecenie. Z limitem (domyślnie) albo RYNKOWE. IDEMPOTENTNIE.
 
         `id_wlasne` musi być wyprowadzone z decyzji, a NIE z czasu ani losowo -
@@ -1120,10 +1189,15 @@ class BybitAdapter:
         if not rynkowe and cena_limitu is None:
             raise ValueError("zlecenie z limitem bez ceny limitu")
 
-        istniejace = await self.stan_zlecenia(id_wlasne, kategoria)
-        if istniejace is not None:
-            return ZlozoneZlecenie(id_wlasne=id_wlasne, id_gieldy=istniejace.id_gieldy,
-                                   status=istniejace.status, juz_istnialo=True)
+        # `istnienie_sprawdzone=True`: wolajacy zapytal o stan TUZ PRZED odczytem
+        # arkusza (`gielda_exec.zloz_plan`), zeby miedzy arkuszem a POST-em nie
+        # stalo zadne zapytanie. Drugie sprawdzenie tutaj wstawialoby z powrotem
+        # te sekundy, przez ktore cena PostOnly przestaje byc pasywna.
+        if not istnienie_sprawdzone:
+            istniejace = await self.stan_zlecenia(id_wlasne, kategoria)
+            if istniejace is not None:
+                return ZlozoneZlecenie(id_wlasne=id_wlasne, id_gieldy=istniejace.id_gieldy,
+                                       status=istniejace.status, juz_istnialo=True)
 
         if rynkowe:
             wynik = await self._post("/v5/order/create", {
@@ -1195,8 +1269,8 @@ class BybitAdapter:
                 "category": kategoria, "symbol": symbol, "orderLinkId": id_wlasne})
             return True
         except ExchangeError as e:
-            # 110001 to "zlecenia nie ma" - przy anulowaniu to sukces, nie awaria.
-            if e.code == "110001":
+            # "Zlecenia nie ma" - przy anulowaniu to sukces, nie awaria.
+            if e.code in KODY_ZLECENIA_NIE_MA:
                 return False
             raise
 

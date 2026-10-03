@@ -45,6 +45,9 @@ innego niz licznik restartow tego samego procesu.
 """
 from __future__ import annotations
 
+import os
+import time
+
 from psycopg.types.json import Jsonb
 
 # Ile znakow opisu bledu trafia do bazy. Pelny slad zostaje w logu; tu ma sie
@@ -130,3 +133,70 @@ def zglos_awarie(conn, worker: str, interwal_s: int, pod_rzad: int,
         # wyjatek z zapisu szczegolow przykrylby wyjatek, ktory ma zobaczyc
         # czlowiek. Zamiana przyczyny na skutek jest gorsza niz skapszy wpis.
         print(f"    (nie udalo sie zapisac awarii do pulsu: {type(e).__name__}: {e})")
+
+
+# ----------------------------------------------------------- sonda zywotnosci
+#
+# PLIK DLA `livenessProbe`, NIE DRUGI PULS - i odwrotnosc zasady 2 jest tu celowa.
+#
+# `bij` mowi czujce "cykl SIE UDAL", wiec cykl nieudany go nie odswieza. Plik
+# mowi kubeletowi cos wezszego: "petla SIE OBRACA". Odswieza go KAZDY obrot -
+# udany i nieudany - bo sonda ma lapac wylacznie proces ZAWIESZONY. Awarie
+# lapia juz inne mechanizmy: licznik pieciu porazek konczy proces, a `bij`
+# przestaje bic i czujka (`dozor.py --co workery`) budzi czlowieka.
+#
+# Gdyby plik odswiezal sie tylko po udanym cyklu, awaria bazy zatrzymalaby go
+# we WSZYSTKICH workerach naraz i kubelet zrestartowalby caly potok w jednej
+# minucie - restartem, ktory niczego nie naprawia, bo baza nadal lezy.
+#
+# TERMIN SIEDZI W PLIKU, NIE W CHARCIE. Proces wpisuje chwile, do ktorej ma
+# prawo milczec (`teraz + termin`), a sonda porownuje ja z zegarem. Interwal
+# zyje wiec dalej w jednym miejscu (`--interval`), a szablon nie dostaje jego
+# trzeciej kopii - to byl drugi z powodow, dla ktorych sond do 2026-10-03 nie
+# bylo (naglowek templates/workers.yaml).
+PLIK_ZYWOTNOSCI = "/tmp/trader-zywy"
+
+# Ile proces moze milczec, zanim kubelet uzna go za zawieszony.
+#
+# GODZINA, nie kwadrans. Czujka pulsu ma podloge 900 s (dozor.py, MIN_PROG_S),
+# wiec przy zawieszeniu CZLOWIEK dostaje powiadomienie z nazwa workera DUZO
+# wczesniej, niz kubelet cokolwiek zrestartuje. Sonda jest ostatnia linia, gdy
+# nikt nie zareagowal - nie zamiennikiem alarmu, bo restart sam nikomu nic
+# nie mowi.
+#
+# Zapas wzgledem najdluzszego cyklu: `features` na dwoch horyzontach to minuty,
+# `history` z ponowieniami gieldy kilka minut. Godzina to rzad wielkosci zapasu,
+# czyli sonda nie ubije dlugiego, ale zywego cyklu.
+PODLOGA_TERMINU_S = 3600
+
+# Dla workerow o dlugim interwale termin skaluje sie z nim: cztery opuszczone
+# obroty petli to juz nie przypadek.
+KROTNOSC_INTERWALU = 4
+
+
+def termin_zywotnosci(interwal_s: int, podloga_s: int = PODLOGA_TERMINU_S) -> int:
+    return max(int(podloga_s), KROTNOSC_INTERWALU * int(interwal_s))
+
+
+def zyje(interwal_s: int, podloga_s: int = PODLOGA_TERMINU_S,
+         plik: str | None = None) -> None:
+    """Petla sie obraca. Wolac NA STARCIE procesu i po KAZDYM obrocie petli.
+
+    Na starcie, bo pierwszy cykl tez moze sie zawiesic - a bez pliku sonda
+    przepuszcza (patrz templates/workers.yaml: brak pliku znaczy "ten modul
+    nie wpial jeszcze sondy", nie "zawieszony").
+
+    Zapis atomowy (`os.replace`), bo sonda czyta plik w dowolnej chwili, a plik
+    przeczytany w polowie zapisu bylby pustym napisem - czyli restartem zdrowego
+    procesu. Blad zapisu tylko wypisujemy: proces, ktory nie umie pisac do /tmp,
+    zostanie zrestartowany przez sonde, i to jest wlasciwa reakcja.
+    """
+    sciezka = plik or os.environ.get("PLIK_ZYWOTNOSCI", PLIK_ZYWOTNOSCI)
+    termin = int(time.time()) + termin_zywotnosci(interwal_s, podloga_s)
+    try:
+        tymczasowy = f"{sciezka}.{os.getpid()}"
+        with open(tymczasowy, "w", encoding="ascii") as f:
+            f.write(str(termin))
+        os.replace(tymczasowy, sciezka)
+    except OSError as e:
+        print(f"    (nie udalo sie zapisac pliku zywotnosci {sciezka}: {e})")

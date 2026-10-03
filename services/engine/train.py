@@ -1041,6 +1041,25 @@ def opis_zrodla_n(n: int, trials_kumulatywnie: int) -> str:
             f"zapłacił, licząc wynik poza oknem wyboru.")
 
 
+def znacznik_miary(karta: Karta) -> dict[str, float]:
+    """Metryki okna mowiace, PRZY JAKIM KOSZCIE policzono jego miary.
+
+    `doplata_pb` - doplata z karty w punktach bazowych na runde, ta sama, ktora
+    odejmuje `wynik_po_doplacie` i DSR.
+
+    `spread_niezmierzony` - 1.0, gdy spread stoi w karcie jako NIEZMIERZONE.
+    Zapisywany ZAWSZE (0.0 albo 1.0), bo brak wiersza znaczy w `learn.wf_metric`
+    „przebieg sprzed znacznika", a nie „zmierzono". Bez niego `doplata_pb = 0`
+    znaczylo dwie rozne rzeczy: „karta liczona, spread nieznany" i (dawniej)
+    „brutto" - a dozor czytal oba jako brutto i kazdy przeskok miedzy pomiarem
+    a jego luka opisywal jako powrot do starej definicji.
+    """
+    spread = next((s for s in karta.skladniki if s.nazwa == "spread"), None)
+    niezmierzony = spread is not None and spread.zrodlo == NIEZMIERZONE
+    return {"doplata_pb": karta.doplata_poza_symulacja * 1e4,
+            "spread_niezmierzony": 1.0 if niezmierzony else 0.0}
+
+
 def opis_doplaty(karta: Karta) -> str:
     """Czym jest dopłata, przy której liczą się miary - BEZ słowa „pełna".
 
@@ -1902,9 +1921,22 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
     doplata_odniesienia = karta_rundy(
         kind, False, spread_bps=spread_bps,
         spread_nasza_ksiega=spread_nasza_ksiega).doplata_poza_symulacja
+    # „TA SAMA KWOTA CO W DSR", NIE „TEN SAM KOSZT WSZEDZIE". Do 2026-10-03
+    # wydruk mowil „(ta sama co w DSR)" i to bylo prawda wylacznie o kwocie
+    # (DSR dostaje `karta.doplata_poza_symulacja`). Trzech rzeczy zdanie nie
+    # mowilo, a kazda zmienia sens „po doplacie":
+    #   * SELEKCJA WAG in-sample (`ocen` -> `simulate_portfolio`) liczy sie
+    #     nadal BRUTTO - doplata wchodzi dopiero w ocenie okna OOS, wiec wybor
+    #     wag faworyzuje wysoki obrot. Decyzja wlasciciela, nie poprawka;
+    #   * V[SR_n] (`odchylenie_prob_z_bazy`) miesza `oos_sharpe` brutto sprzed
+    #     2026-10-02 z wartosciami po doplacie;
+    #   * przy `--limit` niewypelnienie jest NIEZMIERZONE i do doplaty nie
+    #     wchodzi (`opis_doplaty` nizej wymienia to z nazwy).
     if doplata or doplata_odniesienia:
-        print(f"  Miary okien i bramka statusu PO dopłacie {doplata * 1e4:.2f} pb "
-              f"na rundę (ta sama co w DSR); kup-i-trzymaj po "
+        print(f"  Miary okien OOS i bramka statusu PO dopłacie {doplata * 1e4:.2f} pb "
+              f"na rundę (ta sama KWOTA co w DSR); selekcja wag in-sample "
+              f"liczona BRUTTO; V[SR_n] miesza przebiegi brutto sprzed "
+              f"2026-10-02 z przebiegami po dopłacie; kup-i-trzymaj po "
               f"{doplata_odniesienia * 1e4:.2f} pb na swoją jedną rundę. "
               f"Liczby „brutto” = przed dopłatą, tylko do porównania.")
     # CZEGO W DOPLACIE NIE MA - zawsze, takze przy doplacie zero. Przy `--limit`
@@ -2384,7 +2416,12 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
         # przebiegi liczone tą samą miarą - inaczej pierwszy przebieg po
         # wdrożeniu zgłaszałby „zmianę znaku mediany", która jest zmianą
         # definicji, nie rynku.
-        agg["doplata_pb"] = doplata * 1e4
+        #
+        # Plus DRUGI znacznik: czy spread w karcie byl w ogole zmierzony. Bez
+        # niego doplata zero z powodu luki w `book_snapshot` (`zmierz_spread`
+        # oddaje `bps=None`) byla nieodroznialna od przebiegu brutto - patrz
+        # `znacznik_miary`.
+        agg.update(znacznik_miary(karta))
         # SIODMA MIARA NA OKNO: odsetek transakcji bedacych POWROTEM w ten sam
         # instrument ponizej trzech swiec po wyjsciu z niego. NIE jest to
         # czestotliwosc handlu - patrz `portfolio.udzial_powtornych_wejsc`.

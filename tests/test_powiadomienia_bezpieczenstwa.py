@@ -63,7 +63,10 @@ def test_zgloszenia_ida_przez_wariant_niepodnoszacy_wyjatku():
 
 
 def test_helper_polyka_wyjatek_ale_go_nie_ukrywa():
-    zrodlo = inspect.getsource(powiadom_o_bezpieczenstwie)
+    # Od 2026-10-03 wysylka idzie w tle (`create_task`), a wyjatek polyka
+    # korutyna zadania - patrz `test_bezpieczenstwo_kont.py`.
+    from services.api.notifications import _powiadom_bez_wyjatku
+    zrodlo = inspect.getsource(_powiadom_bez_wyjatku)
     assert "except Exception" in zrodlo
     assert "print(" in zrodlo, "błąd kanału znika bez śladu w logu"
 

@@ -191,6 +191,7 @@ async def main() -> int:
         sys.exit("DATABASE_URL nie jest ustawiony")
     nazwa = f"{PULS}-{args.engine}"
     pod_rzad = 0
+    puls.zyje(args.interval)
     while True:
         t0 = datetime.now(timezone.utc)
         try:
@@ -213,6 +214,8 @@ async def main() -> int:
                 pass
             if pod_rzad >= POD_RZAD_MAX:
                 return 1
+        # Obrot petli, takze nieudany - sonda zywotnosci (`puls.zyje`).
+        puls.zyje(args.interval)
         if args.once:
             return 0 if pod_rzad == 0 else 1
         await asyncio.sleep(args.interval)

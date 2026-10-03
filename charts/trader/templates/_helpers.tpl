@@ -165,3 +165,18 @@ securityContext:
   capabilities:
     drop: ["ALL"]
 {{- end -}}
+
+{{/*
+OBRAZ BAZY - repozytorium:tag@digest (2026-10-03).
+
+`pg17` jest tagiem RUCHOMYM, a `pullPolicy: IfNotPresent` znaczy, ze kazdy
+wezel trzyma ten obraz, ktory pobral PIERWSZY. Nowy wezel albo wyczyszczony
+cache pobralby inna wersje TimescaleDB pod ta sama nazwa - a zrzut z kopii
+pasuje tylko do wersji rozszerzenia, z ktorej powstal (backup.yaml).
+
+Digest jest WYMAGANY: pusty ma zatrzymac `helm template`, a nie po cichu
+zejsc na sam tag. Ta sama zasada co w `trader.llmEnv`.
+*/}}
+{{- define "trader.obrazBazy" -}}
+{{ .Values.db.image.repository }}:{{ .Values.db.image.tag }}@{{ required "db.image.digest musi byc ustawiony (przypiecie obrazu bazy)" .Values.db.image.digest }}
+{{- end -}}

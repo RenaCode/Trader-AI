@@ -706,23 +706,21 @@ def test_czujka_workerow_jest_URUCHAMIANA():
     assert "--co workery" in CRON_YAML
 
 
-def test_workery_NIE_MAJA_livenessProbe():
-    """DECYZJA, nie przeoczenie — uzasadnienie stoi w nagłówku workers.yaml.
+def test_livenessProbe_tylko_za_pulsem_nie_zamiast_niego():
+    """DECYZJA ZMIENIONA 2026-10-03 - swiadomie, nie przez przeoczenie.
 
-    Probe restartuje kontener i NIKOMU o tym nie mówi, a zawieszenie na
-    gnieździe bez limitu czasu wraca. Cicho leczony worker zostawia dziury
-    w świecach i cechach, których nikt nie zbada — ten sam kształt co `|| true`
-    w komendzie: awaria obsłużona i niewidoczna. Reakcją ma być powiadomienie
-    z nazwą procesu, a nie milczący restart.
+    Do tej daty ten test padal na kazda sonde, z powodem: restart nikomu nic
+    nie mowi, a cicho leczony worker zostawia dziury, ktorych nikt nie zbada.
+    Sonda weszla dopiero wtedy, gdy kazdy z trzech powodow z naglowka
+    workers.yaml dostal odpowiedz - i te odpowiedzi pilnuje
+    tests/test_sonda_zywotnosci.py (termin w pliku, a nie w charcie; plik
+    odswiezany takze po nieudanym cyklu; termin dluzszy niz prog czujki).
 
-    Ten test pada, gdy ktoś probe dopisze — po to, żeby najpierw przeczytał
-    powyższe i świadomie się z nim nie zgodził.
+    Tu zostaje to, co z tamtej decyzji jest nadal prawda: czujka pulsu jest
+    PIERWSZA. Sonda bez niej bylaby dokladnie tym cichym leczeniem.
     """
-    # Nagłówek `{{/* ... */}}` to uzasadnienie, nie manifest — patrzymy na to,
-    # co naprawdę idzie do klastra.
-    manifest = WORKERY_YAML.split("*/}}", 1)[1]
-    assert "livenessProbe" not in manifest
-    assert "DLACZEGO TU NIE MA `livenessProbe`" in WORKERY_YAML
+    assert "SONDA ZYWOTNOSCI (`livenessProbe`) - OD 2026-10-03" in WORKERY_YAML
+    assert "--co workery" in CRON_YAML, "sonda bez czujki pulsu = ciche leczenie"
 
 
 def test_prog_ROSNIE_z_interwalem_workera_a_nie_jest_stala():

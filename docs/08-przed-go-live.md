@@ -16,7 +16,7 @@ Pelny zestaw testow: 1912 przeszlo, 25 pominietych, 0 bledow.
 | --- | --- |
 | **Petla decyzyjna equity** (`workers.engine-equity`) | chodzi, `--bar 1h --kind stock --limit --egzekucja gielda --mode demo --wymagaj-modelu` |
 | Bramka sesji (`services/engine/sesja.py`) | stan z `/v2/clock` Alpaki; „nie wiem" NIE jest otwarciem i konczy cykl bledem |
-| **Dziennik jakosciowy** (`services/engine/postmortem.py`) | CronJob `50 5 * * * Etc/UTC`, wlasna waska rola `trader_postmortem` (0054) |
+| **Dziennik jakosciowy** (`services/engine/postmortem.py`) | CronJob `50 7 * * *` Europe/Warsaw (wspolna `strefaCzasowa`), wlasna waska rola `trader_postmortem` (0054) |
 | **Atrybucja newsow** (`decision_contribution kind='news'`) | zapisywana; jedna stala SQL wspolna z cecha `news_sent` |
 | **Pelne CD** | push -> CI -> obraz w ghcr -> `update-git` podbija tag -> ArgoCD; `scripts/build-on-vps.sh` usuniety |
 | **Plik blokady** (`services/api/constraints.txt`) | 42 pakiety przypiete ze zrzutu produkcji; `-c` wpiete w obraz |
@@ -372,6 +372,14 @@ nizsza niz w symulacji, na obu nogach.
            stawia znacznik, ale najpierw sprawdza, czy zapisane cechy zgadzaja
            sie ze swiecami (przelicza je w transakcji, ktora wycofuje).
            Rozjazd = odmowa
+
+      Te cztery kroki sklada `scripts/korekta-podzialow-equity.sh` (od
+      2026-10-03; `set -euo pipefail`). Bez argumentu wykonuje WYLACZNIE
+      krok 1 i sprawdza jego warunki: `split` i `raw` daja rozne liczby,
+      zadnego `NIEPELNE`, czynnik okolo 0,1 dla NVDA/AVGO/NFLX - inaczej
+      przerywa. Kroki 2-4 dopiero z `--wykonaj`. Zaden szablon chartu go nie
+      wola; dopoki znacznika nie ma, dozor po nocnym treningu zglasza tor
+      equity jako niegotowy (kod 3) z tygodniowym przypomnieniem.
 
       Kazdy kolejny podzial uniewaznia cala zapisana historie (Alpaca koryguje
       wzgledem DZIS). Od 2026-09-27 nie jest to jednak cicha awaria:

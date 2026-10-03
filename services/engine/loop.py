@@ -41,6 +41,7 @@ from services.engine import stan_kapitalu
 from services.engine.risk import RiskKernel
 from services.engine.sesja import StanSesji, stan_sesji
 from services.ingest.features import wklady_newsow
+from services.ingest import puls
 from services.engine.uniwersum import odcisk, sql_uniwersum_decyzyjnego
 from services.engine.koszty import POSLIZG_MAKER, POSLIZG_TAKER, koszty
 from services.engine.portfolio import _wypelnione
@@ -2627,6 +2628,7 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
 
     if limit and gielda is not None:
         from services.engine.gielda_exec import zloz_oczekujace
+        from services.engine.gielda_exec import ponow_nieznane
 
         # STAN SESJI CZYTAMY PONOWNIE, TU, NA KONCU PRZEBIEGU.
         #
@@ -2653,6 +2655,12 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
         if verbose and not sesja_wysylki.wolno_decydowac:
             print(f"  wysyłka: {sesja_wysylki.opis()} — wejścia WSTRZYMANE, "
                   f"wyjścia idą dalej")
+        # WIERSZE `unknown` WAZNYCH PLANOW PRZED WYSYLKA - patrz
+        # `gielda_exec.ponow_nieznane`. Zwolniony plan wraca do `zloz_oczekujace`
+        # jako plan bez wiersza i idzie na gielde pod tym samym id.
+        stats.update(await ponow_nieznane(
+            cur, gielda, engine=engine, mode=mode, kategoria=kategoria,
+            verbose=verbose, tylko_wyjscia=wejscia_wstrzymane))
         stats.update(await zloz_oczekujace(
             cur, gielda, engine=engine, mode=mode, kategoria=kategoria, h=h,
             verbose=verbose, tylko_wyjscia=wejscia_wstrzymane,
@@ -2673,6 +2681,75 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
     zapisz_puls(cur, engine, mode, stats)
     conn.commit()
     return stats
+
+
+# JEDNO ZAPYTANIE O KLUCZ - dla budowy adaptera i dla sprawdzenia, czy klucz
+# sie nie zmienil (`odcisk_klucza`). Dwie kopie rozjechalyby sie przy pierwszej
+# zmianie reguly wyboru, a wtedy silnik "wykrywalby rotacje" co cykl albo nigdy.
+SQL_KLUCZE = (
+    "SELECT c.id, c.key_hint, c.key_enc, c.secret_enc,"
+    "       v.code AS venue_code, v.demo_host, v.live_host"
+    "  FROM app.api_credential c JOIN ref.venue v ON v.id = c.venue_id"
+    " WHERE v.engine::text = %s AND c.mode::text = %s AND c.active"
+    " ORDER BY c.created_at DESC, c.id DESC")
+
+
+def odcisk_klucza(conn, engine: str, mode: str) -> int | None:
+    """Id klucza, ktory WYBRALBY `zbuduj_adapter` - albo None, gdy nie ma zadnego.
+
+    DLACZEGO CO CYKL (audyt 2026-10-03, G3)
+
+    Adapter powstaje raz na proces, a proces zyje tygodniami. Klucz wymieniony
+    w Ustawieniach (nowy wiersz, stary dezaktywowany) nie docieral do silnika
+    az do restartu poda: silnik dalej podpisywal starym, gielda odbijala 10003,
+    a do 2026-10-03 kazde takie zlozenie zapisywalo sie jako `unknown`, czyli
+    "nie wiemy" zamiast "klucz nie dziala". Porownanie id kosztuje jedno
+    zapytanie do bazy na cykl i nic po stronie gieldy.
+    """
+    w = conn.execute(SQL_KLUCZE, (engine, mode)).fetchone()
+    return w["id"] if w else None
+
+
+class DrugaPetla(RuntimeError):
+    """Inny proces trzyma cykl tego silnika i trybu - ten cykl sie NIE odbywa."""
+
+
+def klucz_cyklu(engine: str, mode: str) -> str:
+    return f"engine:{engine}:{mode}"
+
+
+def zajmij_cykl(conn, engine: str, mode: str) -> None:
+    """Blokada doradcza w bazie: JEDEN cykl silnika (engine, mode) naraz.
+
+    DLACZEGO NIE WYSTARCZA `replicas: 1` I `Recreate`
+
+    Chronia wylacznie przy zwyklym rolloucie. Dwa realne scenariusze ich nie
+    dotycza: reczne `loop.py --once --limit` przez `kubectl exec` obok
+    dzialajacego poda i pod zawieszony w `Terminating`, ktory dalej chodzi.
+    Klucz zlecenia `tai-p{id planu}` nie chroni wtedy przed niczym: dwie petle
+    zapisuja DWIE decyzje (`decided_at` to zegar, wiec ON CONFLICT w
+    `record_decision` nie zadziala), z nich DWA plany o roznych id, i na
+    gielde ida dwa zlecenia - podwojna pozycja, ktora w dzienniku wyglada jak
+    strategia wchodzaca mocniej, niz zakladal risk kernel (audyt 2026-10-03, G1).
+
+    SESYJNA, NIE TRANSAKCYJNA. `run_once` commituje wiele razy, a blokada
+    transakcyjna puszczalaby przy pierwszym commicie. Sesyjna zyje tyle, co
+    polaczenie - a `main` otwiera je NA KAZDY CYKL, wiec zamkniecie polaczenia
+    (takze po wyjatku i po smierci procesu) zwalnia ja bez sprzatania.
+
+    `try`, NIE CZEKANIE. Druga petla ma sie dowiedziec i odpuscic, a nie stanac
+    w kolejce za pierwsza i wykonac ten sam cykl chwile pozniej. Odmowa jest
+    wyjatkiem, zeby wpadla w licznik pieciu awarii pod rzad: proces, ktory nigdy
+    nie dostaje cyklu, ma sie skonczyc widocznie, a nie bic puls bez pracy.
+    """
+    wolne = conn.execute("SELECT pg_try_advisory_lock(hashtext(%s)) AS wolne",
+                         (klucz_cyklu(engine, mode),)).fetchone()["wolne"]
+    if not wolne:
+        raise DrugaPetla(
+            f"cykl silnika {engine}/{mode} trzyma INNY proces (blokada "
+            f"doradcza {klucz_cyklu(engine, mode)!r}) — ten cykl się nie "
+            f"odbywa. Sprawdź `kubectl get pods` (pod w Terminating?) i ręczne "
+            f"`loop.py --once` obok działającego silnika")
 
 
 async def zbuduj_adapter(url: str, mode: str, engine: str = "crypto"):
@@ -2700,12 +2777,7 @@ async def zbuduj_adapter(url: str, mode: str, engine: str = "crypto"):
         # `c.id` zostaje jako rozstrzygniecie remisu: dwa klucze wgrane w tej
         # samej milisekundzie maja dawac ten sam wybor przy kazdym starcie,
         # inaczej silnik po restarcie handluje z innego rachunku.
-        klucze = conn.execute(
-            "SELECT c.id, c.key_hint, c.key_enc, c.secret_enc,"
-            "       v.code AS venue_code, v.demo_host, v.live_host"
-            "  FROM app.api_credential c JOIN ref.venue v ON v.id = c.venue_id"
-            " WHERE v.engine::text = %s AND c.mode::text = %s AND c.active"
-            " ORDER BY c.created_at DESC, c.id DESC", (engine, mode)).fetchall()
+        klucze = conn.execute(SQL_KLUCZE, (engine, mode)).fetchall()
     cred = klucze[0] if klucze else None
     # NIEDOKONCZONA ROTACJA MA BYC SLYSZALNA. Wybor jest juz jednoznaczny,
     # ale dwa aktywne klucze naraz to stan, ktorego nikt nie zaplanowal:
@@ -2805,7 +2877,10 @@ async def main() -> int:
             return await sprawdz(conn, args.engine, h)
 
     gielda = None
+    klucz_gieldy: int | None = None
     if args.egzekucja == "gielda":
+        with psycopg.connect(url, row_factory=dict_row) as conn:
+            klucz_gieldy = odcisk_klucza(conn, args.engine, args.mode)
         gielda = await zbuduj_adapter(url, args.mode, args.engine)
         print(f"EGZEKUCJA NA GIEŁDZIE ({args.mode}) — zlecenia idą naprawdę.")
         # POZYCJE PAPIEROWE NIE PRZECHODZA NA GIELDE - patrz `zamknij_pozycje_papierowe`.
@@ -2854,10 +2929,35 @@ async def main() -> int:
     # i widac to bez zagladania do niczego.
     POD_RZAD_MAX = 5
     pod_rzad = 0
+    # Sonda zywotnosci (`puls.zyje`, templates/workers.yaml): na starcie i po
+    # kazdym obrocie petli, takze nieudanym.
+    puls.zyje(args.interval)
     while True:
         t0 = datetime.now(timezone.utc)
         try:
             with psycopg.connect(url, row_factory=dict_row) as conn:
+                # JEDNA PETLA NA SILNIK I TRYB - patrz `zajmij_cykl`. Blokada
+                # zyje tyle, co to polaczenie.
+                zajmij_cykl(conn, args.engine, args.mode)
+                # KLUCZ ZMIENIONY W UI -> NOWY ADAPTER, BEZ RESTARTU. Patrz
+                # `odcisk_klucza`. Brak klucza to awaria cyklu (licznik pieciu),
+                # tak jak brak klucza przy starcie jest awaria startu.
+                if gielda is not None:
+                    teraz_klucz = odcisk_klucza(conn, args.engine, args.mode)
+                    if teraz_klucz is None:
+                        raise RuntimeError(
+                            f"egzekucja na giełdzie bez aktywnego klucza dla "
+                            f"{args.engine}/{args.mode} — klucz usunięty w trakcie "
+                            f"pracy silnika")
+                    if teraz_klucz != klucz_gieldy:
+                        print(f"[{t0:%H:%M:%S}] klucz giełdy zmieniony "
+                              f"({klucz_gieldy} -> {teraz_klucz}) — przebudowuję adapter")
+                        nowa = await zbuduj_adapter(url, args.mode, args.engine)
+                        try:
+                            await gielda.close()
+                        except Exception as e:                # noqa: BLE001
+                            print(f"  (stary adapter nie zamknął się czysto: {e})")
+                        gielda, klucz_gieldy = nowa, teraz_klucz
                 # STAN SESJI LICZY SIE CO CYKL, NIE RAZ PRZED PETLA. Proces
                 # zyje tygodniami; otwarcie i zamkniecie wypadaja w jego
                 # srodku, a swieta gieldowe nie pytaja o restart poda.
@@ -2915,6 +3015,8 @@ async def main() -> int:
                 print(f"{POD_RZAD_MAX} przebiegów pod rząd zakończonych błędem — "
                       f"kończę proces, żeby restart był WIDOCZNY zamiast cichy")
                 return 1
+        # Obrot petli, takze nieudany - sonda zywotnosci (`puls.zyje`).
+        puls.zyje(args.interval)
         if args.once:
             # Kod wyjscia MOWI, jak poszedl ten jeden cykl. Do 2026-10-02 stalo
             # tu `return 0` takze po przebiegu przerwanym wyjatkiem - kazde

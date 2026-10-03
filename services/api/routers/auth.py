@@ -9,7 +9,6 @@ Zgodnie z OWASP Session Management / Password Storage:
 """
 from __future__ import annotations
 
-import asyncio
 import base64
 import io
 import secrets
@@ -20,14 +19,15 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
 from ..auth import (
-    CSRF_COOKIE, audit, clear_session_cookies, current_user, require_csrf,
-    set_session_cookies,
+    CSRF_COOKIE, adres_klienta, audit, clear_session_cookies, current_user,
+    require_csrf, set_session_cookies,
 )
 from ..db import execute, fetch_all, fetch_one
 from ..notifications import powiadom_o_bezpieczenstwie
 from ..security import (
-    SESSION_TTL, backup_code_hash, hash_password, new_backup_codes, new_session_token,
-    new_totp_secret, session_expiry, totp_uri, verify_password, verify_totp,
+    SESSION_TTL, backup_code_hash, hash_password_async, new_backup_codes,
+    new_session_token, new_totp_secret, session_expiry, sprawdz_haslo, totp_uri,
+    verify_totp,
 )
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
@@ -67,14 +67,99 @@ class TotpDisableBody(BaseModel):
     # `new_password` (min. 12 znakow), ktorego nie uzywal - zadanie z samym
     # haslem dostawalo 422.
     current_password: str = Field(min_length=1, max_length=512)
+    # I KODEM. Do 2026-10-03 wystarczalo samo haslo, a razem z brakiem limitu
+    # prob przy ponownym podaniu hasla dawalo to lancuch: przejeta sesja ->
+    # zgadniete haslo -> drugi skladnik wylaczony. Kod z aplikacji albo kod
+    # zapasowy dowodzi, ze wylacza ten, kto ma URZADZENIE, a nie tylko sesje.
+    code: str = Field(min_length=6, max_length=32)
+
+
+class TotpSetupBody(BaseModel):
+    # Konfiguracja nadpisuje niepotwierdzony sekret i po potwierdzeniu
+    # przypina konto do cudzej aplikacji - kto ma tylko sesje, odcinal tym
+    # wlasciciela od konta. Haslo jest tu tym samym progiem co przy wylaczeniu.
+    current_password: str = Field(min_length=1, max_length=512)
+
+
+# BLOKADA DLA LOGINU, KTOREGO NIE MA. Konto istniejace po `MAX_FAILED` zlych
+# haslach odpowiada 429 z czasem do odblokowania; nieistniejace odpowiadalo
+# zawsze 401. Piec prob na dowolny login mowilo wiec, czy konto istnieje.
+# Licznik dla loginow nieistniejacych zyje w pamieci procesu (API ma jedna
+# replike), zachowuje sie identycznie jak `failed_logins`/`locked_until`
+# i jest przyciety, zeby zalew losowych loginow nie zjadl pamieci.
+_FANTOMY_MAX = 10_000
+_fantomy: dict[str, list] = {}
+
+
+def _fantom_blokada(login: str) -> datetime | None:
+    wpis = _fantomy.get(login)
+    return wpis[1] if wpis else None
+
+
+def _fantom_bledne_haslo(login: str, now: datetime) -> None:
+    wpis = _fantomy.pop(login, None) or [0, None]
+    wpis[0] += 1
+    if wpis[0] >= MAX_FAILED:
+        wpis[1] = now + LOCKOUT
+    _fantomy[login] = wpis                     # na koniec kolejnosci = najswiezszy
+    while len(_fantomy) > _FANTOMY_MAX:
+        _fantomy.pop(next(iter(_fantomy)))
+
+
+def _odpowiedz_blokady(locked_until: datetime, now: datetime) -> HTTPException:
+    left = int((locked_until - now).total_seconds())
+    return HTTPException(status_code=429,
+                         detail=f"Konto zablokowane po nieudanych probach. Sprobuj za {left} s.")
+
+
+async def potwierdz_haslo(user: dict, haslo: str, request: Request, *,
+                          akcja: str, status: int, komunikat: str) -> None:
+    """Ponowne podanie hasla w zalogowanej sesji - z TYM SAMYM limitem co logowanie.
+
+    Do 2026-10-03 `/password`, `/totp/disable` i `revoke-others` sprawdzaly
+    haslo bez licznika i bez sladu w audycie. Kto mial przejeta sesje,
+    zgadywal haslo bez ograniczen i bez sladu - a odgadniete otwieralo zmiane
+    hasla i wylaczenie drugiego skladnika.
+
+    Teraz kazda pomylka podbija `failed_logins` (wspolny licznik z logowaniem,
+    wiec nie da sie rozlozyc prob na dwie sciezki), zapisuje
+    `auth.reauth_failed` z nazwa operacji, a po `MAX_FAILED` konto jest
+    zablokowane, a SESJA, z ktorej zgadywano, uniewazniona.
+    """
+    now = datetime.now(timezone.utc)
+    row = await fetch_one("SELECT password_hash, locked_until FROM app.user WHERE id = %s",
+                          (user["id"],))
+    if row["locked_until"] and row["locked_until"] > now:
+        raise _odpowiedz_blokady(row["locked_until"], now)
+    ok, _ = await sprawdz_haslo(row["password_hash"], haslo)
+    if ok:
+        return
+    await _odnotuj_bledne_ponowne(user, request, akcja)
+    raise HTTPException(status_code=status, detail=komunikat)
+
+
+async def _odnotuj_bledne_ponowne(user: dict, request: Request, akcja: str) -> None:
+    """Licznik W BAZIE (`x + 1`), jak w `_odnotuj_bledny_kod` - z tego samego powodu."""
+    stan = await fetch_one(
+        "UPDATE app.user SET failed_logins = failed_logins + 1,"
+        " locked_until = CASE WHEN failed_logins + 1 >= %s THEN now() + %s"
+        "                     ELSE locked_until END"
+        " WHERE id = %s RETURNING failed_logins",
+        (MAX_FAILED, LOCKOUT, user["id"]),
+    )
+    await audit("auth.reauth_failed", user_id=user["id"], entity=akcja, request=request)
+    if stan and stan["failed_logins"] >= MAX_FAILED:
+        await execute("UPDATE app.session SET revoked_at = now()"
+                      " WHERE id = %s AND revoked_at IS NULL", (user["session_id"],))
+        await audit("auth.session_revoked_after_failures", user_id=user["id"],
+                    entity=akcja, request=request)
 
 
 async def _start_session(user_id: int, mfa_ok: bool, request: Request,
                          response: Response) -> None:
     token, token_hash = new_session_token()
     csrf = secrets.token_urlsafe(32)
-    fwd = request.headers.get("x-forwarded-for")
-    ip = fwd.split(",")[0].strip() if fwd else (request.client.host if request.client else None)
+    ip = adres_klienta(request)
 
     await execute(
         "INSERT INTO app.session (user_id, token_hash, expires_at, mfa_satisfied, ip, user_agent)"
@@ -149,29 +234,31 @@ async def me(user: dict = Depends(current_user)):
 
 @router.post("/login")
 async def login(body: LoginBody, request: Request, response: Response):
+    login_ = body.login.strip()
     row = await fetch_one(
         "SELECT id, login, password_hash, is_active, failed_logins, locked_until"
         " FROM app.user WHERE login = %s",
-        (body.login.strip(),),
+        (login_,),
     )
 
     # Stala odpowiedz niezaleznie od tego, czy login istnieje - inaczej czas
     # odpowiedzi i tresc bledu pozwalaja wyliczyc liste kont.
     generic = HTTPException(status_code=401, detail="Nieprawidlowy login lub haslo")
 
+    now = datetime.now(timezone.utc)
+    locked_until = row["locked_until"] if row else _fantom_blokada(login_)
+    if locked_until and locked_until > now:
+        raise _odpowiedz_blokady(locked_until, now)
+
     if not row:
-        # Symulujemy koszt weryfikacji hasla, zeby czas odpowiedzi nie zdradzal
-        # nieistniejacego konta.
-        await asyncio.sleep(0.25)
+        # Ta sama weryfikacja Argon2 na atrapie (koszt i czas jak przy koncie
+        # istniejacym) i ten sam licznik prob - patrz `_fantomy`.
+        await sprawdz_haslo(None, body.password)
+        _fantom_bledne_haslo(login_, now)
+        await audit("auth.login_failed_unknown", request=request)
         raise generic
 
-    now = datetime.now(timezone.utc)
-    if row["locked_until"] and row["locked_until"] > now:
-        left = int((row["locked_until"] - now).total_seconds())
-        raise HTTPException(status_code=429,
-                            detail=f"Konto zablokowane po nieudanych probach. Sprobuj za {left} s.")
-
-    ok, rehash = verify_password(row["password_hash"], body.password)
+    ok, rehash = await sprawdz_haslo(row["password_hash"], body.password)
     if not ok:
         # Licznik podbijany W BAZIE, tak jak w `_odnotuj_bledny_kod`. Do
         # 2026-10-02 stal tu odczyt z `row` i zapis policzonej w Pythonie
@@ -256,9 +343,7 @@ async def _zglos_nowe_urzadzenie(user_id: int, request: Request) -> None:
     uzytkownik nie moze go wylaczyc. Tak zaprojektowano to w migracji 0007
     i nikt tego nigdy nie podlaczyl.
     """
-    fwd = request.headers.get("x-forwarded-for")
-    ip = (fwd.split(",")[0].strip() if fwd
-          else (request.client.host if request.client else None))
+    ip = adres_klienta(request)
     ua = request.headers.get("user-agent")
 
     # `at`, nie `created_at` - kolumna czasu w app.audit_log nazywa sie `at`
@@ -388,13 +473,11 @@ async def logout(request: Request, response: Response, user: dict = Depends(curr
 @router.post("/password", dependencies=[Depends(require_csrf)])
 async def change_password(body: PasswordBody, request: Request,
                           user: dict = Depends(current_user)):
-    row = await fetch_one("SELECT password_hash FROM app.user WHERE id = %s", (user["id"],))
-    ok, _ = verify_password(row["password_hash"], body.current_password)
-    if not ok:
-        raise HTTPException(status_code=401, detail="Biezace haslo jest nieprawidlowe")
+    await potwierdz_haslo(user, body.current_password, request, akcja="auth.password",
+                          status=401, komunikat="Biezace haslo jest nieprawidlowe")
 
     await execute("UPDATE app.user SET password_hash = %s WHERE id = %s",
-                  (hash_password(body.new_password), user["id"]))
+                  (await hash_password_async(body.new_password), user["id"]))
     # Zmiana hasla uniewaznia WSZYSTKIE pozostale sesje - jesli ktos przejal konto,
     # traci dostep w tym momencie.
     await execute(
@@ -415,9 +498,13 @@ async def change_password(body: PasswordBody, request: Request,
 
 # ----------------------------------------------------------------- TOTP
 @router.post("/totp/setup", dependencies=[Depends(require_csrf)])
-async def totp_setup(request: Request, user: dict = Depends(current_user)):
+async def totp_setup(body: TotpSetupBody, request: Request,
+                     user: dict = Depends(current_user)):
     """Generuje sekret i kod QR. Sekret jest AKTYWNY dopiero po potwierdzeniu kodem."""
     from ..security import SecretBox
+
+    await potwierdz_haslo(user, body.current_password, request, akcja="auth.totp_setup",
+                          status=401, komunikat="Haslo jest nieprawidlowe")
 
     existing = await fetch_one(
         "SELECT confirmed_at FROM app.totp_secret WHERE user_id = %s", (user["id"],))
@@ -481,10 +568,35 @@ async def totp_confirm(body: TotpConfirmBody, request: Request,
 @router.post("/totp/disable", dependencies=[Depends(require_csrf)])
 async def totp_disable(body: TotpDisableBody, request: Request,
                        user: dict = Depends(current_user)):
-    row = await fetch_one("SELECT password_hash FROM app.user WHERE id = %s", (user["id"],))
-    ok, _ = verify_password(row["password_hash"], body.current_password)
-    if not ok:
-        raise HTTPException(status_code=401, detail="Haslo jest nieprawidlowe")
+    from ..security import SecretBox
+
+    await potwierdz_haslo(user, body.current_password, request, akcja="auth.totp_disable",
+                          status=401, komunikat="Haslo jest nieprawidlowe")
+
+    # Kod jak przy logowaniu: TOTP ze zuzyciem kroku (warunkowo i atomowo,
+    # zeby przechwycony kod nie dzialal drugi raz) albo kod zapasowy.
+    totp = await fetch_one(
+        "SELECT secret_enc, last_step FROM app.totp_secret"
+        " WHERE user_id = %s AND confirmed_at IS NOT NULL", (user["id"],))
+    if not totp:
+        raise HTTPException(status_code=409, detail="Drugi skladnik nie jest wlaczony")
+    step = verify_totp(SecretBox().decrypt(bytes(totp["secret_enc"])), body.code,
+                       last_step=totp["last_step"])
+    zuzyty = None
+    if step is not None:
+        zuzyty = await fetch_one(
+            "UPDATE app.totp_secret SET last_step = %s WHERE user_id = %s"
+            " AND (last_step IS NULL OR last_step < %s) RETURNING user_id",
+            (step, user["id"], step))
+    if not zuzyty:
+        zuzyty = await fetch_one(
+            "UPDATE app.backup_code SET used_at = now()"
+            " WHERE user_id = %s AND code_hash = %s AND used_at IS NULL RETURNING id",
+            (user["id"], backup_code_hash(body.code)))
+    if not zuzyty:
+        await _odnotuj_bledne_ponowne(user, request, "auth.totp_disable.code")
+        raise HTTPException(status_code=401, detail="Nieprawidlowy kod")
+
     await execute("DELETE FROM app.totp_secret WHERE user_id = %s", (user["id"],))
     await execute("DELETE FROM app.backup_code WHERE user_id = %s", (user["id"],))
     await audit("auth.totp_disabled", user_id=user["id"], request=request)

@@ -258,9 +258,17 @@ def test_oba_silniki_maja_dziennik():
 
 def test_cron_ma_strefe_jawnie():
     """Bez `timeZone` k3s liczy harmonogram w strefie kontrolera, a dziennik
-    wydatków liczy dobę w UTC — przesunięcie myli przy zestawianiu chwil."""
+    wydatków liczy dobę w UTC — przesunięcie myli przy zestawianiu chwil.
+
+    Od 2026-10-03 strefa jest WSPÓLNA dla wszystkich zadań (`strefaCzasowa`,
+    Europe/Warsaw), a nie własne `Etc/UTC` tego jednego: dwie strefy w jednym
+    harmonogramie przesuwały post-mortem względem trenera przy zmianie czasu.
+    Doba wydatków nie jest zagrożona, póki przebieg stoi daleko od północy UTC."""
     szablon = (KORZEN / "charts/trader/templates/postmortem-cron.yaml").read_text()
-    assert re.search(r'timeZone:\s*"Etc/UTC"', szablon)
+    assert re.search(r'timeZone:\s*\{\{[^}]*\.Values\.strefaCzasowa', szablon)
+    godzina = int(yaml.safe_load(CHART.read_text())["postmortemCron"]["schedule"].split()[1])
+    # Warszawa to UTC+1/+2: 03..21 lokalnie trzyma przebieg z dala od północy UTC.
+    assert 3 <= godzina <= 21
 
 
 def test_brak_hasla_nowej_roli_nie_klodzie_poda_api():

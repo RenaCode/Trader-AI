@@ -846,9 +846,16 @@ async def main() -> int:
         if not cred:
             # BRAK KLUCZA TO NIE JEST ZGODNOSC. Milczace zero powiedzialoby
             # "sprawdzone i w porzadku" o czyms, czego nie sprawdzono.
-            print(f"uzgodnienie: brak aktywnego klucza dla trybu {args.mode} — "
-                  f"nie ma z czym porównać")
-            return 0
+            #
+            # I DLATEGO KOD 2, NIE 0 (audyt 2026-10-03, G3). Do tej zmiany ten
+            # komentarz stal nad `return 0` - czyli kod robil dokladnie to,
+            # przed czym komentarz ostrzegal: Job czujki konczyl sie na zielono,
+            # a linia w logu byla jedynym sladem. Ten sam kod co
+            # `Nieuzgadnialne` nizej, bo to ta sama sytuacja: porownanie
+            # NIEWYKONALNE, a nie wykonane i zgodne.
+            print(f"uzgodnienie {args.engine}/{args.mode}: NIEWYKONALNE — brak "
+                  f"aktywnego klucza dla trybu {args.mode}, nie ma z czym porównać")
+            return 2
         box = SecretBox()
         # HOST Z ref.venue, nie z tablicy w adapterze.
         #

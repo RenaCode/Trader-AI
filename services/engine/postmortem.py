@@ -111,10 +111,18 @@ SCHEMA = {
                     },
                 },
                 "required": ["finding", "action", "oparte_na"],
+                "additionalProperties": False,
             },
         },
     },
     "required": ["summary", "findings"],
+    # KAZDY obiekt, takze zagniezdzony, musi to miec jawnie. Od 26.09.2026
+    # Anthropic odrzuca schemat bez tego pola bledem 400 ("For 'object' type,
+    # 'additionalProperties' must be explicitly set to false"), a CronJob
+    # padal co noc. Pilnuje tego `tests/test_schematy_llm.py` - rekurencyjnie,
+    # bo pierwsza wersja poprawki dopisana tylko na korzeniu przeszlaby
+    # przez test plytki i dalej dostawala 400 za `findings.items`.
+    "additionalProperties": False,
 }
 
 

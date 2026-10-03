@@ -234,24 +234,8 @@ def test_znane_urzadzenie_uwzglednia_logowania_z_drugim_skladnikiem(monkeypatch)
                              ("'auth.login'", "'auth.mfa'", "'auth.mfa_backup_code'"))
 
 
-def test_wylaczenie_TOTP_wymaga_tylko_hasla_i_jest_zglaszane(baza, monkeypatch):
-    b = baza()
-
-    async def fetch_one(sql, params=None):
-        return {"password_hash": b.konto["password_hash"]}
-
-    async def execute(sql, params=None):
-        return None
-
-    monkeypatch.setattr(modul, "fetch_one", fetch_one)
-    monkeypatch.setattr(modul, "execute", execute)
-
-    cialo = modul.TotpDisableBody(current_password=HASLO)
-    wynik = asyncio.run(modul.totp_disable(cialo, zadanie(), {"id": 7}))
-
-    assert wynik == {"ok": True}
-    assert [k for k, _ in b.powiadomienia] == ["credential.changed"], (
-        "wyłączenie drugiego składnika przeszło bez powiadomienia")
+# Wylaczenie TOTP wymaga od 2026-10-03 hasla I kodu, a powiadomienie o nim
+# pilnuje `tests/test_bezpieczenstwo_kont.py::test_wylaczenie_TOTP_dobrym_kodem`.
 
 
 def test_wlaczenie_TOTP_jest_zglaszane(baza, monkeypatch):

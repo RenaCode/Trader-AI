@@ -37,8 +37,8 @@ z osobnymi modelami, osobnym ryzykiem i osobnymi zakładkami w UI.
 - [x] Symulacja **portfelowa** przez ten sam risk kernel co produkcja
 - [x] Rola bazy bez uprawnień superużytkownika + kontrola uprawnień
 - [x] Kopie zapasowe (weryfikowane), rotacja `SECRETS_KEY`, limit wydatków na API
-- [x] 2153 testów jednostkowych (reguły ryzyka, portfel, koszty, TOTP, kryptografia),
-      zmierzone 26.09.2026 — polecenie i sposób sprawdzenia w sekcji [Testy](#testy)
+- [x] 2618 testów jednostkowych (reguły ryzyka, portfel, koszty, TOTP, kryptografia),
+      zmierzone 03.10.2026 — polecenie i sposób sprawdzenia w sekcji [Testy](#testy)
 - [x] Ustawienia, powiadomienia (w aplikacji / WhatsApp / webhook), profil konta
 - [x] Prowizja w mierze, a nie tylko w krzywej kapitału — odsetek dodatnich
       okien i mediana Sharpe były liczone **przed kosztami** (patrz `docs/03`)
@@ -412,11 +412,12 @@ Kontener nginx serwuje czysty HTTP — certyfikat żyje wyłącznie na krawędzi
 | Warstwa | Rozwiązanie |
 |---|---|
 | Hasło | Argon2id, 64 MiB / t=3 / p=4 (OWASP wymaga minimum 19 MiB / t=2 / p=1) |
-| Drugi składnik | TOTP (RFC 6238) + 10 jednorazowych kodów zapasowych |
-| Sesja | 256 bitów z CSPRNG; w bazie wyłącznie SHA-256; cookie `HttpOnly` + `Secure` + `SameSite=Strict` |
+| Drugi składnik | TOTP (RFC 6238) + 10 jednorazowych kodów zapasowych; włączenie wymaga hasła, wyłączenie hasła i kodu (TOTP lub zapasowego) |
+| Sesja | 256 bitów z CSPRNG; w bazie wyłącznie SHA-256; cookie `HttpOnly` + `Secure` + `SameSite=Strict`; wygasa po 12 h albo po 30 min bezczynności |
 | Session fixation | Nowa sesja przy logowaniu i po potwierdzeniu drugiego składnika |
 | CSRF | Double-submit cookie na metodach zmieniających stan |
-| Blokada | 15 minut po pięciu nieudanych próbach; stała odpowiedź i stałe opóźnienie dla nieistniejącego loginu |
+| Blokada | 15 minut po pięciu nieudanych próbach — wspólny licznik dla logowania, drugiego składnika i ponownego podania hasła (`/password`, `/totp/*`, `revoke-others`); identyczna odpowiedź i ta sama weryfikacja Argon2 (atrapa) dla nieistniejącego loginu |
+| Webhook | tylko publiczne adresy po rozwiązaniu DNS, połączenie przypięte do sprawdzonego IP |
 | Audyt | Każda próba logowania, zmiana hasła i operacja na 2FA w `app.audit_log` |
 
 Konto zakładane poza repozytorium:

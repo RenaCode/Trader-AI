@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field
 
 from ..auth import audit, current_user, require_csrf
 from ..db import execute, fetch_all, fetch_one
-from ..notifications import notify
+from ..notifications import WebhookNiedozwolony, adres_webhooka, notify
 from ..security import SecretBox
 
 # Kanaly dostarczania = enum notify.channel_kind (migracja 0027).
@@ -143,8 +143,16 @@ async def add_channel(body: ChannelBody, request: Request, user: dict = Depends(
         config = {"telefon": telefon, "apikey": body.apikey.strip()}
         hint = telefon[:3] + "•" * max(0, len(telefon) - 6) + telefon[-3:]
     else:
-        if not body.url or not body.url.startswith("https://"):
-            raise HTTPException(400, "Webhook wymaga adresu zaczynającego się od https://")
+        # Adres sprawdzany juz przy zapisie, nie dopiero przy wysylce - i drugi
+        # raz przy kazdej wysylce, bo DNS moze sie zmienic (`adres_webhooka`).
+        # Jeden komunikat na kazda przyczyne: rozne tresci mowilyby, ktora
+        # nazwa wewnatrz klastra istnieje.
+        try:
+            await adres_webhooka((body.url or "").strip())
+        except WebhookNiedozwolony as e:
+            print(f"[webhook] odrzucony przy zapisie: {e}", flush=True)
+            raise HTTPException(
+                400, "Webhook wymaga publicznego adresu zaczynającego się od https://")
         config = {"url": body.url.strip(), "secret": (body.secret or "").strip()}
         hint = body.url.split("/")[2][:40]
 

@@ -103,7 +103,11 @@ def test_brak_zlecenia_na_obu_endpointach_to_None_a_nie_blad():
     idempotencja zablokowałaby handel zamiast go chronić."""
     k, zapytania = gielda_z_listami([], [])
     assert asyncio.run(k.stan_zlecenia("tai-nasze-42")) is None
-    assert len(zapytania) == 2, "oba endpointy muszą zostać odpytane"
+    # TRZY odczyty od 2026-10-03: trzeci to `/v5/order/realtime` z `openOnly=1`,
+    # ktory domyka luke "history may delay" (audyt E3). "Nie zna" wolno
+    # powiedziec dopiero po wszystkich trzech.
+    assert len(zapytania) == 3, "wszystkie trzy odczyty muszą zostać wykonane"
+    assert "openOnly=1" in zapytania[-1]
 
 
 def test_cudze_zlecenie_NIE_MOZE_zablokowac_zlozenia_ani_wyslac_drugiego():

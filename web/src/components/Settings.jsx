@@ -275,13 +275,16 @@ export default function Settings({ user, onUserChanged }) {
 function TotpPanel({ enabled, onChanged }) {
   const [setup, setSetup] = useState(null);
   const [code, setCode] = useState('');
+  const [password, setPassword] = useState('');
   const [codes, setCodes] = useState(null);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
 
   const start = async () => {
     setBusy(true); setError('');
-    try { setSetup(await post('/api/auth/totp/setup')); }
+    // Haslo jest wymagane: konfiguracja z samej sesji pozwalala przypiac
+    // konto do cudzej aplikacji uwierzytelniajacej.
+    try { setSetup(await post('/api/auth/totp/setup', { current_password: password })); setPassword(''); }
     catch (e) { setError(e.message); }
     finally { setBusy(false); }
   };
@@ -362,8 +365,13 @@ function TotpPanel({ enabled, onChanged }) {
         Drugi składnik jest wyłączony. Do końca fazy demonstracyjnej to dopuszczalne,
         ale musi zostać włączony przed przejściem na tryb live.
       </div>
+      <label className="field">
+        <span className="field-label">Bieżące hasło</span>
+        <input className="input-field" type="password" value={password}
+               autoComplete="current-password" onChange={(e) => setPassword(e.target.value)} />
+      </label>
       {error && <div className="form-error">{error}</div>}
-      <button className="btn-ghost" onClick={start} disabled={busy}>
+      <button className="btn-ghost" onClick={start} disabled={busy || !password}>
         {busy ? 'Przygotowuję…' : 'Włącz weryfikację dwuetapową'}
       </button>
     </div>

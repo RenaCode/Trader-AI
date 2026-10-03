@@ -48,6 +48,24 @@ db:
   image:
     repository: timescale/timescaledb-ha
     tag: "pg17"
+    # PRZYPIECIE PO DIGESCIE. Tag `pg17` jest ruchomy, a `IfNotPresent` trzymal
+    # na wezle ten obraz, ktory przyszedl pierwszy - nowy wezel albo czysty
+    # cache dostalby inna wersje TimescaleDB pod ta sama nazwa.
+    #
+    # Digest obrazu, na ktorym baza dziala na klastrze (imageID poda,
+    # odczytany 2026-10-03). Aktualny `pg17` w rejestrze to juz inna wersja
+    # (sha256:2fcc39a5d4c8a65f58691ef92c7819df5773db72397b2dd8493f114659b519c2)
+    # - przejscie na nia to osobna decyzja z kopia przed.
+    #
+    # UWAGA WDROZENIOWA - TO JEST DIGEST REJESTRU, NIE DIGEST, KTORY CHODZI.
+    # Pod bazy na klastrze moze stac na starszym obrazie pobranym pod tym
+    # samym tagiem. Zmiana tej linii restartuje pod bazy (Recreate), a inny
+    # digest niz biezacy oznacza PODBICIE wersji Postgresa/TimescaleDB w tym
+    # restarcie. Przed wdrozeniem odczytaj digest dzialajacego poda:
+    #   kubectl get pod -l app=trader-db -o jsonpath='{..imageID}'
+    # i jesli jest inny, wpisz TAMTEN (przypiecie bez zmiany wersji); podbicie
+    # wersji to osobna, swiadoma decyzja z kopia przed.
+    digest: "sha256:a693dd7fbb75b51c3d717507a9956501686edb123b48dd90b094fd5612d53abe"
     pullPolicy: IfNotPresent
   database: trader
   # Wlasciciel schematow - wylacznie migracje i konserwacja.
@@ -581,6 +599,34 @@ workers:
       limits:   { cpu: 1000m, memory: 512Mi }
       requests: { cpu: 50m,   memory: 128Mi }
 
+# STREFA CZASOWA WSZYSTKICH CronJobow - Europe/Warsaw, wpisana JAWNIE (2026-10-03).
+#
+# Bez pola `timeZone` harmonogram liczy sie w strefie kube-controller-managera,
+# czyli na tym k3s w strefie HOSTA - zmierzone 2026-09-12 (komentarz przy
+# `backup` nizej): 01:17Z = 03:17 CEST. Godziny w tym pliku od poczatku byly
+# wiec lokalne, a ich znaczenie zalezalo od tego, jak ktos skonfigurowal VPS.
+# Zmiana strefy hosta albo migracja na inny wezel przesunelaby CALE okno nocne
+# bez jednej zmiany w repozytorium.
+#
+# DLACZEGO WARSZAWA, A NIE UTC:
+#   * to jest DOKLADNIE dzisiejsze zachowanie - wpisanie strefy niczego nie
+#     przesuwa na produkcji, tylko przestaje zalezec od hosta. UTC przesunelo
+#     by wszystkie zadania o 1-2 h w dniu wdrozenia, a kolejnosc kopia ->
+#     trener -> proba -> post-mortem jest ustawiona na odstepy w minutach,
+#   * WSZYSTKIE CronJoby dostaja te sama strefe, wiec zmiana czasu przesuwa je
+#     RAZEM i odstepy miedzy nimi (np. trener 04:40 -> post-mortem 07:50)
+#     zostaja stale. Rozjazd o godzine przy DST bierze sie z MIESZANIA stref,
+#     nie z wyboru jednej,
+#   * okno nocne ma byc nocne dla czlowieka, ktory czyta powiadomienia.
+# CZEGO TO NIE DOTYKA: swiece, cechy i decyzje liczone sa w UTC w kodzie
+# i strefa harmonogramu nie wchodzi do zadnego obliczenia.
+# CENA: noc zmiany czasu. 25.10 godzina 02:00-03:00 wystepuje dwa razy,
+# a w marcu 02:00-03:00 nie ma - zadne zadanie tego chartu nie stoi w tym
+# oknie (najwczesniejsze dobowe to kopia o 03:17); zadania co N godzin
+# (`kurs`, `instrumenty`) moga w te noce wypasc raz wiecej albo raz mniej.
+# Pole `timeZone` wymaga Kubernetesa 1.27+ (k3s 1.27+).
+strefaCzasowa: "Europe/Warsaw"
+
 # Kopia zapasowa bazy. Zrzut trafia na dysk hosta, poza wolumen bazy danych.
 backup:
   enabled: true
@@ -596,6 +642,8 @@ backup:
   # NIE MA TU NIC DO NAPRAWIENIA POZA TYM ZDANIEM. Blad nie objawial sie
   # awaria: objawial sie tym, ze ktos porownywal `lastScheduleTime` z godzina
   # z tego pliku i widzial dwie godziny roznicy, ktorej nie umial wytlumaczyc.
+  # Od 2026-10-03 ta strefa jest wpisana jawnie (`strefaCzasowa` wyzej), wiec
+  # nie zalezy juz od konfiguracji hosta.
   schedule: "17 3 * * *"        # codziennie 03:17 czasu lokalnego, poza szczytem zapytań
   retentionDays: 14
   hostPath: /opt/trader-backups
@@ -759,7 +807,7 @@ trainerCron:
 # a zakladka w panelu od poczatku - i do 2026-09-24 NIC nie zapisalo do niej
 # ani jednego wiersza. To zadanie zamyka ten obieg: decyzja -> wynik -> wniosek.
 #
-# PO TRENERZE, NIE PRZED. Trener konczy okolo 04:40-05:10; dziennik czyta
+# PO TRENERZE, NIE PRZED. Trener startuje 04:40 i konczy zwykle w ciagu godziny; dziennik czyta
 # zamkniete pozycje, wiec nie zalezy od modelu, ale wspolne okno obciazenia
 # wezla dwoch procesow po 0,5 CPU nie jest potrzebne nikomu.
 #
@@ -769,7 +817,11 @@ trainerCron:
 # nadrabia sie sam.
 postmortemCron:
   enabled: true
-  schedule: "50 5 * * *"     # codziennie 05:50 UTC, po trenerze
+  # 07:50 Europe/Warsaw (`strefaCzasowa`). Do 2026-10-03 to zadanie jako jedyne
+  # mialo `Etc/UTC` i "50 5" - czyli te sama godzine latem; zima przesuwalo sie
+  # o godzine blizej trenera. Teraz zapas 3 h 10 min po starcie trenera (04:40)
+  # jest staly przez caly rok.
+  schedule: "50 7 * * *"
   # OBA SILNIKI. Silnik equity dopisze sie tu sam z chwila, gdy zacznie zamykac
   # pozycje; do tego czasu jego przebieg konczy sie linia "0 zamknietych
   # pozycji, prog to 5" i kodem zero - czyli cisza, ktora widac.

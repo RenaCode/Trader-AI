@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field
 
 from ..auth import audit, current_user, require_csrf
 from ..db import execute, fetch_all, fetch_one
-from ..security import verify_password
+from .auth import potwierdz_haslo
 
 router = APIRouter(prefix="/api/account", tags=["account"])
 
@@ -101,16 +101,17 @@ async def revoke_others(body: RevokeBody, request: Request,
     ze ktos ma dostep do konta. Przejety sesyjny cookie nie powinien wystarczyc
     do jej wykonania ANI do zablokowania prawowitego wlasciciela.
     """
-    row = await fetch_one("SELECT password_hash FROM app.user WHERE id = %s", (user["id"],))
-    ok, _ = verify_password(row["password_hash"], body.password)
-    if not ok:
-        # 403, NIE 401. Front na kazde 401 spoza /api/auth/ uznaje, ze sesja
-        # wygasla, i przerzuca uzytkownika na ekran logowania - a to jest
-        # operacja obronna, uruchamiana wlasnie wtedy, gdy podejrzewasz cudzy
-        # dostep. Literowka w hasle zabieralaby wtedy komunikat sprzed oczu
-        # i wygladala jak wylogowanie. Tu sesja JEST wazna; odmawiamy samego
-        # potwierdzenia, a to znaczy 403.
-        raise HTTPException(403, "Hasło jest nieprawidłowe")
+    # Ten sam licznik prob i ten sam audyt co logowanie - patrz
+    # `auth.potwierdz_haslo`.
+    #
+    # 403, NIE 401. Front na kazde 401 spoza /api/auth/ uznaje, ze sesja
+    # wygasla, i przerzuca uzytkownika na ekran logowania - a to jest
+    # operacja obronna, uruchamiana wlasnie wtedy, gdy podejrzewasz cudzy
+    # dostep. Literowka w hasle zabieralaby wtedy komunikat sprzed oczu
+    # i wygladala jak wylogowanie. Tu sesja JEST wazna; odmawiamy samego
+    # potwierdzenia, a to znaczy 403.
+    await potwierdz_haslo(user, body.password, request, akcja="account.revoke_others",
+                          status=403, komunikat="Hasło jest nieprawidłowe")
 
     await execute(
         "UPDATE app.session SET revoked_at = now()"
@@ -131,6 +132,8 @@ async def activity(limit: int = Query(50, le=200), user: dict = Depends(current_
     LABELS = {
         "auth.login": "Zalogowano",
         "auth.login_failed": "Nieudana próba logowania",
+        "auth.reauth_failed": "Błędne hasło przy potwierdzeniu operacji",
+        "auth.session_revoked_after_failures": "Sesja unieważniona po serii błędnych haseł",
         "auth.logout": "Wylogowano",
         "auth.mfa": "Potwierdzono drugi składnik",
         "auth.mfa_failed": "Błędny kod drugiego składnika",
@@ -160,7 +163,9 @@ async def activity(limit: int = Query(50, le=200), user: dict = Depends(current_
             "entity_id": r["entity_id"],
             "ip": str(r["ip"]) if r["ip"] else None,
             "user_agent": r["user_agent"],
-            "suspicious": r["action"] in ("auth.login_failed", "auth.mfa_failed"),
+            "suspicious": r["action"] in ("auth.login_failed", "auth.mfa_failed",
+                                          "auth.reauth_failed",
+                                          "auth.session_revoked_after_failures"),
         }
         for r in rows
     ]

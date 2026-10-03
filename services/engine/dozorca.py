@@ -100,6 +100,7 @@ import psycopg
 from psycopg.rows import dict_row
 
 from services.engine.risk import RiskKernel
+from services.ingest import puls
 from services.engine.wznowienie import wznow
 
 # Pętla co minutę. CronJob dałby najmniej 10 minut (częściej zasypywałoby
@@ -122,6 +123,14 @@ from services.engine.wznowienie import wznow
 # rozdzielczość, której wymaga próg żywotności 180 s.
 INTERWAL_S = int(os.environ.get("DOZORCA_INTERWAL_S", "60"))
 NAZWA = "dozorca-ryzyka"
+
+# Sonda zywotnosci: KWADRANS, nie godzina jak w workerach danych
+# (`puls.PODLOGA_TERMINU_S`). Cykl dozorcy to kilka zapytan i ewentualne
+# powiadomienie, a zawieszony bezpiecznik kosztuje wiecej niz zawieszone
+# swiece: limit straty dziennej przestaje byc oceniany. 900 s to nadal
+# pietnascie interwalow i zapas na powiadomienie wysylane w cyklu (kanal
+# zewnetrzny ma do 20 s limitu czasu).
+PODLOGA_ZYWOTNOSCI_S = 900
 
 # Ile cykli pod rząd zakończonych błędem kończy proces. TA SAMA STAŁA co
 # w market_worker, history_worker, features i news_worker — różna liczba
@@ -204,6 +213,7 @@ async def petla(engine: str, mode: str, raz: bool = False) -> int:
           "bije własny puls.")
     poprzedni: str | None = None
     pod_rzad = 0
+    puls.zyje(INTERWAL_S, PODLOGA_ZYWOTNOSCI_S)
     try:
         with psycopg.connect(url, row_factory=dict_row) as conn:
             while True:
@@ -279,6 +289,8 @@ async def petla(engine: str, mode: str, raz: bool = False) -> int:
                     # narzędzie do ręcznego sprawdzenia dozorcy meldowało sukces
                     # dokładnie wtedy, gdy dozorca nie działał.
                     return 1 if blad else 0
+                # Obrot petli, takze nieudany - sonda zywotnosci (`puls.zyje`).
+                puls.zyje(INTERWAL_S, PODLOGA_ZYWOTNOSCI_S)
                 await asyncio.sleep(INTERWAL_S)
     finally:
         await close_pool()

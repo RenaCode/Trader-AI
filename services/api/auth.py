@@ -6,13 +6,16 @@ bezstanowosc. JWT bez listy odwolan nie da sie wylogowac przed wygasnieciem.
 """
 from __future__ import annotations
 
+import hmac
+import ipaddress
 from datetime import datetime, timezone
 
 from fastapi import Cookie, Depends, Header, HTTPException, Request, Response
 from psycopg.types.json import Jsonb
 
 from .db import fetch_one, execute
-from .security import SESSION_COOKIE, session_token_hash
+from .security import (SESSION_COOKIE, SESSION_IDLE, SESSION_TOUCH_EVERY,
+                       session_token_hash)
 
 CSRF_COOKIE = "trader_csrf"
 CSRF_HEADER = "x-csrf-token"
@@ -28,7 +31,7 @@ async def current_user(
 
     row = await fetch_one(
         """
-        SELECT s.id AS session_id, s.expires_at, s.mfa_satisfied,
+        SELECT s.id AS session_id, s.expires_at, s.mfa_satisfied, s.last_seen_at,
                u.id, u.login, u.role, u.is_active
         FROM app.session s
         JOIN app.user u ON u.id = s.user_id
@@ -38,12 +41,25 @@ async def current_user(
     )
     if not row:
         raise HTTPException(status_code=401, detail="Sesja nieznana lub uniewazniona")
-    if row["expires_at"] <= datetime.now(timezone.utc):
+    teraz = datetime.now(timezone.utc)
+    if row["expires_at"] <= teraz:
         raise HTTPException(status_code=401, detail="Sesja wygasla")
+    # BEZCZYNNOSC. Sesja nieuzywana dluzej niz `SESSION_IDLE` jest
+    # uniewazniana W BAZIE, a nie tylko odrzucana: odrzucenie bez zapisu
+    # zostawialoby ja na liscie aktywnych sesji w profilu i dawalo sie
+    # "ozywic", gdyby ktos kiedys wydluzyl limit.
+    if row["last_seen_at"] is not None and row["last_seen_at"] <= teraz - SESSION_IDLE:
+        await execute("UPDATE app.session SET revoked_at = now()"
+                      " WHERE id = %s AND revoked_at IS NULL", (row["session_id"],))
+        raise HTTPException(status_code=401, detail="Sesja wygasla z powodu bezczynnosci")
     if not row["is_active"]:
         raise HTTPException(status_code=403, detail="Konto nieaktywne")
     if not row["mfa_satisfied"]:
         raise HTTPException(status_code=401, detail="Drugi skladnik niepotwierdzony")
+
+    if row["last_seen_at"] is None or row["last_seen_at"] <= teraz - SESSION_TOUCH_EVERY:
+        await execute("UPDATE app.session SET last_seen_at = now() WHERE id = %s",
+                      (row["session_id"],))
 
     request.state.user_id = row["id"]
     request.state.session_id = row["session_id"]
@@ -99,7 +115,10 @@ async def require_csrf(
     """
     if request.method in ("GET", "HEAD", "OPTIONS"):
         return
-    if not trader_csrf or not x_csrf_token or trader_csrf != x_csrf_token:
+    # `compare_digest`, nie `!=`: zwykle porownanie konczy sie na pierwszej
+    # roznicy, wiec czas odpowiedzi mowi, ile znakow tokenu bylo trafionych.
+    if (not trader_csrf or not x_csrf_token
+            or not hmac.compare_digest(trader_csrf.encode(), x_csrf_token.encode())):
         raise HTTPException(status_code=403, detail="Nieprawidlowy token CSRF")
 
 
@@ -121,15 +140,38 @@ def clear_session_cookies(response: Response) -> None:
     response.delete_cookie(CSRF_COOKIE, path="/", samesite="strict", secure=True)
 
 
+def adres_klienta(request) -> str | None:
+    """Adres klienta - z X-Forwarded-For za Traefikiem - albo None, gdy to nie adres.
+
+    JEDNO miejsce dla audytu, sesji i wykrywania nowego urzadzenia. Do
+    2026-10-03 kazde z trzech rozbieralo naglowek samo i wkladalo pierwszy
+    element prosto do kolumny `inet`. Pod w klastrze wysylajacy w XFF smieci
+    (`x-forwarded-for: abc`) wywracal tym logowanie bledem 500, bo psycopg
+    oddawal `InvalidTextRepresentation` z INSERT-a do `app.session`.
+
+    Smieci daja None, nie wyjatek: brak adresu w audycie jest gorszy od adresu,
+    ale lepszy od logowania, ktore nie dziala. `ipaddress` normalizuje tez
+    zapis (np. IPv6), wiec porownanie "znanego urzadzenia" nie zalezy od tego,
+    jak posrednik sformatowal adres.
+    """
+    fwd = request.headers.get("x-forwarded-for")
+    kandydat = (fwd.split(",")[0].strip() if fwd
+                else (request.client.host if request.client else None))
+    if not kandydat:
+        return None
+    try:
+        return str(ipaddress.ip_address(kandydat))
+    except ValueError:
+        return None
+
+
 async def audit(action: str, *, user_id: int | None = None, entity: str | None = None,
                 entity_id: str | None = None, before=None, after=None,
                 request: Request | None = None) -> None:
     ip = None
     ua = None
     if request is not None:
-        # Za Traefikiem prawdziwy adres jest w X-Forwarded-For.
-        fwd = request.headers.get("x-forwarded-for")
-        ip = (fwd.split(",")[0].strip() if fwd else (request.client.host if request.client else None))
+        ip = adres_klienta(request)
         ua = request.headers.get("user-agent")
     # Goly dict psycopg odrzuca przy WIAZANIU PARAMETRU, a wolajacy zdazyl juz
     # zapisac swoja zmiane (pula chodzi z autocommit=True) - uzytkownik dostawal

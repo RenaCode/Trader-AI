@@ -24,6 +24,8 @@ metadata:
   labels: {{- include "trader.labels" . | nindent 4 }}
 spec:
   schedule: "0 0 31 2 *"
+  # Strefa jawnie - patrz `strefaCzasowa` w values.yaml.
+  timeZone: {{ required "strefaCzasowa musi byc ustawiona wprost" .Values.strefaCzasowa | quote }}
   suspend: true
   concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 1
@@ -42,10 +44,15 @@ spec:
       template:
         spec:
           restartPolicy: Never
+          # Bez tokenu API klastra i bez roota - patrz `trader.podBezUprawnien`
+          # w _helpers.tpl. Zadanie nie rozmawia z API Kubernetesa.
+          automountServiceAccountToken: false
+          {{- include "trader.podBezUprawnien" . | nindent 10 }}
           containers:
             - name: diagnostyka-trener
               image: "{{ .Values.api.image.repository }}:{{ .Values.api.image.tag }}"
               imagePullPolicy: {{ .Values.api.image.pullPolicy }}
+              {{- include "trader.kontenerBezUprawnien" . | nindent 14 }}
               command:
                 - sh
                 - -c

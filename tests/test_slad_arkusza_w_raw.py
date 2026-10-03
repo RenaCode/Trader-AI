@@ -474,4 +474,6 @@ def test_blok_ma_PELNY_zestaw_pol_i_jest_SERIALIZOWALNY():
     assert raw["execution"] == "gielda"
     assert set(raw["arkusz_wysylki"]) == {
         "odczyt_at", "arkusz_at", "wiek_s", "bid", "ask", "powod_braku",
-        "zrodlo_ceny", "cena_rynkowa", "cena_planu", "cena_wyslana"}
+        "zrodlo_ceny", "cena_rynkowa", "cena_planu", "cena_wyslana",
+        # Wiek odczytu NASZYM zegarem w chwili POST-a (2026-10-03, audyt E1).
+        "wiek_przy_wysylce_s"}

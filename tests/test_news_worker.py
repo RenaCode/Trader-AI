@@ -426,7 +426,8 @@ class _Stanowisko:
         monkeypatch.setattr(news_worker, "run_cycle", self._run_cycle)
         monkeypatch.setattr(news_worker, "puls",
                             types.SimpleNamespace(bij=lambda *a, **k: None,
-                                                  zglos_awarie=lambda *a, **k: None))
+                                                  zglos_awarie=lambda *a, **k: None,
+                                                  zyje=lambda *a, **k: None))
         return self
 
     def uruchom(self):

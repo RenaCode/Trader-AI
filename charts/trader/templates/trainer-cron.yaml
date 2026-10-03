@@ -18,6 +18,8 @@ metadata:
   labels: {{- include "trader.labels" . | nindent 4 }}
 spec:
   schedule: {{ .Values.trainerCron.schedule | quote }}
+  # Strefa jawnie - patrz `strefaCzasowa` w values.yaml.
+  timeZone: {{ required "strefaCzasowa musi byc ustawiona wprost" .Values.strefaCzasowa | quote }}
   concurrencyPolicy: Forbid
   startingDeadlineSeconds: 3600
   successfulJobsHistoryLimit: 1
@@ -54,10 +56,15 @@ spec:
       template:
         spec:
           restartPolicy: Never
+          # Bez tokenu API klastra i bez roota - patrz `trader.podBezUprawnien`
+          # w _helpers.tpl. Zadanie nie rozmawia z API Kubernetesa.
+          automountServiceAccountToken: false
+          {{- include "trader.podBezUprawnien" . | nindent 10 }}
           containers:
             - name: trainer
               image: "{{ .Values.api.image.repository }}:{{ .Values.api.image.tag }}"
               imagePullPolicy: {{ .Values.api.image.pullPolicy }}
+              {{- include "trader.kontenerBezUprawnien" . | nindent 14 }}
               # Trener, a po nim dozor - ZAWSZE, takze gdy trener zawiodl.
               # Kod wyjscia idzie do dozoru, bo przebieg zakonczony bledem nie
               # dopisuje wiersza do dziennika stanu: bez tej informacji dozor
@@ -96,6 +103,16 @@ spec:
                   # Do 2026-09-25 oba dozory dostawaly wspolne `$RC`, wiec awaria
                   # crypto kazala dozorowi equity oglosic "Trener zawiodl
                   # (equity)" - alarm o torze, ktory sie nie wywrocil.
+                  #
+                  # KOD 3 TEZ IDZIE DO DOZORU (2026-10-03). Do tej daty trafial
+                  # wylacznie do `NIEGOTOWE`, a dozor dostawal `--kod-trenera 0`:
+                  # tor equity stal na bramce podzialow (0/20 instrumentow ze
+                  # znacznikiem) i jedynym sladem bylo echo w logu Joba, ktorego
+                  # nikt nie czyta. Dozor zamienia trwajacy kod 3 w ostrzezenie
+                  # z wlasnym rytmem (services/engine/dozor.py, KOD_TOR_NIEGOTOWY),
+                  # a Job dalej NIE robi sie od niego czerwony - `RC` go nie widzi.
+                  # Awaria (kod inny niz 0 i 3) w tym samym torze wygrywa z kodem 3:
+                  # "padlo" jest pilniejsze niz "nie bylo czego liczyc".
                   RC_CRYPTO=0
                   RC_EQUITY=0
                   NIEGOTOWE=""
@@ -103,7 +120,15 @@ spec:
                   echo "===== horyzont {{ $h }} ====="
                   python services/engine/train.py                     --bar {{ $h | quote }}                     --days {{ $.Values.trainerCron.days | quote }}                     --trials {{ $.Values.trainerCron.trials | quote }}                     --kind {{ $.Values.trainerCron.kind | default "spot" | quote }}                     {{- if $.Values.trainerCron.limit }} --limit{{ end }}                     {{- if $.Values.trainerCron.spreadBps }} --spread-bps {{ $.Values.trainerCron.spreadBps }}{{- if $.Values.trainerCron.spreadObcaKsiega }} --spread-obca-ksiega{{ end }}{{ end }}
                   K=$?
-                  if [ "$K" = 3 ]; then NIEGOTOWE="${NIEGOTOWE}crypto/{{ $h }} "
+                  if [ "$K" = 3 ]; then
+                    NIEGOTOWE="${NIEGOTOWE}crypto/{{ $h }} "
+                    {{- if eq $h $.Values.trainerCron.bar }}
+                    # Kod 3 idzie do DOZORU, nie do `RC` - patrz `RC_CRYPTO` wyzej.
+                    # Tylko dla horyzontu, ktory ten dozor ocenia: dozor czyta
+                    # dziennik per (engine, bar), wiec 3 z toru 1h kazalby mu
+                    # meldowac niegotowosc toru 4h, ktory sie policzyl.
+                    [ "$RC_CRYPTO" != 0 ] || RC_CRYPTO=3
+                    {{- end }}
                   elif [ "$K" != 0 ]; then RC=$K; RC_CRYPTO=$K
                   fi
                   {{- end }}
@@ -126,7 +151,13 @@ spec:
                   echo "===== equity, horyzont {{ $h }} ====="
                   python services/engine/train.py                     --engine equity                     --bar {{ $h | quote }}                     --days {{ $.Values.trainerCron.days | quote }}                     --trials {{ $.Values.trainerCron.trials | quote }}                     --kind {{ $.Values.trainerCron.equity.kind | default "stock" | quote }}                     {{- if $.Values.trainerCron.equity.limit }} --limit{{ end }}                     {{- if $.Values.trainerCron.equity.spreadBps }} --spread-bps {{ $.Values.trainerCron.equity.spreadBps }}{{- if $.Values.trainerCron.equity.spreadObcaKsiega }} --spread-obca-ksiega{{ end }}{{ end }}
                   K=$?
-                  if [ "$K" = 3 ]; then NIEGOTOWE="${NIEGOTOWE}equity/{{ $h }} "
+                  if [ "$K" = 3 ]; then
+                    NIEGOTOWE="${NIEGOTOWE}equity/{{ $h }} "
+                    {{- if eq $h (first $.Values.trainerCron.equity.horyzonty) }}
+                    # Kod 3 do dozoru - patrz `RC_CRYPTO` wyzej i ten sam warunek
+                    # horyzontu przy torze crypto.
+                    [ "$RC_EQUITY" != 0 ] || RC_EQUITY=3
+                    {{- end }}
                   elif [ "$K" != 0 ]; then RC=$K; RC_EQUITY=$K
                   fi
                   {{- end }}
