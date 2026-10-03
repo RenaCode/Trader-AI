@@ -192,7 +192,6 @@ class Punkt:
     equity: Decimal
     equity_odniesienia: Decimal | None
     kurs: Decimal | None
-    kurs_z: datetime | None
     luka: str | None
 
 
@@ -266,7 +265,6 @@ def krzywa_dwuwalutowa(punkty, kursy: list[Kurs],
             equity=Decimal(equity),
             equity_odniesienia=przelicz(Decimal(equity), k.kurs) if k else None,
             kurs=k.kurs if k else None,
-            kurs_z=k.czas if k else None,
             luka=powod,
         ))
     return wynik

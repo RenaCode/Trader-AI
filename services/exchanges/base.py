@@ -13,7 +13,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
-from typing import Protocol
 
 
 class ExchangeError(Exception):
@@ -218,32 +217,6 @@ class ConnectionCheck:
     permissions: list[str] = field(default_factory=list)
     can_withdraw: bool | None = None
     latency_ms: int | None = None
-
-
-class ExchangeAdapter(Protocol):
-    """Minimalny zestaw operacji, ktorego potrzebuje silnik.
-
-    Skladanie zlecen dochodzi w fazie 4 - na razie wylacznie odczyt, zeby dalo
-    sie zbierac dane i zweryfikowac poswiadczenia bez ryzyka wyslania czegokolwiek.
-    """
-
-    venue_code: str
-
-    async def check_connection(self) -> ConnectionCheck: ...
-
-    async def fetch_candles(self, symbol: str, timeframe: str, limit: int) -> list[Candle]: ...
-
-    # `ksiega_egzekucji` mowi, CZYJEJ ksiegi dotyczy pytanie: True - tej, na
-    # ktorej skladamy zlecenia (arkusz zasila rachunek kosztu), False - ksiegi
-    # referencyjnej, z ktorej szereg `book_spread_bps` brany byl do 2026-09-24.
-    # Nie jest to ustawienie adaptera, bo w jednym cyklu potrzebne sa OBIE:
-    # patrz `market_worker` i flaga `ref.instrument.tradeable`.
-    async def fetch_order_book(self, symbol: str, depth: int, *,
-                               ksiega_egzekucji: bool = True) -> OrderBook: ...
-
-    async def fetch_balances(self) -> list[Balance]: ...
-
-    async def close(self) -> None: ...
 
 
 @dataclass(frozen=True)

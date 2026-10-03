@@ -1213,9 +1213,6 @@ class DostawcaMieszany(Dostawca):
         self._analiza._odmowy_pod_rzad = 0
         return data, usage
 
-    def _dla_triazu_zapasowy(self) -> str:
-        return self._analiza.model_triazu
-
     async def _analiza_zapasowa(self, system: str, user: str, schema: dict,
                                 max_tokens: int) -> tuple[dict, dict]:
         """ANALIZA SCHODZI NA DOSTAWCE TRIAZU. Decyzja wlasciciela z 2026-09-22.

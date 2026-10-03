@@ -47,7 +47,7 @@ Szczegóły techniczne Bybit demo (v5):
 ### 2.2 Warstwa abstrakcji: CCXT
 
 CCXT (~103 giełdy, unified API, Python/TS/Go) daje `set_sandbox_mode(True)` i jednolity
-interfejs. Używamy go jako **domyślnego adaptera**, ale z własnym interfejsem `ExchangeAdapter`
+interfejs. Używamy go jako **domyślnego adaptera**, ale z własnym interfejsem adaptera (`services/exchanges/base.py`)
 nad nim — CCXT wygładza różnice w REST, ale nie w prywatnych WebSocketach ani w niuansach
 marginu. Dla Bybit dodatkowo natywny klient do streamu prywatnego.
 

@@ -574,7 +574,7 @@ async def main() -> int:
             print("Egzekucji nie wolno uruchamiać, dopóki ta lista nie jest pusta —"
                   " zlecenie bez reguł zostanie odrzucone, a odrzucenie w logu"
                   " wygląda jak brak sygnału.")
-            return 3
+            return KOD_BRAK_REGUL
         print("\nwszystkie instrumenty dopuszczone do handlu mają komplet reguł")
         # KOD NIEZEROWY PRZY WYCOFANIU, choc powiadomienie juz poszlo. To jest
         # drugi, niezalezny sygnal: nieudane zadanie widac w `kubectl get jobs`
@@ -583,7 +583,7 @@ async def main() -> int:
         if pilne:
             print(f"WYCOFYWANE INSTRUMENTY: {pilne} — patrz powiadomienia; "
                   "otwarta pozycja NIE zostala zamknieta automatycznie.")
-            return 4
+            return KOD_WYCOFANIE
         return 0
     finally:
         await close_pool()

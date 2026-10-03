@@ -97,9 +97,6 @@ class Bramki:
         para = self.per_rezim.get(rezim or "")
         return para[1] if para else self.wyjscie_zapasowe
 
-    def skalibrowane(self) -> list[str]:
-        return sorted(self.per_rezim)
-
     def opis(self) -> str:
         """Jedna linia do logu - Z LICZBA PROBEK, bo bez niej prog jest goly."""
         if not self.per_rezim:

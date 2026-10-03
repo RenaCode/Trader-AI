@@ -459,8 +459,16 @@ def test_odswiezenie_instrumentow_ODROZNIA_stan_bramki_od_AWARII():
     glowna = next(w for w in drzewo.body
                   if isinstance(w, (ast.AsyncFunctionDef, ast.FunctionDef))
                   and w.name == "main")
-    kody = {w.value.value for w in ast.walk(glowna)
-            if isinstance(w, ast.Return) and isinstance(w.value, ast.Constant)}
+    # Stale modulu (`KOD_BRAK_REGUL`, `KOD_WYCOFANIE`) rozwiazane do wartosci -
+    # `main` zwraca nazwy, nie literaly (U-15).
+    stale = {c.targets[0].id: c.value.value for c in drzewo.body
+             if isinstance(c, ast.Assign) and isinstance(c.value, ast.Constant)
+             and isinstance(c.targets[0], ast.Name)}
+    kody = {w.value.value if isinstance(w.value, ast.Constant) else stale[w.value.id]
+            for w in ast.walk(glowna)
+            if isinstance(w, ast.Return) and (
+                isinstance(w.value, ast.Constant)
+                or (isinstance(w.value, ast.Name) and w.value.id in stale))}
     assert 1 not in kody, (
         "kod 1 z `main` jest nieodróżnialny od nieprzechwyconego wyjątku — "
         "awaria wygląda wtedy tak samo jak normalny stan bramki")
