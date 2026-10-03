@@ -77,6 +77,9 @@ def test_wykonaj_idzie_krokami_2_3_4_w_tej_kolejnosci(tmp_path):
     assert len(z) == 3
     assert "--przepisz" in z[0] and "features.py" in z[1] and "--okno-dni 1400" in z[1]
     assert "--znacznik" in z[2]
+    # Cechy w podzie features-equity (rola z prawem do worker_heartbeat), reszta w api.
+    assert "deploy/trader-features-equity -c features-equity" in z[1]
+    assert "deploy/trader-api -c api" in z[0] and "deploy/trader-api -c api" in z[2]
 
 
 def test_rowne_split_i_raw_przerywa_przed_zapisem(tmp_path):

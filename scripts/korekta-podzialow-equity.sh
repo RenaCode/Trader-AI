@@ -19,7 +19,8 @@
 #   scripts/korekta-podzialow-equity.sh              # krok 1: pomiar + warunki
 #   scripts/korekta-podzialow-equity.sh --wykonaj    # kroki 1-4
 #
-# Zmienne: KUBECTL (domyslnie kubectl), NS (default), CEL (deploy/trader-api).
+# Zmienne: KUBECTL (domyslnie kubectl), NS (default), CEL (deploy/trader-api),
+# CEL_CECHY (deploy/trader-features-equity, tylko krok 3).
 # Polecenia ida przez `kubectl exec` do poda API, bo tam jest SECRETS_KEY
 # (klucz Alpaki jest w bazie zaszyfrowany).
 #
@@ -39,6 +40,7 @@ set -euo pipefail
 KUBECTL="${KUBECTL:-kubectl}"
 NS="${NS:-default}"
 CEL="${CEL:-deploy/trader-api}"
+CEL_CECHY="${CEL_CECHY:-deploy/trader-features-equity}"
 WYKONAJ=0
 case "${1:-}" in
   --wykonaj) WYKONAJ=1 ;;
@@ -110,8 +112,13 @@ fi
 echo "==> krok 2: przepisanie swiec (jedna transakcja na instrument, bez znacznika)"
 uruchom python services/ingest/korekta_podzialow.py --przepisz | tee "$KATALOG/2-przepisz.txt"
 
+# Krok 3 w podzie features-equity, nie api: features.py bije puls do
+# app.worker_heartbeat, a rola bazy api nie ma do niej prawa. 2026-10-03
+# cechy zapisaly sie w calosci, ale cykl skonczyl sie InsufficientPrivilege,
+# `set -e` przerwal skrypt i krok 4 trzeba bylo puscic recznie.
 echo "==> krok 3: przeliczenie cech 1h equity na calym oknie"
-uruchom python services/ingest/features.py --bar 1h --engine equity --okno-dni 1400 --once \
+"$KUBECTL" -n "$NS" exec "$CEL_CECHY" -c features-equity -- \
+  python services/ingest/features.py --bar 1h --engine equity --okno-dni 1400 --once \
   | tee "$KATALOG/3-cechy.txt"
 
 echo "==> krok 4: znacznik (sprawdza cechy vs swiece, rozjazd = odmowa)"
