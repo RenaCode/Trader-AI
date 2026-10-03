@@ -201,7 +201,7 @@ na końcowym kodzie (T4 + T8), z tymi samymi nastawami.
 ### Wynik H-2 (2026-10-03)
 
 Kod: gałąź `fable-t2-t4-t8` (ee7a403), panel jak w H-1, `--days 1400`, przesunięcia
-−2…+2 dni, `n_selekcji` 60 (z eksportu + nowy klucz `progi_na_wagach`).
+−2…+2 dni, `n_selekcji` 59 (z eksportu; nowy klucz `progi_na_wagach` nie dokłada próby, bo `n_konfiguracji_z_listy` liczy bieżący przebieg zawsze raz).
 
 | wariant | siatka | progi na | zwrot/rundę po dopłacie, pb (min / śr / max) | przesunięcia > 0 | DSR (min / max) | transakcji / przesunięcie | okna informatywne | statusy przesunięć → status |
 |---|---|---|---|---|---|---|---|---|
