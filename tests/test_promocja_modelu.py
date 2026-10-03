@@ -293,3 +293,124 @@ def test_brak_klucza_konczy_proces_zamiast_handlowac_dalej(adapter_na_atrapie):
     """Silnik udający, że handluje, jest gorszy niż silnik, który nie wstał."""
     with pytest.raises(SystemExit):
         adapter_na_atrapie([])
+
+
+# ------------------------------------- bramka struktury (audyt Fable F-3.1, T8)
+#
+# 28.09 progi per rezim weszly do demo deployem kodu: kazda wersja
+# nie-`degraded` byla `active`. Teraz zmiana struktury -> `candidate`.
+
+import json  # noqa: E402
+import os  # noqa: E402
+
+from services.engine.train import zmiana_struktury  # noqa: E402
+
+AKTYWNE = {"bar": "4h", "wybor": "ic", "progi": "per_rezim", "kind": "spot_eu",
+           "weights": {"range": {"a": 0.5}}, "enter_threshold": 0.28,
+           "enter_threshold_per_regime": {"range": 0.28, "high_vol": 0.28},
+           "enter_threshold_windows": {"range": 39, "high_vol": 39}}
+
+
+def test_te_same_klucze_i_progi_w_tolerancji_to_NIE_zmiana():
+    nowe = json.loads(json.dumps(AKTYWNE))
+    nowe["enter_threshold_per_regime"] = {"range": 0.30, "high_vol": 0.26}
+    nowe["weights"] = {"range": {"a": 0.9}}
+    nowe["enter_threshold_windows"] = {"range": 40, "high_vol": 40}
+    assert zmiana_struktury(AKTYWNE, nowe) is None
+
+
+def test_zmiana_z_28_09_progi_o_25_procent_JEST_zmiana():
+    nowe = json.loads(json.dumps(AKTYWNE))
+    nowe["enter_threshold_per_regime"] = {"range": 0.35, "high_vol": 0.21}
+    opis = zmiana_struktury(AKTYWNE, nowe)
+    assert opis and "range" in opis and "+25%" in opis and "high_vol" in opis
+
+
+def test_nowy_klucz_params_JEST_zmiana():
+    nowe = AKTYWNE | {"progi_na_wagach": "ic"}
+    assert "+progi_na_wagach" in zmiana_struktury(AKTYWNE, nowe)
+    assert "−progi" in zmiana_struktury(AKTYWNE, {k: v for k, v in AKTYWNE.items()
+                                                  if k != "progi"})
+
+
+def test_inna_wartosc_konfiguracji_JEST_zmiana():
+    assert "kind" in zmiana_struktury(AKTYWNE, AKTYWNE | {"kind": "spot"})
+
+
+def test_rezim_ktory_stracil_prog_JEST_zmiana():
+    nowe = AKTYWNE | {"enter_threshold_per_regime": {"range": 0.28}}
+    assert "reżimy z progiem" in zmiana_struktury(AKTYWNE, nowe)
+
+
+def test_bez_aktywnej_wersji_nie_ma_z_czym_porownac():
+    assert zmiana_struktury(None, AKTYWNE) is None
+
+
+def test_zmiana_struktury_zatrzymuje_promocje_TAKZE_w_demo():
+    docelowy, powod = status_nowej_wersji("validated", "demo", zmiana="próg range +25%")
+    assert docelowy == "candidate"
+    assert "zmiana struktury" in powod and "docs/hipotezy.md" in powod
+
+
+def test_zgoda_czlowieka_przepuszcza_zmiane_struktury():
+    assert status_nowej_wersji("learning", "demo", zgoda=True,
+                               zmiana="x")[0] == "active"
+    assert status_nowej_wersji("degraded", "demo", zgoda=True,
+                               zmiana="x")[0] == "candidate"
+
+
+TEST_DB_URL = os.environ.get("TEST_DB_URL")
+
+
+@pytest.mark.skipif(not TEST_DB_URL, reason="ustaw TEST_DB_URL na jednorazowa baze")
+def test_PRAWDZIWA_BAZA_zapisz_wynik_zostawia_kandydata_i_opis_zmiany():
+    """Cala sciezka zapisu: aktywna wersja zostaje, nowa jest `candidate`,
+    kolumna 0090 ma opis, `reason` mowi, dlaczego."""
+    import psycopg
+    from psycopg.rows import dict_row
+
+    from services.engine import train as tr
+    from services.engine.horizons import get as get_horizon
+
+    with psycopg.connect(TEST_DB_URL, row_factory=dict_row) as conn:
+        cur = conn.cursor()
+        cur.execute("INSERT INTO learn.model (name, engine, kind, description)"
+                    " VALUES ('test_struktura_t8', 'crypto', 'signal_weighting', 't')"
+                    " RETURNING id")
+        model_id = cur.fetchone()["id"]
+        cur.execute("INSERT INTO learn.model_version (model_id, version, status, params)"
+                    " VALUES (%s, 1, 'active', %s) RETURNING id",
+                    (model_id, json.dumps(AKTYWNE)))
+        stara = cur.fetchone()["id"]
+        bez = {k: v for k, v in AKTYWNE.items() if k not in tr.KLUCZE_WYNIKOWE}
+        cur.execute("INSERT INTO learn.model_version (model_id, version, status, params)"
+                    " VALUES (%s, 2, 'training', %s) RETURNING id",
+                    (model_id, json.dumps(bez | {"progi_na_wagach": "ic"})))
+        nowa = cur.fetchone()["id"]
+        cur.execute("INSERT INTO learn.training_run (model_version_id, train_from,"
+                    " train_to, status) VALUES (%s, now(), now(), 'running') RETURNING id",
+                    (nowa,))
+        run = cur.fetchone()["id"]
+        w = tr.Status("validated", "Kryteria spełnione.", "", 40, 30, 75.0, 0.1,
+                      0.6, 0.85, 0.55, 0.8, 0.97)
+        prod = tr.Produkcja({"range": 0.28, "high_vol": 0.28}, {"range": 39, "high_vol": 39},
+                            0.28, {"range": {"a": 0.5}}, [], [])
+
+        class Pol:
+            def commit(self):
+                pass
+
+            def rollback(self):
+                conn.rollback()
+
+        reason = tr.zapisz_wynik(cur, Pol(), False, "crypto", get_horizon("4h"),
+                                 model_id, nowa, run, w, prod, worst_dd=-1.0, ece=None,
+                                 max_psi=0.0, trials=1, zgoda_na_promocje=False)
+        cur.execute("SELECT id, status, zmiana_struktury FROM learn.model_version"
+                    " WHERE model_id=%s ORDER BY id", (model_id,))
+        wiersze = {r["id"]: r for r in cur.fetchall()}
+        conn.rollback()
+    assert wiersze[stara]["status"] == "active"
+    assert wiersze[nowa]["status"] == "candidate"
+    assert "+progi_na_wagach" in wiersze[nowa]["zmiana_struktury"]
+    assert "PROMOCJA WSTRZYMANA (zmiana struktury" in reason

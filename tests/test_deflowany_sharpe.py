@@ -249,7 +249,7 @@ def test_opis_podaje_DSR_RAZEM_z_N_i_liczba_prob():
 
 # =============================================== bramka promocji jako calosc
 
-DOBRE = dict(total=40, positive=30, median=0.117, bije_odniesienie=True)
+DOBRE = dict(total=40, positive=30, median=0.117, bije_odniesienie=True, udzial_b2=0.7)
 
 
 def test_wszystkie_warunki_spelnione_daje_validated():
@@ -394,7 +394,7 @@ def test_bramka_w_trenerze_JEST_podlaczona_do_DSR():
     assert "dsr_ok, opis_dsr = werdykt_dsr(" in ZRODLO_TRENERA
     assert "wszystkie_zwroty, doplata=karta.doplata_poza_symulacja" in ZRODLO_TRENERA
     assert ("status = status_walidacji(total, positive, median, "
-            "bije_odniesienie, dsr_ok)") in ZRODLO_TRENERA
+            "bije_odniesienie, dsr_ok,\n                                  udzial_b2)") in ZRODLO_TRENERA
 
 
 def test_stary_warunek_bramki_JUZ_NIE_ISTNIEJE_w_zrodle():
@@ -658,7 +658,10 @@ def test_bramka_w_trenerze_liczy_DSR_PO_koszcie_i_z_N_z_konfiguracji():
     # stoi w `training` w chwili liczenia N, wiec bez niego filtr statusu gubi
     # dokladnie te probe, ktora bramka wlasnie ocenia. Osobno pilnuje tego
     # `test_n_selekcji_tylko_przebiegi_z_wynikiem`.
-    assert "n=n_konfiguracji(cur, model_id, mv_id)" in arg, (
+    # Od refaktoru T2 `werdykt` dostaje N z `_mianowniki_dsr`, a `train()`
+    # podaje mu dokladnie `n_selekcji` stamtad.
+    assert "n=n," in arg and "werdykt(zp, karta=k.karta, n=n_selekcji," in ZRODLO_TRENERA
+    assert "n_selekcji = n_konfiguracji(cur, model_id, mv_id)" in ZRODLO_TRENERA, (
         "N nie pochodzi z liczby rozroznialnych konfiguracji ALBO nie dolicza "
         "wlasnej wersji biezacego przebiegu")
     assert "trials_kumulatywnie=trials" in arg

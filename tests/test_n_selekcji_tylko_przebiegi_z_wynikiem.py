@@ -183,7 +183,10 @@ def test_PRAWDZIWA_BAZA_wlasna_wersja_o_ISTNIEJACYCH_params_nie_liczy_sie_dwa_ra
 def test_train_podaje_bramce_WLASNA_WERSJE_przebiegu():
     wywolanie = re.search(r"dsr_ok, opis_dsr = werdykt_dsr\((.*?)\n\n", TRAIN, re.S)
     assert wywolanie, "train() nie wola `werdykt_dsr`"
-    assert "n=n_konfiguracji(cur, model_id, mv_id)" in wywolanie.group(1), (
+    # Od refaktoru T2: `werdykt(..., n=n_selekcji)`, a `n_selekcji` liczy
+    # `_mianowniki_dsr` z `mv_id` biezacego przebiegu.
+    assert "n=n," in wywolanie.group(1) and "n=n_selekcji," in TRAIN
+    assert "n_selekcji = n_konfiguracji(cur, model_id, mv_id)" in TRAIN, (
         "bramka dostaje N policzone BEZ wlasnej wersji przebiegu. Wiersz tego "
         "przebiegu stoi w `training` w chwili liczenia, wiec filtr statusu go "
         "pomija — i N jest zanizone o probe, ktora jest wlasnie oceniana")

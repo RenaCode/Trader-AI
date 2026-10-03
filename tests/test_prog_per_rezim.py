@@ -428,7 +428,8 @@ def test_miara_powrotow_idzie_TAKZE_DO_WYDRUKU_a_nie_tylko_do_bazy():
     razem z rezimem i liczba transakcji - czyli w tej samej linii wydruku.
     """
     zrodlo = TRAIN.read_text(encoding="utf-8")
-    i = zrodlo.index('print(f"  okno {idx:>2d}')
+    # od refaktoru T2 linie sklada `opis_okna`, a drukuje ja `train()`
+    i = zrodlo.index('f"  okno {idx:>2d}')
     linia = zrodlo[i:zrodlo.index("\n", zrodlo.index("reżim=", i))]
     assert "powroty" in linia, (
         "wydruk okna nie podaje odsetka powrotow. Przy `--sucho` nie ma go "
@@ -538,3 +539,58 @@ def test_proby_wynikow_odsiewaja_niska_pewnosc_tak_jak_produkcja():
     proby = proby_wynikow(panele, {r: {"trend_follow": 1.0} for r in REGIMES},
                           {"AAA": 2.0}, H, {"AAA": slaba})
     assert proby == {}
+
+
+# ================================== PROGI NA WAGACH, KTORYMI SIE HANDLUJE (T4)
+#
+# Audyt Fable F-2.1: przy `--wybor ic` progi liczyly sie na `bazowe`, a handel
+# szedl wagami IC - po 28.09 udzial decyzji ponad progiem `range` 0,0% (n=72)
+# wobec zamiaru 12%. Teraz `train.bramki_na_wagach` liczy prog na `best_w`.
+
+def _okno_treningowe_syntetyczne():
+    import sys
+    sys.path.insert(0, str(KORZEN / "tests"))
+    from panel_syntetyczny import plik_syntetyczny
+
+    from services.engine import train as tr
+    from services.engine.portfolio import precompute_panels
+
+    plik = plik_syntetyczny()
+    od = plik["od"]
+    do = od + timedelta(days=H.train_days)
+    panele = {s: [r for r in p if od <= r["t"] < do] for s, p in plik["panele"].items()}
+    progi_atr = {s: tr.atr_threshold(p) for s, p in panele.items()}
+    cache = precompute_panels(panele, progi_atr, H)
+    martwe = tr.martwe_sygnaly(cache)
+    return tr, panele, progi_atr, cache, martwe
+
+
+def test_prog_na_wagach_IC_przepuszcza_12_procent_na_oknie_treningowym():
+    """Kryterium T4: udzial ponad progiem na oknie treningowym w [10%; 14%]
+    w kazdym rezimie z >= 50 probkami - na wagach, ktorymi sie handluje."""
+    tr, panele, progi_atr, cache, martwe = _okno_treningowe_syntetyczne()
+    wagi = tr.ic_weights(panele, cache, martwe, H.ic_horizon_bars)
+    bramki = tr.bramki_okna(panele, wagi, progi_atr, H, cache)
+    proby = tr.proby_wynikow(panele, wagi, progi_atr, H, cache)
+    sprawdzone = 0
+    for rezim, lista in proby.items():
+        if len(lista) < MIN_PROB_PROGU:
+            continue
+        prog = bramki.wejscie(rezim)
+        udzial = sum(1 for x in lista if x >= prog) / len(lista)
+        assert 0.10 <= udzial <= 0.14, (rezim, udzial, len(lista))
+        sprawdzone += 1
+    assert sprawdzone >= 2
+
+
+def test_trener_liczy_progi_ic_na_best_w_a_argmax_na_bazowych():
+    """Sklad: dla `ic` progi powstaja PO wyborze wag (`bramki_na_wagach`),
+    dla `argmax` przed nim, na zalozeniach - jeden prog dla wszystkich
+    kandydatow okna."""
+    import inspect
+
+    from services.engine import train as tr
+    zrodlo = inspect.getsource(tr.walk_forward)
+    assert 'przygotuj_okno(kt, okno, z_bramkami=(wybor != "ic"))' in zrodlo
+    assert "gates=bramki_na_wagach(kt, dane, best_w)" in zrodlo
+    assert "dane.train_slices, wagi" in inspect.getsource(tr.bramki_na_wagach)

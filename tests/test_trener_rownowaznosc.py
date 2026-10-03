@@ -1,0 +1,128 @@
+"""Refaktor `train.train` na czyste funkcje nie zmienia wyniku (audyt Fable T2).
+
+ZRZUT REFERENCYJNY (`tests/fixtures/trener_rownowaznosc.json`) zostal
+wygenerowany PRZED refaktorem, na kodzie 4358d81 (commit b08a2b5), z deterministycznego panelu
+syntetycznego ponizej (stale ziarno, zero polaczen z baza - `train(None, ...,
+panel=plik)`). Test porownuje z nim CALY wydruk trenera i slownik
+`PODSUMOWANIE_JSON` dla kilku wariantow, ktore przechodza przez rozne galezie
+`train()`: wybor `ic`, `argmax` (losowanie z ziarnem), `bazowe`, prog wspolny
+i model wypelnien pesymistyczny.
+
+PRZEGENEROWANY RAZ, w T4 (progi na wagach IC, audyt Fable F-2.1): warianty
+`ic*` zmienily sie wylacznie przez progi liczone na `best_w` i klucz
+`progi_na_wagach` w `params` (sprawdzone: z progami na `bazowe` i bez klucza
+wynik byl identyczny ze zrzutem z b08a2b5); `argmax` i `bazowe` bez zmian.
+Doszedl wariant `ic_siatka` - siatka zakotwiczona i piec przesuniec.
+
+Zmiana wyniku zamierzona (nowa miara, poprawka) oznacza swiadome
+przegenerowanie zrzutu:
+
+    .venv/bin/python -B tests/test_trener_rownowaznosc.py --zapisz
+
+i opis w commicie, CO sie zmienilo i dlaczego. Zrzut przegenerowany "zeby
+test przeszedl" przestaje cokolwiek chronic.
+"""
+from __future__ import annotations
+
+import contextlib
+import io
+import json
+import sys
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from services.engine import panel_plik  # noqa: E402
+from services.engine import train as tr  # noqa: E402
+from services.engine.horizons import get as get_horizon  # noqa: E402
+from services.engine.portfolio import Egzekucja  # noqa: E402
+
+from panel_syntetyczny import DNI, plik_syntetyczny  # noqa: E402
+
+ZRZUT = Path(__file__).parent / "fixtures" / "trener_rownowaznosc.json"
+H4 = get_horizon("4h")
+
+# nazwa -> argumenty `train()` poza panelem
+WARIANTY = {
+    "ic": dict(egzekucja=Egzekucja(limit=True), wybor="ic"),
+    "argmax": dict(egzekucja=Egzekucja(limit=True), wybor="argmax", trials=3),
+    "bazowe": dict(egzekucja=Egzekucja(), wybor="bazowe"),
+    "ic_wspolny": dict(egzekucja=Egzekucja(limit=True), wybor="ic",
+                       progi_per_rezim=False),
+    "ic_pesymistyczna": dict(egzekucja=Egzekucja(limit=True, opoznienie_min=20,
+                                                 pesymistyczna=True), wybor="ic"),
+    # Siatka produkcji (T4): kotwica w kalendarzu i piec przesuniec. `days`
+    # o 2 krotsze niz plik - zapas na przesuniecie -2.
+    "ic_siatka": dict(egzekucja=Egzekucja(limit=True), wybor="ic", days=DNI - 2,
+                      od=tr.KOTWICA_SIATKI, przesuniecia=tr.PRZESUNIECIA_SIATKI),
+}
+
+
+def przebieg(plik: dict, wariant: str) -> dict:
+    a = dict(WARIANTY[wariant])
+    trials = a.pop("trials", 2)
+    dni = a.pop("days", DNI)
+    wydruk = io.StringIO()
+    with contextlib.redirect_stdout(wydruk):
+        wynik = tr.train(None, "crypto", dni, trials, H4, "spot_eu", sucho=True,
+                         panel=plik, **a)
+    # Przez JSON: krotki -> listy, tak jak w zrzucie.
+    return {"json": json.loads(json.dumps(wynik)), "stdout": wydruk.getvalue()}
+
+
+@pytest.fixture(scope="module")
+def plik(tmp_path_factory):
+    sciezka = tmp_path_factory.mktemp("rownowaznosc") / "panel.json.gz"
+    panel_plik.zapisz(sciezka, plik_syntetyczny())
+    return panel_plik.wczytaj(sciezka)
+
+
+@pytest.fixture(scope="module")
+def zrzut():
+    return json.loads(ZRZUT.read_text(encoding="utf-8"))
+
+
+@pytest.mark.parametrize("wariant", sorted(WARIANTY))
+def test_wynik_identyczny_z_referencja(plik, zrzut, wariant):
+    teraz = przebieg(plik, wariant)
+    ref = zrzut[wariant]
+    assert teraz["json"] == ref["json"]
+    assert teraz["stdout"].splitlines() == ref["stdout"].splitlines()
+
+
+def test_referencja_ma_okna_i_transakcje(zrzut):
+    """Zrzut, ktory nie ma okien, niczego by nie chronil."""
+    for wariant, ref in zrzut.items():
+        assert ref["json"]["okna"] >= 4, wariant
+        assert ref["json"]["transakcji"] >= 100, wariant
+
+
+def test_zadna_funkcja_trenera_nie_ma_ponad_200_linii():
+    """`train()` jest orkiestratorem, nie miejscem na logike (audyt Fable T2):
+    mierzone AST-em, razem z docstringiem i komentarzami."""
+    import ast
+    drzewo = ast.parse(Path(tr.__file__).read_text(encoding="utf-8"))
+    dlugosci = {n.name: n.end_lineno - n.lineno + 1 for n in ast.walk(drzewo)
+                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    za_dlugie = {n: d for n, d in dlugosci.items() if d > 200}
+    assert not za_dlugie, f"funkcje dluzsze niz 200 linii: {za_dlugie}"
+    assert dlugosci["train"] <= 200
+
+
+if __name__ == "__main__":
+    if "--zapisz" not in sys.argv:
+        sys.exit("uzycie: tests/test_trener_rownowaznosc.py --zapisz")
+    import tempfile
+    with tempfile.TemporaryDirectory() as kat:
+        sciezka = Path(kat) / "panel.json.gz"
+        panel_plik.zapisz(sciezka, plik_syntetyczny())
+        p = panel_plik.wczytaj(sciezka)
+    ZRZUT.parent.mkdir(exist_ok=True)
+    wynik = {w: przebieg(p, w) for w in sorted(WARIANTY)}
+    ZRZUT.write_text(json.dumps(wynik, ensure_ascii=False, indent=1, sort_keys=True) + "\n",
+                     encoding="utf-8")
+    for w, r in wynik.items():
+        print(w, r["json"]["okna"], r["json"]["transakcji"], r["json"]["status"])
