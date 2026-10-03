@@ -52,7 +52,8 @@ import psycopg
 from psycopg.rows import dict_row
 
 from services.engine.risk_rules import (
-    DEFAULT_LIMITS, MIN_CONFIDENCE, START_EQUITY, wartosc_limitu,
+    DEFAULT_LIMITS, MIN_CONFIDENCE, START_EQUITY, position_budget, udzial_budzetu,
+    wartosc_limitu,
 )
 from services.engine.horizons import DEFAULT_BAR, HORIZONS, Horizon, get as get_horizon
 from services.engine.bramki import (
@@ -1060,6 +1061,63 @@ def znacznik_miary(karta: Karta) -> dict[str, float]:
             "spread_niezmierzony": 1.0 if niezmierzony else 0.0}
 
 
+_SQL_KROK_I_CENA = """
+SELECT i.symbol, i.lot_size, max(c.close) AS cena_max
+FROM ref.instrument i
+LEFT JOIN market.candle c ON c.instrument_id = i.id AND c.timeframe = %s
+                         AND c.event_time BETWEEN %s AND %s
+WHERE i.id = ANY(%s)
+GROUP BY i.symbol, i.lot_size
+"""
+
+
+def pyl_toru(cur, kind: str, instruments: list[dict], h: Horizon,
+             od: datetime, do: datetime,
+             zakladane_pozycje: int | None) -> tuple[float | None, float | None]:
+    """Skladnik „pyl" karty dla strategii i dla kup-i-trzymaj. Para ulamkow rundy.
+
+    Tylko dla rodzajow z prowizja w walucie bazowej (`koszty.prowizja_w_bazowej`);
+    dla pozostalych None i skladnika w karcie po prostu nie ma.
+
+    SKAD LICZBY - te same, z ktorych trener je bral w pomiarze z 2026-10-02:
+      * krok: `ref.instrument.lot_size` - ta sama kolumna, z ktorej
+        `gielda_exec` buduje `Filtry.krok_ilosci` przy skladaniu zlecen,
+      * cena: NAJWYZSZE zamkniecie w oknie przebiegu (konserwatywnie: pyl
+        rosnie z cena przy stalym notionalu),
+      * notional strategii: budzet na pozycje z TEJ SAMEJ reguly co symulacja
+        (`position_budget(DEFAULT_LIMITS, ...)`, kapital START_EQUITY) razy
+        `udzial_budzetu(PROG_WEJSCIA_POCZATKOWY)`. Liczba instrumentow to cale
+        uniwersum przebiegu (w oknie bywa ich mniej, czyli budzet wiekszy), a
+        prog poczatkowy 0,25 lezy ponizej zmierzonych progow 0,28-0,57 - obie
+        strony daja MNIEJSZY notional, czyli WIEKSZY pyl. ZALOZENIE, nazwane.
+      * notional odniesienia: kup-i-trzymaj angazuje START_EQUITY / n na
+        instrument, raz na runde.
+
+    Brak kroku albo ceny dla jakiegokolwiek instrumentu -> None, czyli
+    skladnik NIEZMIERZONE (patrz `koszty.pyl_rundy`).
+    """
+    from services.engine.koszty import koszty as cennik, pyl_rundy
+    if not cennik(kind).prowizja_w_bazowej or not instruments:
+        return None, None
+    cur.execute(_SQL_KROK_I_CENA, (h.source_timeframe, od, do,
+                                   [i["id"] for i in instruments]))
+    wiersze = cur.fetchall() or []
+    kroki = {r["symbol"]: (float(r["lot_size"]) if r.get("lot_size") is not None
+                           else None) for r in wiersze}
+    ceny = {r["symbol"]: (float(r["cena_max"]) if r.get("cena_max") is not None
+                          else None) for r in wiersze}
+    # Instrument bez wiersza tez jest dziura - nie wolno go pominac po cichu.
+    for i in instruments:
+        kroki.setdefault(i["symbol"], None)
+    n = zakladane_pozycje or len(instruments)
+    baza = position_budget(DEFAULT_LIMITS, n, Decimal(str(START_EQUITY)))
+    if baza is None:
+        return None, None
+    notional = float(baza) * udzial_budzetu(PROG_WEJSCIA_POCZATKOWY)
+    return (pyl_rundy(kroki, ceny, notional),
+            pyl_rundy(kroki, ceny, START_EQUITY / len(instruments)))
+
+
 def opis_doplaty(karta: Karta) -> str:
     """Czym jest dopłata, przy której liczą się miary - BEZ słowa „pełna".
 
@@ -1073,7 +1131,13 @@ def opis_doplaty(karta: Karta) -> str:
              if s.wartosc is None and s.zrodlo == NIEZMIERZONE]
     podlogi = [f"{s.nazwa} tylko jako podłoga (obca księga)"
                for s in karta.skladniki if s.wartosc is not None and not s.wiarygodny]
+    # SKLAD DOPLATY Z NAZWY. Od 2026-10-03 doplata to nie tylko spread (doszedl
+    # pyl), wiec sama suma nie mowi juz, z czego sie sklada.
+    sklad = [f"{s.nazwa} {s.wartosc * 1e4:.2f} pb" for s in karta.skladniki
+             if s.wartosc is not None and not s.w_symulacji]
     opis = f"dopłata z karty {karta.doplata_poza_symulacja * 1e4:.2f} pb na rundę"
+    if sklad:
+        opis += f" (w tym: {', '.join(sklad)})"
     if not braki and not podlogi:
         return opis + " — karta pełna"
     return opis + " — karta BEZ: " + "; ".join(braki + podlogi)
@@ -1353,6 +1417,21 @@ def load_panel(cur, instrument_id: int, h: Horizon,
     wartosc byla znana trzy sekundy po OTWARCIU swiecy, choc pochodzila z jej
     zamkniecia cztery godziny pozniej. Straznik przepuszczal to bez mrugniecia,
     bo sam byl dobrany pod te bledna date.
+
+    REWIZJE (`revised_at`, migracja 0070) - wartosc POPRAWIONA po chwili decyzji.
+
+    Potok cech nadpisuje wartosc, gdy zmienila sie swieca, z ktorej ja policzono
+    (`features.insert_values`), a `ingested_at` zostaje przy tym `znane_od` -
+    wiec sam straznik wyzej przepuszcza kazda rewizje z definicji. Dlatego osobno:
+    `revised_at > event_time + 2 swiece` znaczy, ze decyzja podjeta na tej
+    swiecy widziala INNA liczbe niz ta, na ktorej trener sie teraz uczy.
+
+    Takiej wartosci NIE odrzucamy. Poprawiona jest funkcja danych, ktore wtedy
+    istnialy na gieldzie - zla byla nasza kopia. Odrzucenie wycinaloby z proby
+    dokladnie te swiece, na ktorych dane byly bledne (selekcja po bledzie),
+    a starej wartosci i tak nie mamy, bo nadpisanie jest w miejscu. Panel
+    niesie wiec tylko LICZNIK (`rewizje` w wierszu): trener raportuje odsetek,
+    czyli to, jak bardzo to, czego sie uczy, rozni sie od tego, co silnik widzial.
     """
     if h.aggregate:
         price_cte = """
@@ -1375,7 +1454,9 @@ def load_panel(cur, instrument_id: int, h: Horizon,
     cur.execute(
         f"""
         WITH f AS (
-            SELECT fv.event_time, fd.params->>'role' AS role, fv.value
+            SELECT fv.event_time, fd.params->>'role' AS role, fv.value,
+                   fv.revised_at > fv.event_time + 2 * %(bar)s::interval
+                       AS po_decyzji
             FROM feat.feature_value fv
             JOIN feat.feature_def fd ON fd.id = fv.feature_def_id
             WHERE fv.instrument_id = %(iid)s
@@ -1387,6 +1468,7 @@ def load_panel(cur, instrument_id: int, h: Horizon,
         ),
         p AS ({price_cte})
         SELECT f.event_time AS t, jsonb_object_agg(f.role, f.value) AS feats,
+               count(*) FILTER (WHERE f.po_decyzji) AS rewizje,
                p.close, p.high, p.low
         FROM f JOIN p ON p.t = f.event_time
         GROUP BY f.event_time, p.close, p.high, p.low ORDER BY f.event_time
@@ -1396,7 +1478,20 @@ def load_panel(cur, instrument_id: int, h: Horizon,
     )
     return [{"t": r["t"], "f": {k: float(v) for k, v in r["feats"].items()},
              "price": float(r["close"]), "high": float(r["high"]),
-             "low": float(r["low"])} for r in cur.fetchall()]
+             "low": float(r["low"]), "rewizje": int(r["rewizje"])}
+            for r in cur.fetchall()]
+
+
+def rewizje_po_decyzji(panels: dict[str, list[dict]]) -> tuple[int, int]:
+    """(wartosci zrewidowane po chwili decyzji, wszystkie wartosci) w panelach.
+
+    Rozjazd "silnik widzial X, trener uczy sie na Y" - patrz `load_panel`.
+    `.get`, bo panel spoza `load_panel` (atrapy, narzedzia) moze nie miec pola,
+    a brak informacji o rewizjach nie jest rewizja.
+    """
+    zrewidowane = sum(r.get("rewizje", 0) for p in panels.values() for r in p)
+    wszystkie = sum(len(r["f"]) for p in panels.values() for r in p)
+    return zrewidowane, wszystkie
 
 
 def atr_threshold(panel: list[dict]) -> float | None:
@@ -1892,9 +1987,12 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
     # symulacja nie nalicza, zamiast wliczac je jako zera - patrz `koszty.py`.
     # `spread_bps` zostaje None, gdy pomiaru NIE MA - wymyslona liczba
     # zamienilaby tu "nie wiem" na "wiem i wynosi tyle".
+    pyl, pyl_odniesienia = pyl_toru(cur, kind, instruments, h,
+                                    now - timedelta(days=days), now,
+                                    zakladane_pozycje)
     karta = karta_rundy(kind, (egzekucja or Egzekucja()).limit,
                         spread_bps=spread_bps,
-                        spread_nasza_ksiega=spread_nasza_ksiega)
+                        spread_nasza_ksiega=spread_nasza_ksiega, pyl=pyl)
     for linia in opis_karty(karta):
         print(linia)
 
@@ -1920,7 +2018,8 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
     doplata = karta.doplata_poza_symulacja
     doplata_odniesienia = karta_rundy(
         kind, False, spread_bps=spread_bps,
-        spread_nasza_ksiega=spread_nasza_ksiega).doplata_poza_symulacja
+        spread_nasza_ksiega=spread_nasza_ksiega,
+        pyl=pyl_odniesienia).doplata_poza_symulacja
     # „TA SAMA KWOTA CO W DSR", NIE „TEN SAM KOSZT WSZEDZIE". Do 2026-10-03
     # wydruk mowil „(ta sama co w DSR)" i to bylo prawda wylacznie o kwocie
     # (DSR dostaje `karta.doplata_poza_symulacja`). Trzech rzeczy zdanie nie
@@ -2044,6 +2143,13 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
         if len(p) > 500:
             panels[inst["symbol"]] = p
         print(f"  {inst['symbol']:10s} {len(p):>7,} punktów panelu")
+    # REWIZJE PO CZASIE DECYZJI: trenujemy na wartosciach poprawionych, ale
+    # silnik decydowal na starych. Liczba idzie do logu, bo to jedyne miejsce,
+    # w ktorym ten rozjazd w ogole widac (uzasadnienie: `load_panel`).
+    zrew, wszystkie = rewizje_po_decyzji(panels)
+    print(f"  rewizje po czasie decyzji: {zrew:,} z {wszystkie:,} wartości cech"
+          f" ({100 * zrew / wszystkie if wszystkie else 0:.3f}%)"
+          f" — na tych silnik widział inną liczbę niż ta, na której uczy się trener")
     if not panels:
         # KOD WYJSCIA MUSI TO ODZWIERCIEDLAC.
         #

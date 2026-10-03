@@ -236,8 +236,11 @@ def test_ARKUSZ_pytany_jest_o_ksiege_EGZEKUCJI_i_o_jeden_poziom():
     g = Gielda(ksiega=arkusz("120.67", "120.70"), odniesienie=D("120.84"))
     zloz(plan(pid=55, strona="buy", limit="120.84", qty="8.87"), gielda=g)
 
+    # Dwa odczyty od 2026-10-03: przed wysylka (cena) i zaraz po niej
+    # (diagnostyka PostOnly, `gielda_exec.arkusz_po_wysylce`). Oba z ksiegi
+    # egzekucji i o jeden poziom.
     assert g.pytania_o_arkusz == [
-        dict(symbol="SOLUSDC", depth=1, ksiega_egzekucji=True)]
+        dict(symbol="SOLUSDC", depth=1, ksiega_egzekucji=True)] * 2
 
 
 # ==================================== 2. miara REAGUJE na wejscie

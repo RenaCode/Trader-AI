@@ -627,7 +627,9 @@ def test_doplata_bierze_sie_z_KARTY_a_nie_z_liczby_wpisanej_w_trenerze():
     assert ze_spreadem.doplata_poza_symulacja == pytest.approx(5.85e-4)
     # prowizja + poslizg SA w symulacji, wiec nie wchodza do doplaty
     assert ze_spreadem.policzone > ze_spreadem.doplata_poza_symulacja
-    assert "spread" in bez.nieznane and not ze_spreadem.nieznane
+    # `pyl` zostaje nieznany, dopoki trener nie poda kroku i ceny (od 2026-10-03).
+    assert "spread" in bez.nieznane and "spread" not in ze_spreadem.nieznane
+    assert ze_spreadem.nieznane == ("pyl",)
 
 
 def test_spread_z_OBCEJ_ksiegi_tez_wchodzi_do_doplaty_ale_nie_domyka_karty():

@@ -95,11 +95,13 @@ def test_karta_z_niezmierzonym_skladnikiem_NIE_JEST_pelna():
 
 
 def test_karta_staje_sie_pelna_dopiero_po_podaniu_WSZYSTKICH_pomiarow():
-    k = karta_rundy("spot", maker=True, spread_bps=3.0, niewypelnienie=0.0005)
+    # Od 2026-10-03 karta spot ma tez skladnik `pyl`; pelna jest dopiero z nim.
+    k = karta_rundy("spot", maker=True, spread_bps=3.0, niewypelnienie=0.0005,
+                    pyl=3e-5)
     assert k.pelna is True
     assert k.nieznane == ()
-    # 2 x 0,10% prowizji + 3 pb spreadu + 5 pb niewypelnienia
-    assert k.policzone == pytest.approx(2 * 0.0010 + 3.0 / 1e4 + 0.0005)
+    # 2 x 0,10% prowizji + 3 pb spreadu + 5 pb niewypelnienia + 0,3 pb pylu
+    assert k.policzone == pytest.approx(2 * 0.0010 + 3.0 / 1e4 + 0.0005 + 3e-5)
 
 
 def test_podany_spread_przestaje_byc_niezmierzony():
@@ -143,7 +145,8 @@ def test_opis_karty_MOWI_ze_suma_jest_NIEPELNA():
 
 def test_opis_pelnej_karty_NIE_STRASZY_niepelnoscia():
     linie = " | ".join(opis_karty(
-        karta_rundy("spot", maker=True, spread_bps=3.0, niewypelnienie=0.0005)))
+        karta_rundy("spot", maker=True, spread_bps=3.0, niewypelnienie=0.0005,
+                    pyl=3e-5)))
     assert "CO NAJMNIEJ" not in linie.upper()
 
 

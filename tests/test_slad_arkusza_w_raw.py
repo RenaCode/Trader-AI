@@ -443,19 +443,24 @@ def test_ODMOWA_PRZED_ZLOZENIEM_tez_dostaje_blok():
     assert b["cena_planu"] == "0.30"
 
 
-def test_blok_NIE_dodaje_ANI_JEDNEGO_zapytania_do_gieldy():
-    """Warunek zadania i jedyna bezpieczna droga: `slad` powstaje z odpowiedzi,
-    ktora i tak odebralismy. Dodatkowy odczyt arkusza po to, zeby go zapisac,
-    opisywalby CHWILE PO wyslaniu zlecenia, a nie chwile wysylki - czyli
-    zapisywalby liczbe wygladajaca poprawnie i odpowiadajaca na inne pytanie.
+def test_slad_CHWILI_WYSYLKI_pochodzi_z_odczytu_PRZED_POST_a_drugi_jest_osobno():
+    """Slad chwili wysylki (`bid`, `ask`, `wiek_s` w korzeniu bloku) powstaje
+    z odpowiedzi, ktora i tak odebralismy PRZED wyslaniem. Odczyt po wysylce
+    opisuje CHWILE PO wyslaniu - inne pytanie - wiec od 2026-10-03 (diagnostyka
+    odrzucen PostOnly) idzie WYLACZNIE pod wlasny klucz `po_wysylce` i nie ma
+    prawa nadpisac liczb sprzed wysylki. To sprawdza ten test: dwa odczyty,
+    drugi PO POST-cie, a korzen bloku z pierwszego.
     """
     g = Gielda(ksiega=arkusz("14.092", "14.093"), odniesienie=D("14.092"))
     cur, ok, msg = zloz(plan(pid=64, symbol="LINKUSDC", strona="buy",
                              cena_planu="14.127", qty="81.112055"), gielda=g)
     assert ok is True, msg
     assert g.pytania_o_arkusz == [
-        dict(symbol="LINKUSDC", depth=1, ksiega_egzekucji=True)]
-    assert blok(cur)["bid"] == "14.092"
+        dict(symbol="LINKUSDC", depth=1, ksiega_egzekucji=True)] * 2
+    b = blok(cur)
+    assert b["bid"] == "14.092"
+    assert b["po_wysylce"]["bid"] == "14.092"
+    assert b["wyslano_at"] <= b["odpowiedz_at"] <= b["po_wysylce"]["odczyt_at"]
 
 
 def test_blok_ma_PELNY_zestaw_pol_i_jest_SERIALIZOWALNY():
@@ -476,4 +481,7 @@ def test_blok_ma_PELNY_zestaw_pol_i_jest_SERIALIZOWALNY():
         "odczyt_at", "arkusz_at", "wiek_s", "bid", "ask", "powod_braku",
         "zrodlo_ceny", "cena_rynkowa", "cena_planu", "cena_wyslana",
         # Wiek odczytu NASZYM zegarem w chwili POST-a (2026-10-03, audyt E1).
-        "wiek_przy_wysylce_s"}
+        "wiek_przy_wysylce_s",
+        # Diagnostyka odrzucen PostOnly (2026-10-03): nasz zegar wokol POST-a
+        # i drugi odczyt ksiegi zaraz po odpowiedzi gieldy.
+        "wyslano_at", "odpowiedz_at", "po_wysylce"}

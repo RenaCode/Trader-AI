@@ -71,11 +71,20 @@ class Koszty:
     # zlecen. Pozycja trzymana dobe placi trzy razy, niezaleznie od tego, czy
     # zarabia. Naliczanie: `portfolio.simulate_portfolio`.
     finansowanie: bool = False
+    # Czy gielda pobiera prowizje od KUPNA w walucie BAZOWEJ (Bybit spot:
+    # kupujac 10 ADA dostajemy 10 ADA minus prowizja). Wtedy na koncie zostaje
+    # ilosc spoza kroku gieldy i po sprzedazy zostaje PYL - reszta ponizej
+    # `lot_size`, ktorej sprzedac sie nie da. Flaga, a nie lista nazw, z tego
+    # samego powodu co `krotka_pozycja` przy koszcie pozyczki papieru: skladnik
+    # karty ma sie pojawiac i znikac razem z przyczyna. Kontrakt (perp) i akcje
+    # na Alpace (prowizja zero, nie w papierach) pylu nie zostawiaja.
+    prowizja_w_bazowej: bool = False
 
 
 # Klucz: ref.instrument.kind
 CENNIK = {
-    "spot": Koszty(maker=0.0010, taker=0.0010, krotka_pozycja=False),
+    "spot": Koszty(maker=0.0010, taker=0.0010, krotka_pozycja=False,
+                   prowizja_w_bazowej=True),
     # PODMIOT UNIJNY MA INNY CENNIK NIZ GLOBALNY.
     #
     # Odczytane z konta przez /v5/account/fee-rate na api-demo.bybit.eu
@@ -87,7 +96,8 @@ CENNIK = {
     # zaden sygnal nie pokrywal wlasnych kosztow. Przy 0,580% zlecenia rynkowe
     # na tym podmiocie nie maja sensu w ogole - zostaje wylacznie egzekucja
     # z limitem, gdzie stawka maker jest identyczna jak globalnie (0,100%).
-    "spot_eu": Koszty(maker=0.0010, taker=0.0025, krotka_pozycja=False),
+    "spot_eu": Koszty(maker=0.0010, taker=0.0025, krotka_pozycja=False,
+                      prowizja_w_bazowej=True),
     "perp": Koszty(maker=0.0002, taker=0.00055, krotka_pozycja=True,
                    finansowanie=True),
     # AKCJE I ETF-Y NA ALPACE. Zero, i to jest LICZBA, a nie brak liczby.
@@ -310,6 +320,41 @@ class Karta:
         return not self.nieznane
 
 
+def pyl_rundy(kroki: dict[str, float | None], ceny: dict[str, float | None],
+              notional: float) -> float | None:
+    """Oczekiwana strata na PYLE jako ulamek rundy - KONSERWATYWNIE po uniwersum.
+
+    Na jednym instrumencie: reszta po sprzedazy lezy w [0, krok), srednio
+    krok/2, czyli `krok * cena / 2` w walucie, a wzgledem notionalu pozycji
+    `krok * cena / (2 * notional)`. Placona raz na runde (przy wyjsciu).
+
+    DLACZEGO MAKSIMUM PO UNIWERSUM, a nie srednia wazona liczba transakcji.
+    Karta jest JEDNA na tor i doplate trzeba znac PRZED walk-forwardem, bo
+    odejmuje sie ja okno po oknie - liczby transakcji na instrument jeszcze nie
+    ma. Srednia z wagami rownymi bylaby zalozeniem o tym, kto handluje, i to
+    zalozeniem w strone TANSZEGO wyniku (pyl rozni sie miedzy instrumentami
+    o rzad: krok ADA 0,1 przy cenie 0,25 wobec kroku BTC przy cenie 100 000).
+    Maksimum zawyza koszt instrumentow o malym pyle, nigdy go nie zaniza.
+    Przy wartosciach rzedu 0,3 pb skala bledu jest ponizej szumu pomiaru
+    spreadu, a kierunek jest wlasciwy.
+
+    `ceny` - wolajacy podaje NAJWYZSZA cene z okna przebiegu: przy stalym
+    notionalu pyl rosnie z cena, wiec to tez jest strona konserwatywna.
+
+    None, gdy dla KTOREGOKOLWIEK instrumentu brakuje kroku albo ceny: maksimum
+    po zbiorze z dziura nie jest maksimum, a zero byloby klamstwem.
+    """
+    if not kroki or notional <= 0:
+        return None
+    wartosci = []
+    for sym, krok in kroki.items():
+        cena = ceny.get(sym)
+        if krok is None or cena is None or krok <= 0 or cena <= 0:
+            return None
+        wartosci.append(float(krok) * float(cena) / (2 * notional))
+    return max(wartosci)
+
+
 def zwroty_po_doplacie(zwroty: list[float], doplata: float) -> list[float]:
     """Zwroty z transakcji PO doliczeniu `Karta.doplata_poza_symulacja`.
 
@@ -333,7 +378,8 @@ def karta_rundy(kind: str, maker: bool = False, *,
                 spread_bps: float | None = None,
                 spread_nasza_ksiega: bool = True,
                 niewypelnienie: float | None = None,
-                finansowanie: float | None = None) -> Karta:
+                finansowanie: float | None = None,
+                pyl: float | None = None) -> Karta:
     """Koszt rundy rozbity na skladniki. Kazdy ze swoim pochodzeniem.
 
     ARGUMENTY OPCJONALNE SA POMIARAMI, KTORYCH JESZCZE NIE MA. Podanie ich
@@ -372,6 +418,9 @@ def karta_rundy(kind: str, maker: bool = False, *,
         ktory przez to przepadl.
       * `finansowanie` - laczna oplata za czas trzymania pozycji, jako ulamek
         ceny. Zrodlo: `market.funding_rate`.
+      * `pyl` - oczekiwana strata na reszcie ponizej kroku ilosci po sprzedazy,
+        jako ulamek rundy. Liczy ja `pyl_rundy`; None = kroku albo ceny nie ma
+        w danych, i wtedy skladnik jest NIEZMIERZONY, a nie zerem.
 
     DLACZEGO PRZY LIMICIE NIE MA POZYCJI „POSLIZG"
 
@@ -470,6 +519,25 @@ def karta_rundy(kind: str, maker: bool = False, *,
             "papieru u brokera i od CZASU TRZYMANIA, wiec nie jest stala rundy - "
             "zrodlo docelowe: pozycje `FEE` rejestru Alpaki po pierwszych "
             "krotkich sprzedazach na koncie paper"))
+
+    # PYL - TYLKO TAM, GDZIE PROWIZJA OD KUPNA IDZIE W WALUCIE BAZOWEJ.
+    #
+    # Zmierzone 2026-10-02 na 14 pozycjach demo: reszta po sprzedazy
+    # (`raw->>'resztka_nierozliczalna'`) to 0,23-0,37 pb rundy, okolo 1,1%
+    # prowizji, a stosunek reszty do kroku wychodzi srednio blisko 1/2 - czyli
+    # tyle, ile daje model "reszta jednostajna na [0, krok)". Symulacja liczy
+    # ilosci ciagle i tej straty NIE zna, wiec skladnik wchodzi do doplaty
+    # (`w_symulacji=False`). Poprawka „sprzedaj ilosc netto po prowizji"
+    # (133fc58) usuwa pyl z nadwyzki, nie z zaokraglenia do kroku - ten zostaje.
+    if k.prowizja_w_bazowej:
+        s.append(Skladnik(
+            "pyl", pyl, ZALOZENIE if pyl is not None else NIEZMIERZONE,
+            "reszta ponizej kroku ilosci (`ref.instrument.lot_size`) po "
+            "sprzedazy: oczekiwana strata polowy kroku, krok*cena/(2*notional); "
+            "maksimum po uniwersum przy najwyzszej cenie okna - patrz `pyl_rundy`"
+            if pyl is not None else
+            "krok ilosci albo cena instrumentu nieznane w danych trenera - "
+            "strata na reszcie ponizej kroku po sprzedazy NIE jest naliczana"))
 
     if k.finansowanie:
         s.append(Skladnik(

@@ -952,7 +952,7 @@ def compute_positioning(cur, instrument_id: int, h: Horizon,
 
 
 def insert_values(cur, rows: list[tuple]) -> int:
-    """Zapis wartosci cech, POPRAWIAJACY istniejace.
+    """Zapis wartosci cech, POPRAWIAJACY istniejace - i DATUJACY poprawke.
 
     DLACZEGO NIE "DO NOTHING"
 
@@ -965,20 +965,34 @@ def insert_values(cur, rows: list[tuple]) -> int:
     policzone - ATR, polozenie w zakresie, rezim - dziedziczyly to zanizenie.
     Poprawienie swiec nie naprawilo cech; dopiero to.
 
-    DLACZEGO TO NIE JEST PRZEPISYWANIE HISTORII
+    DWIE DATY, BO TO SA DWA ROZNE FAKTY (migracja 0070)
 
-    Wartosc cechy datowana jest przez `znane_od(t, h)`, czyli momentem, w ktorym
-    BYLA DO WYLICZENIA z danych dostepnych wtedy na gieldzie. Informacja
-    istniala; zepsuta byla nasza kopia. Poprawka odtwarza wiec to, co dalo sie
-    wiedziec, a nie dokłada wiedzy z przyszlosci - i dlatego `ingested_at`
-    pozostaje wyliczane tak samo, a nie ustawiane na teraz.
+    * `ingested_at = znane_od(t, h)` - od kiedy wartosc BYLA DO WYLICZENIA
+      z danych dostepnych wtedy na gieldzie. Informacja istniala; zepsuta byla
+      nasza kopia. Dlatego ta data zostaje wyliczana tak samo przy poprawce, a nie
+      ustawiana na teraz - inaczej `train.load_panel` wyrzucilby kazda przeliczona
+      wstecz ceche i trener uczylby sie na dziurach dokladnie tam, gdzie dane
+      byly zle.
+    * `revised_at = now()` - KIEDY nasza kopia zostala poprawiona. Ustawiane
+      WYLACZNIE przy nadpisaniu; nowy wiersz ma NULL.
 
-    Warunek IS DISTINCT FROM sprawia, ze przebieg bez zmian nie dotyka bazy.
+    Do 2026-10-03 byla tylko pierwsza data, a docstring nazywal to swiadomym
+    wyborem ("to nie jest przepisywanie historii"). Dla WARTOSCI to prawda; dla
+    DECYZJI nie: silnik w chwili T przeczytal przez `feat.as_of` stara liczbe,
+    a po poprawce baza twierdzila, ze od T byla tam nowa. Oba strazniki
+    bitemporalne przepuszczaly rewizje z definicji, wiec rozjazd "na czym silnik
+    decydowal" vs "na czym trener sie uczy" byl niemierzalny. `revised_at` go
+    mierzy: trener raportuje odsetek wartosci zrewidowanych po chwili decyzji,
+    a kontrola startowa silnika - liczbe takich wartosci z ostatnich 7 dni.
+
+    Warunek IS DISTINCT FROM sprawia, ze przebieg bez zmian nie dotyka bazy -
+    i nie przesuwa `revised_at`: rewizja to ZMIANA wartosci, nie przeliczenie.
     """
     sql = ("INSERT INTO feat.feature_value (feature_def_id, instrument_id, event_time,"
            " value, ingested_at) VALUES (%s,%s,%s,%s,%s)"
            " ON CONFLICT (feature_def_id, instrument_id, event_time) DO UPDATE SET"
-           " value = EXCLUDED.value, ingested_at = EXCLUDED.ingested_at"
+           " value = EXCLUDED.value, ingested_at = EXCLUDED.ingested_at,"
+           " revised_at = now()"
            " WHERE feat.feature_value.value IS DISTINCT FROM EXCLUDED.value")
     for k in range(0, len(rows), BATCH):
         cur.executemany(sql, rows[k:k + BATCH])

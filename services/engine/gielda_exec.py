@@ -420,6 +420,35 @@ async def arkusz_wysylki(adapter, symbol: str, kategoria: str, teraz: datetime
                     f"(wiek {wiek:.1f} s)"), slad
 
 
+async def arkusz_po_wysylce(adapter, symbol: str, kategoria: str) -> dict:
+    """DRUGI odczyt najlepszych ofert, ZARAZ PO odpowiedzi gieldy na POST.
+
+    PO CO. Odrzucenie PostOnly zapada w silniku gieldy w chwili PRZYJECIA
+    zlecenia, a my dowiadujemy sie o nim dopiero przy rozstrzyganiu, w kolejnym
+    cyklu - za pozno, zeby zobaczyc, jak wtedy wygladala ksiega. Odczyt
+    sprzed wysylki (`arkusz_wysylki`) mowi, gdzie byl rynek, kiedy liczylismy
+    cene; ten - gdzie byl, kiedy gielda ja oceniala (z dokladnoscia do jednego
+    obiegu sieci). Dopiero obie pary bid/ask razem rozstrzygaja miedzy „rynek
+    przeszedl przez nasza cene w trakcie wysylki" a „cena byla zla juz przy
+    liczeniu".
+
+    DLA KAZDEGO ZLOZONEGO ZLECENIA, nie tylko odrzuconego - z tego samego
+    powodu, co `slad_wysylki`: bez grupy odniesienia odsetek nic nie mowi.
+
+    NIGDY NIE PODNOSI WYJATKU. To jest diagnostyka PO wyslaniu: cena juz
+    poszla, a blad tego odczytu nie moze zatrzymac zapisu zlecenia, ktore lezy
+    na gieldzie. Kazda awaria wraca jako `powod_braku`.
+    """
+    teraz = datetime.now(timezone.utc)
+    try:
+        _, _, slad = await arkusz_wysylki(adapter, symbol, kategoria, teraz)
+        return slad
+    except Exception as e:  # noqa: BLE001 - diagnostyka nie wywraca egzekucji
+        return {"odczyt_at": teraz.isoformat(), "bid": None, "ask": None,
+                "arkusz_at": None, "wiek_s": None,
+                "powod_braku": f"odczyt po wysyłce nie powiódł się: {e!r}"}
+
+
 def slad_wysylki(arkusz: dict, ceny: dict, plan: dict,
                  cena: Decimal | None) -> dict:
     """Blok `exec.order.raw.arkusz_wysylki`: arkusz, jego WIEK i cena wyslana.
@@ -802,13 +831,25 @@ async def zloz_plan(cur, adapter, plan: dict, f: Filtry, *, engine: str,
                            f"— NIE wysyłam, plan wróci w następnym cyklu")
         z = None
 
+    # ZEGAR WYSYLKI I DRUGI ODCZYT KSIEGI - wylacznie gdy POST naprawde idzie.
+    # Diagnostyka odrzucen PostOnly, patrz `arkusz_po_wysylce`. Cena i logika
+    # zlecenia sa juz ustalone; nic ponizej ich nie zmienia.
+    wysylamy = z is None
     try:
         if z is None:
+            slad_arkusza = {**slad_arkusza,
+                            "wyslano_at": datetime.now(timezone.utc).isoformat()}
             z = await adapter.zloz_zlecenie(
                 symbol=plan["symbol"], strona=plan["side"],
                 ilosc=ilosc, cena_limitu=cena, id_wlasne=id_zlecenia(plan["id"]),
                 kategoria=kategoria, istnienie_sprawdzone=True)
+            slad_arkusza = {**slad_arkusza,
+                            "odpowiedz_at": datetime.now(timezone.utc).isoformat()}
     except OdmowaGieldy as e:
+        slad_arkusza = {**slad_arkusza,
+                        "odpowiedz_at": datetime.now(timezone.utc).isoformat(),
+                        "po_wysylce": await arkusz_po_wysylce(
+                            adapter, plan["symbol"], kategoria)}
         # GIELDA ODPOWIEDZIALA „NIE" — to jest wiedza, nie jej brak.
         # Cala obsluga jest nizej, w `odmowa_gieldy`; tutaj tylko rozdzielamy
         # odmowe od braku odpowiedzi, bo do 2026-09-24 obie wpadaly w ten sam
@@ -844,6 +885,10 @@ async def zloz_plan(cur, adapter, plan: dict, f: Filtry, *, engine: str,
                          "arkusz_wysylki": slad_wysylki(
                              slad_arkusza, slad_ceny, plan, cena)})))
         return False, f"odpowiedź nie dotarła ({e}) — stan sprawdzimy po naszym id"
+
+    if wysylamy:
+        slad_arkusza = {**slad_arkusza, "po_wysylce": await arkusz_po_wysylce(
+            adapter, plan["symbol"], kategoria)}
 
     cur.execute(
         "INSERT INTO exec.order (decision_id, planned_order_id, engine, mode,"
@@ -1014,6 +1059,20 @@ async def odmowa_gieldy(cur, adapter, plan: dict, f: Filtry, blad: OdmowaGieldy,
     return False, f"giełda ODRZUCIŁA zlecenie: {powod}"
 
 
+def _iso_z_ms(ms) -> str | None:
+    """Znacznik giełdy (ms) jako ISO - diagnostyka, więc NIGDY nie rzuca.
+
+    Absurdalna wartość (przepełnienie, ujemna, nie-liczba) nie może wywrócić
+    rozstrzygnięcia zlecenia: wtedy None, a surowy stan i tak jest w `raw`.
+    """
+    if ms is None:
+        return None
+    try:
+        return datetime.fromtimestamp(ms / 1000, timezone.utc).isoformat()
+    except (ValueError, OverflowError, OSError, TypeError):
+        return None
+
+
 async def rozstrzygnij_plan(cur, adapter, plan: dict, f: Filtry, *, engine: str,
                             mode: str, kategoria: str, teraz: datetime,
                             kind: str) -> tuple[str, str]:
@@ -1114,6 +1173,17 @@ async def rozstrzygnij_plan(cur, adapter, plan: dict, f: Filtry, *, engine: str,
     meta = {"execution": "gielda", "kind": kind, "order": "limit",
             "ulamek_wypelnienia": str(r.ulamek), "rodzaj": r.rodzaj,
             "status_gieldy": stan.status, "venue_order_id": stan.id_gieldy}
+    # ZEGAR GIELDY - przy KAZDYM rozstrzygnieciu, nie tylko przy odrzuceniu
+    # (grupa odniesienia, jak w `slad_wysylki`). Z tej samej odpowiedzi
+    # `stan_zlecenia`, bez nowego zapytania. `getattr`, bo atrapy adapterow
+    # w testach i starsze implementacje moga tych pol nie miec.
+    utw, akt = getattr(stan, "utworzono_ms", None), getattr(stan, "zaktualizowano_ms", None)
+    if utw is not None or akt is not None:
+        meta["czas_gieldy"] = {
+            "utworzono_at": _iso_z_ms(utw),
+            "zaktualizowano_at": _iso_z_ms(akt),
+            "ms_od_przyjecia": (akt - utw) if utw is not None and akt is not None else None,
+        }
 
     # POWOD ODMOWY GIELDY: SUROWY OBOK NASZEJ INTERPRETACJI.
     #

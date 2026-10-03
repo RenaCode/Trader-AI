@@ -1850,21 +1850,41 @@ async def sprawdz(conn, engine: str = "crypto", h: Horizon | None = None) -> int
 
     # KONTROLA STRUKTURALNA: czy datowanie nie twierdzi wczesniejszej wiedzy,
     # niz bylo mozliwe. Cecha swiecy 04:00-08:00 nie mogla byc znana o 04:00.
+    #
+    # I DRUGIE PYTANIE, KTOREGO `ingested_at` NIE UMIE ZADAC: czy decyzja wziela
+    # wartosc, ktora potem zrewidowano. Potok przy poprawce zostawia
+    # `ingested_at = znane_od`, wiec pierwszy warunek przepuszcza rewizje
+    # z definicji; `revised_at` (migracja 0070) to zegar poprawki. Tolerancja
+    # TA SAMA co w `train.load_panel` (dwie swiece), zeby obie strony liczyly
+    # ten sam rozjazd. To NIE jest blad - poprawka swiecy jest uprawniona,
+    # a blokowanie startu silnika za nia nie naprawia niczego - wiec UWAGA, nie
+    # [BŁĄD]. Zapytanie odwoluje sie jednak do kolumny wprost: baza bez 0070
+    # wywraca te kontrole, a z nia start silnika (`--sprawdz && exec ...`) -
+    # tak samo, jak wywraca zapis w `features.insert_values`.
     def kontrola_datowania():
         cur.execute(
             """
-            SELECT count(*) AS n FROM feat.feature_value fv
+            SELECT count(*) FILTER (
+                       WHERE fv.ingested_at < fv.event_time + %s::interval) AS n,
+                   count(*) FILTER (
+                       WHERE fv.revised_at > fv.event_time + 2 * %s::interval)
+                       AS zrewidowane,
+                   count(*) AS wszystkie
+            FROM feat.feature_value fv
             JOIN feat.feature_def fd ON fd.id = fv.feature_def_id
             WHERE fd.params->>'bar' = %s
               AND fv.event_time > now() - interval '7 days'
-              AND fv.ingested_at < fv.event_time + %s::interval
             """,
-            (h.bar, f"{h.bar_minutes} minutes"),
+            (f"{h.bar_minutes} minutes", f"{h.bar_minutes} minutes", h.bar),
         )
-        n = cur.fetchone()["n"]
-        if n:
+        r = cur.fetchone()
+        if r["n"]:
             raise RuntimeError(
-                f"{n} cech datowanych PRZED zamknięciem własnej świecy")
+                f"{r['n']} cech datowanych PRZED zamknięciem własnej świecy")
+        if r["zrewidowane"]:
+            print(f"         UWAGA: {r['zrewidowane']} z {r['wszystkie']} wartości "
+                  f"cech z 7 dni zrewidowano po czasie decyzji — decyzje z tych "
+                  f"świec widziały inną liczbę niż ta, na której uczy się trener")
         return True
 
     probuj("datowanie nie wyprzedza zamknięcia świecy", kontrola_datowania)

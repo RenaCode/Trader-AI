@@ -213,6 +213,18 @@ POWODY_ODMOWY: dict[str, tuple[str, str]] = {
 }
 
 
+def _ms_gieldy(surowy) -> int | None:
+    """Znacznik czasu gieldy (ms od epoki, jako napis) -> int albo None.
+
+    Diagnostyka nie ma prawa wywrocic odczytu stanu zlecenia: wartosc
+    nieczytelna daje None, a nie wyjatek.
+    """
+    try:
+        return int(surowy) if surowy not in (None, "") else None
+    except (TypeError, ValueError):
+        return None
+
+
 def _powod_odmowy(surowy) -> PowodOdmowy | None:
     """`rejectReason` giełdy -> (surowa wartość + nasza interpretacja).
 
@@ -1128,6 +1140,10 @@ class BybitAdapter:
                     # zostawialo `exec.order.reject_reason` NULL-em przy kazdym
                     # odrzuceniu i kazdy z nich wygladal identycznie.
                     powod_odmowy=_powod_odmowy(o.get("rejectReason")),
+                    # Z TEJ SAMEJ ODPOWIEDZI, bez nowego zapytania - patrz
+                    # `StanZlecenia.utworzono_ms`.
+                    utworzono_ms=_ms_gieldy(o.get("createdTime")),
+                    zaktualizowano_ms=_ms_gieldy(o.get("updatedTime")),
                 )
         return None
 

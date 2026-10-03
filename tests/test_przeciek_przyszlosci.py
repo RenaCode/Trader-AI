@@ -19,6 +19,11 @@ wypełnia `ingested_at` wartością `znane_od(event_time)`, więc KAŻDY wiersz,
 który zapisze, przechodzi strażnika treningowego z definicji. Ta straż nie
 chroni przed błędem w liczeniu cechy — chroni wyłącznie przed wierszami
 wpisanymi inną drogą. Milczenie tego strażnika nie jest dowodem na nic.
+
+Od migracji 0070 POPRAWKA wartości ma własną datę (`revised_at`) i trener oraz
+kontrola startowa silnika liczą rewizje po czasie decyzji osobno — to pilnuje
+`tests/test_rewizja_cechy.py`. Tutejsza straż `ingested_at` dalej ich nie widzi
+i nie ma widzieć: rewizja nie jest wartością znaną za późno, tylko inną.
 """
 from datetime import datetime, timedelta, timezone
 from pathlib import Path

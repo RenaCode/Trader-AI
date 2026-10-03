@@ -315,6 +315,14 @@ class StanZlecenia:
     # `exec.order.reject_reason` byla NULL przy KAZDYM odrzuceniu, bo adapter
     # czytal z odpowiedzi status i ilosci, a pole z powodem pomijal.
     powod_odmowy: PowodOdmowy | None = None
+    # ZEGAR GIELDY: kiedy przyjela zlecenie i kiedy zmienila jego stan ostatnio
+    # (Bybit `createdTime` / `updatedTime`, ms od epoki, JEJ zegar). Diagnostyka
+    # odrzucen PostOnly: roznica mowi, jak szybko po przyjeciu gielda je
+    # odrzucila, a `createdTime` wobec naszego `arkusz_wysylki.odczyt_at` - ile
+    # minelo od odczytu ceny do chwili, w ktorej gielda ja ocenila. None = adapter
+    # tego nie podaje (Alpaca) albo pole nie przyszlo; NIE zero.
+    utworzono_ms: int | None = None
+    zaktualizowano_ms: int | None = None
 
     @property
     def czesciowe(self) -> bool:
