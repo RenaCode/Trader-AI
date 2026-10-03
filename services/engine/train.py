@@ -53,7 +53,7 @@ import psycopg
 from psycopg.rows import dict_row
 
 from services.engine.risk_rules import (
-    DEFAULT_LIMITS, MIN_CONFIDENCE, START_EQUITY, position_budget, udzial_budzetu,
+    DEFAULT_LIMITS, MIN_CONFIDENCE, START_EQUITY, position_budget, wielkosc_pozycji,
     wartosc_limitu,
 )
 from services.engine.horizons import DEFAULT_BAR, HORIZONS, Horizon, get as get_horizon
@@ -1155,8 +1155,8 @@ def pyl_toru(cur, kind: str, instruments: list[dict], h: Horizon,
       * cena: NAJWYZSZE zamkniecie w oknie przebiegu (konserwatywnie: pyl
         rosnie z cena przy stalym notionalu),
       * notional strategii: budzet na pozycje z TEJ SAMEJ reguly co symulacja
-        (`position_budget(DEFAULT_LIMITS, ...)`, kapital START_EQUITY) razy
-        `udzial_budzetu(prog)`, gdzie prog to mediana zmierzonych progow
+        (`position_budget(DEFAULT_LIMITS, ...)`, kapital START_EQUITY) przez
+        `wielkosc_pozycji(baza, prog)`, gdzie prog to mediana zmierzonych progow
         (`prog_dla_pylu`; do 2026-10-03 stale 0,25). Liczba instrumentow to
         cale uniwersum przebiegu (w oknie bywa ich mniej, czyli budzet
         wiekszy), a prog lezy ponizej wyniku, przy ktorym transakcja naprawde
@@ -1200,7 +1200,7 @@ def pyl_toru(cur, kind: str, instruments: list[dict], h: Horizon,
     else:
         prog, skad = (prog_dla_pylu(cur, nazwa_modelu) if nazwa_modelu
                       else (PROG_WEJSCIA_POCZATKOWY, "próg początkowy"))
-    notional = float(baza) * udzial_budzetu(prog)
+    notional = float(wielkosc_pozycji(baza, prog)[0])
     # PYL PER INSTRUMENT DO LOGU - karta niesie jedna liczbe (srednia), ale
     # rozrzut miedzy instrumentami jest rzedu 10x i to on mowi, gdzie pomiar
     # demo ma szanse model potwierdzic albo obalic.

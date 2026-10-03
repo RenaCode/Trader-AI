@@ -34,7 +34,7 @@ from services.engine.koszty import (
     stawka_finansowania_na_ulamek, zwroty_po_doplacie,
 )
 from services.engine.risk_rules import (
-    START_EQUITY, udzial_budzetu,
+    START_EQUITY, wielkosc_pozycji,
     DEFAULT_LIMITS, RiskState, evaluate_account, evaluate_limits, position_budget,
 )
 from services.engine.bramki import Bramki, bramki_z_pary
@@ -385,9 +385,11 @@ def z_polowa_spreadu(cena: float, spread_bps: float, kupno: bool) -> float:
 
 
 def _sizing(score: float, price: float, baza: float) -> tuple[float, float]:
-    """Wielkosc zlecenia z REGULY WSPOLNEJ z petla decyzyjna, nie z jej kopii."""
-    notional = baza * udzial_budzetu(score)
-    return notional, notional / price
+    """Wielkosc zlecenia z FUNKCJI WSPOLNEJ z petla decyzyjna, nie z jej kopii.
+
+    Od 2026-10-03 (U-3) takze z jej zaokraglen - patrz `risk_rules.wielkosc_pozycji`.
+    """
+    return wielkosc_pozycji(baza, score, price)
 
 
 def simulate_portfolio(panels: dict[str, list[dict]],

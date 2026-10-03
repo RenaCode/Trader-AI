@@ -726,11 +726,47 @@ def udzial_budzetu(score: float) -> float:
     przyznaniem, ze to kopia. Kopia opisana w komentarzu nadal jest kopia
     i rozjedzie sie przy pierwszej zmianie.
 
-    Zwracamy sam UDZIAL, a nie gotowa wielkosc: petla liczy w Decimal i zaokragla
-    do groszy, symulacja we float. Dzielenie sie sama regula, a nie arytmetyka,
-    nie zmusza zadnej ze stron do zmiany typu.
+    Gotowa wielkosc zlecenia - z ta regula i z arytmetyka petli - liczy
+    `wielkosc_pozycji` nizej. Do 2026-10-03 kazda ze stron mnozyla udzial
+    sama, kazda w innej arytmetyce (U-3).
     """
     return min(1.0, abs(score) * 2)
+
+
+# Zaokraglenia wielkosci zlecenia - te, ktorymi od poczatku liczy petla
+# decyzyjna: kwota do groszy, ilosc do szostego miejsca. Krok gieldowy
+# (`zlecenia.do_kroku_w_dol`) przychodzi dopiero przy skladaniu zlecenia.
+GROSZ = Decimal("0.01")
+KROK_ILOSCI = Decimal("0.000001")
+
+
+def wielkosc_pozycji(baza, score: float, cena=None):
+    """(notional, qty) zlecenia wejscia. JEDNA FUNKCJA dla petli, symulacji i trenera.
+
+    Do 2026-10-03 (audyt Fable U-3) liczyly to trzy kopie o roznej arytmetyce:
+    petla w Decimal z `quantize`, `portfolio._sizing` i `train.py` (pyl) we
+    float bez zaokraglen. Rozjazd papier-symulacja byl maly, ale nikt go nie
+    mierzyl, a kazda zmiana jednej kopii zostawialaby dwie pozostale.
+
+    ARYTMETYKA JEST ZAWSZE TA PRODUKCYJNA: Decimal, kwota do groszy, ilosc do
+    `KROK_ILOSCI`. Typ wyniku idzie za typem `baza`: Decimal dla petli, float
+    dla symulacji - czyli symulacja dostaje dokladnie te liczby, ktore
+    zlozylaby petla, tylko w swoim typie. `float` wchodzi przez `str`, tak jak
+    `udzial_budzetu` od zawsze wchodzil do petli.
+
+    `cena=None` oddaje sama kwote (`qty` None) - trener szacujacy pyl nie zna
+    ceny wejscia, tylko budzet.
+    """
+    dziesietnie = isinstance(baza, Decimal)
+    b = baza if dziesietnie else Decimal(str(baza))
+    notional = (b * Decimal(str(udzial_budzetu(score)))).quantize(GROSZ)
+    qty = None
+    if cena is not None:
+        c = cena if isinstance(cena, Decimal) else Decimal(str(cena))
+        qty = (notional / c).quantize(KROK_ILOSCI)
+    if dziesietnie:
+        return notional, qty
+    return float(notional), (None if qty is None else float(qty))
 
 
 def position_budget(limits: dict[str, dict], n_instruments: int,

@@ -46,7 +46,7 @@ import pytest
 from services.engine.loop import wycen
 from services.engine.risk import RiskKernel
 from services.engine.risk_rules import (
-    DEFAULT_LIMITS, START_EQUITY, position_budget, udzial_budzetu,
+    DEFAULT_LIMITS, START_EQUITY, position_budget, wielkosc_pozycji,
     wartosc_limitu,
 )
 
@@ -427,8 +427,7 @@ def test_CALY_CYKL_na_rachunku_10000_nie_przekracza_limitu():
     zlecone = Decimal(0)
     przepuszczone = 0
     for iid in range(1, INSTRUMENTOW + 1):
-        notional = (baza * Decimal(str(udzial_budzetu(0.9)))).quantize(Decimal("0.01"))
-        qty = notional / CENA
+        notional, qty = wielkosc_pozycji(baza, 0.9, CENA)
         v = k.check(iid, notional, qty)
         if v.verdict == "block":
             continue
