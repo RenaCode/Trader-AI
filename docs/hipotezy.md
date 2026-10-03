@@ -8,7 +8,7 @@ hipoteza z nowym numerem i kolejna próba do licznika N (audyt Fable F-3.3, R3).
 | id | data | hipoteza | kryterium | wynik | decyzja |
 |---|---|---|---|---|---|
 | H-B2 | 2026-10-03 | Odniesienie B2 (momentum przekrojowe z filtrem trendu) jest baseline'em, który ensemble musi pobić | definicja, nie test | — | obowiązuje od pierwszego przebiegu |
-| H-1 | 2026-10-03 | Ensemble 4h ma przewagę pod uczciwym modelem wypełnień (STOP/GO 1) | zwrot/rundę po dopłacie > 0 w ≥ 3/5 przesunięć **i** bije B2 przy tej samej ekspozycji w ≥ 60% okien | patrz niżej | patrz niżej |
+| H-1 | 2026-10-03 | Ensemble 4h ma przewagę pod uczciwym modelem wypełnień (STOP/GO 1) | zwrot/rundę po dopłacie > 0 w ≥ 3/5 przesunięć **i** bije B2 przy tej samej ekspozycji w ≥ 60% okien | zwrot/rundę −11,2 pb (0/5 przesunięć > 0), bije B2 w 61% okien | **STOP** — kalibracja wag ensemble zamknięta, dalej tylko R4 |
 
 ---
 
@@ -70,6 +70,97 @@ Zapisane przed pomiarem.
   poprawce z 02.10 niezmierzona) i czy godzina to właściwe okno życia zlecenia.
   Wynik przy innych wartościach to osobna hipoteza.
 
-### Wynik H-1
+### Wynik H-1 (2026-10-03)
 
-(dopisany po przebiegu, poniżej)
+Przebieg: panel z `trader_prod_kopia` (dump 20261003T043403Z, koniec okna 2026-10-03
+04:34 UTC, 10 instrumentów `tradeable`, 1402 dni), `scripts/eksperyment.py --kind spot_eu
+--limit --trials 60 --wybor ic`, przesunięcia `--days` 1402…1398 (−2…+2 doby wokół 1400
+z `trainerCron`). Zero połączeń z produkcją. Uwaga do parametrów: rejestr wyżej wymieniał
+1400…1396; pomiar poszedł na 1402…1398 (symetrycznie wokół wartości z `values.yaml`),
+kryterium bez zmian.
+
+**(a) model wypełnień sprzed zmiany** (limit po `close`, cała następna świeca 4h):
+
+| --days | okna | dodatnie | transakcji | zwrot/rundę po dopłacie (pb) | DSR | wypełnialność | bije B2 |
+|---|---|---|---|---|---|---|---|
+| 1402 | 39 | 28 (72%) | 1597 | +54,09 | 0,887 | 100,0% | 31/39 (79%) |
+| 1401 | 39 | 28 (72%) | 1583 | +46,78 | 0,728 | 100,0% | 32/39 (82%) |
+| 1400 | 40 | 30 (75%) | 1572 | +48,85 | 0,795 | 100,0% | 30/40 (75%) |
+| 1399 | 39 | 30 (77%) | 1529 | +44,05 | 0,631 | 100,0% | 29/39 (74%) |
+| 1398 | 40 | 26 (65%) | 1535 | +46,32 | 0,714 | 100,0% | 28/40 (70%) |
+
+**(b) model pesymistyczny** (`--egzekucja-pesymistyczna --opoznienie 20`):
+
+| --days | okna | dodatnie | transakcji | zwrot/rundę po dopłacie (pb) | DSR | wypełnialność | bije B2 |
+|---|---|---|---|---|---|---|---|
+| 1402 | 38 | 21 (55%) | 1334 | −11,64 | 0,0000 | 76,1% | 25/38 (66%) |
+| 1401 | 36 | 19 (53%) | 1300 | −13,95 | 0,0000 | 76,1% | 23/36 (64%) |
+| 1400 | 37 | 19 (51%) | 1283 | −10,72 | 0,0000 | 75,7% | 21/37 (57%) |
+| 1399 | 38 | 18 (47%) | 1291 | −8,61 | 0,0001 | 76,3% | 25/38 (66%) |
+| 1398 | 38 | 18 (47%) | 1279 | −10,88 | 0,0000 | 76,3% | 21/38 (55%) |
+
+Zbiorczo po pięciu przesunięciach (średnia / min / max):
+
+| miara | (a) dziś | (b) pesymistyczny |
+|---|---|---|
+| zwrot/rundę po dopłacie 9,27 pb (pb) | +48,0 / +44,1 / +54,1 | **−11,2 / −14,0 / −8,6** |
+| przesunięcia ze zwrotem > 0 | 5/5 | **0/5** |
+| okna dodatnie (Sharpe > 0) | 72% (65–77%) | 51% (47–55%) |
+| DSR (N = 59) | 0,75 (0,63–0,89) | 0,0000 (0,0000–0,0001) |
+| wypełnialność symulowana | 100% | 76% (75,7–76,3%) |
+| koszt niewypełnienia (składnik karty, POMIAR) | — | 47 pb/rundę (43–49) |
+| bije B1 przy tej samej ekspozycji | 75% | 51% |
+| bije B2 przy tej samej ekspozycji | 150/197 = 76% | 115/187 = **61%** |
+| bije B3 przy tej samej ekspozycji | 80% | 66% |
+
+Odniesienia w tych samych oknach (średnio na okno 30 dni, wariant b; w wariancie a różnice < 0,3 pp):
+
+| | średni zwrot w oknie (% kapitału) | średnia ekspozycja | okna z zyskiem |
+|---|---|---|---|
+| strategia (b) | −0,02 | 1,6% | 53% |
+| strategia (a) | +0,23 | 1,5% | 73% |
+| B0 4% p.a. | +0,33 | 100% | 100% |
+| B1 koszyk | +2,68 | 100% | 50% |
+| B2 momentum + filtr | +4,37 | 53% | 45% |
+| B3 trend BTC/ETH | +0,22 | 4,9% | 35% |
+
+**Werdykt STOP/GO 1: STOP.** Zwrot na rundę po dopłacie > 0 w 0 z 5 przesunięć (próg 3).
+Warunek B2 formalnie spełniony (61% ≥ 60%), ale to nie jest przewaga: B2 zarabia
+skośnie (45% okien z zyskiem, średnio +4,4% w oknie), więc strategia przy ekspozycji 1,6%
+„bije” je w każdym oknie, w którym B2 straciło, nawet tracąc sama.
+
+Co mówi pomiar:
+
+- Cała przewaga z wariantu (a) (+48 pb/rundę) siedzi w założeniu o wypełnieniach.
+  Wypełnialność 76% w symulacji (produkcja demo ok. 65%, więc model jest wciąż
+  łagodniejszy od rynku), a ruch, który przepada na niewypełnionych wejściach, to
+  średnio ok. 2% w 3 świece: wypełniają się wejścia, przy których cena poszła przeciw
+  nam, a uciekają te, które by zarobiły (selekcja negatywna, F-3.2).
+- DSR spada z 0,75 do zera. Żadne przesunięcie nie zbliża się do progu 0,95.
+- Status we wszystkich 10 przebiegach `learning`, więc obecna bramka nie
+  wypromowałaby tego modelu w żadnym wariancie. Wynik (a) był jednak czytany jako
+  „blisko progu”, a to nie była prawda.
+
+Ograniczenia (nie zmieniają werdyktu, są kandydatami na osobne hipotezy):
+
+- Wyjścia w modelu (b) też są zleceniami z limitem żyjącymi godzinę, a niewypełnione
+  czekają do następnej decyzji. Produkcja od T6 (41e6649) po odrzuceniu PostOnly ponawia
+  wyjście i przechodzi na takera. Model (b) jest więc dla wyjść surowszy niż produkcja.
+  Wpływ tej różnicy NIE jest zmierzony. Koszt niewypełnienia (47 pb) liczony jest
+  z utraconych **wejść**, a wyjście takerem na `spot_eu` kosztuje 0,25% zamiast stawki
+  makera, więc model „wyjście zawsze wypełnione takerem” nie musi dać wyniku lepszego.
+  Do sprawdzenia jako osobna hipoteza (wariant modelu z wyjściem T6).
+- Opóźnienie 20 min i godzinne okno życia zlecenia są przyjęte, nie zmierzone (patrz wyżej).
+- Pomiar na jednej kopii bazy z jednego dnia; `n_selekcji` = 59 z eksportu.
+
+**Decyzja (zgodnie z kryterium zapisanym przed pomiarem):** kalibracja wag ensemble 4h
+zamknięta; dalsza praca badawcza tylko w torze R4. Wariant (b) jest od tej chwili
+domyślnym modelem do pomiarów; włączenie `--egzekucja-pesymistyczna --opoznienie 20`
+w `trainerCron` to decyzja właściciela (audyt T1: „w CronJobie **on** po akceptacji”).
+
+Odtworzenie pomiaru: `scripts/odtworz_lokalnie.sh` (kopia lokalna) →
+`scripts/eksport_paneli.py --days 1402 --do 2026-10-03T04:34:03+00:00` →
+`scripts/eksperyment.py --panel … --przesuniecia 1402,1401,1400,1399,1398 --kind spot_eu
+--limit [--egzekucja-pesymistyczna --opoznienie 20]`. Równoważność pliku z bazą
+sprawdzona tego samego dnia: przebieg `--days 1400` z bazy i z pliku wyeksportowanego
+na tę samą chwilę dał identyczne `PODSUMOWANIE_JSON`.
