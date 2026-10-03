@@ -152,3 +152,26 @@ def test_README_podaje_TAKZE_date_pomiaru():
     assert m, "nie znaleziono wpisu o testach jednostkowych"
     assert re.search(r"\d{2}\.\d{2}\.\d{4}|\d{4}-\d{2}-\d{2}", m.group(0)), (
         f"wpis o liczbie testów nie podaje daty pomiaru: {m.group(0)!r}")
+
+
+def test_pytest_q_wypisuje_linie_podsumowania(tmp_path):
+    """`addopts = -q` w `pytest.ini` plus `-q` z linii poleceń daje `-qq`,
+    a przy `-qq` pytest NIE wypisuje linii „N passed, M skipped”.
+
+    Polecenie z komentarzy w testach (`pytest -q tests/...`) i z audytów kończyło
+    się więc samymi kropkami — wynik trzeba było zgadywać z kodu wyjścia.
+    Sprawdzone uruchomieniem, nie odczytem pliku: liczy się to, co widzi
+    człowiek.
+    """
+    import subprocess
+    import sys
+
+    (tmp_path / "test_kanarek.py").write_text("def test_ok():\n    pass\n")
+    wynik = subprocess.run(
+        [sys.executable, "-B", "-m", "pytest", "-q", "-p", "no:cacheprovider",
+         "-c", str(KORZEN / "pytest.ini"), "--rootdir", str(tmp_path),
+         str(tmp_path / "test_kanarek.py")],
+        capture_output=True, text=True, timeout=60)
+    assert wynik.returncode == 0, wynik.stdout + wynik.stderr
+    assert "1 passed" in wynik.stdout, (
+        f"`pytest -q` nie wypisał podsumowania:\n{wynik.stdout}")
