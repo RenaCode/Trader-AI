@@ -1,4 +1,4 @@
--- 0076: nowy powód holdu `decyzja_przeterminowana` (audyt Fable 2026-10-03, F-4.4 / T7).
+-- 0080: nowy powód holdu `decyzja_przeterminowana` (audyt Fable 2026-10-03, F-4.4 / T7).
 --
 -- CO SIĘ ZMIENIA W ZACHOWANIU
 --

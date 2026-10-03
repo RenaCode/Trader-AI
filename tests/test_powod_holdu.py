@@ -37,7 +37,7 @@ MIGRACJA = KORZEN / "db/migrations/0040_powod_holdu.sql"
 # kod, migracja i słownik opisów mówiły to samo.
 POWODY = {"slaby_wynik", "niska_pewnosc", "short_niewykonalny",
           "trzyma_pozycje", "wstrzymanie_ryzykiem", "rezim_bez_progu",
-          # 0076: wejscie po ponad 20 min od zamkniecia swiecy (audyt F-4.4).
+          # 0080: wejscie po ponad 20 min od zamkniecia swiecy (audyt F-4.4).
           "decyzja_przeterminowana"}
 
 
@@ -100,11 +100,11 @@ def test_kazda_galaz_konczaca_sie_holdem_ustawia_powod():
                 f"zbioru dopuszczonego przez CHECK w migracji 0040")
     # Bez tego licznika test przechodzi także wtedy, gdy CAŁY blok wyboru akcji
     # zniknie z pliku - czyli nie sprawdza niczego.
-    # 7 od 2026-10-03: `decyzja_przeterminowana` (0076).
+    # 7 od 2026-10-03: `decyzja_przeterminowana` (0080).
     assert holdy == 7, (
         f"gałęzi kończących się holdem jest {holdy}, a nie 7 - jeśli to celowa "
         f"zmiana, popraw liczbę i sprawdź, czy CHECK w migracji (0040, ostatnio "
-        f"przepisany w 0076) nadal pokrywa wszystkie powody")
+        f"przepisany w 0080) nadal pokrywa wszystkie powody")
 
 
 def test_powody_w_kodzie_migracji_i_opisach_to_ten_sam_zbior():
