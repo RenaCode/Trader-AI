@@ -150,9 +150,46 @@ def test_workery_i_joby_bez_ruchu_przychodzacego():
 
 
 @z_helmem
-def test_tylko_Ingress_bez_Egress():
+def test_polityki_ingress_nie_maja_egress():
     for nazwa, spec in _polityki(_render()).items():
-        assert spec["policyTypes"] == ["Ingress"] and "egress" not in spec, nazwa
+        if "egress" not in nazwa:
+            assert spec["policyTypes"] == ["Ingress"] and "egress" not in spec, nazwa
+
+
+# ------------------------------------------------- egress (2026-10-03)
+SIEC_DOMOWA = ["192.168.3.0/24", "10.13.13.0/24"]
+
+
+@z_helmem
+def test_egress_obejmuje_KAZDY_pod_chartu():
+    """Audyt 03.10: pod tradera dochodzil przez wg0 do UDM, TV i Fibaro.
+    Pod pominiety przez selektor egress zostaje z ta sama luka."""
+    docs = _render()
+    p = _polityki(docs)
+    selektory = [p["trader-egress"]["podSelector"], p["trader-egress-zadania"]["podSelector"]]
+    pody = list(_pody(docs))
+    assert len(pody) >= 20
+    for nazwa, etykiety, _ in pody:
+        assert any(_pasuje(etykiety, s) for s in selektory), f"{nazwa} bez polityki egress"
+
+
+@z_helmem
+def test_egress_blokuje_dom_i_zostawia_reszte():
+    p = _polityki(_render())
+    for nazwa in ("trader-egress", "trader-egress-zadania"):
+        spec = p[nazwa]
+        assert spec["policyTypes"] == ["Egress"] and "ingress" not in spec
+        dns, klaster, swiat = spec["egress"]
+        assert dns["to"][0]["podSelector"] == {"matchLabels": {"k8s-app": "kube-dns"}}
+        assert {(x["protocol"], x["port"]) for x in dns["ports"]} == {("UDP", 53), ("TCP", 53)}
+        assert klaster == {"to": [{"namespaceSelector": {}}]}
+        assert swiat == {"to": [{"ipBlock": {"cidr": "0.0.0.0/0", "except": SIEC_DOMOWA}}]}
+
+
+@z_helmem
+def test_flaga_egress_wylacza_tylko_egress():
+    p = _polityki(_render("networkPolicy.egress.enabled=false"))
+    assert p and not [n for n in p if "egress" in n]
 
 
 @z_helmem

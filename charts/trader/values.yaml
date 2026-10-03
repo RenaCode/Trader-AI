@@ -200,6 +200,21 @@ networkPolicy:
     namespace: kube-system
     podLabels:
       app.kubernetes.io/name: traefik
+  # EGRESS (2026-10-03): pody tego chartu NIE dochodza do sieci domowej.
+  # Wezel ma trase do 192.168.3.0/24 (LAN: UDM, TV, Fibaro) i 10.13.13.0/24
+  # (tunel WireGuard; 10.13.13.1 to wg0 SAMEGO wezla) przez wg0, a UDM wpuszcza
+  # cale 10.13.13.0/24 - audyt 03.10 doszedl z poda tradera do UDM :443, TV
+  # :5555 i Fibaro :80. Reszta ruchu wychodzacego zostaje bez zmian: DNS,
+  # pody klastra, internet, API klastra. Reguly: `trader.regulyEgress`
+  # w _helpers.tpl. Z 10.13.13.1 nie korzysta zaden pod (adres sluzy tylko
+  # ruchowi Z domu do Traefika), wiec blokowane jest cale /24.
+  #
+  # Szybkie wycofanie samego egress: `egress.enabled: false`.
+  egress:
+    enabled: true
+    siecDomowa:
+      - 192.168.3.0/24
+      - 10.13.13.0/24
 
 # MODELE I LIMITY ANALIZY WIADOMOSCI.
 #

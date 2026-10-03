@@ -193,3 +193,43 @@ w przestrzeni nazw" - czyli razem z kidwatchem i dietetykiem. Klucz ten sam co
 {{- define "trader.etykietyZadania" -}}
 trader.renacode.com/component: job
 {{- end -}}
+
+{{/*
+REGULY EGRESS - WSZYSTKO POZA SIECIA DOMOWA (2026-10-03).
+
+Wezel ma trase 192.168.3.0/24 i 10.13.13.0/24 przez wg0 (tunel do domu),
+a UDM wpuszcza cale 10.13.13.0/24 - bez tej polityki kazdy pod dochodzil do
+UDM, telewizora i Fibaro. Trzy reguly, suma (OR):
+
+  1. DNS do CoreDNS (UDP i TCP 53),
+  2. dowolny pod w klastrze (`namespaceSelector: {}`) - ruch wewnatrz
+     klastra bez zmian; kube-router liczy egress PO DNAT kube-proxy, wiec
+     ClusterIP jest juz adresem poda,
+  3. kazdy adres IPv4 poza `networkPolicy.egress.siecDomowa` - internet oraz
+     adres WEZLA, na ktory DNAT-uje sie ClusterIP API serwera (10.43.0.1:443
+     -> :6443) i kubelet (:10250).
+
+ipBlock w kube-routerze dotyczy KAZDEGO adresu docelowego, takze adresow
+podow (ipset hash:net, wyjatki jako wpisy `nomatch`, /0 rozbijane na dwa /1 -
+pkg/controllers/netpol/policy.go, evalIPBlockPeer). Regula 2 zostaje mimo to:
+wedlug specyfikacji NetworkPolicy ipBlock nie musi obejmowac podow, wiec ruch
+w klastrze nie powinien od tego zalezec.
+*/}}
+{{- define "trader.regulyEgress" -}}
+- to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+      podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+  ports:
+    - { protocol: UDP, port: 53 }
+    - { protocol: TCP, port: 53 }
+- to:
+    - namespaceSelector: {}
+- to:
+    - ipBlock:
+        cidr: 0.0.0.0/0
+        except: {{- toYaml .Values.networkPolicy.egress.siecDomowa | nindent 10 }}
+{{- end -}}
