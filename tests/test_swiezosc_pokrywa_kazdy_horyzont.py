@@ -86,7 +86,9 @@ def tory() -> list[dict]:
     listą i rozjechałaby się cicho.
     """
     wynik = [dict(engine="crypto", horyzonty=_horyzonty_crypto())]
-    if VALUES["trainerCron"]["equity"]["enabled"]:
+    # Equity jest pilnowane, gdy chodzi jego potok cech - nie gdy chodzi trening
+    # (trening bywa wstrzymany, a potok i silnik dalej pracuja; 2026-10-03).
+    if VALUES["workers"]["features-equity"]["enabled"]:
         rowne = VALUES["trainerCron"]["equity"]["horyzonty"]
         wynik.append(dict(engine="equity", horyzonty=rowne))
     return wynik

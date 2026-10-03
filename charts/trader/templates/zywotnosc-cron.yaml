@@ -34,7 +34,8 @@ nie jest miara awarii potoku, bo po otwarciu sesji najnowsza swieca pochodzi
 z poprzedniego zamkniecia (zmierzone: 1050 min przy progu 180).
 */}}
 {{- $tory := list (dict "engine" "crypto" "horyzonty" (.Values.trainerCron.horyzonty | default (list .Values.trainerCron.bar))) }}
-{{- if .Values.trainerCron.equity.enabled }}
+{{- /* Equity pilnowane, gdy chodzi potok cech, nie trening (trening bywa wstrzymany, 2026-10-03). */}}
+{{- if (index .Values.workers "features-equity").enabled }}
 {{- $tory = append $tory (dict "engine" "equity" "horyzonty" .Values.trainerCron.equity.horyzonty) }}
 {{- end }}
 # Czujka zywotnosci silnikow.
