@@ -41,6 +41,7 @@ import os
 import random
 import statistics
 from collections import Counter
+from dataclasses import replace as dc_replace
 from decimal import Decimal
 import sys
 from datetime import datetime, timedelta, timezone
@@ -60,13 +61,17 @@ from services.engine.bramki import (
     EXIT_RATIO, MIN_PROB_PROGU, PROG_WEJSCIA_POCZATKOWY, Bramki, bramki_z_prob,
 )
 from services.engine.portfolio import (
-    Egzekucja, kup_i_trzymaj, metrics as portfolio_metrics, precompute_panels,
-    simulate_portfolio, udzial_powtornych_wejsc, wynik_po_doplacie,
+    Egzekucja, indeks_swiec, kup_i_trzymaj, metrics as portfolio_metrics,
+    precompute_panels, simulate_portfolio, udzial_powtornych_wejsc,
+    wynik_po_doplacie,
 )
 from services.engine.koszty import (
-    NIEZMIERZONE, Karta, karta_rundy, opis_karty, zwroty_po_doplacie,
+    NIEZMIERZONE, Karta, karta_rundy, koszt_niewypelnienia, opis_karty,
+    zwroty_po_doplacie,
 )
-from services.engine.spread import opis_pomiaru, zmierz_spread
+from services.engine.spread import Pomiar, opis_pomiaru, zmierz_spread
+from services.engine import baseline as odniesienia
+from services.engine import panel_plik
 from services.engine.statystyka import (
     MIN_PROB_ROZRZUTU, PROG_DSR, deflowany_sharpe, profit_factor, rozklad,
     rozrzut_sharpeow, sharpe as sharpe_proby, sharpe_dla_dsr, spearman, wilson,
@@ -1135,6 +1140,7 @@ def pyl_toru(cur, kind: str, instruments: list[dict], h: Horizon,
              od: datetime, do: datetime,
              zakladane_pozycje: int | None,
              nazwa_modelu: str | None = None,
+             plik: dict | None = None,
              ) -> tuple[float | None, float | None, list[str]]:
     """Skladnik „pyl" karty dla strategii i dla kup-i-trzymaj, plus wydruk.
 
@@ -1164,9 +1170,20 @@ def pyl_toru(cur, kind: str, instruments: list[dict], h: Horizon,
     from services.engine.koszty import koszty as cennik, pyl_per_instrument, pyl_rundy
     if not cennik(kind).prowizja_w_bazowej or not instruments:
         return None, None, []
-    cur.execute(_SQL_KROK_I_CENA, (h.source_timeframe, od, do,
-                                   [i["id"] for i in instruments]))
-    wiersze = cur.fetchall() or []
+    if plik is not None:
+        # Z pliku panelu: krok z eksportu, cena maksymalna z tych samych swiec
+        # zrodlowych i w tym samym przedziale (BETWEEN), co zapytanie nizej.
+        wiersze = []
+        for i in instruments:
+            zam = [c["close"] for c in plik.get("swiece_1h", {}).get(i["symbol"], [])
+                   if od <= c["t"] <= do]
+            wiersze.append({"symbol": i["symbol"],
+                            "lot_size": plik["kroki"].get(i["symbol"]),
+                            "cena_max": max(zam) if zam else None})
+    else:
+        cur.execute(_SQL_KROK_I_CENA, (h.source_timeframe, od, do,
+                                       [i["id"] for i in instruments]))
+        wiersze = cur.fetchall() or []
     kroki = {r["symbol"]: (float(r["lot_size"]) if r.get("lot_size") is not None
                            else None) for r in wiersze}
     ceny = {r["symbol"]: (float(r["cena_max"]) if r.get("cena_max") is not None
@@ -1178,8 +1195,11 @@ def pyl_toru(cur, kind: str, instruments: list[dict], h: Horizon,
     baza = position_budget(DEFAULT_LIMITS, n, Decimal(str(START_EQUITY)))
     if baza is None:
         return None, None, ["  pył: budżetu na pozycję nie da się policzyć — NIEZMIERZONY"]
-    prog, skad = (prog_dla_pylu(cur, nazwa_modelu) if nazwa_modelu
-                  else (PROG_WEJSCIA_POCZATKOWY, "próg początkowy"))
+    if plik is not None:
+        prog, skad = plik["prog_pylu"]
+    else:
+        prog, skad = (prog_dla_pylu(cur, nazwa_modelu) if nazwa_modelu
+                      else (PROG_WEJSCIA_POCZATKOWY, "próg początkowy"))
     notional = float(baza) * udzial_budzetu(prog)
     # PYL PER INSTRUMENT DO LOGU - karta niesie jedna liczbe (srednia), ale
     # rozrzut miedzy instrumentami jest rzedu 10x i to on mowi, gdzie pomiar
@@ -1589,6 +1609,38 @@ def rewizje_po_decyzji(panels: dict[str, list[dict]]) -> tuple[int, int]:
     return zrewidowane, wszystkie
 
 
+def load_swiece_wykonania(cur, instrument_id: int, since: datetime,
+                          until: datetime) -> list[dict]:
+    """Swiece 1h instrumentu - material modelu wypelnien z opoznieniem.
+
+    Okno o dobe SZERSZE z obu stron niz panel: wysylka po ostatniej swiecy
+    decyzyjnej i godzina po niej wypadaja juz za `until`, a cena wysylki
+    potrzebuje zamkniecia godziny poprzedniej.
+    """
+    cur.execute(
+        "SELECT event_time AS t, open, high, low, close FROM market.candle"
+        " WHERE instrument_id = %s AND timeframe = '1h'"
+        "   AND event_time BETWEEN %s AND %s ORDER BY event_time",
+        (instrument_id, since - timedelta(days=1), until + timedelta(days=1)))
+    return [{"t": r["t"], "open": float(r["open"]), "high": float(r["high"]),
+             "low": float(r["low"]), "close": float(r["close"])}
+            for r in cur.fetchall()]
+
+
+def n_konfiguracji_z_listy(konfiguracje: list[str], params: dict) -> int:
+    """N selekcji w przebiegu z PLIKU: rozne `params` zakonczonych wersji
+    (zapisane przy eksporcie) plus ten przebieg - to samo, co `n_konfiguracji`
+    liczy w bazie z `mv_id` biezacego przebiegu."""
+    return len(set(konfiguracje) | {panel_plik.kanoniczne_params(params)})
+
+
+def wypelnialnosc_symulacji(wypelnione: int, niewypelnione: int) -> float | None:
+    """Ulamek zlecen z limitem, ktore w symulacji weszly - ta sama definicja co
+    `poslizg.wypelnialnosc` na produkcji (wypelnione / rozstrzygniete)."""
+    razem = wypelnione + niewypelnione
+    return wypelnione / razem if razem else None
+
+
 def atr_threshold(panel: list[dict]) -> float | None:
     vals = [r["f"]["atr_pct"] for r in panel if "atr_pct" in r["f"]]
     if len(vals) < 50:
@@ -1931,8 +1983,16 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
           zgoda_na_promocje: bool = False,
           spread_bps: float | None = None,
           spread_nasza_ksiega: bool = True,
-          progi_per_rezim: bool = True) -> None:
-    cur = conn.cursor()
+          progi_per_rezim: bool = True,
+          panel: dict | None = None) -> dict:
+    # `panel` - dane z `panel_plik.wczytaj` (harness offline, `--panel`).
+    # Wtedy NIC nie idzie do bazy: `conn` moze byc None, a wszystko, co
+    # przebieg z bazy czyta, przychodzi z pliku. Zapisy pomijamy, bo przebieg
+    # z pliku jest z definicji suchy.
+    plik = panel
+    if plik is not None and not sucho:
+        raise ValueError("przebieg z pliku panelu (--panel) jest zawsze suchy")
+    cur = conn.cursor() if plik is None else None
     rng = random.Random(SEED)
 
     # PRZEBIEG SUCHY NIE ZOSTAWIA W BAZIE NICZEGO (audyt Fable F-2.4).
@@ -1949,18 +2009,31 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
     # przebiegu suchego rownolegly trening tego samego modelu czeka na wolny
     # numer wersji (UNIQUE (model_id, version)) - przebiegi suche sa reczne.
     def _utrwal():
+        if conn is None:
+            return
         if sucho:
             conn.rollback()
         else:
             conn.commit()
-    now = datetime.now(timezone.utc)
+    now = datetime.now(timezone.utc) if plik is None else plik["do"]
+    egzekucja = egzekucja or Egzekucja()
+    z_godzin = bool(egzekucja.opoznienie_min or egzekucja.pesymistyczna)
 
     # `tradeable` decyduje o uniwersum produkcyjnym - ta sama flaga, ktora czyta
     # petla decyzyjna (0020). Flaga --instrumenty sluzy WYLACZNIE eksperymentom
     # i zaweza to, co juz z bazy wyszlo; nie potrafi dodac niczego z powrotem.
-    cur.execute("SELECT id, symbol, quote_ccy FROM ref.instrument WHERE engine=%s AND active"
-                " AND tradeable AND kind <> 'perp' ORDER BY symbol", (engine,))
-    instruments = cur.fetchall()
+    if plik is not None:
+        if plik["engine"] != engine or plik["bar"] != h.bar:
+            raise SystemExit(f"plik panelu jest dla {plik['engine']}/{plik['bar']}, "
+                             f"przebieg dla {engine}/{h.bar}")
+        if days > plik["dni"]:
+            raise SystemExit(f"--days {days} wychodzi poza plik panelu "
+                             f"({plik['dni']} dni do {plik['do']:%Y-%m-%d %H:%M})")
+        instruments = list(plik["instrumenty"])
+    else:
+        cur.execute("SELECT id, symbol, quote_ccy FROM ref.instrument WHERE engine=%s AND active"
+                    " AND tradeable AND kind <> 'perp' ORDER BY symbol", (engine,))
+        instruments = cur.fetchall()
     # NADPISANIE uniwersum na potrzeby eksperymentu.
     #
     # Bez tej flagi trener bierze uniwersum decyzyjne z bazy (`tradeable`) - to
@@ -1972,9 +2045,11 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
     # Dlatego flaga wymaga --sucho: przebieg na uniwersum, ktorego produkcja nie
     # obstawia, nie moze promowac wersji modelu.
     if tylko:
-        cur.execute("SELECT id, symbol, quote_ccy FROM ref.instrument WHERE engine=%s AND active"
-                    " AND kind <> 'perp' ORDER BY symbol", (engine,))
-        instruments = cur.fetchall()
+        # Z pliku: wylacznie to, co wyeksportowano (uniwersum `tradeable`).
+        if plik is None:
+            cur.execute("SELECT id, symbol, quote_ccy FROM ref.instrument WHERE engine=%s AND active"
+                        " AND kind <> 'perp' ORDER BY symbol", (engine,))
+            instruments = cur.fetchall()
         znane = {i["symbol"] for i in instruments}
         brakujace = sorted(set(tylko) - znane)
         if brakujace:
@@ -2038,6 +2113,9 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
     # nieskorygowany szereg wyglada jak szereg z gwaltownym ruchem. Nazwa
     # znacznika pochodzi z modulu, ktory o korekcie DECYDUJE (adapter Alpaki) -
     # jedna nazwa w jednym miejscu, zamiast dwoch literalow do rozjechania.
+    if engine == "equity" and plik is not None:
+        raise SystemExit("panel z pliku dla equity nieobsługiwany — bramka korekty "
+                         "podziałów czyta znacznik z bazy")
     if engine == "equity":
         from services.exchanges.alpaca import ZNACZNIK_KOREKTY_PODZIALOW
         # PYTAMY O DOKLADNIE TEN ZBIOR, KTORY WEJDZIE DO TRENINGU (takze po
@@ -2083,10 +2161,12 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
     # wzial liczbe. Gdy pomiar idzie z bazy, flage USTAWIA POMIAR: to on wie,
     # czy okno siega przed `spread.DATA_WLASNEJ_KSIEGI` i czy wszystkie
     # instrumenty byly `tradeable`.
+    pomiar = None
     if spread_bps is None:
-        pomiar = zmierz_spread(cur, engine, h.bar, h.source_timeframe,
-                               h.bar_minutes, [i["id"] for i in instruments],
-                               now - timedelta(days=days), now)
+        pomiar = (zmierz_spread(cur, engine, h.bar, h.source_timeframe,
+                                h.bar_minutes, [i["id"] for i in instruments],
+                                now - timedelta(days=days), now)
+                  if plik is None else Pomiar(**plik["spread"]))
         if pomiar.bps is not None:
             spread_bps = pomiar.bps
             spread_nasza_ksiega = pomiar.nasza_ksiega
@@ -2102,10 +2182,37 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
     # Tylko do logu: symulacja nadal liczy cale uniwersum, bo regula patrzy na
     # biezacy arkusz, a okna WF siegaja lat wstecz - wykluczenie dzisiejszym
     # spreadem w 2023 roku byloby selekcja z przyszlosci.
-    wykluczone = za_szeroki_spread(srednie_spready(
-        cur, [i["id"] for i in instruments], h.bar, now))
+    # Z pliku panelu tej liczby nie ma (arkusz z 7 dni przed eksportem) - log
+    # i tak niczego w symulacji nie zmienia.
+    wykluczone = (za_szeroki_spread(srednie_spready(
+        cur, [i["id"] for i in instruments], h.bar, now)) if plik is None else {})
     for linia in opis_wykluczen(wykluczone, {i["id"]: i["symbol"] for i in instruments}):
         print(f"  {linia} — produkcja nie wchodzi, symulacja WF go liczy")
+
+    # SPREAD PER INSTRUMENT DO MODELU WYPELNIEN (`--egzekucja-pesymistyczna`).
+    # Ta sama srednia per instrument, z ktorej powstala liczba karty - ale
+    # w modelu wypelnien liczy sie spread TEGO instrumentu (NEAR ~21 pb wobec
+    # BTC ponizej 1 pb). Instrument bez pomiaru dostaje srednia uniwersum,
+    # wypisana z nazwy; spread podany z linii polecen idzie rowno do wszystkich.
+    if egzekucja.pesymistyczna:
+        po_id = pomiar.per_id if pomiar is not None else {}
+        spready = {}
+        bez = []
+        for i in instruments:
+            if i["id"] in po_id:
+                spready[i["symbol"]] = po_id[i["id"]]
+            else:
+                spready[i["symbol"]] = spread_bps or 0.0
+                bez.append(i["symbol"])
+        egzekucja = dc_replace(egzekucja, spread_per_instrument=spready)
+        print("  Model wypełnień PESYMISTYCZNY: limit z ceny 1h po opóźnieniu "
+              f"{egzekucja.opoznienie_min} min ± pół spreadu instrumentu, "
+              "wypełnienie tylko w godzinie po wysyłce")
+        print("    spread per instrument (pb): " + "  ".join(
+            f"{s} {v:.2f}" for s, v in sorted(spready.items())))
+        if bez:
+            print(f"    bez pomiaru, średnia uniwersum {spread_bps or 0.0:.2f} pb: "
+                  f"{', '.join(sorted(bez))}")
 
     # KARTA KOSZTU, NIE JEDNA LICZBA. Wymienia z nazwy skladniki, ktorych
     # symulacja nie nalicza, zamiast wliczac je jako zera - patrz `koszty.py`.
@@ -2113,8 +2220,9 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
     # zamienilaby tu "nie wiem" na "wiem i wynosi tyle".
     pyl, pyl_odniesienia, linie_pylu = pyl_toru(
         cur, kind, instruments, h, now - timedelta(days=days), now,
-        zakladane_pozycje, f"{engine}_signal_weighting_{h.bar}")
-    karta = karta_rundy(kind, (egzekucja or Egzekucja()).limit,
+        zakladane_pozycje, f"{engine}_signal_weighting_{h.bar}",
+        plik=plik)
+    karta = karta_rundy(kind, egzekucja.limit,
                         spread_bps=spread_bps,
                         spread_nasza_ksiega=spread_nasza_ksiega, pyl=pyl)
     for linia in opis_karty(karta):
@@ -2178,10 +2286,14 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
     # powiedziane wprost: cichy brak sygnalu wyglada jak sygnal bez tresci.
     waluta_symbolu = {i["symbol"]: i["quote_ccy"] for i in instruments}
     fp = odcisk([i["symbol"] for i in instruments])
-    cur.execute("SELECT count(*) AS n FROM feat.feature_def"
-                " WHERE active AND params->>'bar' = %s AND params->>'uniwersum' = %s",
-                (h.bar, fp))
-    if not cur.fetchone()["n"]:
+    if plik is not None:
+        przekroj = plik["przekroj_policzony"]
+    else:
+        cur.execute("SELECT count(*) AS n FROM feat.feature_def"
+                    " WHERE active AND params->>'bar' = %s AND params->>'uniwersum' = %s",
+                    (h.bar, fp))
+        przekroj = cur.fetchone()["n"]
+    if not przekroj:
         print(f"  UWAGA: brak cech przekrojowych dla tego uniwersum (odcisk {fp}).")
         print("         Siła względna będzie martwa. Policz je najpierw:")
         print(f"         python services/ingest/features.py --bar {h.bar} --backfill "
@@ -2189,87 +2301,119 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
               + (f" --instrumenty {','.join(i['symbol'] for i in instruments)}"
                  if tylko else ""))
 
-    cur.execute(
-        "INSERT INTO learn.model (name, engine, kind, description) VALUES (%s,%s,%s,%s)"
-        " ON CONFLICT (name) DO UPDATE SET kind = EXCLUDED.kind RETURNING id",
-        (f"{engine}_signal_weighting_{h.bar}", engine, "signal_weighting",
-         f"Kalibracja wag sygnałów per reżim rynkowy metodą walk-forward, świeca {h.bar}"))
-    model_id = cur.fetchone()["id"]
-
-    cur.execute("SELECT COALESCE(max(version), 0) + 1 AS v FROM learn.model_version"
-                " WHERE model_id = %s", (model_id,))
-    version = cur.fetchone()["v"]
-
-    cur.execute("SELECT array_agg(id) AS ids FROM feat.feature_def"
-                " WHERE active AND params->>'bar' = %s"
-                "   AND (params->>'uniwersum' IS NULL OR params->>'uniwersum' = %s)",
-                (h.bar, fp))
-    feature_ids = cur.fetchone()["ids"] or []
-    cur.execute("SELECT array_agg(id) AS ids FROM sig.signal_def WHERE engine = %s", (engine,))
-    signal_ids = cur.fetchone()["ids"] or []
-
-    # SHA KODU I SKLAD SYGNALOW - RAZEM, BO OSOBNO NIE ZNACZA NIC.
-    #
-    # `git_sha` istnieje od migracji 0006 i do tej pory nikt go nie wypelnial:
-    # 131 wierszy, 131 NULL-i. Bez niego przy metrykach modelu nie da sie
-    # powiedziec, jaki kod je policzyl - a rozjazd trening-produkcja zdarzyl sie
-    # w tym projekcie kilka razy i za kazdym razem pierwsze pytanie brzmialo
-    # "od kiedy?".
-    #
-    # Sam commit jednak nie wystarcza: `SYGNALY_EKSPERYMENTALNE` zmienia sklad
-    # sygnalow zmienna srodowiskowa, wiec ten sam commit potrafi wytrenowac dwa
-    # rozne modele. Zapisujemy ROZSTRZYGNIETY zbior (to, co faktycznie weszlo do
-    # `precompute`), a nie surowa tresc zmiennej - pusta zmienna znaczy
-    # "wszystkie eksperymenty", i taki napis nie mowilby, ktore to byly.
     eksperymenty = sorted(wlaczone_eksperymenty())
-    cur.execute(
-        "INSERT INTO learn.model_version (model_id, version, status, params, feature_def_ids,"
-        " signal_def_ids, trained_from, trained_to, git_sha)"
-        " VALUES (%s,%s,'training',%s,%s,%s,%s,%s,%s)"
-        " RETURNING id",
-        (model_id, version,
-         # `kind` I `limit` MUSZA TU BYC, BO `params` JEST TERAZ MIANOWNIKIEM.
-         #
-         # Liczba roznych `params` tego modelu jest N deflacji (patrz
-         # `n_konfiguracji`). Do 2026-09-26 brakowalo tu rodzaju instrumentu
-         # i trybu egzekucji, wiec dwa przebiegi roznce sie WYLACZNIE cennikiem
-         # (`--kind spot` taker 0,100% wobec `spot_eu` 0,250%) mialy IDENTYCZNE
-         # `params` i liczyly sie jako jedna konfiguracja. N bylo przez to
-         # zanizone, a zanizone N podnosi DSR - czyli bramka byla latwiejsza.
-         #
-         # `--days` nie trzeba dopisywac: odtwarza sie z `trained_to -
-         # trained_from`, ktore i tak sa w tym samym wierszu.
-         json.dumps({"bar": h.bar, "train_days": h.train_days, "test_days": h.test_days,
-                     "step_days": h.step_days, "min_trades": h.min_trades,
-                     "trials_per_window": trials_per_window, "seed": SEED,
-                     "wybor": wybor, "kind": kind,
-                     # SPOSOB LICZENIA PROGU JEST CZESCIA KONFIGURACJI, nie
-                     # szczegolem wykonania: ten sam zestaw wag przy progu
-                     # wspolnym i przy progach per rezim to dwie rozne
-                     # strategie i nie wolno ich liczyc jako jednej proby.
-                     "progi": "per_rezim" if progi_per_rezim else "wspolny",
+    # `kind` I `limit` MUSZA TU BYC, BO `params` JEST MIANOWNIKIEM N - patrz
+    # komentarz przy INSERT nizej. Model wypelnien takze: przebieg pesymistyczny
+    # to inna konfiguracja niz optymistyczny. Klucze dopisywane TYLKO poza
+    # wartoscia domyslna, zeby przebiegi sprzed zmiany i po niej z tymi samymi
+    # nastawami mialy te same `params` (inaczej N roslo by samo od wdrozenia).
+    params_przebiegu = {
+        "bar": h.bar, "train_days": h.train_days, "test_days": h.test_days,
+        "step_days": h.step_days, "min_trades": h.min_trades,
+        "trials_per_window": trials_per_window, "seed": SEED,
+        "wybor": wybor, "kind": kind,
+        # SPOSOB LICZENIA PROGU JEST CZESCIA KONFIGURACJI, nie
+        # szczegolem wykonania: ten sam zestaw wag przy progu
+        # wspolnym i przy progach per rezim to dwie rozne
+        # strategie i nie wolno ich liczyc jako jednej proby.
+        "progi": "per_rezim" if progi_per_rezim else "wspolny",
+        "limit": bool(egzekucja.limit),
+        "sygnaly_eksperymentalne": eksperymenty}
+    if egzekucja.pesymistyczna:
+        params_przebiegu["egzekucja_pesymistyczna"] = True
+    if egzekucja.opoznienie_min:
+        params_przebiegu["opoznienie_min"] = egzekucja.opoznienie_min
+    model_id = mv_id = run_id = None
+    if plik is None:
+        cur.execute(
+            "INSERT INTO learn.model (name, engine, kind, description) VALUES (%s,%s,%s,%s)"
+            " ON CONFLICT (name) DO UPDATE SET kind = EXCLUDED.kind RETURNING id",
+            (f"{engine}_signal_weighting_{h.bar}", engine, "signal_weighting",
+             f"Kalibracja wag sygnałów per reżim rynkowy metodą walk-forward, świeca {h.bar}"))
+        model_id = cur.fetchone()["id"]
 
-                     "limit": bool((egzekucja or Egzekucja()).limit),
-                     "sygnaly_eksperymentalne": eksperymenty}),
-         feature_ids, signal_ids, now - timedelta(days=days), now, sha_kodu()))
-    mv_id = cur.fetchone()["id"]
+        cur.execute("SELECT COALESCE(max(version), 0) + 1 AS v FROM learn.model_version"
+                    " WHERE model_id = %s", (model_id,))
+        version = cur.fetchone()["v"]
 
-    cur.execute(
-        "INSERT INTO learn.training_run (model_version_id, train_from, train_to, status)"
-        " VALUES (%s,%s,%s,'running') RETURNING id",
-        (mv_id, now - timedelta(days=days), now))
-    run_id = cur.fetchone()["id"]
-    if not sucho:
-        conn.commit()
+        cur.execute("SELECT array_agg(id) AS ids FROM feat.feature_def"
+                    " WHERE active AND params->>'bar' = %s"
+                    "   AND (params->>'uniwersum' IS NULL OR params->>'uniwersum' = %s)",
+                    (h.bar, fp))
+        feature_ids = cur.fetchone()["ids"] or []
+        cur.execute("SELECT array_agg(id) AS ids FROM sig.signal_def WHERE engine = %s", (engine,))
+        signal_ids = cur.fetchone()["ids"] or []
+
+        # SHA KODU I SKLAD SYGNALOW - RAZEM, BO OSOBNO NIE ZNACZA NIC.
+        #
+        # `git_sha` istnieje od migracji 0006 i do tej pory nikt go nie wypelnial:
+        # 131 wierszy, 131 NULL-i. Bez niego przy metrykach modelu nie da sie
+        # powiedziec, jaki kod je policzyl - a rozjazd trening-produkcja zdarzyl sie
+        # w tym projekcie kilka razy i za kazdym razem pierwsze pytanie brzmialo
+        # "od kiedy?".
+        #
+        # Sam commit jednak nie wystarcza: `SYGNALY_EKSPERYMENTALNE` zmienia sklad
+        # sygnalow zmienna srodowiskowa, wiec ten sam commit potrafi wytrenowac dwa
+        # rozne modele. Zapisujemy ROZSTRZYGNIETY zbior (to, co faktycznie weszlo do
+        # `precompute`), a nie surowa tresc zmiennej - pusta zmienna znaczy
+        # "wszystkie eksperymenty", i taki napis nie mowilby, ktore to byly.
+        cur.execute(
+            "INSERT INTO learn.model_version (model_id, version, status, params, feature_def_ids,"
+            " signal_def_ids, trained_from, trained_to, git_sha)"
+            " VALUES (%s,%s,'training',%s,%s,%s,%s,%s,%s)"
+            " RETURNING id",
+            (model_id, version,
+             # `kind` I `limit` MUSZA TU BYC, BO `params` JEST TERAZ MIANOWNIKIEM.
+             #
+             # Liczba roznych `params` tego modelu jest N deflacji (patrz
+             # `n_konfiguracji`). Do 2026-09-26 brakowalo tu rodzaju instrumentu
+             # i trybu egzekucji, wiec dwa przebiegi roznce sie WYLACZNIE cennikiem
+             # (`--kind spot` taker 0,100% wobec `spot_eu` 0,250%) mialy IDENTYCZNE
+             # `params` i liczyly sie jako jedna konfiguracja. N bylo przez to
+             # zanizone, a zanizone N podnosi DSR - czyli bramka byla latwiejsza.
+             #
+             # `--days` nie trzeba dopisywac: odtwarza sie z `trained_to -
+             # trained_from`, ktore i tak sa w tym samym wierszu.
+             json.dumps(params_przebiegu),
+             feature_ids, signal_ids, now - timedelta(days=days), now, sha_kodu()))
+        mv_id = cur.fetchone()["id"]
+
+        cur.execute(
+            "INSERT INTO learn.training_run (model_version_id, train_from, train_to, status)"
+            " VALUES (%s,%s,%s,'running') RETURNING id",
+            (mv_id, now - timedelta(days=days), now))
+        run_id = cur.fetchone()["id"]
+        if not sucho:
+            conn.commit()
 
     # Panel wczytujemy RAZ na instrument - to najdrozsza operacja w calym treningu.
     panels = {}
     inst_ids = {inst["symbol"]: inst["id"] for inst in instruments}
+    od_panelu = now - timedelta(days=days)
     for inst in instruments:
-        p = load_panel(cur, inst["id"], h, now - timedelta(days=days), now, fp=fp)
+        if plik is None:
+            p = load_panel(cur, inst["id"], h, od_panelu, now, fp=fp)
+        else:
+            # Ten sam przedzial co `load_panel` (BETWEEN, obustronnie domkniety).
+            p = [r for r in plik["panele"].get(inst["symbol"], [])
+                 if od_panelu <= r["t"] <= now]
         if len(p) > 500:
             panels[inst["symbol"]] = p
         print(f"  {inst['symbol']:10s} {len(p):>7,} punktów panelu")
+    # SWIECE 1h DLA MODELU WYPELNIEN - tylko gdy model ich uzywa.
+    swiece_wykonania = None
+    if z_godzin:
+        swiece_wykonania = {}
+        for inst in instruments:
+            if inst["symbol"] not in panels:
+                continue
+            if plik is None:
+                sw = load_swiece_wykonania(cur, inst["id"], od_panelu, now)
+            else:
+                sw = plik.get("swiece_1h", {}).get(inst["symbol"], [])
+            swiece_wykonania[inst["symbol"]] = indeks_swiec(sw)
+        print(f"  świece 1h do modelu wypełnień: "
+              f"{sum(len(v) for v in swiece_wykonania.values()):,}")
     # REWIZJE PO CZASIE DECYZJI: trenujemy na wartosciach poprawionych, ale
     # silnik decydowal na starych. Liczba idzie do logu, bo to jedyne miejsce,
     # w ktorym ten rozjazd w ogole widac (uzasadnienie: `load_panel`).
@@ -2291,8 +2435,9 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
               "panelu dłuższego niż 500 punktów")
         print(f"  sprawdź: czy świeca {h.bar} ma policzone cechy "
               f"(proces trader-features) i czy uniwersum nie jest puste")
-        cur.execute("UPDATE learn.training_run SET status='failed', finished_at=now(),"
-                    " error='za mało punktów panelu' WHERE id=%s", (run_id,))
+        if cur is not None:
+            cur.execute("UPDATE learn.training_run SET status='failed', finished_at=now(),"
+                        " error='za mało punktów panelu' WHERE id=%s", (run_id,))
         _utrwal()
         raise SystemExit(KOD_NIC_NIE_POLICZONO)
 
@@ -2331,11 +2476,14 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
     # CZEGO TEN STRAZNIK PRZEZ TO NIE LAPIE: sytuacji, w ktorej stanely TAKZE
     # swiece. Wtedy cechy nadazaja za danymi, bo dane tez stoja. To nalezy do
     # `dozor.py --co swiezosc`, ktory patrzy wprost na `market.candle`.
-    cur.execute(
-        "SELECT max(event_time) AS ostatnia FROM market.candle"
-        " WHERE instrument_id = ANY(%s) AND timeframe = %s",
-        ([inst_ids[s] for s in panels], h.source_timeframe))
-    ostatnia_swieca = (cur.fetchone() or {}).get("ostatnia")
+    if plik is not None:
+        ostatnia_swieca = plik.get("ostatnia_swieca")
+    else:
+        cur.execute(
+            "SELECT max(event_time) AS ostatnia FROM market.candle"
+            " WHERE instrument_id = ANY(%s) AND timeframe = %s",
+            ([inst_ids[s] for s in panels], h.source_timeframe))
+        ostatnia_swieca = (cur.fetchone() or {}).get("ostatnia")
     # Brak swiec przy niepustym panelu jest niemozliwy, ale gdyby zapytanie
     # zwrocilo NULL, zegar jest jedynym odniesieniem, jakie zostaje.
     odniesienie = ostatnia_swieca or now
@@ -2350,8 +2498,9 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
         print(f"  ostatni punkt panelu:  {najnowszy:%Y-%m-%d %H:%M} UTC")
         print(f"  ostatnia świeca {h.source_timeframe}: {odniesienie:%Y-%m-%d %H:%M} UTC")
         print("  sprawdź: kubectl logs deploy/trader-features --tail=30")
-        cur.execute("UPDATE learn.training_run SET status='failed', finished_at=now(),"
-                    " error=%s WHERE id=%s", (komunikat, run_id))
+        if cur is not None:
+            cur.execute("UPDATE learn.training_run SET status='failed', finished_at=now(),"
+                        " error=%s WHERE id=%s", (komunikat, run_id))
         _utrwal()
         raise SystemExit(KOD_NIC_NIE_POLICZONO)
 
@@ -2383,6 +2532,15 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
     # Do wydruku obok karty: niewypelnienie w karcie jest NIEZMIERZONE jako
     # koszt, a ta liczba mowi przynajmniej, jak czesto symulacja go ponosi.
     niewypelnione_oos = 0
+    # Mianownik wypelnialnosci i material na skladnik `niewypelnienie` karty.
+    wypelnione_oos = 0
+    utracone_oos: list[float] = []
+    brak_swiec_oos = 0
+    # ODNIESIENIA B0-B3 (`baseline.py`): {nazwa: [pobite, porownywalne]}.
+    bije_odn: dict[str, list[int]] = {n: [0, 0] for n in ("B1", "B2", "B3")}
+    b0_dodatnie = [0, 0]      # [zwrot > 0, okna]
+    b0_4_pobite = 0
+    # Zwrot na runde PO DOPLACIE per okno - do tabeli STOP/GO.
     all_sharpes_brutto: list[float] = []
     pokonane_odniesienie_brutto = 0
     ekspozycje: list[float] = []
@@ -2522,7 +2680,8 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
             res = simulate_portfolio(sl, w, thresholds, gates, h, MIN_CONF,  # noqa: B023
                                      instrument_ids=inst_ids, cache=c,
                                      kind=kind, egzekucja=egzekucja,
-                                     zakladane_pozycje=zakladane_pozycje)
+                                     zakladane_pozycje=zakladane_pozycje,
+                                     swiece_wykonania=swiece_wykonania)
             return portfolio_metrics(res, h.min_trades)
 
         def zapisz_hipoteze(cand):
@@ -2597,7 +2756,8 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
         oos_brutto = simulate_portfolio(
             {s: v for s, v in test_slices.items() if v}, best_w, thresholds, gates, h,
             MIN_CONF, instrument_ids=inst_ids, cache=cache_te,
-            kind=kind, egzekucja=egzekucja, zakladane_pozycje=zakladane_pozycje)
+            kind=kind, egzekucja=egzekucja, zakladane_pozycje=zakladane_pozycje,
+            swiece_wykonania=swiece_wykonania)
         # OD TEGO MIEJSCA `oos_res` I `oos_m` SA PO DOPLACIE Z KARTY - patrz
         # komentarz przy `doplata`. Wersja brutto zostaje pod wlasna nazwa
         # i idzie WYLACZNIE do wydruku oraz do dwoch odbiorcow, ktorzy doplate
@@ -2606,6 +2766,9 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
         oos_m = portfolio_metrics(oos_res, h.min_trades)
         oos_m_brutto = portfolio_metrics(oos_brutto, h.min_trades)
         niewypelnione_oos += oos_m["niewypelnione"]
+        wypelnione_oos += oos_m["wypelnione"]
+        utracone_oos.extend(oos_brutto.utracone_ruchy)
+        brak_swiec_oos += oos_brutto.brak_swiec_wykonania
         if not oos_res.equity_curve:
             start += timedelta(days=h.step_days)
             continue
@@ -2668,6 +2831,30 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
         powtorne = udzial_powtornych_wejsc(oos_res.trades, h.bar_minutes)
         if powtorne is not None:
             agg["udzial_powtornych_wejsc"] = powtorne
+        # ODNIESIENIA B0-B3 NA TYM SAMYM OKNIE (audyt Fable R3 / T5). Ekspozycja
+        # strategii to `ekspozycja_przenoszona` - kazdy przedzial, przez ktory
+        # pozycja niesie cene, raz (patrz `PortfolioResult`). Kolumny `bije_b*`
+        # ida do `learn.wf_metric` jako 1/0; brak porownania = brak wiersza.
+        ekspozycja_por = oos_m["ekspozycja_przenoszona"]
+        odn_okna = odniesienia.odniesienia_okna(
+            {s: panels[s] for s in aktywne}, test_from, test_to,
+            h.bar_minutes, kind, doplata_odniesienia)
+        bije_okna: dict[str, bool | None] = {}
+        for nazwa in ("B1", "B2", "B3"):
+            b = odniesienia.bije(oos_m["total_return"], ekspozycja_por, odn_okna[nazwa])
+            bije_okna[nazwa] = b if informative else None
+            if bije_okna[nazwa] is not None:
+                agg[f"bije_{nazwa.lower()}"] = 1.0 if b else 0.0
+                bije_odn[nazwa][1] += 1
+                bije_odn[nazwa][0] += int(b)
+        for nazwa in ("B2", "B3"):
+            if odn_okna[nazwa] is not None:
+                agg[f"{nazwa.lower()}_zwrot"] = odn_okna[nazwa].zwrot
+                agg[f"{nazwa.lower()}_ekspozycja"] = odn_okna[nazwa].ekspozycja
+        if informative:
+            b0_dodatnie[1] += 1
+            b0_dodatnie[0] += int(oos_m["total_return"] > 0)
+            b0_4_pobite += int(oos_m["total_return"] > odn_okna["B0_4"].zwrot)
         if informative:
             all_sharpes.append(agg["sharpe"])
             worst_dd = min(worst_dd, agg["max_dd"])
@@ -2794,8 +2981,14 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
         # zaangazowany przez strategie zarobil wiecej niz zloty wlozony
         # w koszyk". Malejaca ekspozycja skraca obie strony jednakowo, wiec
         # nie da sie tego warunku przejsc samym zmniejszeniem pozycji.
+        # EKSPOZYCJA DO POROWNANIA = PRZENOSZONA, nie `avg_exposure`
+        # (2026-10-03, audyt Fable F-3.5): `avg_exposure` gubi po jednym
+        # przedziale na transakcje, takze na domknieciu koncem okna, czyli
+        # zanizala koszyk „przy tej samej ekspozycji" na korzysc strategii.
+        # `ekspozycja` (stara miara) zostaje w rozkladzie na czynniki, ktory
+        # sie na niej zamyka.
         ekspozycja = oos_m["avg_exposure"]
-        odniesienie_dop = odniesienie * ekspozycja
+        odniesienie_dop = odniesienie * ekspozycja_por
         # Okno bez ani jednej swiecy z pozycja nie ma czego porownywac:
         # odniesienie dopasowane bylo by zerem, ktore "pokonuje" kazdy dodatni
         # zwrot. Zwykle idzie to w parze z brakiem transakcji, ale nie musi -
@@ -2806,7 +2999,7 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
         # dodatnich okien liczy sie dalej, bo tam zerowa ekspozycja niczego
         # nie psuje - a ciche wypadniecie okna z dwoch miar naraz bylo by
         # trudniejsze do zauwazenia niz z jednej.
-        porownywalne_okno = informative and ekspozycja > 0.0
+        porownywalne_okno = informative and ekspozycja_por > 0.0
         if porownywalne_okno:
             porownywalne += 1
             ekspozycje.append(ekspozycja)
@@ -2817,16 +3010,20 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
             if oos_m["total_return"] > odniesienie:
                 pokonane_pelne += 1
             # Ta sama ekspozycja - doplata nie zmienia ani jednej pozycji.
-            if oos_m_brutto["total_return"] > odniesienie_brutto * ekspozycja:
+            if oos_m_brutto["total_return"] > odniesienie_brutto * ekspozycja_por:
                 pokonane_odniesienie_brutto += 1
         mark = "" if informative else (f"  (poniżej {h.min_trades} transakcji — "
                                        "pominięte w ocenie)")
         if informative:
             mark += (f"  [strategia {oos_m['total_return']:+.2f}% przy ekspozycji "
-                     f"{ekspozycja:.1%} vs kup-i-trzymaj {odniesienie:+.2f}% → "
+                     f"{ekspozycja_por:.1%} vs kup-i-trzymaj {odniesienie:+.2f}% → "
                      f"przy tej samej ekspozycji {odniesienie_dop:+.2f}%]"
                      if porownywalne_okno else
                      "  [zerowa ekspozycja — poza porównaniem z odniesieniem]")
+        if informative:
+            znak = {True: "tak", False: "nie", None: "—"}
+            mark += "  bije " + " ".join(
+                f"{n}={znak[bije_okna[n]]}" for n in ("B1", "B2", "B3"))
         if oos_res.killswitch_at:
             mark += f"  [KILL-SWITCH {oos_res.killswitch_at:%m-%d %H:%M}]"
         if oos_m["blocked"]:
@@ -2886,6 +3083,8 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
             pred = statistics.fmean(p for p, _ in bucket)
             obs = statistics.fmean(1.0 if h else 0.0 for _, h in bucket)
             ece += abs(pred - obs) * len(bucket) / len(predictions)
+            if cur is None:
+                continue
             cur.execute(
                 "INSERT INTO learn.calibration_bin (model_version_id, evaluated_at, bin_lo,"
                 " bin_hi, predicted_mean, observed_rate, n_samples)"
@@ -2948,12 +3147,19 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
     print(f"dryf cech: okno nowe {DRYF_OKNO_NOWE_DNI} dni wobec "
           f"poprzedzających {DRYF_OKNO_STARE_DNI}, świeca {h.bar}, "
           f"odcisk uniwersum {fp}")
-    cur.execute(
-        "SELECT id, name FROM feat.feature_def"
-        " WHERE active AND params->>'bar' = %s"
-        "   AND (params->>'uniwersum' IS NULL OR params->>'uniwersum' = %s)",
-        (h.bar, fp))
-    for fd in cur.fetchall():
+    if cur is None:
+        # Dryf czyta surowe `feat.feature_value` poza panelem - z pliku go nie
+        # ma i nie jest potrzebny: przebieg z pliku nic nie zapisuje.
+        print("  (dryf cech pominięty — przebieg z pliku panelu)")
+        definicje_cech = []
+    else:
+        cur.execute(
+            "SELECT id, name FROM feat.feature_def"
+            " WHERE active AND params->>'bar' = %s"
+            "   AND (params->>'uniwersum' IS NULL OR params->>'uniwersum' = %s)",
+            (h.bar, fp))
+        definicje_cech = cur.fetchall()
+    for fd in definicje_cech:
         cur.execute(
             """
             SELECT stddev_pop(value) AS sd_old, avg(value) AS m_old
@@ -3001,8 +3207,11 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
     total = len(all_sharpes)
     pct = (positive / total * 100) if total else 0.0
     median = statistics.median(all_sharpes) if all_sharpes else None
-    cur.execute("SELECT count(*) AS n FROM learn.hypothesis_trial WHERE model_id=%s", (model_id,))
-    trials = cur.fetchone()["n"]
+    if plik is not None:
+        trials = plik["dsr"]["trials"]
+    else:
+        cur.execute("SELECT count(*) AS n FROM learn.hypothesis_trial WHERE model_id=%s", (model_id,))
+        trials = cur.fetchone()["n"]
 
     # DEFLOWANY SHARPE - LICZONY TU, BO BEZ NIEGO BRAMKA NIE MIERZY SELEKCJI.
     #
@@ -3044,10 +3253,17 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
     #    zmiennosc rynku plus szum estymacji z jednego okna, nie konfiguracje.
     #    Gdyby pomiar wyszedl PONIZEJ podlogi, `deflowany_sharpe` bierze podloge
     #    i to mowi: pomiar mniejszy od samego szumu jest dowodem niepelnosci.
-    sd_prob, konfiguracji_z_oos = odchylenie_prob_z_bazy(cur, model_id)
+    if plik is not None:
+        sd_prob, konfiguracji_z_oos = plik["dsr"]["odchylenie"]
+        n_selekcji = n_konfiguracji_z_listy(plik["dsr"]["konfiguracje"],
+                                            params_przebiegu)
+    else:
+        sd_prob, konfiguracji_z_oos = odchylenie_prob_z_bazy(cur, model_id)
+        n_selekcji = n_konfiguracji(cur, model_id, mv_id)
     dsr_ok, opis_dsr = werdykt_dsr(
         wszystkie_zwroty, doplata=karta.doplata_poza_symulacja,
-        n=n_konfiguracji(cur, model_id, mv_id), trials_kumulatywnie=trials,
+        n=n_konfiguracji(cur, model_id, mv_id) if plik is None else n_selekcji,
+        trials_kumulatywnie=trials,
         nieznane=karta.nieznane, odchylenie_prob=sd_prob,
         konfiguracji_z_oos=konfiguracji_z_oos)
 
@@ -3310,7 +3526,7 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
             (engine, h.bar, status, total, positive, round(ci_lo, 4), round(ci_hi, 4),
              round(median, 4) if median is not None else None,
              round(worst_dd, 4), round(max_psi, 4), trials, mv_id))
-    else:
+    elif cur is not None:
         cur.execute("UPDATE learn.training_run SET status='done', finished_at=now(),"
                     " error='tryb suchy - porownanie wariantow' WHERE id=%s", (run_id,))
     _utrwal()
@@ -3340,10 +3556,42 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
     print(f"Okna: {total}, dodatnie: {positive} ({pct:.1f}%)"
           f"   przedział ufności 95%: {ci_lo:.1%}–{ci_hi:.1%}")
     print(f"Mediana Sharpe (OOS): {median:+.3f}" if median is not None else "Mediana Sharpe: —")
-    if egzekucja is not None and egzekucja.limit:
+    wypelnialnosc = wypelnialnosc_symulacji(wypelnione_oos, niewypelnione_oos)
+    koszt_niewyp = None
+    if egzekucja.limit and egzekucja.pesymistyczna:
+        # SKLADNIK `niewypelnienie` STAJE SIE POMIAREM. Liczony z symulacji,
+        # ktora niewypelnienia sama odgrywa, wiec do doplaty nie wchodzi
+        # (`niewypelnienie_w_symulacji`) - karta wypisana jeszcze raz, zeby
+        # bylo widac, ze skladnik ma wartosc i skad.
+        koszt_niewyp = koszt_niewypelnienia(wypelnialnosc, utracone_oos)
+        karta_po = karta_rundy(kind, True, spread_bps=spread_bps,
+                               spread_nasza_ksiega=spread_nasza_ksiega, pyl=pyl,
+                               niewypelnienie=koszt_niewyp,
+                               niewypelnienie_w_symulacji=True)
+        print("Wypełnialność zleceń z limitem w symulacji OOS: "
+              + (f"{wypelnialnosc:.1%}" if wypelnialnosc is not None else "—")
+              + f" ({wypelnione_oos} weszło, {niewypelnione_oos} nie; w tym "
+              f"{brak_swiec_oos} bez świecy 1h). Produkcja demo: ok. 65%.")
+        for linia in opis_karty(karta_po):
+            print(linia)
+    elif egzekucja.limit:
         print(f"Niewypełnione zlecenia z limitem w symulacji OOS: "
               f"{niewypelnione_oos} (wejścia + wyjścia, wszystkie okna). "
               f"Ich KOSZT nie jest w dopłacie — w karcie stoi jako NIEZMIERZONE.")
+    # ODNIESIENIA B0-B3 - zbiorczo. Kryterium STOP/GO 1 (docs/hipotezy.md):
+    # bije B2 przy tej samej ekspozycji w >= 60% okien.
+    for nazwa in ("B1", "B2", "B3"):
+        pob, por = bije_odn[nazwa]
+        if por:
+            lo, hi = wilson(pob, por)
+            print(f"Bije {nazwa} przy tej samej ekspozycji (przenoszonej): "
+                  f"{pob}/{por} okien ({pob / por:.0%}, przedział 95% {lo:.0%}–{hi:.0%})")
+        else:
+            print(f"Bije {nazwa}: brak porównania (brak odniesienia w uniwersum "
+                  f"albo okien z ekspozycją)")
+    if b0_dodatnie[1]:
+        print(f"B0 (gotówka): zwrot > 0 w {b0_dodatnie[0]}/{b0_dodatnie[1]} okien; "
+              f"ponad 4% w skali roku na CAŁYM kapitale w {b0_4_pobite}/{b0_dodatnie[1]}")
     # BRUTTO OBOK, NIE ZAMIAST. Gdy doplaty nie ma, obie wersje sa identyczne
     # i wiersz bylby szumem.
     if doplata and total:
@@ -3388,6 +3636,32 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
                   f"{', '.join(dominujace)}")
     print(f"Przetestowanych konfiguracji: {trials}")
     print(f"Stan: {status} — {reason}")
+
+    # PODSUMOWANIE MASZYNOWE - jedna linia JSON dla `scripts/eksperyment.py`
+    # (tabela przesuniec) i dla porownan wariantow. Te same liczby co wyzej,
+    # bez parsowania zdan. Zwrot na runde PO doplacie z karty, w pb.
+    po_doplacie = zwroty_po_doplacie(wszystkie_zwroty, karta.doplata_poza_symulacja)
+    wynik_dsr = przewaga_dsr(po_doplacie, n_selekcji, sd_prob)
+    podsumowanie = {
+        "days": days, "od": f"{now - timedelta(days=days):%Y-%m-%d %H:%M}",
+        "do": f"{now:%Y-%m-%d %H:%M}",
+        "pesymistyczna": egzekucja.pesymistyczna,
+        "opoznienie_min": egzekucja.opoznienie_min, "limit": egzekucja.limit,
+        "okna": total, "dodatnie": positive,
+        "transakcji": len(wszystkie_zwroty),
+        "zwrot_na_runde_pb": (statistics.fmean(po_doplacie) * 1e4
+                              if po_doplacie else None),
+        "doplata_pb": karta.doplata_poza_symulacja * 1e4,
+        "dsr": wynik_dsr.get("dsr"), "n_selekcji": n_selekcji,
+        "mediana_sharpe": median,
+        "wypelnialnosc": wypelnialnosc,
+        "niewypelnienie_pb": koszt_niewyp * 1e4 if koszt_niewyp is not None else None,
+        "brak_swiec_1h": brak_swiec_oos,
+        "bije_b1": bije_odn["B1"], "bije_b2": bije_odn["B2"], "bije_b3": bije_odn["B3"],
+        "b0_dodatnie": b0_dodatnie, "status": status,
+    }
+    print("PODSUMOWANIE_JSON " + json.dumps(podsumowanie, ensure_ascii=False))
+    return podsumowanie
 
 
 def main() -> int:
@@ -3475,7 +3749,32 @@ def main() -> int:
                          "jest sprawdzany osobno w kazdej swiecy, wiec mniejszy "
                          "dzielnik go NIE PODNOSI - zmienia tylko rozklad ryzyka "
                          "na mniej, wiekszych pozycji. Wymaga --sucho")
+    ap.add_argument("--egzekucja-pesymistyczna", action="store_true",
+                    dest="pesymistyczna",
+                    help="model wypelnien zlecen z limitem zblizony do produkcji "
+                         "(audyt Fable R1): limit z ceny 1h po opoznieniu, pol "
+                         "spreadu INSTRUMENTU pod/nad cena, wypelnienie tylko "
+                         "w godzinie po wysylce. Wymaga --limit i --sucho")
+    ap.add_argument("--opoznienie", type=int, default=0, dest="opoznienie_min",
+                    help="minuty od zamkniecia swiecy decyzyjnej do wysylki "
+                         "zlecenia (produkcja: 5-88, mediana po 02.10 do "
+                         "zmierzenia). Wymaga --limit i --sucho")
+    ap.add_argument("--panel", default="",
+                    help="plik z scripts/eksport_paneli.py - przebieg BEZ BAZY "
+                         "(harness offline); wymusza --sucho")
     args = ap.parse_args()
+
+    if args.panel and not args.sucho:
+        print("--panel: przebieg z pliku jest zawsze suchy (--sucho wymuszone)")
+        args.sucho = True
+    if (args.pesymistyczna or args.opoznienie_min) and not args.limit:
+        sys.exit("--egzekucja-pesymistyczna i --opoznienie dotycza zlecen "
+                 "z limitem - podaj --limit")
+    if (args.pesymistyczna or args.opoznienie_min) and not args.sucho:
+        sys.exit("--egzekucja-pesymistyczna i --opoznienie wymagaja --sucho "
+                 "(wariant pomiaru, nie produkcja)")
+    if args.opoznienie_min < 0:
+        sys.exit("--opoznienie nie moze byc ujemne")
 
     # Wariant eksperymentalny NIE MOZE promowac wersji modelu ani nadpisywac
     # stanu nauki - inaczej jeden przebieg porownawczy po cichu zmienialby to,
@@ -3498,13 +3797,20 @@ def main() -> int:
     if args.progi != ap.get_default("progi") and not args.sucho:
         sys.exit(f"--progi inne niz {ap.get_default('progi')} wymaga --sucho")
 
+    plik = panel_plik.wczytaj(args.panel) if args.panel else None
     url = os.environ.get("DATABASE_URL")
-    if not url:
+    if not url and plik is None:
         sys.exit("DATABASE_URL nie jest ustawiony")
 
-    with psycopg.connect(url, row_factory=dict_row) as conn:
+    with (psycopg.connect(url, row_factory=dict_row) if plik is None
+          else _BezBazy()) as conn:
         h = get_horizon(args.bar)
-        egz = Egzekucja(limit=args.limit)
+        egz = Egzekucja(limit=args.limit, opoznienie_min=args.opoznienie_min,
+                        pesymistyczna=args.pesymistyczna)
+        if plik is not None:
+            print(f"Panel Z PLIKU {args.panel}: {plik['engine']}/{plik['bar']}, "
+                  f"{plik['dni']} dni do {plik['do']:%Y-%m-%d %H:%M} UTC — "
+                  f"bez połączenia z bazą")
         print(f"Walk-forward: świeca {h.bar}, trening {h.train_days} dni / "
               f"test {h.test_days} dni, krok {h.step_days} dni")
         # KARTA KOSZTU WYPISUJE SIE W `train()`, NIE TUTAJ - I TO JEST WAZNE.
@@ -3528,8 +3834,21 @@ def main() -> int:
               zakladane_pozycje=args.zakladane_pozycje or None,
               zgoda_na_promocje=args.zgoda_na_promocje,
               spread_bps=args.spread_bps,
-              spread_nasza_ksiega=not args.spread_obca_ksiega)
+              spread_nasza_ksiega=not args.spread_obca_ksiega,
+              panel=plik)
     return 0
+
+
+class _BezBazy:
+    """Zastepca polaczenia w przebiegu z pliku: `train()` nie wola na nim
+    niczego (`cur is None`), a kazde przypadkowe uzycie ma wywrocic przebieg,
+    a nie cicho pojsc do bazy."""
+
+    def __enter__(self):
+        return None
+
+    def __exit__(self, *exc):
+        return False
 
 
 if __name__ == "__main__":

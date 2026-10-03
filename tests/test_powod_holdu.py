@@ -331,7 +331,11 @@ def test_trener_zapisuje_sha_i_sklad_sygnalow():
         "mv_id = cur.fetchone()", 1)[0]
     assert "git_sha" in wstawka, "trener nadal nie zapisuje commita"
     assert "sha_kodu()" in wstawka, "kolumna w SQL, ale wartość nie dolatuje"
-    assert "sygnaly_eksperymentalne" in wstawka, (
+    # Od 2026-10-03 `params` sklada sie przed INSERT-em w `params_przebiegu`
+    # (ten sam slownik liczy N przebiegu z pliku panelu).
+    assert "json.dumps(params_przebiegu)" in wstawka
+    slownik = zrodlo.split("params_przebiegu = {", 1)[1].split("}\n", 1)[0]
+    assert "sygnaly_eksperymentalne" in slownik, (
         "commit bez składu sygnałów nie wystarcza - ta sama wersja kodu przy "
         "innej wartości SYGNALY_EKSPERYMENTALNE trenuje inny model")
     # Liczba znaczników i parametrów - ta sama pułapka co przy dzienniku.

@@ -545,8 +545,13 @@ def test_params_zapisuja_kind_i_limit_bo_bez_nich_N_jest_zanizone():
     wstawka = re.search(r"INSERT INTO learn\.model_version.*?sha_kodu\(\)\)\)",
                         ZRODLO_TRENERA, re.S)
     assert wstawka, "nie znaleziono zapisu wersji modelu"
+    # Od 2026-10-03 `params` sklada sie przed INSERT-em (`params_przebiegu`) -
+    # ten sam slownik liczy N przebiegu z pliku panelu - i INSERT go zapisuje.
+    assert "json.dumps(params_przebiegu)" in wstawka.group(0)
+    slownik = re.search(r"params_przebiegu = \{.*?\}\n", ZRODLO_TRENERA, re.S)
+    assert slownik, "nie znaleziono `params_przebiegu`"
     for klucz in ('"kind": kind', '"limit": bool('):
-        assert klucz in wstawka.group(0), (
+        assert klucz in slownik.group(0), (
             f"`params` nie zapisuje {klucz} — dwa różne cenniki zlewają się "
             f"w jedną konfigurację i N jest zaniżone")
 

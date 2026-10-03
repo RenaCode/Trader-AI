@@ -395,10 +395,35 @@ def zwroty_po_doplacie(zwroty: list[float], doplata: float) -> list[float]:
     return [r - doplata for r in zwroty]
 
 
+def koszt_niewypelnienia(wypelnialnosc: float | None,
+                         utracone_ruchy: list[float]) -> float | None:
+    """Koszt niewypelnienia jako ulamek rundy: (1 - wypelnialnosc) x sredni
+    ruch, ktory przepadl przez wejscie, ktore nie weszlo.
+
+    `wypelnialnosc` w tej samej definicji co `poslizg.wypelnialnosc`
+    (wypelnione / rozstrzygniete); `utracone_ruchy` - zwrot ze strony pozycji
+    od ceny limitu do ceny kilka swiec pozniej, po jednym na niewypelnione
+    wejscie (`portfolio.PortfolioResult.utracone_ruchy`).
+
+    ZE ZNAKIEM. Ujemna liczba znaczy, ze wejscia, ktore przepadly, stracilyby
+    - czyli niewypelnienie oszczedzilo pieniadze. To jest wynik, nie blad, i
+    przycinanie go do zera zawyzaloby koszt w jedna strone.
+
+    None, gdy nie ma czego mierzyc (brak zlecen albo brak niewypelnien przy
+    nieznanej wypelnialnosci) - zero znaczyloby „zmierzone i wyszlo zero".
+    """
+    if wypelnialnosc is None:
+        return None
+    if not utracone_ruchy:
+        return 0.0 if wypelnialnosc >= 1.0 else None
+    return (1.0 - wypelnialnosc) * (sum(utracone_ruchy) / len(utracone_ruchy))
+
+
 def karta_rundy(kind: str, maker: bool = False, *,
                 spread_bps: float | None = None,
                 spread_nasza_ksiega: bool = True,
                 niewypelnienie: float | None = None,
+                niewypelnienie_w_symulacji: bool = False,
                 finansowanie: float | None = None,
                 pyl: float | None = None,
                 wyjscia_takerem: float | None = None) -> Karta:
@@ -437,7 +462,12 @@ def karta_rundy(kind: str, maker: bool = False, *,
             `book_spread_bps` zostal ciagly.
       * `niewypelnienie` - koszt zlecen, ktore nie weszly, jako ulamek ceny na
         runde. Zrodlo: `poslizg.wypelnialnosc` zestawione z rozkladem ruchu,
-        ktory przez to przepadl.
+        ktory przez to przepadl (`koszt_niewypelnienia`).
+      * `niewypelnienie_w_symulacji` - liczba wyzej pochodzi z symulacji, ktora
+        niewypelnienia SAMA odgrywa (`Egzekucja.pesymistyczna`): transakcje,
+        ktore nie weszly, nie maja zwrotu, a wyjscia, ktore nie weszly, trzymaja
+        pozycje dalej. Skladnik jest wtedy POMIAREM, ale do doplaty nie
+        wchodzi - odjecie go od zwrotow liczyloby te strate drugi raz.
       * `finansowanie` - laczna oplata za czas trzymania pozycji, jako ulamek
         ceny. Zrodlo: `market.funding_rate`.
       * `wyjscia_takerem` - UDZIAL wyjsc zlozonych agresywnie (GTC bez
@@ -465,7 +495,16 @@ def karta_rundy(kind: str, maker: bool = False, *,
         "fee/qty rowne stawce makera co do cyfry",
         w_symulacji=True)]
 
-    if maker:
+    if maker and niewypelnienie_w_symulacji:
+        s.append(Skladnik(
+            "niewypelnienie", niewypelnienie,
+            POMIAR if niewypelnienie is not None else NIEZMIERZONE,
+            "model pesymistyczny: limit z ceny po opoznieniu, pol spreadu "
+            "instrumentu, wypelnienie tylko w godzinie po wysylce; wartosc = "
+            "(1 - wypelnialnosc symulowana) x sredni ruch, ktory przepadl - "
+            "juz w zwrotach symulacji, do doplaty nie wchodzi",
+            w_symulacji=True))
+    elif maker:
         s.append(Skladnik(
             "niewypelnienie", niewypelnienie,
             POMIAR if niewypelnienie is not None else NIEZMIERZONE,

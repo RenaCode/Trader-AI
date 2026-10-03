@@ -178,6 +178,15 @@ class Pomiar:
     per_instrument: tuple[tuple[int, float, int], ...] = ()
     powod: str = ""
 
+    @property
+    def per_id(self) -> dict[int, float]:
+        """{id instrumentu: sredni PELNY spread w pb} - ta sama srednia per
+        instrument, z ktorej powstaje `bps`. Do modelu wypelnien
+        (`portfolio.Egzekucja.spread_per_instrument`), ktory potrzebuje spreadu
+        TEGO instrumentu, a nie sredniej po uniwersum (NEAR ~21 pb wobec BTC
+        ponizej 1 pb)."""
+        return {i: sr for i, sr, _ in self.per_instrument}
+
 
 def _bez_wartosci(powod: str, **kw) -> Pomiar:
     # `nasza_ksiega=False` przy braku wartosci nie jest twierdzeniem o zrodle -

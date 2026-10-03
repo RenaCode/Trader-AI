@@ -110,8 +110,53 @@ class Egzekucja:
     najbardziej zyskowne. Ta selekcja jest w modelu zawarta z definicji: nie
     zgadujemy prawdopodobienstwa wypelnienia, tylko sprawdzamy, czy nastepna
     swieca faktycznie dotknela naszej ceny.
+
+    MODEL PESYMISTYCZNY (2026-10-03, audyt Fable F-3.2 / R1). Model wyzej mial
+    w sobie TRZY zalozenia, ktore produkcja obalila: limit po `close` swiecy
+    decyzyjnej (produkcja: bid - 1 tick w chwili WYSYLKI, 5-88 min pozniej),
+    okno wypelnienia cale 4 h nastepnej swiecy (dla kupna pod rynkiem
+    spelnione prawie zawsze - 0 niewypelnionych na 1 561) i brak spreadu
+    instrumentu przy cenie. Trzy pola nizej zdejmuja je osobno:
+
+      * `opoznienie_min` - limit liczony z ceny W CHWILI WYSYLKI
+        (`koniec swiecy decyzyjnej + opoznienie`), odczytanej ze swiec 1h:
+        interpolacja liniowa miedzy zamknieciem poprzedniej godziny a
+        zamknieciem godziny, w ktorej wysylka wypada. Przy danych godzinowych
+        to jest wartosc oczekiwana ceny w tej chwili (most Browna), a nie
+        zgadywanie kierunku. 0 = cena zamkniecia swiecy decyzyjnej, czyli
+        dzisiejszy model co do bitu.
+      * `spread_per_instrument` - PELNY spread w pb per symbol (to, co oddaje
+        `spread.Pomiar.per_symbol`). Limit kupna = cena - pol spreadu, limit
+        sprzedazy = cena + pol spreadu: tyle, ile daje PostOnly na bid/ask.
+        Brak symbolu w slowniku = spread 0 dla niego, wypisany przez
+        wolajacego.
+      * `pesymistyczna` - okno wypelnienia to JEDNA godzina po tej, w ktorej
+        zlecenie wyslano (`low` kolejnej 1h <= limit), a nie cala nastepna
+        swieca 4h. Zlecenie, ktore nie weszlo w godzine, przepada: wejscie nie
+        powstaje, wyjscie czeka nastepnej decyzji (jak dotad).
+
+    Wszystkie trzy wymagaja zlecen z limitem - zlecenie rynkowe nie czeka na
+    wypelnienie - oraz swiec 1h (`simulate_portfolio(..., swiece_wykonania=)`).
+    Przy wartosciach domyslnych symulacja idzie DOKLADNIE ta sama sciezka co
+    przed zmiana (test regresji w `tests/test_wypelnienia.py`).
+
+    SPREAD W KARCIE ZOSTAJE. Wejscie po `cena - pol spreadu` plus doplata
+    karty (`pol spreadu` na noge) daje wejscie po cenie odniesienia - czyli
+    spread nie jest ani zarabiany, ani placony dwa razy, a jedynym skutkiem
+    spreadu w modelu jest TRUDNIEJSZE wypelnienie. To swiadomie ostrozne:
+    maker na bid formalnie zarabia pol spreadu, ale tylko na zleceniach, ktore
+    weszly - a to te, przy ktorych rynek poszedl przeciw nam.
     """
     limit: bool = False
+    opoznienie_min: int = 0
+    spread_per_instrument: dict[str, float] | None = None
+    pesymistyczna: bool = False
+
+    @property
+    def zmienia_cene_lub_okno(self) -> bool:
+        """Czy ten wariant odchodzi od modelu sprzed 2026-10-03."""
+        return bool(self.opoznienie_min or self.pesymistyczna
+                    or any((self.spread_per_instrument or {}).values()))
 
 
 @dataclass
@@ -129,6 +174,23 @@ class PortfolioResult:
     # kapitalu faktycznie pracowalo, nie mowi nic - a bez tego zwrotu
     # z okna nie da sie porownac z niczym, co angazuje inna czesc konta.
     avg_exposure: float = 0.0
+    # EKSPOZYCJA PRZENOSZONA NA NASTEPNY PRZEDZIAL - liczona PO wejsciach
+    # swiecy, nie przed nimi (2026-10-03, audyt Fable F-3.5 / audyt 2 R-d).
+    #
+    # `avg_exposure` mierzy portfel po wyjsciach i PRZED wejsciami tej samej
+    # swiecy. Pozycja otwarta w swiecy `a` i zamknieta decyzja w `b` niesie
+    # ruch ceny przez `b - a` przedzialow, a do sredniej wchodzi `b - a - 1`
+    # razy: JEDNA SWIECA MNIEJ na kazda transakcje, takze na domknieciu
+    # wymuszonym koncem okna. Przy medianie trzymania 4 swiece to ok. 25%
+    # zanizenia - a porownanie „przy tej samej ekspozycji" mnozy koszyk przez
+    # te liczbe, wiec zanizona ekspozycja to slabsze odniesienie, czyli
+    # obciazenie NA KORZYSC strategii. Ta miara liczy kazdy przedzial, przez
+    # ktory pozycja niesie cene, dokladnie raz - tak jak kup-i-trzymaj liczy
+    # caly swoj przedzial.
+    #
+    # `avg_exposure` zostaje bez zmian: na nim stoi tozsamosc rozkladu
+    # (`srednio_pozycji x sredni_notional`) i dotychczasowe wydruki.
+    avg_exposure_przenoszona: float = 0.0
     # ROZKLAD SREDNIEJ EKSPOZYCJI NA CZYNNIKI.
     #
     # Sama srednia mowi, ze kapital nie pracuje - nie mowi DLACZEGO. A odpowiedzi
@@ -147,6 +209,19 @@ class PortfolioResult:
     base_notional: float = 0.0  # budzet na pozycje wyliczony z limitu
     niewypelnione_wejscia: int = 0
     niewypelnione_wyjscia: int = 0
+    # MIANOWNIK WYPELNIALNOSCI. Same niewypelnione nie mowia nic bez liczby
+    # zlecen, ktore weszly - a „0 niewypelnionych" przy zleceniach z limitem
+    # bylo dokladnie tym zdaniem, ktore produkcja (65%) obalila.
+    wypelnione_wejscia: int = 0
+    wypelnione_wyjscia: int = 0
+    # Ruch, ktory przepadl przez niewypelnione WEJSCIE: zwrot ze strony
+    # pozycji od ceny limitu do ceny `UTRACONY_RUCH_SWIEC` swiec pozniej.
+    # Material na skladnik `niewypelnienie` karty (`koszty.koszt_niewypelnienia`).
+    utracone_ruchy: list[float] = field(default_factory=list)
+    # Zlecenia, dla ktorych brakowalo swiecy 1h potrzebnej do wyceny albo do
+    # sprawdzenia wypelnienia. Licza sie jako NIEWYPELNIONE (ostroznie) i sa
+    # wypisane osobno, zeby dziura w danych nie udawala rynku.
+    brak_swiec_wykonania: int = 0
     pominiete_shorty: int = 0
     # Ile razy sygnal ponad progiem NIE MIAL PROGU - czyli wypadl w rezimie
     # bez kalibracji. Kanarek na ciche zniknięcie rezimu z handlu.
@@ -241,6 +316,74 @@ def _wypelnione(limit: float, swieca: dict, kupno: bool) -> bool:
     return swieca["low"] <= limit if kupno else swieca["high"] >= limit
 
 
+# Rozdzielczosc swiec, z ktorych model pesymistyczny czyta cene wysylki
+# i wypelnienie. Panel 4h jest agregatem z dokladnie tych swiec
+# (`horizons.H4H.source_timeframe = "1h"`).
+KROK_WYKONANIA = timedelta(hours=1)
+
+# Na ile swiec horyzontu mierzymy ruch, ktory przepadl przez niewypelnione
+# wejscie. Ta sama liczba co horyzont IC wag (`train.ic_weights`,
+# `horyzont_swiec=3`) - ruch, ktory wagi probuja przewidziec.
+UTRACONY_RUCH_SWIEC = 3
+
+
+def indeks_swiec(swiece: list[dict]) -> dict[datetime, dict]:
+    """{poczatek swiecy 1h: swieca} - do odczytu po czasie w symulacji."""
+    return {s["t"]: s for s in swiece}
+
+
+def _poczatek_godziny_wysylki(t_wys: datetime) -> datetime:
+    """Poczatek swiecy 1h, W KTOREJ wypada wysylka - przedzial (start, koniec].
+
+    Domkniety z prawej: wysylka dokladnie o pelnej godzinie (opoznienie 0)
+    nalezy do godziny, ktora sie WLASNIE zamknela, czyli do ostatniej godziny
+    swiecy decyzyjnej. Dzieki temu opoznienie 0 daje cene zamkniecia swiecy
+    decyzyjnej, a nie zamkniecie godziny pozniejszej.
+    """
+    pelna = t_wys.replace(minute=0, second=0, microsecond=0)
+    return pelna - KROK_WYKONANIA if pelna == t_wys else pelna
+
+
+def wycena_wysylki(row: dict, bar_minutes: int, opoznienie_min: int,
+                   swiece: dict[datetime, dict] | None
+                   ) -> tuple[float, dict] | None:
+    """(cena w chwili wysylki, godzina PO wysylce) - bez spreadu.
+
+    `row` to wiersz panelu ze swieca DECYZYJNA (znacznik = jej poczatek), wiec
+    decyzja zapada w `row.t + bar_minutes`, a zlecenie wychodzi `opoznienie_min`
+    pozniej. Cena w chwili wysylki - patrz docstring `Egzekucja`. Druga
+    pozycja to swieca 1h, ktora w modelu pesymistycznym rozstrzyga wypelnienie.
+
+    None, gdy brakuje swiecy potrzebnej do ktoregokolwiek kroku - wolajacy
+    liczy to jako niewypelnienie i osobno jako dziure w danych.
+    """
+    if swiece is None:
+        return None
+    t_wys = row["t"] + timedelta(minutes=bar_minutes + opoznienie_min)
+    start = _poczatek_godziny_wysylki(t_wys)
+    biezaca = swiece.get(start)
+    nastepna = swiece.get(start + KROK_WYKONANIA)
+    if biezaca is None or nastepna is None:
+        return None
+    if opoznienie_min == 0:
+        return row["price"], nastepna
+    poprzednia = swiece.get(start - KROK_WYKONANIA)
+    otwarcie = (poprzednia["close"] if poprzednia is not None
+                else biezaca.get("open"))
+    if otwarcie is None:
+        return None
+    waga = (t_wys - start) / KROK_WYKONANIA
+    return otwarcie + waga * (biezaca["close"] - otwarcie), nastepna
+
+
+def z_polowa_spreadu(cena: float, spread_bps: float, kupno: bool) -> float:
+    """Cena PostOnly po wlasciwej stronie arkusza: kupno pol spreadu pod cena,
+    sprzedaz pol spreadu nad nia. `spread_bps` to PELNY spread (jak w cesze
+    `book_spread_bps`), wiec na noge idzie polowa."""
+    pol = spread_bps / 2 / 1e4
+    return cena * (1 - pol) if kupno else cena * (1 + pol)
+
+
 def _sizing(score: float, price: float, baza: float) -> tuple[float, float]:
     """Wielkosc zlecenia z REGULY WSPOLNEJ z petla decyzyjna, nie z jej kopii."""
     notional = baza * udzial_budzetu(score)
@@ -259,11 +402,16 @@ def simulate_portfolio(panels: dict[str, list[dict]],
                        kind: str = "spot",
                        egzekucja: Egzekucja | None = None,
                        zakladane_pozycje: int | None = None,
-                       poslizg: float | None = None) -> PortfolioResult:
+                       poslizg: float | None = None,
+                       swiece_wykonania: dict[str, dict[datetime, dict]] | None = None,
+                       ) -> PortfolioResult:
     """Jedno konto, wszystkie instrumenty, wspolne limity.
 
     Wejscie i wyjscie po cenie NASTEPNEJ swiecy - decyzja z zamkniecia swiecy T
     nie moze zostac wykonana po cenie tej samej swiecy.
+
+    `swiece_wykonania` - {symbol: indeks_swiec(swiece 1h)}; wymagane, gdy
+    `egzekucja` ma opoznienie albo tryb pesymistyczny (patrz `Egzekucja`).
     """
     limits = limits or DEFAULT_LIMITS
     # PROGI SA PER REZIM. Jeden obiekt `Bramki` na okno albo - dla wolaczy,
@@ -274,6 +422,43 @@ def simulate_portfolio(panels: dict[str, list[dict]],
             else {s: (g if isinstance(g, Bramki) else bramki_z_pary(*g))
                   for s, g in gates.items()})
     egz = egzekucja or Egzekucja()
+    if egz.zmienia_cene_lub_okno and not egz.limit:
+        raise ValueError("opóźnienie, spread per instrument i tryb pesymistyczny "
+                         "dotyczą zleceń z limitem — zlecenie rynkowe nie czeka "
+                         "na wypełnienie")
+    z_godzin = bool(egz.opoznienie_min or egz.pesymistyczna)
+    if z_godzin and swiece_wykonania is None:
+        # Bez swiec 1h model z opoznieniem nie ma skad wziac ceny wysylki.
+        # Cichy powrot do `close` swiecy decyzyjnej dawalby wynik, ktory
+        # wyglada na policzony z opoznieniem, a jest dzisiejszym modelem.
+        raise ValueError("model z opóźnieniem albo pesymistyczny wymaga świec 1h "
+                         "(`swiece_wykonania`)")
+    spready = egz.spread_per_instrument or {}
+
+    def zlecenie_z_limitem(sym: str, row: dict, nxt_row: dict,
+                           kupno: bool) -> float | None:
+        """Cena limitu, jesli zlecenie WESZLO; None, jesli nie.
+
+        Przy wartosciach domyslnych `Egzekucja` to jest dokladnie model sprzed
+        2026-10-03: limit = zamkniecie swiecy decyzyjnej, wypelnienie, gdy
+        nastepna swieca go dotknela.
+        """
+        if not egz.zmienia_cene_lub_okno:
+            limit_px = row["price"]
+            return limit_px if _wypelnione(limit_px, nxt_row, kupno) else None
+        if z_godzin:
+            w = wycena_wysylki(row, h.bar_minutes, egz.opoznienie_min,
+                               swiece_wykonania.get(sym))
+            if w is None:
+                res.brak_swiec_wykonania += 1
+                return None
+            cena, godzina = w
+            swieca = godzina if egz.pesymistyczna else nxt_row
+        else:
+            cena, swieca = row["price"], nxt_row
+        limit_px = z_polowa_spreadu(cena, spready.get(sym, 0.0), kupno)
+        return limit_px if _wypelnione(limit_px, swieca, kupno) else None
+
     k = koszty(kind)
     fee = k.maker if egz.limit else k.taker
     # POSLIZG: ZALOZENIE, KTOREGO DA SIE DOTKNAC Z ZEWNATRZ.
@@ -367,6 +552,7 @@ def simulate_portfolio(panels: dict[str, list[dict]],
     positions: dict[str, Position] = {}
     max_exposure = 0.0
     suma_ekspozycji = 0.0
+    suma_przenoszona = 0.0
     swiec_ekspozycji = 0
     suma_pozycji = 0
     swiec_z_pozycja = 0
@@ -476,10 +662,12 @@ def simulate_portfolio(panels: dict[str, list[dict]],
                 # Wyjscie po cenie zamkniecia swiecy decyzyjnej. Gdy sie nie
                 # wypelni, POZYCJA ZOSTAJE OTWARTA - nieudane wyjscie
                 # w spadajacym rynku kosztuje najwiecej i musi byc w modelu.
-                limit_px = cur["row"]["price"]
-                if not _wypelnione(limit_px, rows[nxt_idx], kupno=pos.side < 0):
+                limit_px = zlecenie_z_limitem(sym, cur["row"], rows[nxt_idx],
+                                              kupno=pos.side < 0)
+                if limit_px is None:
                     res.niewypelnione_wyjscia += 1
                     continue
+                res.wypelnione_wyjscia += 1
                 exit_px = limit_px
             else:
                 exit_px = rows[nxt_idx]["price"] * (1 - slip * pos.side)
@@ -654,10 +842,17 @@ def simulate_portfolio(panels: dict[str, list[dict]],
 
             side = 1 if score > 0 else -1
             if egz.limit:
-                limit_px = cur["row"]["price"]
-                if not _wypelnione(limit_px, rows[nxt_idx], kupno=side > 0):
+                limit_px = zlecenie_z_limitem(sym, cur["row"], rows[nxt_idx],
+                                              kupno=side > 0)
+                if limit_px is None:
                     res.niewypelnione_wejscia += 1
+                    # Ruch, ktory przepadl: od ceny, po ktorej chcielismy wejsc,
+                    # do ceny UTRACONY_RUCH_SWIEC swiec po decyzji (albo konca
+                    # panelu). Liczony ze strony pozycji.
+                    cel = rows[min(cur["idx"] + UTRACONY_RUCH_SWIEC, len(rows) - 1)]
+                    res.utracone_ruchy.append(side * (cel["price"] / cena_decyzji - 1))
                     continue
+                res.wypelnione_wejscia += 1
                 entry = limit_px
             else:
                 entry = price * (1 + slip * side)
@@ -678,6 +873,9 @@ def simulate_portfolio(panels: dict[str, list[dict]],
             per_inst[ids[sym]] = per_inst.get(ids[sym], Decimal(0)) + Decimal(str(qty * entry))
             exposure += Decimal(str(qty * entry))
             orders_h += 1
+
+        # Po wejsciach: to, co portfel niesie przez przedzial (t, t+1].
+        suma_przenoszona += float(exposure)
 
     # Domkniecie po ostatniej swiecy - pozycja otwarta na koncu okna liczy sie
     # po ostatniej znanej cenie, inaczej jej wynik znikalby z oceny.
@@ -702,6 +900,8 @@ def simulate_portfolio(panels: dict[str, list[dict]],
     res.equity_curve.append((last_t, START_EQUITY + realized - fees_paid))
     res.max_exposure = max_exposure
     res.avg_exposure = (suma_ekspozycji / swiec_ekspozycji) if swiec_ekspozycji else 0.0
+    res.avg_exposure_przenoszona = ((suma_przenoszona / swiec_ekspozycji)
+                                    if swiec_ekspozycji else 0.0)
     if swiec_ekspozycji:
         res.udzial_swiec_z_pozycja = swiec_z_pozycja / swiec_ekspozycji
         res.srednio_pozycji = suma_pozycji / swiec_ekspozycji
@@ -737,6 +937,9 @@ def metrics(res: PortfolioResult, min_trades: int) -> dict:
             # dzielic. Bez niej zwrot z okna jest nieporownywalny
             # z czymkolwiek o innej ekspozycji.
             "avg_exposure": round(res.avg_exposure / START_EQUITY, 6),
+            # Ta sama miara liczona PO wejsciach - do porownan z odniesieniami
+            # (patrz `PortfolioResult.avg_exposure_przenoszona`).
+            "ekspozycja_przenoszona": round(res.avg_exposure_przenoszona / START_EQUITY, 6),
             # Czynniki tej sredniej. Mnoza sie z powrotem:
             #   avg_exposure = srednio_pozycji x notional_na_pozycje
             "w_rynku": round(res.udzial_swiec_z_pozycja, 6),
@@ -753,6 +956,7 @@ def metrics(res: PortfolioResult, min_trades: int) -> dict:
             "blocked": res.blocked, "downsized": res.downsized,
             "killswitch": res.killswitch_reason,
             "niewypelnione": res.niewypelnione_wejscia + res.niewypelnione_wyjscia,
+            "wypelnione": res.wypelnione_wejscia + res.wypelnione_wyjscia,
             "pominiete_shorty": res.pominiete_shorty,
             "pominiete_bez_progu": res.pominiete_bez_progu}
     if len(rets) < min_trades:
@@ -910,6 +1114,16 @@ def kup_i_trzymaj(panels: dict[str, list[dict]], kind: str = "spot",
     wyjsciu - czyli placi JEDNA doplate rundy na instrument. Wolajacy podaje
     doplate z karty RYNKOWEJ (`karta_rundy(kind, maker=False, ...)`), bo tak
     ten koszyk jest kupowany: prowizja i poslizg sa juz policzone wyzej.
+
+    OBCIAZENIE KONCA OKNA (audyt 2 R-d, audyt Fable F-3.5) NIE SIEDZIALO
+    W TEJ FUNKCJI, tylko w mnozniku, przez ktory wolajacy ja skaluje. Koszyk
+    niesie cene przez wszystkie przedzialy od `rows[0]` do `rows[-1]`, kazdy
+    raz - takze ostatni. Ekspozycja strategii (`avg_exposure`) gubila po
+    jednym przedziale na transakcje, takze na domknieciu wymuszonym koncem
+    okna, wiec „koszyk przy tej samej ekspozycji" byl mnozony przez za mala
+    liczbe. Porownania z odniesieniami ida od 2026-10-03 po
+    `ekspozycja_przenoszona` (patrz `PortfolioResult`) - test
+    `tests/test_kup_i_trzymaj_koniec_okna.py`.
     """
     k = koszty(kind)
     zwroty = []
