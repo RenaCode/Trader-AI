@@ -1933,6 +1933,25 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
           progi_per_rezim: bool = True) -> None:
     cur = conn.cursor()
     rng = random.Random(SEED)
+
+    # PRZEBIEG SUCHY NIE ZOSTAWIA W BAZIE NICZEGO (audyt Fable F-2.4).
+    #
+    # Do 2026-10-03 `--sucho` zakladalo wiersz w `learn.model_version`
+    # i `learn.training_run`, zatwierdzalo go od razu i na koncu oznaczalo
+    # przebieg jako "tryb suchy" - wersja zostawala w `training` na zawsze,
+    # razem z `drift_metric` i `calibration_bin` przypietymi do niej. Zmierzone
+    # na produkcji: 106 ze 169 wersji toru 4h w `training`.
+    #
+    # Teraz przebieg suchy liczy w JEDNEJ transakcji, wycofanej na koncu albo
+    # przy przerwaniu. Wlasna wersja jest potrzebna W TRAKCIE (`n_konfiguracji`
+    # liczy ja do N) i istnieje - tylko dla tego polaczenia. Cena: przez czas
+    # przebiegu suchego rownolegly trening tego samego modelu czeka na wolny
+    # numer wersji (UNIQUE (model_id, version)) - przebiegi suche sa reczne.
+    def _utrwal():
+        if sucho:
+            conn.rollback()
+        else:
+            conn.commit()
     now = datetime.now(timezone.utc)
 
     # `tradeable` decyduje o uniwersum produkcyjnym - ta sama flaga, ktora czyta
@@ -2229,7 +2248,8 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
         " VALUES (%s,%s,%s,'running') RETURNING id",
         (mv_id, now - timedelta(days=days), now))
     run_id = cur.fetchone()["id"]
-    conn.commit()
+    if not sucho:
+        conn.commit()
 
     # Panel wczytujemy RAZ na instrument - to najdrozsza operacja w calym treningu.
     panels = {}
@@ -2262,7 +2282,7 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
               f"(proces trader-features) i czy uniwersum nie jest puste")
         cur.execute("UPDATE learn.training_run SET status='failed', finished_at=now(),"
                     " error='za mało punktów panelu' WHERE id=%s", (run_id,))
-        conn.commit()
+        _utrwal()
         raise SystemExit(KOD_NIC_NIE_POLICZONO)
 
     # CECHY, KTORE PRZESTALY PRZYCHODZIC, TO NIE JEST WYNIK - TO AWARIA.
@@ -2321,7 +2341,7 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
         print(f"  sprawdź: kubectl logs deploy/trader-features --tail=30")
         cur.execute("UPDATE learn.training_run SET status='failed', finished_at=now(),"
                     " error=%s WHERE id=%s", (komunikat, run_id))
-        conn.commit()
+        _utrwal()
         raise SystemExit(KOD_NIC_NIE_POLICZONO)
 
     idx = 0
@@ -3280,7 +3300,7 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
     else:
         cur.execute("UPDATE learn.training_run SET status='done', finished_at=now(),"
                     " error='tryb suchy - porownanie wariantow' WHERE id=%s", (run_id,))
-    conn.commit()
+    _utrwal()
 
     if wybor == "argmax":
         print(f"\nWagi z IC wybrane w {wybrane_ic}/{idx} okien "
