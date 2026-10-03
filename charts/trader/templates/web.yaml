@@ -14,6 +14,8 @@ spec:
       labels:
         app: {{ include "trader.fullname" . }}-web
     spec:
+      # Proces nie rozmawia z API Kubernetesa (audyt Fable U-8).
+      automountServiceAccountToken: false
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets: {{- toYaml . | nindent 8 }}
       {{- end }}

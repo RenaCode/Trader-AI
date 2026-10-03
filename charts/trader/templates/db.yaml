@@ -30,10 +30,23 @@ spec:
         app: {{ include "trader.fullname" . }}-db
         {{- include "trader.labels" . | nindent 8 }}
     spec:
+      # TWARDNIENIE (audyt Fable U-8). Obraz timescaledb-ha i tak chodzi jako
+      # uid 1000 (zmierzone na produkcji 03.10: `id` -> uid=1000(postgres),
+      # PGDATA 1000:1000 0700), wiec kontekst wymusza to, co juz jest.
+      # BEZ `fsGroup`: kubelet robilby rekursywny chown wolumenu z danymi
+      # przy kazdym starcie. Token ServiceAccount - baza go nie uzywa.
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: db
           image: "{{ include "trader.obrazBazy" . }}"
           imagePullPolicy: {{ .Values.db.image.pullPolicy }}
+          {{- include "trader.kontenerBezUprawnien" . | nindent 10 }}
           env:
             - name: POSTGRES_DB
               value: {{ .Values.db.database | quote }}

@@ -53,5 +53,15 @@ def test_api_i_workery_uzywaja_obu_helperow_dla_KAZDEGO_kontenera():
         assert tekst.count('include "trader.podBezUprawnien"') == 1, plik
         # Kontener startowy i główny — oba z obrazu API, oba z tym samym zakazem.
         obrazy = tekst.count(".Values.api.image.pullPolicy")
-        assert tekst.count('include "trader.kontenerBezUprawnien"') == obrazy, (
+        # `kontenerTylkoOdczyt` (U-8) to ten sam zakaz plus root fs RO.
+        z_kontekstem = (tekst.count('include "trader.kontenerBezUprawnien"')
+                        + tekst.count('include "trader.kontenerTylkoOdczyt"'))
+        assert z_kontekstem == obrazy, (
             f"{plik}: nie każdy kontener z obrazem API dostał kontekst bezpieczeństwa")
+
+
+def test_wariant_tylko_do_odczytu_zawiera_caly_zakaz():
+    k = _definicja("trader.kontenerTylkoOdczyt")
+    assert "allowPrivilegeEscalation: false" in k
+    assert re.search(r'drop:\s*\[\s*"ALL"\s*\]', k)
+    assert "readOnlyRootFilesystem: true" in k

@@ -184,6 +184,21 @@ securityContext:
 {{- end -}}
 
 {{/*
+To samo co `trader.kontenerBezUprawnien` plus ROOT FILESYSTEM TYLKO DO ODCZYTU
+(audyt Fable U-8). Dla workerow: jedynym zapisem procesu jest plik zywotnosci
+`/tmp/trader-zywy` (puls.zyje), wiec /tmp dostaje `emptyDir`. Sprawdzone
+03.10 obrazem z `--read-only --tmpfs /tmp`. API i Joby zostaja na wersji bez
+tej flagi - nikt nie zmierzyl, czy nie pisza poza /tmp.
+*/}}
+{{- define "trader.kontenerTylkoOdczyt" -}}
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+{{- end -}}
+
+{{/*
 OBRAZ BAZY - repozytorium:tag@digest (2026-10-03).
 
 `pg17` jest tagiem RUCHOMYM, a `pullPolicy: IfNotPresent` znaczy, ze kazdy

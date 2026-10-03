@@ -75,6 +75,8 @@ spec:
       imagePullSecrets: {{- toYaml . | nindent 8 }}
       {{- end }}
       {{- include "trader.podBezUprawnien" $ | nindent 6 }}
+      # Zaden worker nie rozmawia z API Kubernetesa (audyt Fable U-8).
+      automountServiceAccountToken: false
       {{/*
       BRAMKA MIGRACJI.
 
@@ -230,7 +232,7 @@ spec:
         - name: {{ $name }}
           image: "{{ $.Values.api.image.repository }}:{{ $.Values.api.image.tag }}"
           imagePullPolicy: {{ $.Values.api.image.pullPolicy }}
-          {{- include "trader.kontenerBezUprawnien" $ | nindent 10 }}
+          {{- include "trader.kontenerTylkoOdczyt" $ | nindent 10 }}
           command: {{ toJson $w.command }}
           {{/* Patrz naglowek: termin jest w pliku, sonda tylko porownuje go z zegarem. */}}
           livenessProbe:
@@ -281,5 +283,13 @@ spec:
             - name: PYTHONUNBUFFERED
               value: "1"
           resources: {{- toYaml $w.resources | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        # Jedyne miejsce zapisu przy root fs tylko do odczytu (U-8).
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
 {{- end }}
 {{- end }}
