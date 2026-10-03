@@ -63,9 +63,146 @@ def filtry_z_bazy(cur, engine: str) -> dict[int, Filtry]:
     return out
 
 
-def id_zlecenia(plan_id: int) -> str:
-    """Nasz identyfikator zlecenia. Z PLANU, nie z czasu i nie losowy."""
-    return f"tai-p{plan_id}"
+# ILE PROB POSTONLY DOSTAJE WYJSCIE W JEDNYM CYKLU, ZANIM PRZEJDZIE NA TAKERA
+# (2026-10-03, audyt F-4.3).
+#
+# Do tej zmiany wyjscie odrzucone przez `EC_PostOnlyWillTakeLiquidity` konczylo
+# sie wygasnieciem planu i czekalo na nastepna decyzje, czyli na nastepna
+# swiece (4 h). Zmierzony koszt: 85 USD na 4 przypadkach, NEAR #38 sam 60 USD
+# (480 pb pozycji). Teraz: pierwsza proba PostOnly, druga PostOnly po swiezym
+# arkuszu, trzecia GTC po drugiej stronie spreadu (`zlecenia.sprawdz_zlecenie`
+# z `agresywna=True`). Taker na spot_eu kosztuje 25 pb zamiast 10 - przy
+# pozycji 1 250 USD to okolo 3 USD wobec 60.
+#
+# WEJSCIA NIE ESKALUJA. Niewypelnione wejscie kosztuje okazje, a wejscie
+# takerem to strategia, ktorej symulacja nie zna (przy takerze Sharpe jest
+# ujemny - naglowek `bybit.zloz_zlecenie`).
+PROBY_POSTONLY_WYJSCIA = 2
+
+
+def id_zlecenia(plan_id: int, proba: int = 0) -> str:
+    """Nasz identyfikator zlecenia. Z PLANU, nie z czasu i nie losowy.
+
+    KAZDA PROBA WYJSCIA MA WLASNY, TEZ DETERMINISTYCZNY IDENTYFIKATOR:
+    `tai-p77`, `tai-p77-r1`, ..., a proba agresywna `tai-p77-a`. Ten sam
+    `orderLinkId` drugi raz to dla Bybita duplikat (170141) nawet po
+    odrzuceniu pierwszego, a identyfikator z czasu zniosłby idempotencje.
+    Stala lista znaczy, ze po restarcie da sie zapytac gielde o kazde ogniwo
+    po kolei (`_ogniwo_lancucha`) i nie zlozyc zadnego drugi raz.
+    """
+    if proba <= 0:
+        return f"tai-p{plan_id}"
+    if proba >= PROBY_POSTONLY_WYJSCIA:
+        return f"tai-p{plan_id}-a"
+    return f"tai-p{plan_id}-r{proba}"
+
+
+def proba_z_id(plan_id: int, id_wlasne: str | None) -> int | None:
+    """Odwrotnosc `id_zlecenia`. None, gdy identyfikator nie jest z tego planu."""
+    for proba in range(PROBY_POSTONLY_WYJSCIA + 1):
+        if id_zlecenia(plan_id, proba) == id_wlasne:
+            return proba
+    return None
+
+
+def id_planu_u_gieldy(plan: dict) -> str:
+    """Identyfikator, pod ktorym ZYJE zlecenie planu - z wiersza, gdy jest.
+
+    Wyjscie po odrzuceniu PostOnly ma zlecenie pod `tai-p77-r1` albo
+    `tai-p77-a`, a nie pod `tai-p77`. Pytanie gieldy o `tai-p77` oddaloby
+    wtedy pierwsze, odrzucone ogniwo i rozstrzygnelo plan jako niewypelniony,
+    choc zlecenie zastepcze lezy w arkuszu. `client_order_id` dokleja do planu
+    zapytanie w `rozstrzygnij_oczekujace`.
+    """
+    return plan.get("client_order_id") or id_zlecenia(plan["id"])
+
+
+def odrzucone_przez_postonly(stan) -> bool:
+    """Gielda zdjela zlecenie, bo przecielo spread - i NIC z niego nie weszlo.
+
+    Tylko taki stan wolno eskalowac. Wypelnienie czesciowe jest juz pozycja
+    w ksiegach, a kazdy inny powod odmowy (saldo, regula) powtorzy sie przy
+    kazdej cenie.
+    """
+    odmowa = getattr(stan, "powod_odmowy", None)
+    return (stan is not None and stan.status in ("cancelled", "rejected")
+            and stan.wypelniono == 0
+            and odmowa is not None and odmowa.rodzaj == "postonly")
+
+
+async def _ogniwo_lancucha(adapter, plan: dict, kategoria: str):
+    """Pierwsza proba wyjscia, ktora NIE jest odrzuceniem PostOnly: (proba, stan).
+
+    IDEMPOTENCJA LANCUCHA. Cykl, ktory wyslal `tai-p77`, dostal odrzucenie
+    i wyslal `tai-p77-r1`, moze zginac przed `commit` - wtedy plan wraca jako
+    `pending` bez wiersza. Pytanie wylacznie o `tai-p77` zobaczyloby zlecenie
+    odrzucone i zapisalo je jako stan planu, a `tai-p77-r1` zostaloby w arkuszu
+    bez wiersza. Idziemy wiec po ogniwach, dopoki gielda mowi "odrzucone przez
+    PostOnly": pierwsze inne (zywe, wypelnione albo nieznane gieldzie) jest
+    tym, od ktorego wolno kontynuowac.
+
+    Koszt: jedno zapytanie w zwyklym przypadku (gielda nie zna `tai-p77`),
+    po jednym na ogniwo tylko po odrzuceniu.
+    """
+    stan = None
+    for proba in range(PROBY_POSTONLY_WYJSCIA + 1):
+        stan = await adapter.stan_zlecenia(id_zlecenia(plan["id"], proba),
+                                           kategoria=kategoria)
+        if not odrzucone_przez_postonly(stan):
+            return proba, stan
+    # Ogniwo agresywne nie ma PostOnly, wiec tu nie dochodzimy; gdyby jednak
+    # gielda tak je opisala, nie ma juz czego eskalowac.
+    return PROBY_POSTONLY_WYJSCIA, stan
+
+
+def wycofaj_ogniwo(cur, *, zlecenie_id: int | None, plan: dict, engine: str,
+                   mode: str, id_wlasne: str, proba: int, stan,
+                   ilosc=None, cena=None, raw: dict | None = None) -> None:
+    """Zapisuje odrzucone ogniwo wyjscia jako zlecenie BEZ planu.
+
+    JEDEN WIERSZ Z `planned_order_id` NA PLAN - na tym stoja `rozstrzygnij_plan`
+    (`ORDER BY id LIMIT 1`) i kazde `UPDATE ... WHERE planned_order_id`.
+    Odrzucone ogniwo dostaje wiec ten sam ksztalt co wiersz zwolniony przez
+    `ponow_nieznane`: `planned_order_id` NULL (plan zostaje w `raw`),
+    `client_order_id` z sufiksem `~postonly`, zeby UNIQUE (mode,
+    client_order_id) nie zderzylo sie z zadnym pozniejszym zapisem tego
+    identyfikatora. Wiersz ZOSTAJE: odrzucenie jest zleceniem, ktore poszlo na
+    gielde, i liczy sie do wypelnialnosci (`poslizg.wypelnialnosc`).
+
+    `zlecenie_id` podany - wiersz juz jest (odrzucenie wykryte przy
+    rozstrzyganiu) i zostaje przepisany; None - wstawiamy nowy.
+    """
+    odmowa = stan.powod_odmowy
+    meta = {"execution": "gielda", "etap": "wyjscie_odrzucone_postonly",
+            "planned_order_id": plan["id"], "proba": proba,
+            "client_order_id_wyslany": id_wlasne,
+            "status_gieldy": stan.status, "venue_order_id": stan.id_gieldy,
+            "powod_odmowy_gieldy": odmowa.kod,
+            "powod_odmowy_rodzaj": odmowa.rodzaj,
+            "dalej": ("ponowna proba PostOnly po swiezym arkuszu"
+                      if proba + 1 < PROBY_POSTONLY_WYJSCIA
+                      else "zlecenie agresywne GTC bez PostOnly")}
+    if raw:
+        meta = {**raw, **meta}
+    if zlecenie_id is not None:
+        cur.execute(
+            "UPDATE exec.order SET status=%s, updated_at=now(), planned_order_id=NULL,"
+            " client_order_id = client_order_id || '~postonly', reject_reason=%s,"
+            " venue_order_id = COALESCE(venue_order_id, %s),"
+            " raw = COALESCE(raw,'{}'::jsonb) || %s WHERE id=%s",
+            (stan.status, odmowa.opis, stan.id_gieldy, json.dumps(meta),
+             zlecenie_id))
+        return
+    cur.execute(
+        "INSERT INTO exec.order (decision_id, planned_order_id, engine, mode,"
+        " instrument_id, venue_order_id, client_order_id, side, order_type, qty,"
+        " limit_price, status, reject_reason, submitted_at, raw)"
+        " VALUES (%s,NULL,%s,%s,%s,%s,%s,%s,'limit',%s,%s,%s,%s,now(),%s)",
+        (plan["decision_id"], engine, mode, plan["instrument_id"],
+         stan.id_gieldy, f"{id_wlasne}~postonly", plan["side"],
+         ilosc if ilosc is not None else plan["qty"],
+         cena if cena is not None else plan["limit_price"],
+         stan.status, odmowa.opis, json.dumps(meta)))
 
 
 async def potwierdzone_saldo(adapter, aktywo: str | None) -> Decimal | None:
@@ -153,7 +290,7 @@ async def gielda_juz_rozstrzygnela(adapter, plan: dict, *, kategoria: str,
     ktora ostrzega `stan_zlecenia`.
     """
     try:
-        stan = await adapter.stan_zlecenia(id_zlecenia(plan["id"]),
+        stan = await adapter.stan_zlecenia(id_planu_u_gieldy(plan),
                                            kategoria=kategoria)
     except ExchangeError as e:
         if e.wymaga_czlowieka:
@@ -383,7 +520,14 @@ async def arkusz_wysylki(adapter, symbol: str, kategoria: str, teraz: datetime
     PRZED odczytem arkusza, nie w jego chwili. `odczyt_at` to `teraz` podane
     przez wywolujacego, czyli zegar z chwili odczytu.
     """
+    # `mid_eu_przy_wysylce` (2026-10-03, audyt F-4.2): srodek arkusza ksiegi
+    # EGZEKUCJI w chwili wysylki. Wysylka idzie w tym samym cyklu co decyzja,
+    # wiec to jest tez mid z chwili decyzji, z dokladnoscia do sekund - i to
+    # on dzieli `fill - target` na ruch od zamkniecia swiecy do wysylki
+    # i ruch od wysylki do wypelnienia (`poslizg.rozbicie_do_celu`). Zero
+    # dodatkowych zapytan: ta sama odpowiedz co bid i ask.
     slad: dict = {"odczyt_at": teraz.isoformat(), "bid": None, "ask": None,
+                  "mid_eu_przy_wysylce": None,
                   "arkusz_at": None, "wiek_s": None, "powod_braku": None}
     try:
         ksiega = await adapter.fetch_order_book(symbol, 1, ksiega_egzekucji=True)
@@ -401,9 +545,11 @@ async def arkusz_wysylki(adapter, symbol: str, kategoria: str, teraz: datetime
     # ZNACZNIK I WIEK ZAPISUJEMY TAKZE WTEDY, GDY ODCZYT ODRZUCAMY. Bez tego
     # "arkusz byl za stary" zostawaloby wiedza wylacznie tej funkcji, a wlasnie
     # ona rozstrzyga miedzy dwoma przeciwnymi lekarstwami.
+    bid, ask = ksiega.bids[0].price, ksiega.asks[0].price
     slad = {**slad, "arkusz_at": ksiega.event_time.isoformat(),
             "wiek_s": round(wiek, 3),
-            "bid": str(ksiega.bids[0].price), "ask": str(ksiega.asks[0].price)}
+            "bid": str(bid), "ask": str(ask),
+            "mid_eu_przy_wysylce": str((bid + ask) / 2)}
     if wiek > WIEK_ARKUSZA_MAX_S:
         # SWIEZA CENA Z ODCZYTU SPRZED GODZINY TO TEN SAM BLAD W NOWYM MIEJSCU.
         skad = (f"arkusz księgi egzekucji ma {wiek:.0f} s "
@@ -445,7 +591,7 @@ async def arkusz_po_wysylce(adapter, symbol: str, kategoria: str) -> dict:
         return slad
     except Exception as e:  # noqa: BLE001 - diagnostyka nie wywraca egzekucji
         return {"odczyt_at": teraz.isoformat(), "bid": None, "ask": None,
-                "arkusz_at": None, "wiek_s": None,
+                "mid_eu_przy_wysylce": None, "arkusz_at": None, "wiek_s": None,
                 "powod_braku": f"odczyt po wysyłce nie powiódł się: {e!r}"}
 
 
@@ -476,7 +622,8 @@ def slad_wysylki(arkusz: dict, ceny: dict, plan: dict,
 
 async def zloz_plan(cur, adapter, plan: dict, f: Filtry, *, engine: str,
                     mode: str, kategoria: str,
-                    sesja: StanSesji | None = None) -> tuple[bool, str]:
+                    sesja: StanSesji | None = None,
+                    proba: int | None = None) -> tuple[bool, str]:
     """Składa jeden plan na giełdzie. Zwraca (czy_zlozono, komunikat).
 
     ODMOWA ZŁOŻENIA JEST ZAPISYWANA, nie pomijana. Plan, który nie poszedł na
@@ -498,8 +645,24 @@ async def zloz_plan(cur, adapter, plan: dict, f: Filtry, *, engine: str,
     Dlatego ta funkcja czyta arkusz księgi egzekucji (`arkusz_wysylki`) i cena
     limitu powstaje z NIEGO, po pasywnej stronie spreadu. Decyzja się przy tym
     NIE ZMIENIA — zmienia się cena, po której ją wykonujemy. Wyjątkiem jest
-    jawny próg: gdy cena odjechała od ceny decyzyjnej dalej niż 1,5×ATR pary
-    (`zlecenia.prog_zwloki`), wejścia NIE składamy i zapisujemy pominięcie.
+    jawny próg: gdy cena odjechała od ceny decyzyjnej dalej niż
+    `zlecenia.KROTNOSC_ZWLOKI`×ATR pary (`zlecenia.prog_zwloki`, od 2026-10-03
+    0,5), wejścia NIE składamy i zapisujemy pominięcie.
+
+    WYJŚCIE ODRZUCONE PRZEZ POSTONLY NIE CZEKA ŚWIECY (2026-10-03, audyt F-4.3)
+
+    Po wysłaniu wyjścia pytamy giełdę o jego stan. `EC_PostOnlyWillTakeLiquidity`
+    zapada w silniku dopasowań w chwili przyjęcia, więc odpowiedź jest zwykle
+    już w pierwszym odczycie. Wtedy ogniwo zostaje zapisane bez planu
+    (`wycofaj_ogniwo`), a ta funkcja woła się ponownie z `proba + 1`: świeży
+    arkusz, nowy identyfikator (`id_zlecenia`), cena pasywna. Po
+    `PROBY_POSTONLY_WYJSCIA` odrzuceniach - cena po drugiej stronie spreadu
+    i `timeInForce: GTC` (`raw.wyjscie_agresywne`). Odrzucenie widoczne
+    dopiero w następnym cyklu łapie `rozstrzygnij_plan`.
+
+    `proba is None` znaczy „wołający nie wie, gdzie w łańcuchu jesteśmy" -
+    tak woła `zloz_oczekujace`, a funkcja pyta giełdę po kolejnych ogniwach
+    (`_ogniwo_lancucha`). Wejście ma zawsze jedno ogniwo.
     """
     wyjscie = plan["trigger"]["rodzaj"] == "wyjscie"
     kupno = plan["side"] == "buy"
@@ -523,12 +686,23 @@ async def zloz_plan(cur, adapter, plan: dict, f: Filtry, *, engine: str,
     istnieje = None
     blad_odczytu: ExchangeError | None = None
     try:
-        istnieje = await adapter.stan_zlecenia(id_zlecenia(plan["id"]),
-                                               kategoria=kategoria)
+        if proba is None and wyjscie:
+            proba, istnieje = await _ogniwo_lancucha(adapter, plan, kategoria)
+        else:
+            proba = proba or 0
+            istnieje = await adapter.stan_zlecenia(id_zlecenia(plan["id"], proba),
+                                                   kategoria=kategoria)
     except ExchangeError as e:
         if e.wymaga_czlowieka:
             raise
         blad_odczytu = e
+    # Odczyt przerwany w srodku lancucha zostawia `proba` nieustalone. Zero jest
+    # wtedy bezpieczne: bez odpowiedzi nic nie wysylamy (`BladPrzedWyslaniem`),
+    # a wiersz odmowy pod `tai-p{id}` nie zderzy sie z wycofanym ogniwem, bo to
+    # ma sufiks `~postonly`.
+    proba = proba or 0
+    id_w = id_zlecenia(plan["id"], proba)
+    agresywne = wyjscie and proba >= PROBY_POSTONLY_WYJSCIA
 
     # CENA ODNIESIENIA Z KSIEGI, W KTOREJ ZLECENIE WYLADUJE.
     #
@@ -568,7 +742,7 @@ async def zloz_plan(cur, adapter, plan: dict, f: Filtry, *, engine: str,
         Decimal(plan["qty"]), Decimal(plan["limit_price"]), f,
         kupno=kupno, wyjscie=wyjscie,
         cena_odniesienia=odniesienie, atr_pct=atr, najlepsze=oferty,
-        slad=slad_ceny)
+        slad=slad_ceny, agresywna=agresywne)
 
     # GRANICA, ZA KTORA NIE WCHODZIMY - I SLAD PO NIEJ W DZIENNIKU.
     #
@@ -722,7 +896,7 @@ async def zloz_plan(cur, adapter, plan: dict, f: Filtry, *, engine: str,
                 " qty, limit_price, status, reject_reason, submitted_at, raw)"
                 " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,'limit',%s,%s,%s,%s,now(),%s)",
                 (plan["decision_id"], plan["id"], engine, mode,
-                 plan["instrument_id"], istnieje.id_gieldy, id_zlecenia(plan["id"]),
+                 plan["instrument_id"], istnieje.id_gieldy, id_w,
                  plan["side"], istnieje.ilosc, plan["limit_price"],
                  istnieje.status,
                  f"sprawdzenie przed wysłaniem odmówiłoby ({powod}), ale giełda"
@@ -748,7 +922,7 @@ async def zloz_plan(cur, adapter, plan: dict, f: Filtry, *, engine: str,
             " status, reject_reason, submitted_at, raw)"
             " VALUES (%s,%s,%s,%s,%s,%s,%s,'limit',%s,%s,'rejected',%s,now(),%s)",
             (plan["decision_id"], plan["id"], engine, mode, plan["instrument_id"],
-             id_zlecenia(plan["id"]), plan["side"], plan["qty"], plan["limit_price"],
+             id_w, plan["side"], plan["qty"], plan["limit_price"],
              powod, json.dumps({"execution": "gielda", "etap": "przed_zlozeniem",
                                 "arkusz_wysylki": slad_wysylki(
                                     slad_arkusza, slad_ceny, plan, cena)})))
@@ -816,7 +990,7 @@ async def zloz_plan(cur, adapter, plan: dict, f: Filtry, *, engine: str,
     if istnieje is not None:
         # GIELDA JUZ ZNA TO ZLECENIE - ta sama odpowiedz, ktora dotad dawal
         # `zloz_zlecenie` jako `juz_istnialo=True`, z tym samym zapisem nizej.
-        z = ZlozoneZlecenie(id_wlasne=id_zlecenia(plan["id"]),
+        z = ZlozoneZlecenie(id_wlasne=id_w,
                             id_gieldy=istnieje.id_gieldy, status=istnieje.status,
                             juz_istnialo=True)
     else:
@@ -839,10 +1013,14 @@ async def zloz_plan(cur, adapter, plan: dict, f: Filtry, *, engine: str,
         if z is None:
             slad_arkusza = {**slad_arkusza,
                             "wyslano_at": datetime.now(timezone.utc).isoformat()}
+            # `post_only` TYLKO GDY EGZEKUCJA SIE NAPRAWDE ESKALUJE. Zwykle
+            # wywolanie zostaje bajt w bajt takie jak dotad - adapter Alpaki
+            # tego argumentu nie zna, bo PostOnly tam nie istnieje.
             z = await adapter.zloz_zlecenie(
                 symbol=plan["symbol"], strona=plan["side"],
-                ilosc=ilosc, cena_limitu=cena, id_wlasne=id_zlecenia(plan["id"]),
-                kategoria=kategoria, istnienie_sprawdzone=True)
+                ilosc=ilosc, cena_limitu=cena, id_wlasne=id_w,
+                kategoria=kategoria, istnienie_sprawdzone=True,
+                **({"post_only": False} if agresywne else {}))
             slad_arkusza = {**slad_arkusza,
                             "odpowiedz_at": datetime.now(timezone.utc).isoformat()}
     except OdmowaGieldy as e:
@@ -858,7 +1036,7 @@ async def zloz_plan(cur, adapter, plan: dict, f: Filtry, *, engine: str,
             cur, adapter, plan, f, e, ilosc=ilosc, cena=cena, engine=engine,
             mode=mode, kategoria=kategoria, wyjscie=wyjscie, kupno=kupno,
             odniesienie=odniesienie, atr=atr,
-            slad_arkusza=slad_arkusza, slad_ceny=slad_ceny)
+            slad_arkusza=slad_arkusza, slad_ceny=slad_ceny, id_w=id_w)
     except ExchangeError as e:
         # MARTWY KLUCZ, ZLE IP, ZAMROZONE KONTO - W GORE, NIE DO `unknown`.
         # Odpowiedz dotarla, wiec zlecenia nie ma; ale reakcja to czlowiek,
@@ -880,7 +1058,7 @@ async def zloz_plan(cur, adapter, plan: dict, f: Filtry, *, engine: str,
             " status, reject_reason, submitted_at, raw)"
             " VALUES (%s,%s,%s,%s,%s,%s,%s,'limit',%s,%s,'unknown',%s,now(),%s)",
             (plan["decision_id"], plan["id"], engine, mode, plan["instrument_id"],
-             id_zlecenia(plan["id"]), plan["side"], ilosc, cena, str(e),
+             id_w, plan["side"], ilosc, cena, str(e),
              json.dumps({"execution": "gielda", "etap": "odpowiedz_nie_dotarla",
                          "arkusz_wysylki": slad_wysylki(
                              slad_arkusza, slad_ceny, plan, cena)})))
@@ -890,6 +1068,34 @@ async def zloz_plan(cur, adapter, plan: dict, f: Filtry, *, engine: str,
         slad_arkusza = {**slad_arkusza, "po_wysylce": await arkusz_po_wysylce(
             adapter, plan["symbol"], kategoria)}
 
+    raw = {"execution": "gielda", "juz_istnialo": z.juz_istnialo,
+           "arkusz_wysylki": slad_wysylki(slad_arkusza, slad_ceny, plan, cena)}
+    if wyjscie:
+        # Na KAZDYM wyjsciu, takze `false` - bez grupy odniesienia udzial
+        # agresywnych w `poslizg.udzial_wyjsc_takerem` nie ma mianownika.
+        raw["proba"] = proba
+        raw["wyjscie_agresywne"] = agresywne
+
+    if wysylamy and wyjscie and not agresywne:
+        # ODRZUCENIE POSTONLY ZAPADA PRZY PRZYJECIU - PYTAMY OD RAZU.
+        #
+        # Blad odczytu NIE eskaluje: o zleceniu nic nie wiemy, a drugie
+        # zlecenie przy pierwszym zywym byloby podwojna sprzedaza. Zostaje
+        # zwykly wiersz; odrzucenie widoczne pozniej zlapie `rozstrzygnij_plan`.
+        try:
+            stan_po = await adapter.stan_zlecenia(id_w, kategoria=kategoria)
+        except ExchangeError:
+            stan_po = None
+        if odrzucone_przez_postonly(stan_po):
+            wycofaj_ogniwo(cur, zlecenie_id=None, plan=plan, engine=engine,
+                           mode=mode, id_wlasne=id_w, proba=proba, stan=stan_po,
+                           ilosc=ilosc, cena=cena, raw=raw)
+            ok, msg = await zloz_plan(cur, adapter, plan, f, engine=engine,
+                                      mode=mode, kategoria=kategoria,
+                                      sesja=sesja, proba=proba + 1)
+            return ok, (f"PostOnly odrzucił {id_w} @ {cena}; "
+                        f"ponowione jako {id_zlecenia(plan['id'], proba + 1)}: {msg}")
+
     cur.execute(
         "INSERT INTO exec.order (decision_id, planned_order_id, engine, mode,"
         " instrument_id, venue_order_id, client_order_id, side, order_type, qty,"
@@ -897,11 +1103,10 @@ async def zloz_plan(cur, adapter, plan: dict, f: Filtry, *, engine: str,
         " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,'limit',%s,%s,%s,now(),%s)",
         (plan["decision_id"], plan["id"], engine, mode, plan["instrument_id"],
          z.id_gieldy, z.id_wlasne, plan["side"], ilosc, cena, z.status,
-         json.dumps({"execution": "gielda", "juz_istnialo": z.juz_istnialo,
-                     "arkusz_wysylki": slad_wysylki(
-                         slad_arkusza, slad_ceny, plan, cena)})))
+         json.dumps(raw)))
     return True, ("odnalezione u giełdy (idempotencja)" if z.juz_istnialo
-                  else f"złożone {ilosc} @ {cena}")
+                  else f"złożone {ilosc} @ {cena}"
+                  + (" (AGRESYWNIE, GTC bez PostOnly)" if agresywne else ""))
 
 
 async def odmowa_gieldy(cur, adapter, plan: dict, f: Filtry, blad: OdmowaGieldy, *,
@@ -909,7 +1114,8 @@ async def odmowa_gieldy(cur, adapter, plan: dict, f: Filtry, blad: OdmowaGieldy,
                         kategoria: str, wyjscie: bool, kupno: bool,
                         odniesienie: Decimal | None, atr: float | None,
                         slad_arkusza: dict | None = None,
-                        slad_ceny: dict | None = None) -> tuple[bool, str]:
+                        slad_ceny: dict | None = None,
+                        id_w: str | None = None) -> tuple[bool, str]:
     """Giełda ODMÓWIŁA przyjęcia zlecenia. Zapisuje to jako fakt, nie jako niewiedzę.
 
     DLACZEGO TO JEST OSOBNA ŚCIEŻKA, A NIE GAŁĄŹ W `except ExchangeError`
@@ -954,7 +1160,10 @@ async def odmowa_gieldy(cur, adapter, plan: dict, f: Filtry, blad: OdmowaGieldy,
     ilość, a dopiero potem zapisujemy JEDEN wiersz opisujący to, co naprawdę
     się stało.
     """
-    id_w = id_zlecenia(plan["id"])
+    # Identyfikator TEJ proby (`id_zlecenia(plan, proba)`), nie planu - po
+    # odrzuceniu PostOnly wyjscie idzie pod `tai-p77-r1`, a wiersz pod
+    # `tai-p77` juz istnieje i UNIQUE (mode, client_order_id) by go nie wpuscilo.
+    id_w = id_w or id_zlecenia(plan["id"])
     slad_arkusza = {} if slad_arkusza is None else slad_arkusza
     slad_ceny = {} if slad_ceny is None else slad_ceny
     meta = {"execution": "gielda", "etap": "odmowa_gieldy",
@@ -1091,7 +1300,7 @@ def _iso_z_ms(ms) -> str | None:
 
 async def rozstrzygnij_plan(cur, adapter, plan: dict, f: Filtry, *, engine: str,
                             mode: str, kategoria: str, teraz: datetime,
-                            kind: str) -> tuple[str, str]:
+                            kind: str, ponow_wyjscie: bool = False) -> tuple[str, str]:
     """Pyta giełdę o los planu i zapisuje wynik. Zwraca (rodzaj, komunikat).
 
     Rodzaj to zwykle wynik `co_z_wypelnieniem` ('pelne', 'czesciowe', 'brak',
@@ -1103,9 +1312,13 @@ async def rozstrzygnij_plan(cur, adapter, plan: dict, f: Filtry, *, engine: str,
                                 zostaje `pending` i wracamy do niego w następnym
                                 cyklu,
       * 'wyjscie_bez_pozycji' — sprzedaż wykonała się na giełdzie, a w bazie nie
-                                ma otwartej pozycji, którą miała zamknąć.
+                                ma otwartej pozycji, którą miała zamknąć,
+      * 'wyjscie_ponowione'   — wyjście odrzucone przez PostOnly przed terminem
+                                planu (`ponow_wyjscie`); ogniwo wycofane, plan
+                                zostaje `pending` i `zloz_oczekujace` złoży
+                                następną próbę jeszcze w tym cyklu.
     """
-    id_w = id_zlecenia(plan["id"])
+    id_w = id_planu_u_gieldy(plan)
     stan = await adapter.stan_zlecenia(id_w, kategoria=kategoria)
 
     if stan is None:
@@ -1268,6 +1481,30 @@ async def rozstrzygnij_plan(cur, adapter, plan: dict, f: Filtry, *, engine: str,
             return "nie_zdjete", (r.powod + " — ZLECENIE ZOSTAJE W ARKUSZU GIEŁDY,"
                                   " plan pozostaje do rozstrzygnięcia i anulowanie"
                                   " zostanie ponowione")
+
+        # ODRZUCENIE POSTONLY WYJSCIA, KTORE ZOBACZYLISMY DOPIERO TERAZ.
+        #
+        # `zloz_plan` pyta o stan zaraz po wysylce, ale gdy gielda opisala
+        # odrzucenie z opoznieniem, pierwszy odczyt widzial `new`. Wygaszenie
+        # planu w tym miejscu przywracaloby dokladnie to, co usuwa F-4.3:
+        # wyjscie czekajace na nastepna decyzje. Ogniwo wycofujemy, plan
+        # zostaje `pending` BEZ wiersza, a `zloz_oczekujace` (koniec tego
+        # samego cyklu) zlozy nastepna probe - `_ogniwo_lancucha` znajdzie,
+        # ktora.
+        #
+        # TYLKO PRZED TERMINEM PLANU (`ponow_wyjscie`). Po nim nastepna swieca
+        # ma juz wlasna decyzje; drugie wyjscie z tej samej pozycji obok jej
+        # planu byloby podwojna sprzedaza.
+        proba = proba_z_id(plan["id"], id_w)
+        if (ponow_wyjscie and plan["trigger"]["rodzaj"] == "wyjscie"
+                and proba is not None and proba < PROBY_POSTONLY_WYJSCIA
+                and odrzucone_przez_postonly(stan) and id_zlecenia_w_bazie is not None):
+            wycofaj_ogniwo(cur, zlecenie_id=id_zlecenia_w_bazie, plan=plan,
+                           engine=engine, mode=mode, id_wlasne=id_w, proba=proba,
+                           stan=stan, raw=meta)
+            return "wyjscie_ponowione", (
+                f"PostOnly odrzucił {id_w} — następna próba "
+                f"{id_zlecenia(plan['id'], proba + 1)} jeszcze w tym cyklu")
 
         cur.execute("UPDATE journal.planned_order SET status='expired',"
                     " resolved_at=%s WHERE id=%s", (teraz, plan["id"]))
@@ -1694,7 +1931,7 @@ async def rozstrzygnij_oczekujace(cur, adapter, *, engine: str, mode: str,
     # w pulsie jak cykl bez zdarzen.
     st = {"wypelnione": 0, "niewypelnione": 0, "czekaja": 0, "czesciowe": 0,
           "nie_do_zamkniecia": 0, "nie_zdjete": 0, "wyjscie_bez_pozycji": 0,
-          "nie_wiem": 0, "blad_odczytu": 0}
+          "nie_wiem": 0, "blad_odczytu": 0, "wyjscie_ponowione": 0}
     filtry = filtry_z_bazy(cur, engine)
     # SILNIK I TRYB Z DECYZJI, KTORA PLAN ZRODZILA.
     #
@@ -1717,7 +1954,11 @@ async def rozstrzygnij_oczekujace(cur, adapter, *, engine: str, mode: str,
     # regule z tego samego miejsca, inaczej powstanie druga obok istniejacej.
     cur.execute(
         "SELECT p.id, p.decision_id, p.instrument_id, p.side, p.qty, p.limit_price,"
-        "       p.trigger, p.valid_until, i.symbol, i.quote_ccy, i.base_ccy"
+        "       p.trigger, p.valid_until, i.symbol, i.quote_ccy, i.base_ccy,"
+        # POD JAKIM ID ZLECENIE PLANU NAPRAWDE ZYJE - patrz `id_planu_u_gieldy`.
+        "       (SELECT o.client_order_id FROM exec.order o"
+        "         WHERE o.planned_order_id = p.id ORDER BY o.id LIMIT 1)"
+        "         AS client_order_id"
         "  FROM journal.planned_order p"
         "  JOIN ref.instrument i ON i.id = p.instrument_id"
         "  JOIN journal.decision d ON d.id = p.decision_id"
@@ -1742,7 +1983,8 @@ async def rozstrzygnij_oczekujace(cur, adapter, *, engine: str, mode: str,
         try:
             rodzaj, powod = await rozstrzygnij_plan(
                 cur, adapter, plan, f, engine=engine, mode=mode,
-                kategoria=kategoria, teraz=now, kind=kind)
+                kategoria=kategoria, teraz=now, kind=kind,
+                ponow_wyjscie=czekamy)
         except ExchangeError as e:
             if e.wymaga_czlowieka:
                 raise
@@ -1759,8 +2001,8 @@ async def rozstrzygnij_oczekujace(cur, adapter, *, engine: str, mode: str,
             # `niewypelnione` mowiloby "zamkniete i nic nie weszlo", czyli
             # dokladnie to, czego jeszcze nie wiemy.
             st["nie_zdjete"] += 1
-        elif rodzaj == "nie_wiem":
-            st["nie_wiem"] += 1
+        elif rodzaj in ("nie_wiem", "wyjscie_ponowione"):
+            st[rodzaj] += 1
         else:
             st["wypelnione"] += 1
             if rodzaj in st:

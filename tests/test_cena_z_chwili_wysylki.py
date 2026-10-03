@@ -312,11 +312,15 @@ def test_ZMIERZONY_dryf_produkcyjny_NIE_odmawia_wejscia():
     0,11–0,15%. Próg przy ATR 1,85% to 2,78%, więc zapas jest osiemnastokrotny.
     Ta asercja jest tu po to, żeby zacieśnienie progu do wartości odmawiającej
     normalnego dnia zapaliło zestaw.
+
+    Od 2026-10-03 próg to 0,5×ATR (0,93% przy SOL), więc zapas spadł do
+    sześciokrotnego - i to nadal przy dryfie z ZWŁOKI 75 MINUT, której próg
+    czasowy (`loop.MAKS_ZWLOKA_WEJSCIA`) już nie przepuści.
     """
     z = ocena_zwloki(D("120.84"), D("120.66"), ATR_SOL)
     assert z.poza is False
     assert z.odchylenie < D("0.002")
-    assert z.prog > 10 * z.odchylenie
+    assert z.prog > 5 * z.odchylenie
 
 
 def test_cena_odjechana_DALEJ_NIZ_PROG_nie_idzie_na_gielde():
@@ -355,7 +359,7 @@ def test_odmowa_zostawia_POMINIECIE_z_wlasnym_powodem_i_ze_SWIECA():
     assert params[2] == 3
     assert params[3] == dt.datetime.fromisoformat(BAR)
     assert params[4] == "cena_odjechala"
-    assert "1,5" in params[5]
+    assert "0,5×ATR" in params[5]
 
 
 def test_WYJSCIE_nie_dostaje_zadnego_progu_nawet_przy_wielkim_dryfie():
@@ -466,3 +470,84 @@ def test_podmiana_ceny_NIE_RUSZA_ilosci_ani_dziennika_decyzji():
     assert not cur.zapytania("UPDATE journal.planned_order SET limit_price")
     (_, params), = cur.zapytania("INSERT INTO exec.order")
     assert D("120.66") in params, "wiersz zlecenia nie zapisal ceny WYSLANEJ"
+
+
+# =========================== 5. swiezosc decyzji: prog CZASOWY i 0,5 x ATR (T7)
+#
+# Prog cenowy 1,5 x ATR byl p98-p99,5 dryfu przy zwloce 75 MINUT - przepuszczal
+# 99% wejsc po godzinie (audyt F-4.4). Teraz zwloke ogranicza wprost czas od
+# zamkniecia swiecy, a prog cenowy zaciesnia sie do 0,5 x ATR.
+
+def test_KROTNOSC_ZWLOKI_to_POL_ATR():
+    assert KROTNOSC_ZWLOKI == D("0.5")
+    assert prog_zwloki(ATR_SOL) == D("0.5") * D(str(ATR_SOL)) / 100
+
+
+def test_dryf_PRZEPUSZCZANY_przy_1_5_ATR_jest_teraz_ODMOWA():
+    """Kanarek na wartość: SOL o 1,2% w górę mieścił się w 1,5×ATR (2,78%),
+    a nie mieści się w 0,5×ATR (0,93%) - i wejście nie idzie na giełdę."""
+    g = Gielda(ksiega=arkusz("122.30", "122.32"), odniesienie=D("122.30"))
+    cur, ok, msg = zloz(plan(pid=55, strona="buy", limit="120.84", qty="8.87"),
+                        gielda=g)
+    assert ok is False, msg
+    assert g.zlozone == []
+    (_, params), = cur.zapytania("INSERT INTO journal.pominiecie")
+    assert params[4] == "cena_odjechala"
+
+
+def test_prog_CZASOWY_wejscia_to_20_minut_OD_ZAMKNIECIA_swiecy():
+    """Granica liczona od KOŃCA świecy (`okno_decyzji`), nie od jej początku:
+    świeca 4h 08:00 zamyka się o 12:00, więc 12:20 jest jeszcze w porządku,
+    a 12:21 już nie. Przy liczeniu od początku każda decyzja byłaby
+    przeterminowana o cztery godziny."""
+    from services.engine.horizons import get as get_horizon
+    from services.engine.loop import MAKS_ZWLOKA_WEJSCIA, decyzja_przeterminowana
+
+    assert MAKS_ZWLOKA_WEJSCIA == dt.timedelta(minutes=20)
+    h4 = get_horizon("4h")
+    poczatek = dt.datetime(2026, 9, 25, 8, 0, tzinfo=dt.timezone.utc)
+    zamkniecie = poczatek + dt.timedelta(hours=4)
+    assert not decyzja_przeterminowana(zamkniecie + dt.timedelta(minutes=5), poczatek, h4)
+    assert not decyzja_przeterminowana(zamkniecie + dt.timedelta(minutes=20), poczatek, h4)
+    assert decyzja_przeterminowana(zamkniecie + dt.timedelta(minutes=21), poczatek, h4)
+    # Zmierzone przed poprawka potoku: decyzje 63-88 min po zamknieciu.
+    assert decyzja_przeterminowana(zamkniecie + dt.timedelta(minutes=63), poczatek, h4)
+
+    h1 = get_horizon("1h")
+    assert not decyzja_przeterminowana(poczatek + dt.timedelta(minutes=75), poczatek, h1)
+    assert decyzja_przeterminowana(poczatek + dt.timedelta(minutes=81), poczatek, h1)
+
+
+def test_prog_czasowy_wstrzymuje_WEJSCIE_z_wlasnym_powodem_a_po_KILL_SWITCHU():
+    """Drzewo składniowe, nie tekst: gałąź z `decyzja_przeterminowana(...)`
+    w warunku musi (1) ustawiać hold z powodem `decyzja_przeterminowana`,
+    (2) stać PO gałęzi `wstrzymanie_ryzykiem` - próba pożarowa rozpoznaje
+    działające ogniwo 3 po tym powodzie - i (3) PRZED `risk.check`, żeby
+    przeterminowane wejście nie zużywało limitów ryzyka. Warunek musi też
+    dotyczyć wyłącznie wejść (`action.startswith("enter")`)."""
+    import ast
+    from pathlib import Path
+
+    drzewo = ast.parse(Path("services/engine/loop.py").read_text(encoding="utf-8"))
+
+    def wola(wezel, nazwa):
+        return any(isinstance(n, ast.Call) and getattr(n.func, "id", None) == nazwa
+                   for n in ast.walk(wezel))
+
+    def powod(blok):
+        return [a.value.value for a in blok if isinstance(a, ast.Assign)
+                and any(getattr(t, "id", None) == "powod_holdu" for t in a.targets)
+                and isinstance(a.value, ast.Constant)]
+
+    rodzice = [n for n in ast.walk(drzewo) if isinstance(n, ast.If)
+               and len(n.orelse) == 1 and isinstance(n.orelse[0], ast.If)
+               and wola(n.orelse[0].test, "decyzja_przeterminowana")]
+    assert len(rodzice) == 1, "brak gałęzi progu czasowego w łańcuchu wyboru"
+    rodzic = rodzice[0]
+    galaz = rodzic.orelse[0]
+    assert powod(rodzic.body) == ["wstrzymanie_ryzykiem"]
+    assert powod(galaz.body) == ["decyzja_przeterminowana"]
+    assert "startswith" in ast.unparse(galaz.test) and "enter" in ast.unparse(galaz.test)
+    dalej = galaz.orelse[0]
+    assert "risk.check" in ast.unparse(dalej.body[0])
+

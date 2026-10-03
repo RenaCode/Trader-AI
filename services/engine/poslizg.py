@@ -58,10 +58,12 @@ sensowną wielkością — to rozjazd między księgą, na której stanął plan
 do której poszło zlecenie. Mierzymy ją i wypisujemy pod własną nazwą
 (`rozjazd_ksiag`), ale NIE jako poślizg: do kosztu egzekucji nie należy.
 
-Brakuje czwartej — nie ma jej i to trzeba powiedzieć wprost: ceny mid z arkusza
-w chwili składania zlecenia. Bez niej nie da się rozdzielić poślizgu na spread
-i na ruch rynku w czasie oczekiwania. Mierzymy więc SUMĘ obu, i to jest liczba
-właściwa dla wyceny strategii — bo to ona jest faktycznie płacona.
+Czwarta jest od 2026-10-03 (audyt F-4.2): `mid_eu_przy_wysylce`, środek
+arkusza księgi EGZEKUCJI w chwili składania zlecenia (`exec.order.raw.
+arkusz_wysylki`). Poślizg wyżej nadal mierzy SUMĘ — to ona jest płacona —
+a `rozbicie_do_celu` dzieli `fill − target_price` na ruch od zamknięcia świecy
+do wysyłki i ruch od wysyłki do wypełnienia. Zlecenia sprzed tej daty pola nie
+mają i wypadają z rozbicia z nazwanym powodem, a nie jako zero.
 
 ZNAK: DODATNI ZAWSZE ZNACZY „NA NASZĄ NIEKORZYŚĆ"
 
@@ -591,10 +593,102 @@ def rozjazd_ksiag(wiersze: list[dict]) -> dict:
             "zerowych": sum(1 for x in xs if x == 0.0)}
 
 
+def _dec(x) -> Decimal | None:
+    if x is None:
+        return None
+    try:
+        d = Decimal(str(x))
+    except (InvalidOperation, ValueError):
+        return None
+    return d if d > 0 else None
+
+
+def rozbicie_do_celu(wiersze: list[dict]) -> dict:
+    """`fill - target_price` rozbite na DWA skladniki. CZYSTA FUNKCJA.
+
+    PO CO (audyt F-4.2). Kupna wypelnialy sie 76-95 pb nad cena decyzji przy
+    zwloce 63-88 min. Sama suma nie mowi, czy to zwloka (rynek odjechal, zanim
+    wyslalismy), czy egzekucja (spread ksiegi EU, tick, baza USDC). Mid
+    arkusza z chwili wysylki dzieli ja na:
+
+      * `do_wysylki`   = (mid_wysylki - target) / target - ruch od zamkniecia
+                         swiecy do wysylki; lekarstwo: szybszy potok (F-4.1),
+      * `od_wysylki`   = (fill - mid_wysylki) / target - spread i ruch w czasie
+                         lezenia zlecenia; lekarstwo: egzekucja.
+
+    Ten sam mianownik w obu, wiec skladniki SUMUJA SIE dokladnie do calosci.
+    Znak jak w calym module: dodatni = na nasza niekorzysc (kupno drozej,
+    sprzedaz taniej).
+
+    Per strona rynku, bo kryterium akceptacji jest na kupnach (srednia
+    `fill/target - 1` <= 10 pb na 20 kupnach), a sprzedaze maja inny powod
+    zwloki (wyjscie nie czeka na prog).
+    """
+    proby: dict[str, dict[str, list[float]]] = {
+        s: {"calosc": [], "do_wysylki": [], "od_wysylki": []}
+        for s in ("buy", "sell")}
+    pominiete: dict[str, int] = {}
+
+    def pomin(powod):
+        pominiete[powod] = pominiete.get(powod, 0) + 1
+
+    for w in wiersze:
+        if (w.get("zrodlo") or "") != ZRODLO_MIERZALNE:
+            continue
+        strona = (w.get("strona") or "").strip().lower()
+        if strona not in proby:
+            pomin("nieznana strona")
+            continue
+        cel, mid, fill = (_dec(w.get("cena_decyzji")), _dec(w.get("mid_wysylki")),
+                          _dec(w.get("cena_wykonania")))
+        if cel is None or fill is None:
+            pomin("brak target_price albo ceny wykonania")
+            continue
+        if mid is None:
+            pomin("brak mid z chwili wysyłki (zlecenie sprzed 2026-10-03 "
+                  "albo arkusz nieodczytany)")
+            continue
+        znak = Decimal(1) if strona == "buy" else Decimal(-1)
+        p = proby[strona]
+        p["calosc"].append(float(znak * (fill - cel) / cel))
+        p["do_wysylki"].append(float(znak * (mid - cel) / cel))
+        p["od_wysylki"].append(float(znak * (fill - mid) / cel))
+
+    def opisz(xs):
+        return {"n": len(xs),
+                "srednia": statistics.fmean(xs) if xs else None,
+                "przedzial": przedzial_sredniej(xs)}
+
+    return {s: {k: opisz(v) for k, v in p.items()} for s, p in proby.items()} \
+        | {"pominiete": pominiete}
+
+
+def udzial_wyjsc_takerem(zlecenia: list[dict]) -> dict:
+    """Jaki ulamek WYJSC poszedl agresywnie (GTC bez PostOnly). CZYSTA FUNKCJA.
+
+    To jest wejscie `koszty.karta_rundy(wyjscia_takerem=...)`. Mianownik to
+    wyjscia, ktore maja pole `wyjscie_agresywne` (pisane od 2026-10-03 przy
+    kazdym wyjsciu); wiersze bez niego nie sa ani agresywne, ani pasywne -
+    nie wiemy. None przy pustej probie: zero byloby twierdzeniem "zadne
+    wyjscie nie eskalowalo".
+    """
+    def flaga(z):
+        v = z.get("wyjscie_agresywne")
+        if isinstance(v, bool) or v is None:
+            return v
+        return {"true": True, "false": False}.get(str(v).strip().lower())
+
+    flagi = [f for f in (flaga(z) for z in zlecenia) if f is not None]
+    agresywnych = sum(1 for f in flagi if f)
+    return {"wyjsc": len(flagi), "agresywnych": agresywnych,
+            "udzial": agresywnych / len(flagi) if flagi else None}
+
+
 def pomiar(wiersze: list[dict]) -> dict:
     """Cały pomiar naraz: poślizg per rodzaj + ułamek wypełnienia."""
     return statystyki(wiersze) | {"ulamek": ulamki(wiersze),
-                                  "rozjazd_ksiag": rozjazd_ksiag(wiersze)}
+                                  "rozjazd_ksiag": rozjazd_ksiag(wiersze),
+                                  "do_celu": rozbicie_do_celu(wiersze)}
 
 
 # ------------------------------------------------------------------ wypisanie
@@ -717,6 +811,37 @@ def opis(p: dict) -> list[str]:
             f"rozjazd ksiąg (plan vs cena wysłana, NIE poślizg): n={r['n']}"
             f"{zera}, mediana {_bp(r['mediana'], znak=False)}, "
             f"największy {_bp(r['najwiekszy'], znak=False)}")
+
+    # ROZBICIE `fill - target` (F-4.2): SKAD sie bierze odleglosc od ceny decyzji.
+    dc = p.get("do_celu")
+    if dc is not None:
+        for strona, nazwa in (("buy", "kupna"), ("sell", "sprzedaże")):
+            r = dc[strona]
+            if not r["calosc"]["n"]:
+                linie.append(f"fill − target ({nazwa}): n=0 — NIE ZMIERZONO "
+                             f"(brak mid z chwili wysyłki)")
+                continue
+
+            def czlon(x):
+                prz = x["przedzial"]
+                return (f"{_bp(x['srednia'])}"
+                        + ("" if prz is None else f" [{_bp(prz[0])}, {_bp(prz[1])}]"))
+            linie.append(
+                f"fill − target ({nazwa}): n={r['calosc']['n']}, średnio "
+                f"{czlon(r['calosc'])} = do wysyłki {czlon(r['do_wysylki'])} "
+                f"+ od wysyłki {czlon(r['od_wysylki'])}")
+        for powod, n in sorted(dc["pominiete"].items()):
+            linie.append(f"  fill − target, pominięto {n}: {powod}")
+
+    tk = p.get("wyjscia_takerem")
+    if tk is not None:
+        if tk["udzial"] is None:
+            linie.append("wyjścia takerem: n=0 — NIE ZMIERZONO (brak wyjść "
+                         "z polem `wyjscie_agresywne`)")
+        else:
+            linie.append(f"wyjścia takerem: {tk['agresywnych']} z {tk['wyjsc']} "
+                         f"({tk['udzial']:.1%}) — GTC bez PostOnly po dwóch "
+                         f"odrzuceniach; do `karta_rundy(wyjscia_takerem=...)`")
 
     for skad, n in sorted(p["odniesienia"].items()):
         linie.append(f"  cena odniesienia z: {skad} ({n})")
@@ -850,6 +975,12 @@ SELECT o.order_type                     AS rodzaj_zlecenia,
        l.ask                            AS ask_wysylki,
        p.limit_price                    AS cena_planu,
        d.target_price                   AS cena_decyzji,
+       -- Mid ksiegi egzekucji z chwili wysylki - tylko z odczytu, ktory
+       -- `arkusz_wysylki` przyjal (bez `powod_braku`): mid z arkusza
+       -- odrzuconego jako stary opisywalby inna chwile niz wysylka.
+       CASE WHEN o.raw->'arkusz_wysylki'->>'powod_braku' IS NULL
+            THEN o.raw->'arkusz_wysylki'->>'mid_eu_przy_wysylce' END
+                                        AS mid_wysylki,
        f.price                          AS cena_wykonania,
        f.qty                            AS ilosc,
        f.event_time                     AS czas,
@@ -881,7 +1012,11 @@ SELECT o.order_type                     AS rodzaj_zlecenia,
 # wiec policzona z niego wypelnialnosc bylaby echem modelu symulacji.
 ZAPYTANIE_ZLECENIA = """
 SELECT o.status AS status,
-       o.raw->>'powod_odmowy_rodzaj' AS powod_odmowy
+       o.raw->>'powod_odmowy_rodzaj' AS powod_odmowy,
+       -- Wyjscie i jego tryb (`gielda_exec.zloz_plan`, od 2026-10-03). Pole
+       -- jest na KAZDYM wyjsciu - `false` tez - wiec brak klucza znaczy
+       -- "wejscie albo zlecenie sprzed zmiany", nie "wyjscie pasywne".
+       o.raw->>'wyjscie_agresywne'   AS wyjscie_agresywne
   FROM exec.order o
  WHERE o.engine::text = %(engine)s
    AND o.mode::text = %(mode)s
@@ -978,7 +1113,8 @@ async def main() -> int:
         print(f"poślizg ({args.engine}/{args.mode}, {okno}), "
               f"wypełnień w rejestrze: {len(wiersze)}, "
               f"złożonych zleceń: {len(zlecenia)}")
-        pom = pomiar(wiersze) | {"wypelnialnosc": wypelnialnosc(zlecenia)}
+        pom = pomiar(wiersze) | {"wypelnialnosc": wypelnialnosc(zlecenia),
+                                 "wyjscia_takerem": udzial_wyjsc_takerem(zlecenia)}
         for linia in opis(pom):
             print(f"  {linia}")
         wejscia = await pobierz_zwrot_naprzod(fetch_all, engine=args.engine,
