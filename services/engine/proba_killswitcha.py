@@ -600,12 +600,16 @@ async def przeprowadz(fetch_all, fetch_one, execute, engine: str = "crypto",
             # meldowaloby wtedy dzialajacy kanal alarmowy na podstawie maila
             # o czyms innym.
             #
+            # DWA KODY (2026-10-03): dozor zglasza skutek proby jako
+            # `killswitch.proba` (`info`), a zdarzenie spoza okna proby jako
+            # `killswitch.triggered`. Powiazanie z proba niesie `event_id`.
+            #
             # `event_id` w `data` wstawia `dozor.py` przy kazdym zgloszeniu
             # kill-switcha; wzor filtra po silniku stoi tamze, przy liczeniu
             # odstepu miedzy przypomnieniami.
             r = await fetch_one(
                 "SELECT count(*) AS n FROM notify.notification"
-                " WHERE event_code = 'killswitch.triggered'"
+                " WHERE event_code IN ('killswitch.proba', 'killswitch.triggered')"
                 "   AND engine::text = %s"
                 "   AND data->>'event_id' = %s"
                 "   AND created_at > (SELECT triggered_at FROM risk.killswitch_event"

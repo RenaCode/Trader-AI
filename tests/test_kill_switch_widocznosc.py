@@ -511,8 +511,11 @@ def test_zdarzenie_w_oknie_proby_POWIADAMIA_jako_probe_ale_NIE_maluje_na_czerwon
                               proba_do=TERAZ + timedelta(minutes=9))])
     kod, wyslane = uruchom(a)
     assert len(wyslane) == len(a.odbiorcy), "ogniwo 4 próby: powiadomienie MA pójść"
-    assert all(w["code"] == "killswitch.triggered" for w in wyslane), (
-        "próba liczy powiadomienia po tym kodzie - inny kod jej nie zaliczy")
+    # Od 2026-10-03 (F-5.2) skutek próby ma własny kod i severity `info`;
+    # ogniwo 4 próby liczy oba kody (test_proba_powiadomienie_info.py).
+    assert all(w["code"] == "killswitch.proba" for w in wyslane), (
+        "skutek próby poszedł kodem alarmu krytycznego")
+    assert all(w["severity"] == "info" for w in wyslane)
     assert all(w["tytul"].startswith("PRÓBA POŻAROWA") for w in wyslane), (
         "odbiorca o 05:30 ma wiedzieć, że to sprawdzian, nie strata")
     assert all(w["data"]["proba"] for w in wyslane)

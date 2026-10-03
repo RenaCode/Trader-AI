@@ -1489,11 +1489,22 @@ async def sprawdz_ryzyko(fetch_all, notify, sucho: bool = False) -> int:
         # maluje zadanie na czerwono. Bez tej granicy przypomnienie sprzed
         # godziny tlumiloby CUDZE zdarzenie - a od zwiazania kodu wyjscia
         # z tlumieniem tlumiloby je w obu kanalach naraz.
+        #
+        # KOD ZALEZY OD TEGO, CZY TRWA PROBA (2026-10-03, audyt Fable F-5.2).
+        # Skutek proby idzie kodem `killswitch.proba` z severity `info`, wiec
+        # w oknie proby rytm liczy oba kody - inaczej kazdy przebieg w oknie
+        # dokladalby kolejne powiadomienie. Poza oknem liczy WYLACZNIE
+        # `killswitch.triggered`: zdarzenie, ktore przezylo okno, moglo byc
+        # prawdziwym spadkiem kapitalu, a w oknie dostalo tylko `info`. Pierwszy
+        # przebieg po oknie ma wtedy wyslac alarm krytyczny od razu, a nie uznac
+        # sprawy za zgloszona.
+        kody_rytmu = ("event_code IN ('killswitch.triggered', 'killswitch.proba')"
+                      if proba else "event_code = 'killswitch.triggered'")
         ostatnie = await fetch_all(
             "SELECT round(extract(epoch from (now() - max(created_at)))/60)"
             "         AS od_zgloszenia_min"
             " FROM notify.notification"
-            " WHERE event_code = 'killswitch.triggered'"
+            f" WHERE {kody_rytmu}"
             "   AND engine::text = %s AND created_at > %s",
             (z["engine"], z["triggered_at"]))
         od_min = ostatnie[0]["od_zgloszenia_min"] if ostatnie else None
@@ -1565,9 +1576,14 @@ async def sprawdz_ryzyko(fetch_all, notify, sucho: bool = False) -> int:
                  f"automatyczne wznowienie po obsunięciu to najprostsza droga do "
                  f"powtórzenia tej samej straty.\n\nZwolnienie: zakładka Ryzyko "
                  f"w interfejsie.")
+        # Proba: `info`, osobny kod - 15 nieprzeczytanych "krytycznych" z osmiu
+        # dni prob zaslanialo dzwonek, w ktorym prawdziwy kill-switch by utonal
+        # (F-5.2). Ogniwo 4 proby szuka powiadomienia pod obydwoma kodami.
+        kod_zdarzenia = "killswitch.proba" if proba else "killswitch.triggered"
         for u in odbiorcy:
-            await notify(u["id"], "killswitch.triggered", tytul, tresc,
-                         engine=z["engine"], severity="critical",
+            await notify(u["id"], kod_zdarzenia, tytul, tresc,
+                         engine=z["engine"],
+                         severity="info" if proba else "critical",
                          data={"reason": z["reason"], "event_id": z["id"],
                                "wiek_min": wiek_min,
                                "przypomnienie": not werdykt["pierwsze"],
