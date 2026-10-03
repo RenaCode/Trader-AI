@@ -83,6 +83,10 @@ def jedyny_cronjob(nazwa_pliku: str) -> dict:
 def skrypt(cronjob: dict) -> list[str]:
     """Wiersze polecenia kontenera, bez komentarzy i pustych."""
     polecenie = cronjob["spec"]["jobTemplate"]["spec"]["template"]["spec"]["containers"][0]["command"]
+    # Opakowanie `przebieg_zadania.py` (F-8.4) stoi przed skryptem i oddaje
+    # mu kod wyjscia bez zmian - liczy sie polecenie po `--`.
+    if polecenie[:2] == ["python", "services/engine/przebieg_zadania.py"]:
+        polecenie = polecenie[polecenie.index("--") + 1:]
     assert polecenie[:2] == ["sh", "-c"], "spodziewany skrypt powłoki"
     return [w.strip() for w in polecenie[2].splitlines()
             if w.strip() and not w.strip().startswith("#")]

@@ -245,6 +245,9 @@ def _skrypt_trenera() -> str:
     kron = [d for d in manifesty if d.get("kind") == "CronJob"]
     assert len(kron) == 1
     polecenie = kron[0]["spec"]["jobTemplate"]["spec"]["template"]["spec"]["containers"][0]["command"]
+    # Opakowanie `przebieg_zadania.py` (F-8.4) oddaje kod skryptu bez zmian.
+    if polecenie[:2] == ["python", "services/engine/przebieg_zadania.py"]:
+        polecenie = polecenie[polecenie.index("--") + 1:]
     assert polecenie[:2] == ["sh", "-c"]
     return polecenie[2]
 

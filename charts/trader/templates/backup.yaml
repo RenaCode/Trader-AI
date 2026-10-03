@@ -125,6 +125,25 @@ spec:
                 - -c
                 - |
                   set -eu
+                  # WYNIK PRZEBIEGU DO `risk.job_run` (F-8.4, migracja 0074) -
+                  # przez `trap`, bo ten obraz nie ma naszego kodu
+                  # (`przebieg_zadania.py`). EXIT lapie kazde zakonczenie,
+                  # takze przez `set -e`; TERM/INT zamieniamy na `exit`, zeby
+                  # EXIT poszedl tez przy zabiciu przez `activeDeadlineSeconds`.
+                  # Nieudany zapis nie zmienia kodu wyjscia kopii.
+                  START_PRZEBIEGU="$(date +%s)"
+                  zapisz_przebieg() {
+                    RC=$?
+                    trap - EXIT
+                    psql -h {{ include "trader.fullname" . }}-db \
+                         -U {{ .Values.db.username }} -d {{ .Values.db.database }} -q \
+                         -c "INSERT INTO risk.job_run (nazwa, started_at, exit_code, pod) VALUES ('backup', now() - make_interval(secs => $(( $(date +%s) - START_PRZEBIEGU ))), $RC, '${HOSTNAME:-}')" \
+                      || echo "==> wynik kopii (kod $RC) NIE ZAPISANY w risk.job_run" >&2
+                    exit $RC
+                  }
+                  trap zapisz_przebieg EXIT
+                  trap 'exit 143' TERM
+                  trap 'exit 130' INT
                   ZNACZNIK="$(date -u +%Y%m%dT%H%M%SZ)"
                   PLIK="/backup/trader-$ZNACZNIK.dump"
                   PLIK_ROL="/backup/trader-$ZNACZNIK.role.sql"

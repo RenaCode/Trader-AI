@@ -103,7 +103,15 @@ spec:
               # Bez `|| true` i bez maskowania kodu wyjscia. Kod 1 z tego
               # podzakresu znaczy "zrodlo nie oddalo ani jednej swiecy" - czyli
               # dokladnie ten stan, o ktorym czlowiek ma sie dowiedziec.
+              # PRZEZ `przebieg_zadania.py` (F-8.4, migracja 0074): po zakonczeniu
+              # dopisuje wiersz do `risk.job_run`, ktory czyta `dozor --co zadania`.
+              # Kod wyjscia i sygnaly ida bez zmian do polecenia ponizej.
               command:
+                - python
+                - services/engine/przebieg_zadania.py
+                - --nazwa
+                - kurs
+                - "--"
                 - python
                 - services/engine/waluta.py
                 - --co

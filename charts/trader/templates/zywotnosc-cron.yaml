@@ -38,6 +38,17 @@ z poprzedniego zamkniecia (zmierzone: 1050 min przy progu 180).
 {{- if (index .Values.workers "features-equity").enabled }}
 {{- $tory = append $tory (dict "engine" "equity" "horyzonty" .Values.trainerCron.equity.horyzonty) }}
 {{- end }}
+{{/* ZADANIA CYKLICZNE DO `--co zadania` (F-8.4) - z flag `enabled`, bo tylko
+chart wie, ktore sa wlaczone. Nazwy = `--nazwa` w `przebieg_zadania.py`.
+`zywotnosc` nie pilnuje samej siebie: jej kod niezerowy znaczy "czujka cos
+zglosila", nie awarie, a cisze wlasnego zadania zobaczy dopiero ktos inny. */}}
+{{- $zadania := list }}
+{{- if .Values.trainerCron.enabled }}{{ $zadania = append $zadania "trainer" }}{{ end }}
+{{- if .Values.probaCron.enabled }}{{ $zadania = append $zadania "proba-killswitcha" }}{{ end }}
+{{- if .Values.postmortemCron.enabled }}{{ $zadania = append $zadania "postmortem" }}{{ end }}
+{{- if .Values.instrumentyCron.enabled }}{{ $zadania = append $zadania "instrumenty" }}{{ end }}
+{{- if .Values.kursCron.enabled }}{{ $zadania = append $zadania "kurs" }}{{ end }}
+{{- if .Values.backup.enabled }}{{ $zadania = append $zadania "backup" }}{{ end }}
 # Czujka zywotnosci silnikow.
 #
 # MUSI byc osobnym procesem: martwy proces nie zglosi wlasnej smierci. Petla
@@ -125,7 +136,15 @@ spec:
               # powiadomien, wiec `kubectl logs job/trader-zywotnosc-...` mowi,
               # w jakim stanie jest system, za kazdym razem, gdy ktos spojrzy.
               # Uzasadnienie i historia obu rund: docstring services/engine/dozor.py.
+              # PRZEZ `przebieg_zadania.py` (F-8.4, migracja 0074): po zakonczeniu
+              # dopisuje wiersz do `risk.job_run`, ktory czyta `dozor --co zadania`.
+              # Kod wyjscia i sygnaly ida bez zmian do polecenia ponizej.
               command:
+                - python
+                - services/engine/przebieg_zadania.py
+                - --nazwa
+                - zywotnosc
+                - "--"
                 - sh
                 - -c
                 - |
@@ -224,6 +243,12 @@ spec:
                   # cykl na bramce (wstrzymany trening, values.yaml) - czujka
                   # krzyczalaby o stanie zamierzonym przy kazdej sesji.
                   python services/engine/dozor.py --co decyzje --engine crypto --bar 4h || RC=$?
+                  # ZADANIA CYKLICZNE (F-8.4). Kazdy CronJob dopisuje wynik do
+                  # `risk.job_run` (przebieg_zadania.py, backup - trap). Ostatni
+                  # przebieg z kodem niezerowym albo cisza > 2 typowe odstepy ->
+                  # `job.nieudany`. Do tej pory nieudany job byl widoczny
+                  # wylacznie w `kubectl get jobs`.
+                  python services/engine/dozor.py --co zadania --zadania {{ join "," $zadania | quote }} || RC=$?
                   # CZY ALARM MA JAK OPUSCIC PANEL.
                   #
                   # Wszystkie czujki wyzej koncza sie powiadomieniem. Ta sprawdza

@@ -3358,6 +3358,131 @@ async def sprawdz_decyzje(fetch_all, notify, sucho: bool = False, *,
     return kod_wyjscia(1, 0, "brak decyzji dla części uniwersum")
 
 
+# ------------------------------------------------------ przebiegi CronJobow
+#
+# NIEUDANE JOBY BEZ ESKALACJI (audyt Fable F-8.4, 2026-10-03, migracja 0074).
+# Kazdy CronJob dopisuje po zakonczeniu wiersz do `risk.job_run`
+# (`przebieg_zadania.py`; backup - `trap` w powloce). Ta czujka czyta ostatnie
+# przebiegi kazdego WLACZONEGO zadania - liste podaje chart, bo tylko on wie,
+# ktore zadania sa wlaczone.
+#
+# ODSTEP Z DANYCH, NIE Z HARMONOGRAMU - ta sama zasada co `dlugosc_swiecy_petli`.
+# Harmonogram mieszka w `values.yaml`; druga kopia tutaj rozjechalaby sie przy
+# pierwszej zmianie (trening nocny -> tygodniowy, F-2.3) i czujka krzyczalaby
+# o zadaniu, ktore chodzi dokladnie tak, jak ma.
+#
+# Cisza = brak przebiegu dluzej niz CISZA_KROTNOSC typowych odstepow + zapas.
+CISZA_KROTNOSC = 2
+CISZA_ZAPAS_MIN = 30
+# Ile przebiegow wstecz czytamy i ile trzeba, zeby odstep cokolwiek znaczyl.
+PRZEBIEGOW_WSTECZ = 10
+MIN_PRZEBIEGOW_ODSTEPU = 3
+# Zadanie bez ANI JEDNEGO wiersza jest cisza dopiero wtedy, gdy dziennik
+# istnieje dluzej niz najrzadsze zadanie (tydzien) - inaczej kazde wdrozenie
+# zaczynaloby sie alarmem o zadaniach, ktore jeszcze nie mialy kiedy pojsc.
+BRAK_WIERSZY_PO_DNIACH = 8
+
+
+def ocen_zadania(historia: dict[str, list[dict]], teraz: datetime,
+                 dziennik_od: datetime | None) -> list[tuple[str, str]]:
+    """Ktore zadania zawiodly albo zamilkly. CZYSTA FUNKCJA.
+
+    `historia`: nazwa -> przebiegi od najnowszego (`id`, `finished_at`,
+    `exit_code`). `dziennik_od`: najstarszy wiersz `risk.job_run` w ogole.
+    Zwraca (klucz, opis); klucz niesie id przebiegu, wiec nowy nieudany
+    przebieg jest nowym znaleziskiem, a ten sam - przypomnieniem.
+    """
+    braki = []
+    for nazwa, przebiegi in sorted(historia.items()):
+        if not przebiegi:
+            if dziennik_od is not None and \
+                    teraz - dziennik_od > timedelta(days=BRAK_WIERSZY_PO_DNIACH):
+                braki.append((f"{nazwa}:brak",
+                              f"{nazwa}: ani jednego zapisanego przebiegu od "
+                              f"{dziennik_od:%Y-%m-%d}"))
+            continue
+        ostatni = przebiegi[0]
+        if ostatni["exit_code"] != 0:
+            braki.append((f"{nazwa}:{ostatni['id']}",
+                          f"{nazwa}: ostatni przebieg "
+                          f"{ostatni['finished_at']:%m-%d %H:%M} zakończony "
+                          f"kodem {ostatni['exit_code']}"))
+            continue
+        if len(przebiegi) < MIN_PRZEBIEGOW_ODSTEPU:
+            continue
+        konce = [p["finished_at"] for p in przebiegi]
+        odstepy = sorted((a - b).total_seconds() for a, b in zip(konce, konce[1:]))
+        typowy = odstepy[len(odstepy) // 2]
+        cisza = (teraz - ostatni["finished_at"]).total_seconds()
+        if cisza > CISZA_KROTNOSC * typowy + CISZA_ZAPAS_MIN * 60:
+            braki.append((f"{nazwa}:cisza:{ostatni['id']}",
+                          f"{nazwa}: ostatni przebieg {cisza / 3600:.1f} h temu, "
+                          f"typowy odstęp {typowy / 3600:.1f} h"))
+    return braki
+
+
+async def sprawdz_zadania(fetch_all, notify, sucho: bool = False, *,
+                          zadania: list[str],
+                          teraz: datetime | None = None) -> int:
+    """Czy kazde wlaczone zadanie cykliczne skonczylo sie powodzeniem
+    i czy w ogole chodzi."""
+    teraz = teraz or datetime.now(timezone.utc)
+    if not zadania:
+        print("zadania: pusta lista zadań do sprawdzenia — chart nie podał "
+              "żadnego, czujka nie ma czego oceniać")
+        return 0
+    wiersze = await fetch_all(
+        "SELECT id, nazwa, finished_at, exit_code FROM ("
+        "  SELECT j.*, row_number() OVER (PARTITION BY nazwa"
+        "                                 ORDER BY finished_at DESC) AS nr"
+        "    FROM risk.job_run j WHERE nazwa = ANY(%s)) x"
+        " WHERE nr <= %s ORDER BY nazwa, finished_at DESC",
+        (list(zadania), PRZEBIEGOW_WSTECZ))
+    od = await fetch_all("SELECT min(finished_at) AS od FROM risk.job_run")
+    historia: dict[str, list[dict]] = {z: [] for z in zadania}
+    for w in wiersze:
+        historia[w["nazwa"]].append(w)
+    for nazwa, przebiegi in sorted(historia.items()):
+        if przebiegi:
+            p = przebiegi[0]
+            print(f"zadanie {nazwa}: ostatni przebieg {p['finished_at']:%m-%d %H:%M}"
+                  f" kod {p['exit_code']} ({len(przebiegi)} w historii)")
+        else:
+            print(f"zadanie {nazwa}: brak zapisanych przebiegów")
+
+    braki = ocen_zadania(historia, teraz, od[0]["od"] if od else None)
+    if not braki:
+        print("  każde zadanie skończyło się powodzeniem i chodzi w swoim rytmie")
+        return 0
+    for _, opis in braki:
+        print(f"  ZADANIE: {opis}")
+    if sucho:
+        print("  Tryb suchy — powiadomienie nie wysylane.")
+        return len(braki)
+
+    nowe, trwale = 0, 0
+    odbiorcy = None
+    for klucz, opis in braki:
+        juz = await fetch_all(
+            "SELECT 1 FROM notify.notification"
+            " WHERE event_code = 'job.nieudany' AND data->>'klucz' = %s"
+            "   AND created_at > now() - interval '24 hours' LIMIT 1", (klucz,))
+        if juz:
+            trwale += 1
+            continue
+        nowe += 1
+        if odbiorcy is None:
+            odbiorcy = await fetch_all('SELECT id FROM app."user" WHERE is_active')
+        nazwa = klucz.split(":", 1)[0]
+        for u in odbiorcy:
+            await notify(u["id"], "job.nieudany", f"Zadanie {nazwa} zawiodło",
+                         f"{opis}.\n\nLog: `kubectl -n default get jobs | grep "
+                         f"{nazwa}` i `kubectl logs job/<nazwa>`. Wiersze: "
+                         f"`risk.job_run`.",
+                         severity="warning", data={"klucz": klucz, "zadanie": nazwa})
+    return kod_wyjscia(nowe, trwale, "zadanie cykliczne zawiodło")
+
+
 async def sprawdz_dryf(fetch_all, notify, sucho: bool = False, *,
                        engine: str = "crypto", bar: str = "4h",
                        teraz: datetime | None = None) -> int:
@@ -3501,7 +3626,7 @@ async def main() -> int:
                     choices=("stan-nauki", "zywotnosc", "ryzyko", "kopie",
                              "swiezosc", "egzekucja", "poslizg", "instrumenty",
                              "workery", "dryf", "kanaly", "odlozone",
-                             "decyzje"),
+                             "decyzje", "zadania"),
                     help="stan-nauki: czy wynik treningu sie zmienil; "
                          "dryf: czy rozklad cech odjechal od treningowego I TAK "
                          "ZOSTAL - stan trwaly, ktorego 'stan-nauki' z definicji "
@@ -3522,7 +3647,12 @@ async def main() -> int:
                          "workery: czy procesy zbierajace dane domykaja cykle - "
                          "prog liczony z INTERWALU kazdego z nich; "
                          "decyzje: czy kazda swieca ma decyzje dla kazdego "
-                         "instrumentu uniwersum, gdy cechy przyszly")
+                         "instrumentu uniwersum, gdy cechy przyszly; "
+                         "zadania: czy wlaczone CronJoby koncza sie "
+                         "powodzeniem i chodza w swoim rytmie (risk.job_run)")
+    ap.add_argument("--zadania", default="",
+                    help="lista nazw zadan dla --co zadania, po przecinku; "
+                         "podaje ja chart z flag `enabled`")
     ap.add_argument("--prog-statusu-h", type=int, default=None, dest="prog_statusu_h",
                     help="prog nieswiezosci odczytu statusu w godzinach dla "
                          "--co instrumenty; do wywolania sciezki alarmowej na "
@@ -3586,6 +3716,10 @@ async def main() -> int:
         if args.co == "dryf":
             return await sprawdz_dryf(fetch_all, notify, sucho=args.sucho,
                                       engine=args.engine, bar=args.bar)
+        if args.co == "zadania":
+            return await sprawdz_zadania(
+                fetch_all, notify, sucho=args.sucho,
+                zadania=[z for z in args.zadania.split(",") if z])
         if args.co == "decyzje":
             return await sprawdz_decyzje(fetch_all, notify, sucho=args.sucho,
                                          engine=args.engine, mode=args.mode,

@@ -96,6 +96,10 @@ TABELE_RISK = {
     # migracji — model niżej czyta wyłącznie 0034, więc pilnuje ich osobny
     # zestaw twierdzeń w tests/test_puls_workerow.py.
     "worker_heartbeat",
+    # Dziennik przebiegow CronJobow (0074): procesy DOPISUJA wiersz na
+    # kolumnach bez `rola`, czujka czyta. Pilnuje tego
+    # tests/test_dziennik_przebiegow_zadan.py na prawdziwej bazie.
+    "job_run",
 }
 
 PRAWA = ("SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES",
