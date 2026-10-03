@@ -443,3 +443,23 @@ def test_trener_nie_jest_workerem():
     assert VALUES["trainerCron"]["enabled"] is True
     assert "--interval" not in komenda("trainer"), \
         "trener nie ma pętli: raz uruchomiony CronJob przeżywa restart Deploymentów"
+
+
+# --- łańcuch świeca -> decyzja ---------------------------------------------
+def _interwal(nazwa: str) -> int:
+    cmd = WORKERY[nazwa]["command"]
+    return int(cmd[cmd.index("--interval") + 1])
+
+
+@pytest.mark.parametrize("nazwa", ["history", "features"])
+def test_potok_cech_krypto_nie_doklada_wiecej_niz_piec_minut(nazwa):
+    """Łańcuch market -> history -> features -> engine jest zegarowy: każde
+    ogniwo dokłada losowe 0..interwał do zwłoki decyzji po zamknięciu świecy.
+
+    Przy `history` 1200 s i `features` 900 s najgorszy przypadek wynosił 40 min,
+    a kupno wypełniało się 76-95 pb nad ceną decyzji przy zwłoce 63-88 min
+    (audyt Fable, F-4.1). 300 s na obu ogniwach to najgorszy przypadek 15 min;
+    koszt to 4x więcej zapytań o świece 1h - pomijalne wobec limitu Bybita.
+    """
+    assert _interwal(nazwa) <= 300, \
+        f"{nazwa} chodzi co {_interwal(nazwa)} s - zwłoka decyzji po świecy rośnie"

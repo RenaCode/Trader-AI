@@ -320,9 +320,16 @@ workers:
   # Oba zadania sa teraz jednym procesem (history_worker), ktory laczy sie
   # z baza na kazdy cykl i KONCZY SIE po pieciu awariach pod rzad - bo restart
   # poda widac, a wpis w logu nie.
+  #
+  # INTERWAL 300 s, nie 1200 s. Lancuch market -> history -> features -> engine
+  # jest zegarowy, a kazde ogniwo doklada losowe 0..interwal do zwloki decyzji
+  # po zamknieciu swiecy 4h. Przy 1200 + 900 + 300 najgorszy przypadek wynosil
+  # 40 min, a kupna wypelnialy sie 76-95 pb nad cena decyzji (audyt Fable,
+  # F-4.1). Cykl trwa kilka sekund; 4x wiecej zapytan o swiece 1h jest
+  # pomijalne wobec limitu Bybita.
   history:
     enabled: true
-    command: ["python", "services/ingest/history_worker.py", "--interval", "1200", "--days", "3", "--timeframe", "1h"]
+    command: ["python", "services/ingest/history_worker.py", "--interval", "300", "--days", "3", "--timeframe", "1h"]
     resources:
       limits:   { cpu: 500m, memory: 384Mi }
       requests: { cpu: 50m,  memory: 96Mi }
@@ -346,9 +353,12 @@ workers:
   #
   # Lista horyzontow idzie teraz jednym argumentem: jeden proces, jedna petla,
   # polaczenie z baza na kazdy cykl, koniec procesu po pieciu awariach pod rzad.
+  #
+  # Interwal 300 s z tego samego powodu co `history` (F-4.1): cykl trwa ok. 5 s,
+  # a kazda minuta czekania tutaj to minuta zwloki decyzji po swiecy.
   features:
     enabled: true
-    command: ["python", "services/ingest/features.py", "--bar", "4h,1h", "--interval", "900"]
+    command: ["python", "services/ingest/features.py", "--bar", "4h,1h", "--interval", "300"]
     resources:
       limits:   { cpu: 1000m, memory: 768Mi }
       requests: { cpu: 100m,  memory: 192Mi }
