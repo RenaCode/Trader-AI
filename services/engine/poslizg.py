@@ -469,6 +469,9 @@ STATUS_NIEWYPELNIONE = frozenset({"cancelled", "rejected", "expired"})
 # z nich nie rozstrzygnelo sie w zadna strone - zaliczenie ich do niewypelnien
 # zanizaloby wypelnialnosc o wszystko, co akurat jest w locie.
 STATUS_NIEROZSTRZYGNIETE = frozenset({"new", "unknown"})
+# `raw->>'powod_odmowy_rodzaj'` zapisywany przez `gielda_exec` (kategoria z
+# `bybit.py`), gdy gielda odrzucila zlecenie PostOnly, ktore zabraloby plynnosc.
+ODMOWA_POSTONLY = "postonly"
 
 
 def wypelnialnosc(zlecenia: list[dict]) -> dict:
@@ -498,6 +501,12 @@ def wypelnialnosc(zlecenia: list[dict]) -> dict:
     """
     liczniki = {"wypelnionych": 0, "czesciowych": 0, "niewypelnionych": 0,
                 "nierozstrzygnietych": 0}
+    # ROZBICIE NIEWYPELNIEN (2026-10-03, audyt 3 T2). „Przepadlo 9" nie mowi,
+    # czy dzialaja poprawki E1-E5 (cena PostOnly z arkusza tuz przed wysylka):
+    # odrzucenie PostOnly to cena, ktora przeciela spread, anulowanie to cena,
+    # ktorej rynek nie dotknal przez swiece. To dwie rozne naprawy.
+    rozbicie = {"odrzuconych": 0, "odrzuconych_postonly": 0, "anulowanych": 0,
+                "wygaslych": 0}
     nieznany: dict[str, int] = {}
     for z in zlecenia:
         s = (z.get("status") or "").strip().lower()
@@ -507,6 +516,14 @@ def wypelnialnosc(zlecenia: list[dict]) -> dict:
             liczniki["czesciowych"] += 1
         elif s in STATUS_NIEWYPELNIONE:
             liczniki["niewypelnionych"] += 1
+            if s == "rejected":
+                rozbicie["odrzuconych"] += 1
+                if (z.get("powod_odmowy") or "") == ODMOWA_POSTONLY:
+                    rozbicie["odrzuconych_postonly"] += 1
+            elif s == "cancelled":
+                rozbicie["anulowanych"] += 1
+            else:
+                rozbicie["wygaslych"] += 1
         elif s in STATUS_NIEROZSTRZYGNIETE:
             liczniki["nierozstrzygnietych"] += 1
         else:
@@ -520,7 +537,7 @@ def wypelnialnosc(zlecenia: list[dict]) -> dict:
     udzial = (None if rozstrzygniete == 0 else
               (liczniki["wypelnionych"] + liczniki["czesciowych"]) / rozstrzygniete)
     return {"wyslanych": len(zlecenia), "rozstrzygnietych": rozstrzygniete,
-            "udzial": udzial, "nieznany_status": nieznany} | liczniki
+            "udzial": udzial, "nieznany_status": nieznany} | liczniki | rozbicie
 
 
 def rozjazd_ksiag(wiersze: list[dict]) -> dict:
@@ -676,6 +693,11 @@ def opis(p: dict) -> list[str]:
                 f"({wyp['udzial']:.1%}), symulacja przyjmuje 100,0%; "
                 f"{wyp['wyslanych']} złożonych, w locie {wyp['nierozstrzygnietych']}, "
                 f"przepadło {wyp['niewypelnionych']}")
+        if wyp["niewypelnionych"]:
+            linie.append(
+                f"  przepadłe: odrzucone {wyp['odrzuconych']} (w tym PostOnly "
+                f"{wyp['odrzuconych_postonly']}), anulowane {wyp['anulowanych']}, "
+                f"wygasłe {wyp['wygaslych']}")
         for s, n in sorted(wyp["nieznany_status"].items()):
             linie.append(f"  nieznany status zlecenia {s!r}: {n} — poza rachunkiem")
 
@@ -754,7 +776,8 @@ SELECT o.order_type                     AS rodzaj_zlecenia,
 # poslizgu: rachunek papierowy zapisuje status z wlasnego rozstrzygniecia,
 # wiec policzona z niego wypelnialnosc bylaby echem modelu symulacji.
 ZAPYTANIE_ZLECENIA = """
-SELECT o.status AS status
+SELECT o.status AS status,
+       o.raw->>'powod_odmowy_rodzaj' AS powod_odmowy
   FROM exec.order o
  WHERE o.engine::text = %(engine)s
    AND o.mode::text = %(mode)s

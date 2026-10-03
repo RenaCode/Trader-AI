@@ -919,6 +919,23 @@ def stawki(kind: str, limit: bool) -> tuple[Decimal, Decimal]:
             Decimal(str(POSLIZG_MAKER if limit else POSLIZG_TAKER)))
 
 
+def _czas_wypelnienia(czas_wykonania: datetime | None, as_of: datetime) -> datetime:
+    """`exec.fill.event_time`: czas GIELDY, gdy go znamy (2026-10-03, audyt 3 T3).
+
+    Do tej daty kolumna dostawala `as_of`, czyli chwile KSIEGOWANIA przy
+    rozstrzyganiu planu - nawet dwie godziny po wypelnieniu (zlecenie 81:
+    `event_time` 07:21:27 = `ingested_at` co do milisekundy). Opoznienia
+    wypelnienia nie dalo sie przez to zmierzyc, a symulacja zaklada wypelnienie
+    przy dotknieciu ceny. Chwila ksiegowania zostaje w `exec.fill.ingested_at`.
+
+    Czas gieldy pozniejszy niz ksiegowanie jest niemozliwy (rozjazd zegarow) -
+    wtedy `as_of`, zeby wypelnienie nie wyprzedzalo wlasnego zapisu.
+    """
+    if czas_wykonania is None or czas_wykonania > as_of:
+        return as_of
+    return czas_wykonania
+
+
 def zapisz_wejscie(cur, engine: str, mode: str, instrument_id: int, decision_id: int,
                    side: str, qty: Decimal, cena: Decimal, prowizja: Decimal,
                    as_of: datetime, quote_ccy: str, meta: dict, *,
@@ -928,8 +945,13 @@ def zapisz_wejscie(cur, engine: str, mode: str, instrument_id: int, decision_id:
                    venue_fill_id: str | None = None,
                    order_id: int | None = None,
                    prowizja_ccy: str | None = None,
-                   prowizja_surowa: Decimal | None = None) -> int:
+                   prowizja_surowa: Decimal | None = None,
+                   czas_wykonania: datetime | None = None) -> int:
     """Zapis wejscia w pozycje. JEDEN ZAPIS DLA OBU ZRODEL.
+
+    `czas_wykonania` to chwila wypelnienia wg ZEGARA GIELDY i idzie wylacznie
+    do `exec.fill.event_time` (patrz `_czas_wypelnienia`). None = nie znamy
+    (rachunek papierowy) i zostaje `as_of`, jak dotad.
 
     DWIE LICZBY PROWIZJI, BO DWIE KOLUMNY ODPOWIADAJA NA DWA ROZNE PYTANIA
 
@@ -1032,7 +1054,7 @@ def zapisz_wejscie(cur, engine: str, mode: str, instrument_id: int, decision_id:
         # KWOTA I WALUTA MUSZA POCHODZIC Z TEGO SAMEGO ODCZYTU - patrz docstring.
         (oid, venue_fill_id or f"paper-{oid}", qty, cena,
          prowizja if prowizja_surowa is None else prowizja_surowa,
-         prowizja_ccy or quote_ccy, as_of))
+         prowizja_ccy or quote_ccy, _czas_wypelnienia(czas_wykonania, as_of)))
     cur.execute(
         "INSERT INTO exec.position (engine, mode, instrument_id, side, qty, avg_price,"
         " opened_at, fees_paid, open_decision_id) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
@@ -1100,7 +1122,8 @@ def zapisz_wyjscie(cur, position: dict, cena: Decimal, prowizja: Decimal,
                    client_order_id: str | None = None,
                    venue_fill_id: str | None = None,
                    prowizja_ccy: str | None = None,
-                   filtry: Filtry | None = None) -> Decimal:
+                   filtry: Filtry | None = None,
+                   czas_wykonania: datetime | None = None) -> Decimal:
     """Zamkniecie pozycji, w calosci albo w czesci. Wspolne dla obu zrodel.
 
     WYJSCIE CZESCIOWE JEST NAJGORSZYM MOMENTEM NA UPROSZCZENIE. Zlecenie
@@ -1260,7 +1283,8 @@ def zapisz_wyjscie(cur, position: dict, cena: Decimal, prowizja: Decimal,
             # miejscu zmienialby prowizje w liczbe bez jednostki - czyli w cos,
             # czego nie da sie zsumowac z pozostalymi kosztami.
             (oid, venue_fill_id or f"paper-{oid}", ile, cena, prowizja,
-             prowizja_ccy or p["quote_ccy"], as_of))
+             prowizja_ccy or p["quote_ccy"],
+             _czas_wypelnienia(czas_wykonania, as_of)))
 
     # CZY TO, CO ZOSTAJE NA POZYCJI, DA SIE JESZCZE SPRZEDAC.
     #

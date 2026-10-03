@@ -41,7 +41,7 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 import httpx
@@ -126,6 +126,46 @@ TIMEFRAMES = {
     "1m": "1Min", "5m": "5Min", "15m": "15Min", "1h": "1Hour",
     "4h": "4Hour", "1d": "1Day",
 }
+
+# Jak daleko wstecz siega zapytanie o NAJNOWSZE swiece (bez `start`). Cztery doby
+# przykrywaja weekend ze swietem w poniedzialek: pierwszy cykl wtorku nadal widzi
+# ogon piatkowej sesji. O liczbie swiec decyduje `limit` i `sort=desc`, wiec
+# szersze okno nie kosztuje ani jednego zapytania wiecej.
+OKNO_NAJNOWSZYCH = timedelta(days=4)
+
+# LIMIT ZAPYTAN JEST MINUTOWY I WSPOLNY DLA KLUCZA (2026-10-03, audyt 3 T1).
+#
+# Jednym kluczem paper pytaja rownolegle `market-equity` (co minute swieca
+# i oferta na kazdy z ~21 symboli), `history-equity`, silnik, `kapital-equity`
+# i jednorazowe narzedzia (korekta podzialow padla na tym dwa razy). Limit
+# procesowy nic tu nie da, bo pozostale procesy go nie widza - wspolna jest
+# tylko odpowiedz Alpaki: naglowki `X-RateLimit-Remaining` i `X-RateLimit-Reset`
+# (sekundy epoki). Dlatego:
+#   * gdy po udanym zapytaniu zostaje `ZAPAS_LIMITU` lub mniej, czekamy do
+#     odnowienia okna, zamiast zuzyc reszte i wywrocic zapytanie innego procesu;
+#   * 429 czeka do `X-RateLimit-Reset` (albo `Retry-After`), a nie 0,5-1-2 s,
+#     ktore przy limicie MINUTOWYM wyczerpuja trzy proby w 3,5 s.
+# Oba czekania sa przyciete do `CZEKANIE_LIMITU_MAX_S`: zegar Alpaki o godzine
+# do przodu nie moze zawiesic workera na godzine.
+ZAPAS_LIMITU = 10
+CZEKANIE_LIMITU_MAX_S = 60.0
+
+
+def _do_odnowienia_limitu(r: httpx.Response) -> float | None:
+    """Ile sekund do odnowienia okna limitu wg naglowkow Alpaki. None = nie wiadomo."""
+    reset = r.headers.get("X-RateLimit-Reset")
+    if reset:
+        try:
+            return max(0.0, min(float(reset) - time.time(), CZEKANIE_LIMITU_MAX_S))
+        except ValueError:
+            pass
+    ponow = r.headers.get("Retry-After")
+    if ponow:
+        try:
+            return max(0.0, min(float(ponow), CZEKANIE_LIMITU_MAX_S))
+        except ValueError:
+            pass
+    return None
 
 # Statusy Alpaca -> statusy silnika ('new','partial','filled','cancelled',
 # 'rejected'). Stany posrednie (`pending_new`, `accepted`, `pending_cancel`,
@@ -321,9 +361,9 @@ class AlpacaAdapter:
                        prob: int = 3) -> httpx.Response:
         """Jedno zapytanie z ponowieniem WYLACZNIE bledow przejsciowych.
 
-        Ponawiamy 429 i 5xx z rosnacym odstepem. 4xx poza tymi dwoma nie
-        ponawiamy nigdy: bledne zlecenie zlozone trzy razy nie staje sie
-        poprawne, a duplikat `client_order_id` (422) jest sygnalem, nie awaria.
+        Ponawiamy 429 (po odnowieniu okna limitu) i 5xx z rosnacym odstepem.
+        4xx poza tymi dwoma nie ponawiamy nigdy: bledne zlecenie zlozone trzy
+        razy nie staje sie poprawne, a duplikat `client_order_id` (422) jest sygnalem, nie awaria.
         """
         url = (host or self._host) + path
         ostatni: ExchangeError | None = None
@@ -339,14 +379,33 @@ class AlpacaAdapter:
                     retryable=True)
             else:
                 if r.status_code < 400:
+                    await self._oszczedzaj_limit(r)
                     return r
                 blad = _blad_z_odpowiedzi(r)
                 if not blad.retryable:
                     raise blad
                 ostatni = blad
+                if r.status_code == 429:
+                    # Limit minutowy: czekamy do odnowienia okna (patrz
+                    # `ZAPAS_LIMITU`). Bez naglowka - pelne okno, nie 0,5 s.
+                    czekaj = _do_odnowienia_limitu(r)
+                    await asyncio.sleep(CZEKANIE_LIMITU_MAX_S if czekaj is None else czekaj)
+                    continue
             await asyncio.sleep(0.5 * (2 ** proba))
         assert ostatni is not None
         raise ostatni
+
+    async def _oszczedzaj_limit(self, r: httpx.Response) -> None:
+        """Czeka do odnowienia okna, gdy klucz ma `ZAPAS_LIMITU` zapytan lub mniej."""
+        try:
+            zostalo = int(r.headers.get("X-RateLimit-Remaining", ""))
+        except ValueError:
+            return
+        if zostalo > ZAPAS_LIMITU:
+            return
+        czekaj = _do_odnowienia_limitu(r)
+        if czekaj:
+            await asyncio.sleep(czekaj)
 
     async def _get(self, path: str, params: dict | None = None, *, host: str | None = None):
         r = await self._zapytaj("GET", path, params=params, host=host)
@@ -368,8 +427,22 @@ class AlpacaAdapter:
         Alpaca stronicuje przez `next_page_token` i oddaje najwyzej 10 000
         swiec na strone. `limit` jest u nas gorna granica LACZNA - paginacja
         zatrzymuje sie, gdy ja osiagnie, albo gdy token sie skonczy.
-        Bez `start` Alpaca liczy od poczatku dostepnej historii, wiec przy
-        samym `limit` cofamy sie o rozsadne okno.
+
+        BEZ `start` ODDAJEMY NAJNOWSZE `limit` SWIEC, jak Bybit (2026-10-03, audyt 3 T1).
+
+        Do tej daty stalo tu `sort=asc` bez `start`, a docstring obiecywal, ze
+        "cofamy sie o rozsadne okno" - kod tego nie robil. Alpaca bierze wtedy
+        `start` = poczatek biezacego dnia i przy `sort=asc` oddaje PIERWSZE
+        `limit` swiec dnia. `market_worker` (equity) prosi o 200 swiec 1m co
+        minute, wiec zapisywal 13:30-16:50 UTC i nic wiecej: kazdy z 21 symboli
+        mial dokladnie 200 swiec dziennie, ostatnia miedzy 16:37 a 19:09 UTC, przy
+        sesji do 20:00. Silnik equity tracilby swieza cene na ostatnie 1-3,5 h
+        kazdej sesji, a puls meldowal `bledy 0`.
+
+        Teraz bez `start` pytamy `sort=desc` z oknem `OKNO_NAJNOWSZYCH` wstecz
+        (przez weekend i swieto, zeby poniedzialkowy cykl widzial ogon piatku)
+        i odwracamy wynik. Z `start` zachowanie jest jak dotad: rosnaco od
+        `start`, bo tak czytaja backfill i korekta podzialow.
         """
         tf = TIMEFRAMES.get(timeframe)
         if not tf:
@@ -403,11 +476,13 @@ class AlpacaAdapter:
             raise ValueError(
                 f"nieznana korekta swiec: {wybrana!r} "
                 f"(dopuszczalne: {', '.join(KOREKTY_DOPUSZCZALNE)})")
+        najnowsze = start is None
+        if najnowsze:
+            start = datetime.now(timezone.utc) - OKNO_NAJNOWSZYCH
         params: dict = {"symbols": symbol, "timeframe": tf, "feed": self._feed,
                         "adjustment": wybrana, "limit": min(limit, 10_000),
-                        "sort": "asc"}
-        if start is not None:
-            params["start"] = start.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+                        "sort": "desc" if najnowsze else "asc"}
+        params["start"] = start.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
         if end is not None:
             params["end"] = end.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
         out: list[Candle] = []
@@ -424,7 +499,9 @@ class AlpacaAdapter:
             token = res.get("next_page_token")
             if not token or len(out) >= limit:
                 break
-        return out[:limit]
+        # Przy `desc` pierwsze `limit` to NAJNOWSZE; sortowanie po czasie oddaje
+        # je rosnaco, jak obiecuje kontrakt, niezaleznie od kierunku zapytania.
+        return sorted(out[:limit], key=lambda c: c.event_time)
 
     async def fetch_order_book(self, symbol: str, depth: int = 1, *,
                                ksiega_egzekucji: bool = True) -> OrderBook:

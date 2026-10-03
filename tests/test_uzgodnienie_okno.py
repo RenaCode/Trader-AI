@@ -106,6 +106,9 @@ def _fetch(aktywa, pozycje_dziennika=(), okno=()):
         # zapytania - czyli mierzylaby sama siebie.
         if "AS prowizja_w" in sql:
             return []
+        # Zlecenia w locie (`uzgodnienie.zlecenia_w_locie`) - brak.
+        if "AS strona" in sql:
+            return []
         if "sum(p.qty)" in sql:
             return list(pozycje_dziennika)
         if "min(i.lot_size)" in sql:

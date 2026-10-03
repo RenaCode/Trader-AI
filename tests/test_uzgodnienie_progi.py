@@ -3,7 +3,7 @@
 DLACZEGO TEN PLIK ISTNIEJE OSOBNO
 
 Uzgodnienie jest jedynym miejscem, które porównuje nasz obraz stanu z obrazem
-giełdy — i jedynym, które wysyła `killswitch.triggered` o severity `critical`.
+giełdy — i jedynym, które wysyła `reconcile.mismatch` (do 03.10 `killswitch.triggered`) o severity `critical`.
 Kanał powiadomień ma własny limit tempa, więc uzgodnienie alarmujące bez
 powodu nie jest hałasem: jest ZAGŁUSZENIEM prawdziwego kill-switcha
 i `engine.down`. Fałszywy alarm kosztuje tu tyle samo co brak alarmu.
@@ -60,6 +60,9 @@ def _fetch(aktywa, pozycje=(), od=None, cena_swieza=True, okno=None):
         # Atrapa musi je ZNAC, inaczej oddalaby na nie wiersz z innego
         # zapytania - czyli mierzylaby sama siebie.
         if "AS prowizja_w" in sql:
+            return []
+        # Zlecenia w locie (`uzgodnienie.zlecenia_w_locie`) - brak.
+        if "AS strona" in sql:
             return []
         if "sum(p.qty)" in sql:
             return list(pozycje)
@@ -245,6 +248,9 @@ def _fetch_wiersze(wiersze):
         # Atrapa musi je ZNAC, inaczej oddalaby na nie wiersz z innego
         # zapytania - czyli mierzylaby sama siebie.
         if "AS prowizja_w" in sql:
+            return []
+        # Zlecenia w locie (`uzgodnienie.zlecenia_w_locie`) - brak.
+        if "AS strona" in sql:
             return []
         assert "min(i.lot_size)" in sql, f"nieoczekiwane zapytanie: {sql}"
         return wiersze
@@ -546,4 +552,4 @@ def test_prawdziwy_rozjazd_na_calej_sciezce_NADAL_wysyla():
         _fetch(("LINK",)), notify, _Salda({"LINK": D("94.605844")}),
         kind="spot_eu"))
     assert n == 1
-    assert zgloszone == ["killswitch.triggered"]
+    assert zgloszone == ["reconcile.mismatch"]

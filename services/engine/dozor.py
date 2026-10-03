@@ -1977,6 +1977,11 @@ async def sprawdz_swiezosc(fetch_all, notify, sucho: bool = False,
 PROB_WYJSCIA_BEZ_SKUTKU = 3
 
 
+# Od ilu ROZSTRZYGNIETYCH zlecen w oknie stosunek odrzucen cokolwiek mowi.
+# „Zadne nie przeszlo" alarmuje bez minimum - to inny warunek i inny powod.
+MIN_PROBA_ODRZUCEN = 4
+
+
 def ocen_egzekucje(stan: dict) -> list[tuple[str, str, str]]:
     """Czy zlecenia w ogole dochodza do gieldy. CZYSTA FUNKCJA.
 
@@ -2031,11 +2036,17 @@ def ocen_egzekucje(stan: dict) -> list[tuple[str, str, str]]:
             f"System nie handluje i NIE WYGLĄDA to na awarię: silnik bije, dane "
             f"są świeże, kill-switch milczy. Odrzucone zlecenie w logu wygląda "
             f"tak samo jak brak sygnału."))
-    elif odrzucone and przyjete and odrzucone >= przyjete:
+    elif (odrzucone and przyjete and odrzucone >= przyjete
+          and odrzucone + przyjete >= MIN_PROBA_ODRZUCEN):
+        # MINIMUM PROBY I TRESC ZGODNA Z WARUNKIEM (2026-10-03, audyt 3 T10).
+        # Do tej daty jedno odrzucenie PostOnly przy jednym przyjeciu (n = 2)
+        # zapalalo Job na czerwono tytulem „Więcej… (1) niż (1)". Przy dwoch
+        # zleceniach stosunek nic nie mowi, a tytul przeczyl liczbom obok.
         powody.append((
             "order.rejected",
-            f"Więcej zleceń odrzuconych ({odrzucone}) niż przyjętych ({przyjete})",
-            "Przechodzi mniej niż połowa zleceń. Powody:\n" + "\n".join(
+            f"Odrzucona co najmniej połowa zleceń ({odrzucone} z "
+            f"{odrzucone + przyjete})",
+            "Przechodzi najwyżej połowa zleceń. Powody:\n" + "\n".join(
                 f"  • {p}" for p in stan["powody"])))
 
     if stan["nieznane"]:
@@ -2296,13 +2307,21 @@ async def sprawdz_poslizg(fetch_all, *, engine: str = "crypto",
     Zwraca zawsze 0 z tego samego powodu: niezerowy kod zapalilby zadanie
     cykliczne na czerwono, czyli podnioslby alarm bez tresci.
     """
-    from services.engine.poslizg import opis, pobierz, pomiar
+    from services.engine.poslizg import (opis, pobierz, pobierz_zlecenia, pomiar,
+                                         wypelnialnosc)
 
     wiersze = await pobierz(fetch_all, engine=engine, mode=mode, okno_h=okno_h)
+    # WYPELNIALNOSC TEZ TUTAJ (2026-10-03, audyt 3 T2). Do tej daty liczyl ja
+    # tylko `poslizg.main`, ktorego nikt nie uruchamia, a ten raport - czytany
+    # codziennie w `zywotnosc` - dwa razy odsylal do „wypelnialnosci nizej",
+    # ktorej nizej nie bylo. To jedyna miara efektu E1-E5.
+    zlecenia = await pobierz_zlecenia(fetch_all, engine=engine, mode=mode,
+                                      okno_h=okno_h)
     okno = "od poczatku" if okno_h is None else f"{okno_h} h"
     print(f"poślizg ({engine}/{mode}, {okno}), "
-          f"wypełnień w rejestrze: {len(wiersze)}")
-    for linia in opis(pomiar(wiersze)):
+          f"wypełnień w rejestrze: {len(wiersze)}, "
+          f"złożonych zleceń: {len(zlecenia)}")
+    for linia in opis(pomiar(wiersze) | {"wypelnialnosc": wypelnialnosc(zlecenia)}):
         print(f"  {linia}")
     return 0
 

@@ -107,6 +107,18 @@ PULS = "market"
 #     referencyjnych jest w tym projekcie jeden.
 ODSWIEZANIE_LISTY_S = 900
 
+# PULS, KTORY MELDUJE `bledy 0` PRZY SWIECACH SPRZED TRZECH GODZIN, KLAMIE (2026-10-03, audyt 3 T1).
+#
+# Do tej daty cykl byl udany, gdy pobranie sie udalo - niezaleznie od tego, CO
+# przyszlo. Adapter Alpaki oddawal pierwsze 200 swiec dnia, wiec od ok. 16:40 UTC
+# kazdy cykl zapisywal zero nowych swiec i meldowal zdrowie. Silnik equity czyta
+# cene wylacznie z 1m i po 15 min uznaje ja za stara (`loop.CENA_STARA_PO_MIN`),
+# czyli przez reszte sesji nie mialby ceny - a puls mowil, ze wszystko gra.
+#
+# Prog to TA SAMA liczba co w silniku (test pilnuje rownosci): worker ma alarmowac
+# dokladnie wtedy, gdy silnik przestaje miec cene, nie wczesniej i nie pozniej.
+SWIECA_STARA_PO_MIN = 15
+
 
 def czytaj_instrumenty(cur, venue_code: str) -> list[dict]:
     """Instrumenty tej gieldy, dla ktorych zbieramy dane.
@@ -133,7 +145,7 @@ async def cycle(conn, adapter, instruments: list[dict], book_depth: int) -> dict
     # Zlepienie ich konczy proces (patrz naglowek), rozdzielenie bez licznika
     # zamienia to w cisze - stad trzecia liczba, ktora idzie do pulsu.
     stats = {"swiece": 0, "orderbooki": 0, "bledy": 0, "bez_arkusza": 0,
-             "nieudane": []}
+             "nieudane": [], "ostatnia": {}}
     now = datetime.now(timezone.utc)
 
     for inst in instruments:
@@ -148,6 +160,9 @@ async def cycle(conn, adapter, instruments: list[dict], book_depth: int) -> dict
         rows = [(inst["id"], "1m", c.event_time, c.open, c.high, c.low, c.close,
                  c.volume, c.trades, now)
                 for c in candles if c.event_time < now.replace(second=0, microsecond=0)]
+        # Najnowsza ZAMKNIETA swieca, ktora gielda oddala - do oceny swiezosci
+        # (`nieswieze`). Brak swiec to `None`, nie pominiecie symbolu.
+        stats["ostatnia"][inst["symbol"]] = max((r[2] for r in rows), default=None)
         if rows:
             cur.executemany(
                 "INSERT INTO market.candle (instrument_id, timeframe, event_time, open, high,"
@@ -249,6 +264,56 @@ def ocen_cykl(s: dict, instruments: list[dict],
     return None, uporczywe
 
 
+async def sesja_otwarta(adapter) -> bool | None:
+    """Czy rynek tej gieldy jest teraz otwarty. None = nie udalo sie zapytac.
+
+    Gielda bez zegara sesji (krypto) jest otwarta zawsze. Blad zegara NIE jest
+    awaria cyklu - swiece i arkusz przyszly - ale tego cyklu nie oceniamy pod
+    katem swiezosci, bo nie wiemy, czy brak swiec to zamkniety rynek.
+    """
+    zegar = getattr(adapter, "zegar", None)
+    if zegar is None:
+        return True
+    try:
+        return (await zegar()).otwarta
+    except ExchangeError as e:
+        print(f"  zegar sesji: {e}")
+        return None
+
+
+def nieswieze(ostatnie: dict[str, datetime | None], teraz: datetime,
+              sesja_od: datetime, prog_min: int = SWIECA_STARA_PO_MIN) -> list[str]:
+    """Symbole, ktorych najnowsza swieca jest starsza niz prog. CZYSTA FUNKCJA.
+
+    Wiek liczymy od POZNIEJSZEJ z dwoch chwil: ostatniej swiecy i poczatku sesji
+    widzianego przez ten proces (`sesja_od`). Inaczej kazde otwarcie gieldy
+    zaczynaloby sie alarmem o swiecy z wczorajszego zamkniecia, a proces
+    wstajacy w srodku nocy - alarmem o rynku, ktory dopiero rusza.
+    """
+    out = []
+    for sym, t in ostatnie.items():
+        odniesienie = sesja_od if t is None else max(t, sesja_od)
+        if (teraz - odniesienie).total_seconds() > prog_min * 60:
+            out.append(sym)
+    return sorted(out)
+
+
+def awaria_swiezosci(stare: list[str], instruments: list[dict]) -> str | None:
+    """Kiedy nieswieze swiece sa awaria CYKLU, a nie tylko wpisem w pulsie.
+
+    Pojedynczy symbol bez swiecy od kwadransa to zwykle papier bez obrotu na IEX
+    albo wstrzymany obrot - trafia do `detail` pulsu jako `nieswieze`, ale nie
+    konczy procesu (ta sama zasada co `bez_danych` w `ocen_cykl`). Polowa
+    uniwersum naraz to juz nie symbol, tylko zrodlo: tak wygladalo T1, gdzie
+    symbole wypadaly kolejno od 16:37 do 19:09. Wtedy cykl jest porazka, puls
+    przestaje bic i `dozor --co workery` mowi „nie domyka cykli" z opisem.
+    """
+    if stare and 2 * len(stare) >= len(instruments):
+        return (f"świece 1m starsze niż {SWIECA_STARA_PO_MIN} min w otwartej sesji: "
+                f"{len(stare)} z {len(instruments)} ({', '.join(stare[:10])})")
+    return None
+
+
 async def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--interval", type=int, default=60)
@@ -273,6 +338,9 @@ async def main() -> int:
         pod_rzad = 0
         pod_rzad_symbolu: dict[str, int] = {}
         lista_z = datetime.now(timezone.utc)
+        # Od kiedy TEN PROCES widzi otwarta sesje - patrz `nieswieze`. None =
+        # rynek zamkniety (albo jeszcze nie pytalismy).
+        sesja_od: datetime | None = None
         while True:
             t0 = datetime.now(timezone.utc)
             blad: str | None = None
@@ -334,6 +402,23 @@ async def main() -> int:
                         if uporczywe:
                             print(f"[{t0:%H:%M:%S}] bez danych od {POD_RZAD_MAX}+ cykli: "
                                   f"{', '.join(uporczywe)}")
+                        otwarta = await sesja_otwarta(adapter)
+                        if otwarta is False:
+                            sesja_od = None
+                        elif otwarta and sesja_od is None:
+                            sesja_od = t0
+                        stare: list[str] = []
+                        if otwarta and sesja_od is not None:
+                            # Symbol, ktorego pobranie padlo, jest juz w `bledy`
+                            # i `bez_danych` - tu tylko te, ktore PRZYSZLY stare.
+                            nieudane = set(s.get("nieudane") or ())
+                            stare = nieswieze(
+                                {k: v for k, v in s.get("ostatnia", {}).items()
+                                 if k not in nieudane}, t0, sesja_od)
+                        if stare:
+                            print(f"[{t0:%H:%M:%S}] nieświeże (>{SWIECA_STARA_PO_MIN} min): "
+                                  f"{', '.join(stare)}")
+                        blad = blad or awaria_swiezosci(stare, instruments)
                         if not blad:
                             # PULS DOPIERO TU, po CALYM udanym cyklu. Bicie przed
                             # petla albo po pierwszym instrumencie meldowaloby
@@ -355,6 +440,8 @@ async def main() -> int:
                                       "bez_arkusza": s["bez_arkusza"],
                                       "bledy": s["bledy"],
                                       "bez_danych": uporczywe,
+                                      "nieswieze": stare,
+                                      "sesja": otwarta,
                                       "glebokosc": args.depth})
                     except Exception as e:                # noqa: BLE001
                         conn.rollback()

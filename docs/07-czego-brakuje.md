@@ -58,6 +58,13 @@ wejścia 0,2795. Nie jest to awaria: silnik podejmuje jedną decyzję na świec�
 4 h i żaden sygnał nie przekroczył progu. Jest to natomiast powód, dla którego
 poniższe liczby wciąż są założeniem.
 
+**Aktualizacja 2026-10-03 (audyt 3).** W rejestrze są 72 wypełnienia, z tego
+28 giełdowych (`execution = 'gielda'`). Zleceń giełdowych crypto/demo: 43 —
+28 wypełnionych, 9 odrzuconych (6 z nich to odrzucenia PostOnly), 6
+anulowanych. Wypełnialność z rozbiciem drukuje od tej daty także
+`dozor --co poslizg` (wcześniej tylko `poslizg.py`), a `exec.fill.event_time`
+dostaje czas wykonania z zegara giełdy zamiast chwili księgowania.
+
 **Czego to wymaga, żeby przestać być założeniem:** wypełnień Z GIEŁDY, a te
 zależą od tego, czy strategia w ogóle otworzy pozycję. Przy zmierzonej częstości
 z backtestu (20–60 transakcji na okno 30-dniowe dla dziesięciu instrumentów)
@@ -126,6 +133,10 @@ i progu pojedynczego odczytu **1,0**. Czujka jest wpięta w zadanie trenera
 i odpowiada: *„stan jeszcze nie utrwalony (za mało przebiegów lub za krótki
 odstęp) — cisza"*. Zadziała po trzech kolejnych odczytach powyżej progu,
 rozpiętych na co najmniej 48 godzin.
+
+**Aktualizacja 2026-10-03 (audyt 3).** Dryf wynosi **3,27**, a czujka trwałości
+zadziałała 03.10 („Dryf cech utrzymuje się"). Liczba 0,69 wyżej jest
+historyczna.
 
 Wcześniejsza wersja tej sekcji podawała **PSI 0,695 przy progu 0,25** i twierdziła,
 że stan trwale zły milczy na zawsze. Oba zdania były nieprawdziwe i oba

@@ -70,6 +70,9 @@ MIGRACJE_NADAN = [
     # Zakres tamtej roli pilnuje tests/test_postmortem.py; tutaj migracja jest
     # po to, zeby twierdzenia o schemacie `public` obejmowaly takze ja.
     KORZEN / "db" / "migrations" / "0054_rola_postmortemu.sql",
+    # Próba zapisuje wynik w `risk.killswitch_event.proba_wynik` (0072) -
+    # nadanie kolumnowe, tylko tej jednej kolumny.
+    KORZEN / "db" / "migrations" / "0072_wynik_proby_pozarowej.sql",
 ]
 
 # Role procesów z 0034 i 0052. Wypisane tutaj, a nie wyciągnięte z chartu, bo to

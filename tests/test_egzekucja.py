@@ -281,6 +281,9 @@ def _fetch_all_stub(pozycje, symbole=(("BTCUSDC", "BTC"),), od=None,
         # zapytania - czyli mierzylaby sama siebie.
         if "AS prowizja_w" in sql:
             return []
+        # Zlecenia w locie (`uzgodnienie.zlecenia_w_locie`) - brak.
+        if "AS strona" in sql:
+            return []
         # Rozroznienie po NAJWEZSZYM markerze. Zapytanie o pozycje takze
         # dotyka ref.instrument, wiec dopasowanie po nazwie tabeli laczyloby
         # dwa rozne pytania w jedno - i test padalby na wlasnym stubie.
@@ -569,6 +572,9 @@ def test_uzgodnienie_WIDZI_aktywo_ktorego_nie_ma_w_dzienniku():
         # zapytania - czyli mierzylaby sama siebie.
         if "AS prowizja_w" in sql:
             return []
+        # Zlecenia w locie (`uzgodnienie.zlecenia_w_locie`) - brak.
+        if "AS strona" in sql:
+            return []
         if "sum(p.qty)" in sql:
             return []                       # nasz dziennik jest PUSTY
         if "DISTINCT base_ccy" in sql:
@@ -611,6 +617,9 @@ def test_uzgodnienie_nadal_pomija_walute_kwotowana():
         # Atrapa musi je ZNAC, inaczej oddalaby na nie wiersz z innego
         # zapytania - czyli mierzylaby sama siebie.
         if "AS prowizja_w" in sql:
+            return []
+        # Zlecenia w locie (`uzgodnienie.zlecenia_w_locie`) - brak.
+        if "AS strona" in sql:
             return []
         if "sum(p.qty)" in sql:
             return []

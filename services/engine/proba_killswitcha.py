@@ -118,6 +118,11 @@ Właściwym miejscem na to rozróżnienie jest KOLUMNA w `risk.killswitch_event`
 tego ostatniego zabrania wprost test `test_slad_poprzednich_prob_czytany_
 z_TROJKI_KOLUMN_a_nie_z_notatki`.
 
+OD 2026-10-03 TA KOLUMNA ISTNIEJE (`proba_wynik`, migracja 0072). Kod wyjścia
+się nie zmienia - z powodów wyżej - ale komunikat podaje osobno wiek ostatniej
+próby z ogniwami 1-2 i 4 oraz wiek PEŁNEGO potwierdzenia, a przebieg bez
+zamiaru wejścia mówi wprost, że ogniwa 3 nie dało się w nim potwierdzić.
+
 Jedno zdarzenie jest w ogniwie 3 rozstrzygające w drugą stronę i nie wymaga
 żadnej okazji: DECYZJA WEJŚCIOWA zapisana po zadziałaniu bezpiecznika. Silnik,
 który mimo aktywnego kill-switcha zapisał `enter_long`/`enter_short`, nie
@@ -153,6 +158,8 @@ OPIS_WSTRZYMANIA = OPIS_POWODU_HOLDU[POWOD_WSTRZYMANIA]
 # czestym (patrz naglowek) i myleniem go z ktorymkolwiek z pozostalych dwoch
 # stoi cala wada, ktora ten modul naprawia.
 ZADZIALALO = "zadziałało"
+# Nazwa ogniwa 3 w `ogniwa` - jedyna, ktorej brak pomiaru daje wynik 'czesciowa'.
+OGNIWO_3 = "3 aktywny -> silnik wstrzymał wejścia"
 NIEZMIERZONE = "NIE ZMIERZONO"
 PADLO = "NIE ZADZIAŁAŁO"
 
@@ -251,18 +258,26 @@ class Niezaliczona(RuntimeError):
 class Nierozstrzygnieta(RuntimeError):
     """Próby NIE DAŁO SIĘ przeprowadzić. To nie jest wynik pomiaru.
 
-    Niesie `dni` — ile dób minęło od ostatniego POTWIERDZENIA, że łańcuch
-    działa. Bez tej liczby trzeci wynik byłby nieodróżnialny od sukcesu.
+    Niesie `dni` — ile dób minęło od ostatniej próby, która POTWIERDZIŁA
+    OGNIWA 1-2 i 4 (patrz `_dni_od_potwierdzenia`). Bez tej liczby trzeci wynik
+    byłby nieodróżnialny od sukcesu.
 
     `dni is None` znaczy coś jeszcze innego i nie wolno tego zastąpić zerem:
-    w dzienniku NIE MA ANI JEDNEGO pełnego potwierdzenia, więc nie ma od czego
-    liczyć ciszy. Zero czytałoby się jako „potwierdzono przed chwilą", czyli
+    w dzienniku NIE MA ANI JEDNEJ takiej próby, więc nie ma od czego liczyć
+    ciszy. Zero czytałoby się jako „potwierdzono przed chwilą", czyli
     dokładnie odwrotnie niż jest.
+
+    `dni_pelne` — ile dób od ostatniej próby ZALICZONEJ (wszystkie cztery
+    ogniwa, kolumna `proba_wynik`, migracja 0072). None = takiej nie ma.
+    `tylko_ogniwo_3` — jedynym niezmierzonym ogniwem było wstrzymanie wejść.
     """
 
-    def __init__(self, powod: str, dni: float | None):
+    def __init__(self, powod: str, dni: float | None, *,
+                 dni_pelne: float | None = None, tylko_ogniwo_3: bool = False):
         super().__init__(powod)
         self.dni = dni
+        self.dni_pelne = dni_pelne
+        self.tylko_ogniwo_3 = tylko_ogniwo_3
 
 
 async def _czekaj_na(warunek, limit_s: int, opis: str):
@@ -309,12 +324,39 @@ async def _dni_od_potwierdzenia(fetch_one, engine: str, mode: str) -> float | No
     Doby liczy BAZA. Odejmowanie dat po stronie Pythona wymagałoby zgadywania
     strefy — a strefa pomylona o dwie godziny przy progu liczonym w dobach jest
     niewidoczna dokładnie do dnia, w którym ma zadziałać.
+
+    OD 2026-10-03 (migracja 0072) ROZRÓŻNIA TO KOLUMNA `proba_wynik`. Liczymy
+    próby 'zaliczona' i 'czesciowa' (ogniwa 1-2 i 4 zmierzone, trzecie bez
+    okazji) oraz NULL, czyli próby sprzed migracji - te liczyły się tak samo
+    i wpisanie im wyniku wstecz byłoby zgadywaniem. 'niedokonczona' (przerwanie,
+    błąd, ogniwo 4 niezmierzone) już NIE odnawia licznika. Pełne potwierdzenie,
+    z ogniwem 3, liczy osobno `_dni_od_pelnego_potwierdzenia`.
     """
     r = await fetch_one(
         "SELECT extract(epoch FROM now() - max(released_at)) / 86400.0 AS dni"
         " FROM risk.killswitch_event"
         " WHERE engine::text=%s AND mode::text=%s AND released_at IS NOT NULL"
-        "   AND released_auto = false AND released_by IS NULL", (engine, mode))
+        "   AND released_auto = false AND released_by IS NULL"
+        "   AND (proba_wynik IS NULL OR proba_wynik IN ('zaliczona', 'czesciowa'))",
+        (engine, mode))
+    if r and r["dni"] is not None:
+        return float(r["dni"])
+    return None
+
+
+async def _dni_od_pelnego_potwierdzenia(fetch_one, engine: str,
+                                        mode: str) -> float | None:
+    """Ile dób od próby, która zmierzyła WSZYSTKIE cztery ogniwa. None = nigdy.
+
+    Nie wchodzi do kodu wyjścia (ogniwo 3 jest mierzalne tylko okazjonalnie,
+    patrz nagłówek), ale idzie do komunikatu - żeby „1.0 doby od potwierdzenia"
+    nie znaczyło „potwierdzono wstrzymanie wejść dobę temu", kiedy go nie było.
+    """
+    r = await fetch_one(
+        "SELECT extract(epoch FROM now() - max(released_at)) / 86400.0 AS dni"
+        " FROM risk.killswitch_event"
+        " WHERE engine::text=%s AND mode::text=%s AND proba_wynik = 'zaliczona'",
+        (engine, mode))
     if r and r["dni"] is not None:
         return float(r["dni"])
     return None
@@ -413,6 +455,8 @@ async def przeprowadz(fetch_all, fetch_one, execute, engine: str = "crypto",
     # bo czyta go `finally` - a tam nie wolno polegac na tym, ze przypisanie
     # w srodku zdazylo sie wykonac.
     moje_zdarzenie: int | None = None
+    # `risk.killswitch_event.proba_wynik` dla zwolnienia w `finally` (0072).
+    wynik_proby = "niedokonczona"
 
     # STAN KAZDEGO OGNIWA Z OSOBNA, a nie jedna flaga „poszlo dobrze".
     # Komunikat koncowy powstaje WYLACZNIE z tego slownika, wiec nie da sie
@@ -420,7 +464,7 @@ async def przeprowadz(fetch_all, fetch_one, execute, engine: str = "crypto",
     # rozjazd miedzy zdaniem koncowym a pomiarem byl tu cala wada.
     ogniwa: dict[str, str] = {
         "1-2 limit -> zdarzenie": NIEZMIERZONE,
-        "3 aktywny -> silnik wstrzymał wejścia": NIEZMIERZONE,
+        OGNIWO_3: NIEZMIERZONE,
         "4 dozór -> powiadomienie": NIEZMIERZONE,
     }
 
@@ -588,14 +632,14 @@ async def przeprowadz(fetch_all, fetch_one, execute, engine: str = "crypto",
         wstrzymane, wejscia = max(wstrzymane, wstrzymane_2), max(wejscia, wejscia_2)
 
         if wejscia:
-            ogniwa["3 aktywny -> silnik wstrzymał wejścia"] = PADLO
+            ogniwa[OGNIWO_3] = PADLO
             wypisz_ogniwa()
             raise Niezaliczona(
                 f"silnik zapisał {wejscia} decyzji wejściowych PO zadziałaniu "
                 f"kill-switcha — bezpiecznik nie wstrzymał wejść, czyli nie "
                 f"zrobił jedynej rzeczy, która chroni pieniądze")
         if wstrzymane:
-            ogniwa["3 aktywny -> silnik wstrzymał wejścia"] = ZADZIALALO
+            ogniwa[OGNIWO_3] = ZADZIALALO
             print(f"  wstrzymanych zamiarów wejścia: {wstrzymane} "
                   f"({OPIS_WSTRZYMANIA})")
         else:
@@ -643,16 +687,24 @@ async def przeprowadz(fetch_all, fetch_one, execute, engine: str = "crypto",
         # gorsze od braku proby: brak proby nikogo nie uspokaja.
         niezmierzone = [n for n, s in ogniwa.items() if s != ZADZIALALO]
         if niezmierzone:
-            # Zwolnienie idzie przez `finally` - z notatka BEZ prefiksu
-            # potwierdzenia, wiec ten przebieg nie odnowi licznika ciszy.
+            tylko_3 = niezmierzone == [OGNIWO_3]
+            if tylko_3:
+                # WYNIK CZESCIOWY (migracja 0072): ogniwa 1-2 i 4 sa
+                # potwierdzone i odnawiaja licznik ciszy, ale pelnego
+                # potwierdzenia ten przebieg nie daje. Zapisuje go zwolnienie
+                # w `finally`.
+                wynik_proby = "czesciowa"
+            # Zwolnienie idzie przez `finally`.
             raise Nierozstrzygnieta(
                 "łańcuch NIE został potwierdzony w całości — nie zmierzono: "
                 + ", ".join(f"ogniwo {n}" for n in niezmierzone),
-                await _dni_od_potwierdzenia(fetch_one, engine, mode))
+                await _dni_od_potwierdzenia(fetch_one, engine, mode),
+                dni_pelne=await _dni_od_pelnego_potwierdzenia(fetch_one, engine, mode),
+                tylko_ogniwo_3=tylko_3)
 
         await execute(
             "UPDATE risk.killswitch_event SET released_at = now(),"
-            " released_auto = false, release_note = %s"
+            " released_auto = false, proba_wynik = 'zaliczona', release_note = %s"
             " WHERE id = %s",
             ("PRÓBA POŻAROWA ZALICZONA — zdarzenie wywołane celowo przez "
              "services/engine/proba_killswitcha.py", z["id"]))
@@ -704,13 +756,13 @@ async def przeprowadz(fetch_all, fetch_one, execute, engine: str = "crypto",
         if moje_zdarzenie is not None:
             await execute(
                 "UPDATE risk.killswitch_event SET released_at = now(),"
-                " released_auto = false, release_note = %s"
+                " released_auto = false, release_note = %s, proba_wynik = %s"
                 " WHERE id = %s AND released_at IS NULL",
                 ("PRÓBA POŻAROWA NIEDOKOŃCZONA — zdarzenie wywołane celowo przez "
                  "services/engine/proba_killswitcha.py, przyczyna (podniesiony "
                  "próg) już nie istnieje. Łańcuch NIE został potwierdzony "
                  "w całości: próba padła albo któregoś ogniwa nie zmierzyła.",
-                 moje_zdarzenie))
+                 wynik_proby, moje_zdarzenie))
 
         # PRZYWRACANIE W `finally`, nie na końcu bloku: próg musi wrócić także
         # wtedy, gdy próba padnie w połowie albo zostanie przerwana.
@@ -761,12 +813,29 @@ async def uruchom(fetch_all, fetch_one, execute, **kw) -> int:
             # potwierdzila dotad calego lancucha, wiec licznik nie ma poczatku -
             # a wpisanie tu zera albo nieskonczonosci byloby wymyslona data.
             # Roznica jest widoczna w komunikacie i nie zapala zadania.
-            print("  Pełnego potwierdzenia łańcucha NIE MA w dzienniku ani "
-                  "razu — licznik ciszy nie ma od czego liczyć.",
+            print("  Żadna próba nie potwierdziła dotąd ogniw 1-2 i 4 — "
+                  "licznik ciszy nie ma od czego liczyć.",
                   file=sys.stderr)
             return 0
-        print(f"  Od ostatniego potwierdzenia: {e.dni:.1f} doby "
-              f"(próg: {MAX_DNI_BEZ_POTWIERDZENIA}).", file=sys.stderr)
+        # DWIE LICZBY, BO SA DWA RÓŻNE POTWIERDZENIA (2026-10-03, audyt 3 T5).
+        # Do tej daty stało tu „Od ostatniego potwierdzenia: 1.0 doby" przy
+        # dziesięciu próbach z rzędu, z których żadna nie zmierzyła ogniwa 3 -
+        # zdanie czytało się jak potwierdzenie wstrzymania wejść, którego nie
+        # było. Próg dotyczy pierwszej liczby; druga jest informacją.
+        print(f"  Od ostatniej próby z potwierdzonymi ogniwami 1-2 i 4: "
+              f"{e.dni:.1f} doby (próg: {MAX_DNI_BEZ_POTWIERDZENIA}).",
+              file=sys.stderr)
+        if e.dni_pelne is None:
+            print("  Pełnego potwierdzenia (z ogniwem 3, wstrzymanie wejść) NIE "
+                  "MA w dzienniku od wprowadzenia wyniku próby (migracja 0072).",
+                  file=sys.stderr)
+        else:
+            print(f"  Pełne potwierdzenie (z ogniwem 3, wstrzymanie wejść): "
+                  f"{e.dni_pelne:.1f} doby temu.", file=sys.stderr)
+        if e.tylko_ogniwo_3:
+            print("  Ogniwa 3 NIE DA SIĘ potwierdzić bez zamiaru wejścia silnika "
+                  "w oknie próby — w tym przebiegu go nie było. To granica "
+                  "pomiaru, nie awaria.", file=sys.stderr)
         if e.dni > MAX_DNI_BEZ_POTWIERDZENIA:
             print(f"\nNIESPRAWDZONE od {e.dni:.1f} doby — sama ta cisza jest "
                   f"już awarią.", file=sys.stderr)

@@ -38,7 +38,8 @@ KORZEN = Path(__file__).resolve().parents[1]
 MOJE_ZDARZENIE = 77
 
 
-def _atrapa(*, zdarzenie=None, powiadomienia=(), wstrzymane=0, wejscia=0):
+def _atrapa(*, zdarzenie=None, powiadomienia=(), wstrzymane=0, wejscia=0,
+            dni_pelne=None):
     """Atrapa bazy dla próby. Oddaje wiersze, o które próba pyta.
 
     `powiadomienia` to lista krotek `(engine, event_id)` — atrapa liczy z nich
@@ -53,6 +54,9 @@ def _atrapa(*, zdarzenie=None, powiadomienia=(), wstrzymane=0, wejscia=0):
             return {"equity": 10_000}
         if "count(*)" in p and "released_at IS NULL" in p:
             return {"n": 0, "dni_blokady": 0.0}
+        if "proba_wynik = 'zaliczona'" in p:
+            # Pelne potwierdzenie (migracja 0072) - osobne pytanie od ciszy.
+            return {"dni": dni_pelne}
         if "released_auto = false" in p and "released_by IS NULL" in p:
             return {"dni": 1.0}
         if "notify.notification" in p:

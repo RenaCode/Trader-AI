@@ -31,7 +31,7 @@ Sama różnica WZGLĘDNA nie wystarcza i psuje się dokładnie tam, gdzie boli.
 Gdy po jednej stronie jest zero, mianownikiem porównania jest sama resztka,
 więc KAŻDA niezerowa ilość daje względną 1,0 — tysiąc razy ponad tolerancję.
 Resztka warta siedem centów wygląda wtedy identycznie jak zniknięcie całej
-pozycji, a `killswitch.triggered` chodzi bez wyciszenia co dziesięć minut.
+pozycji, a alarm krytyczny chodzi bez wyciszenia co dziesięć minut.
 Skutek nie jest kosmetyczny: CallMeBot ma własny limit tempa, więc prawdziwy
 kill-switch i `engine.down` giną za ścianą alarmów o pyle.
 
@@ -69,6 +69,9 @@ from services.exchanges.bybit import RECV_WINDOW  # noqa: E402
 # unijny ma takera 0,250%, czyli DWA I PÓŁ RAZA drożej niż globalny, a próg
 # policzony z cudzego wiersza cennika nie opisuje rachunku, który uzgadniamy.
 KIND_DOMYSLNY = "spot_eu"
+
+# Kod powiadomienia o rozjezdzie (`notify.event_type`, migracja 0071).
+KOD_ZDARZENIA = "reconcile.mismatch"
 
 
 def tolerancja_wzgledna(kind: str = KIND_DOMYSLNY) -> Decimal:
@@ -179,6 +182,88 @@ def rozjazdy(nasze: dict[str, Decimal], gieldy: dict[str, Decimal],
             "rodzaj": ("pozycja-widmo" if u_nas > u_nich else "saldo-nieznane"),
         })
     return wynik
+
+
+# ---------------------------------------------------------- zlecenia w locie
+
+# ZLECENIE WYPELNIONE NA GIELDZIE, A JESZCZE NIE ZAKSIEGOWANE, TO NIE ROZJAZD
+# (2026-10-03, audyt 3 T3).
+#
+# Ksiegujemy wypelnienie dopiero przy rozstrzyganiu planu (`gielda_exec.
+# rozstrzygnij_plan`), czyli w najblizszym cyklu silnika PO wypelnieniu - a do
+# tej chwili `exec.order.status` stoi na `new`. Uzgodnienie, ktore wpadnie w te
+# minuty, widzi saldo bez naszej pozycji i krzyczalo `critical`:
+#
+#     NEAR 01.10: alarm 07:20:51, zaksiegowane 07:21:27 (zlecenie 81)
+#     BTC  02.10: alarm 05:30:52, zaksiegowane 05:33:02 (zlecenie 83)
+#
+# Dwa alarmy krytyczne na cztery kupna w 72 h, oba z roznica rowna CALEMU
+# zleceniu. Alarm krytyczny, ktory w polowie przypadkow jest falszywy, uczy go
+# ignorowac - takze wtedy, gdy jest prawdziwy.
+#
+# DLACZEGO NIE GOLA KARENCJA CZASOWA. Karencja oslepialaby uzgodnienie na
+# kazdy rozjazd z ostatnich minut, takze prawdziwy. Rozpoznanie zlecen w locie
+# zwalnia WYLACZNIE roznice, ktora te zlecenia moga wyjasnic: na tym aktywie,
+# w ich kierunku i nie wieksza niz ich ilosc. Pozycja-widmo przy otwartym
+# kupnie nadal jest alarmem, bo kupno nie moze ZMNIEJSZYC salda.
+#
+# KIEDY ZLECENIE PRZESTAJE BYC „W LOCIE". Plan ma `valid_until`; po nim petla
+# rozstrzyga go w najblizszym cyklu (co 300 s, `loop.py --interval`). Dwa
+# cykle zapasu - potem `new` nie jest juz lotem, tylko rozstrzygnieciem, ktore
+# nie nastapilo, i rozjazd wraca jako alarm.
+KARENCJA_PO_WAZNOSCI_S = 2 * 300
+
+
+def w_locie(r: list[dict], zlecenia: list[dict],
+            progi: dict[str, Decimal] | None = None) -> tuple[list[dict], list[dict]]:
+    """Dzieli rozjazdy na prawdziwe i wyjasnione zleceniami w locie. CZYSTA FUNKCJA.
+
+    `zlecenia`: wiersze z `aktywo`, `strona` ('buy'/'sell') i `ilosc` -
+    nierozstrzygniete zlecenia gieldowe silnika. Roznica `u_gieldy - u_nas`
+    jest wyjasniona, gdy miesci sie w [-suma sprzedazy, +suma kupna] (plus prog
+    bezwzgledny aktywa): kupno moze saldo tylko podniesc, sprzedaz tylko
+    obnizyc, i zadne nie wiecej niz o swoja ilosc. `ilosc-ujemna` nie jest
+    nigdy wyjasniona - to blad pomiaru, nie lot.
+    """
+    progi = progi or {}
+    kupno: dict[str, Decimal] = {}
+    sprzedaz: dict[str, Decimal] = {}
+    for z in zlecenia:
+        a = (z["aktywo"] or "").upper()
+        cel = kupno if z["strona"] == "buy" else sprzedaz
+        cel[a] = cel.get(a, Decimal(0)) + Decimal(str(z["ilosc"]))
+    prawdziwe, wyjasnione = [], []
+    for x in r:
+        a = x["aktywo"].upper()
+        prog = progi.get(x["aktywo"], Decimal(0))
+        if (x["rodzaj"] != "ilosc-ujemna" and (a in kupno or a in sprzedaz)
+                and -sprzedaz.get(a, Decimal(0)) - prog
+                <= x["roznica"] <= kupno.get(a, Decimal(0)) + prog):
+            wyjasnione.append(x)
+        else:
+            prawdziwe.append(x)
+    return prawdziwe, wyjasnione
+
+
+async def zlecenia_w_locie(fetch_all, engine: str, mode: str) -> list[dict]:
+    """Nierozstrzygniete zlecenia gieldowe silnika, ktorych plan jeszcze zyje.
+
+    Dwie doby od zlozenia to bezpiecznik dla planu bez `valid_until`: zaden
+    plan silnika nie zyje dluzej niz swieca (4 h), wiec starsze `new` to
+    zawieszone rozstrzygniecie, a nie lot - i nie moze niczego tlumaczyc.
+    """
+    return list(await fetch_all(
+        "SELECT i.base_ccy AS aktywo, o.side AS strona, o.qty AS ilosc"
+        "  FROM exec.order o"
+        "  JOIN ref.instrument i ON i.id = o.instrument_id"
+        "  LEFT JOIN journal.planned_order p ON p.id = o.planned_order_id"
+        " WHERE o.engine::text = %s AND o.mode::text = %s"
+        "   AND o.status IN ('new', 'partial', 'unknown')"
+        "   AND o.raw->>'execution' = 'gielda'"
+        "   AND (p.valid_until IS NULL"
+        "        OR p.valid_until > now() - make_interval(secs => %s))"
+        "   AND o.submitted_at > now() - interval '2 days'",
+        (engine, mode, KARENCJA_PO_WAZNOSCI_S)))
 
 
 # --------------------------------------------------------- prog bezwzgledny
@@ -682,6 +767,12 @@ async def uzgodnij(fetch_all, notify, adapter, engine: str = "crypto",
     # zostalo czysta funkcja dwoch slownikow.
     progi = await progi_bezwzgledne(fetch_all, engine)
     r = rozjazdy(nasze, salda, tolerancja_wzgledna(kind), progi)
+    r, lot = w_locie(r, await zlecenia_w_locie(fetch_all, engine, mode), progi)
+    for x in lot:
+        print(f"  W LOCIE {x['aktywo']}: u nas {x['u_nas']}, u giełdy "
+              f"{x['u_gieldy']} (różnica {x['roznica']:+}) — wyjaśnia ją "
+              f"nierozstrzygnięte zlecenie; zaksięguje się przy rozstrzygnięciu "
+              f"planu, to NIE jest alarm")
 
     # POZYCJA ZAKSIEGOWANA BRUTTO — SPRAWDZENIE BEZ PROGU I BEZ GIELDY.
     #
@@ -713,7 +804,7 @@ async def uzgodnij(fetch_all, notify, adapter, engine: str = "crypto",
     # opisywac stan, w ktorym zadna z dwoch stron nie wniosla do porownania
     # niczego, co mozna by trzymac.
     zywe = {k: v for k, v in salda.items() if v != 0}
-    if not r and not brutto and not nasze and not zywe:
+    if not r and not brutto and not nasze and not zywe and not lot:
         # PUSTO PO OBU STRONACH TO NIE JEST UZGODNIENIE. Zgadzaja sie dwa puste
         # zbiory, czyli nie porownano niczego. Komunikat "zgodne" powiedzialby
         # o tym stanie dokladnie tyle samo, co o stanie faktycznie sprawdzonym -
@@ -785,9 +876,12 @@ async def uzgodnij(fetch_all, notify, adapter, engine: str = "crypto",
                   if any(x["rodzaj"] == k for x in r)]
         if brutto:
             obecne.append(wyjasnienia["pozycja-brutto"])
+        # WLASNY KOD ZDARZENIA (migracja 0071). Do 2026-10-03 szlo to jako
+        # `killswitch.triggered`, choc zaden kill-switch nie zadzialal - i alarm
+        # uzgodnienia tlumil w dozorze przypomnienie o PRAWDZIWYM kill-switchu.
         for u in await fetch_all('SELECT id FROM app."user" WHERE is_active'):
             await notify(
-                u["id"], "killswitch.triggered",
+                u["id"], KOD_ZDARZENIA,
                 f"Nasz stan nie zgadza się z giełdą ({engine})",
                 f"{tresc}\n\n" + "; ".join(obecne) +
                 ". Wymaga wyjaśnienia PRZED kolejnym zleceniem.",

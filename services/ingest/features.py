@@ -274,6 +274,15 @@ def rsi(closes: list[float], period: int) -> float | None:
     return 100.0 - 100.0 / (1.0 + avg_gain / avg_loss)
 
 
+# Ile swiec wstecz liczy sie EMA: stala wielokrotnosc wolnego okresu. Waga
+# wartosci poczatkowej po 3*ema_slow krokach to ok. e^-6 - ponizej szumu ceny.
+EMA_BUFFER = 4
+
+
+def bufor_ema(h: Horizon) -> int:
+    return h.ema_slow * EMA_BUFFER
+
+
 def ema(values: list[float], period: int) -> float | None:
     """EMA zainicjowana srednia z pierwszych `period` wartosci.
 
@@ -420,8 +429,17 @@ def compute_prices(cur, instrument_id: int, h: Horizon, feat_ids: dict[str, int]
     # Rozgrzewka: najdluzsze okno + zapas. Bez niej pierwsze swiece okresu
     # mialyby cechy policzone z niepelnej historii - czyli inne niz te same
     # swiece policzone przy nastepnym uruchomieniu.
+    #
+    # BUFOR EMA WCHODZI DO ROZGRZEWKI (2026-10-03, audyt 3 T6). Do tej daty
+    # stalo tu samo `h.ema_slow`, a bufor EMA to `4 * ema_slow`. Dla 1h:
+    # rozgrzewka 205 swiec, bufor 288 - wiec przy oknie przebiegu 24 h KAZDA
+    # swieca dostawala EMA z bufora krotszego niz staly, i to tym krotszego, im
+    # pozniej `since` przesunelo sie za nia. Ta sama swieca 1h byla przeliczana
+    # co przebieg na inna wartosc: 748 rewizji `ema_ratio__1h` na dobe, srednio
+    # 12,6 h po swiecy. Silnik decydowal na wartosci z jednego bufora, trener
+    # uczyl sie na ostatniej nadpisanej. 4h nie bylo dotkniete (200 < 205).
     lookback = max(h.ret_long, h.range_window, h.volume_lookback,
-                   h.ema_slow, h.warmup) + 5
+                   h.ema_slow, h.warmup, bufor_ema(h)) + 5
     bars = load_bars(cur, instrument_id, h, since, until, rozgrzewka=lookback)
     if len(bars) <= lookback:
         # NIE CICHE ZERO. Ten warunek znaczy "ten instrument nie dostanie
@@ -435,8 +453,9 @@ def compute_prices(cur, instrument_id: int, h: Horizon, feat_ids: dict[str, int]
 
     closes = [b["close"] for b in bars]
     volumes = [b["volume"] for b in bars]
-    # Staly bufor dla EMA - patrz komentarz przy ema().
-    ema_buf = h.ema_slow * 4
+    # Staly bufor dla EMA - patrz komentarz przy ema(). `lookback` go obejmuje,
+    # wiec od `i >= lookback` okno ma zawsze pelne `ema_buf` swiec.
+    ema_buf = bufor_ema(h)
     rows: list[tuple] = []
 
     # Ostatnia swieca panelu liczy sie tylko domknieta i kompletna - patrz

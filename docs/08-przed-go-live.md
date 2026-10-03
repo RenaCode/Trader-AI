@@ -348,7 +348,10 @@ nizsza niz w symulacji, na obu nogach.
       Dzis przed shortami na Alpace chroni nas wylacznie niewdrozony silnik —
       zabezpieczenie przez przypadek. Zmiana w kodzie, nie migracja: tabeli
       cennika w bazie nie ma
-- [ ] korekta o podzialy akcji u Alpaki — MECHANIZM GOTOWY, OPERACJA DO
+- [x] korekta o podzialy akcji u Alpaki — WYKONANA 2026-10-03: znacznik
+      `swiece_skorygowane_o_podzialy` na 20/20 instrumentach equity (05:49 UTC,
+      audyt 3). Opis operacji zostaje ponizej na wypadek kolejnego podzialu.
+      Pierwotnie: MECHANIZM GOTOWY, OPERACJA DO
       WYKONANIA. Adapter pobiera od 2026-09-27 `adjustment=split`
       (`services/exchanges/alpaca.py:KOREKTA_SWIEC`; `all` odrzucone — wliczaloby
       dywidendy, ktorych zaden rachunek silnika nie przyjmuje). Zapisana historia
@@ -416,7 +419,9 @@ tabele podaja mediane.
 
 - [ ] `naprawa-B1-zasiew-demo.sql` — 25 920 swiec i 709 629 wierszy cech
 - [ ] `naprawa-B4-news-sent.sql` — 747 680 z 749 591 wierszy bez pokrycia
-- [ ] Uniwersum equity jest PUSTE Z DEFINICJI: wszystkie 23 instrumenty equity
+- [ ] NIEAKTUALNE od migracji 0060 (stan 2026-10-03: 20 instrumentow equity
+      `tradeable`, audyt 3). Pierwotnie:
+      Uniwersum equity jest PUSTE Z DEFINICJI: wszystkie 23 instrumenty equity
       maja `tradeable = false`. Silnik liczy cechy i nie moze otworzyc zadnej
       pozycji. To swiadome, ale musi byc swiadome takze za rok — inaczej ktos
       bedzie szukal przyczyny braku transakcji w strategii

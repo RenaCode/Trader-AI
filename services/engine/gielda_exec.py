@@ -1059,6 +1059,22 @@ async def odmowa_gieldy(cur, adapter, plan: dict, f: Filtry, blad: OdmowaGieldy,
     return False, f"giełda ODRZUCIŁA zlecenie: {powod}"
 
 
+def czas_wykonania(stan) -> datetime | None:
+    """Chwila wypelnienia wg zegara gieldy, gdy da sie ja wskazac. Inaczej None.
+
+    Tylko dla `filled`: wtedy ostatnia zmiana stanu (`updatedTime` Bybita) JEST
+    ostatnim wykonaniem. Przy `partial` + anulowaniu reszty `updatedTime` to
+    chwila anulowania, nie wykonania - lepiej nie wiedziec niz zapisac zle.
+    """
+    ms = getattr(stan, "zaktualizowano_ms", None)
+    if stan.status != "filled" or ms is None:
+        return None
+    try:
+        return datetime.fromtimestamp(int(ms) / 1000, tz=timezone.utc)
+    except (OverflowError, OSError, TypeError, ValueError):
+        return None
+
+
 def _iso_z_ms(ms) -> str | None:
     """Znacznik giełdy (ms) jako ISO - diagnostyka, więc NIGDY nie rzuca.
 
@@ -1364,6 +1380,7 @@ async def rozstrzygnij_plan(cur, adapter, plan: dict, f: Filtry, *, engine: str,
             # (pelny opis w docstringu `zapisz_wyjscie`).
             zapisz_wyjscie(cur, poz, cena, prowizja, teraz, plan["decision_id"],
                            ilosc=r.ilosc, meta=meta,
+                           czas_wykonania=czas_wykonania(stan),
                            order_id=id_zlecenia_w_bazie,
                            planned_order_id=plan["id"],
                            venue_order_id=stan.id_gieldy,
@@ -1413,7 +1430,8 @@ async def rozstrzygnij_plan(cur, adapter, plan: dict, f: Filtry, *, engine: str,
                        # `exec.position.fees_paid`. Wiersz wypelnienia trzyma
                        # pare (`fee`, `fee_ccy`) i `sprzatanie` czyta ja jako
                        # pare; kapital sumuje `fees_paid` bez jednostki.
-                       prowizja_surowa=prowizja)
+                       prowizja_surowa=prowizja,
+                       czas_wykonania=czas_wykonania(stan))
 
     if anulowanie_padlo is not None:
         # RESZTA ZLECENIA ZOSTAJE ZYWA NA GIELDZIE.
