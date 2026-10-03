@@ -320,7 +320,8 @@ def test_RENDER_bramka_ma_TYLKO_haslo_wlasnej_roli(workery_z_renderu):
     `workers.yaml`, a zmienia to, co ląduje w podzie. Warstwa statyczna by tego
     nie zobaczyła.
     """
-    wolno = {"ROLA_DB_PASSWORD", "DATABASE_URL", "PYTHONUNBUFFERED"}
+    # `PGPASSWORD`, nie hasło w URL-u - patrz tests/test_haslo_poza_url.py.
+    wolno = {"PGPASSWORD", "DATABASE_URL", "PYTHONUNBUFFERED"}
     for d in workery_z_renderu:
         bramka = next(c for c in d["spec"]["template"]["spec"]["initContainers"]
                       if c["name"] == BRAMKA)
@@ -354,10 +355,10 @@ def test_RENDER_bramka_laczy_sie_rola_SWOJEGO_workera(workery_z_renderu):
                       if c["name"] == BRAMKA)
         env = {e["name"]: e for e in bramka["env"]}
         assert env["DATABASE_URL"]["value"].startswith(
-            f"postgresql://{rola['user']}:"), (
+            f"postgresql://{rola['user']}@"), (
             f"{nazwa}: bramka łączy się nie swoją rolą — "
             f"{env['DATABASE_URL']['value'].split('@')[0]}")
-        assert env["ROLA_DB_PASSWORD"]["valueFrom"]["secretKeyRef"]["key"] \
+        assert env["PGPASSWORD"]["valueFrom"]["secretKeyRef"]["key"] \
             == rola["secretKey"]
 
         # I ta sama rola, co kontener roboczy — inaczej bramka mierzyłaby

@@ -430,12 +430,15 @@ tabele podaja mediane.
 
 ## Brama 3 — bezpieczenstwo i eksploatacja
 
-- [ ] HASLO ZE ZNAKIEM SPECJALNYM ROZCINA LANCUCH POLACZENIA. Naprawa nie moze
+- [x] HASLO ZE ZNAKIEM SPECJALNYM ROZCINA LANCUCH POLACZENIA. Naprawa nie moze
       isc w szablon: `postgresql://user:$(ROLA_DB_PASSWORD)@...` sklada sie
       podstawieniem Kubernetesa, gdzie kodowanie procentowe jest niemozliwe.
       Trzeba przekazywac parametry polaczenia osobno. Cztery role dzialaja dzis
       przez przypadek — ich hasla po prostu nie trafily na `/`. Objaw jest
-      mylacy: komunikat mowi o nierozwiazanym hoscie i porcie, a wina lezy w hasle
+      mylacy: komunikat mowi o nierozwiazanym hoscie i porcie, a wina lezy w hasle.
+      NAPRAWIONE 2026-10-03: URL w charcie nie ma hasla, haslo idzie w
+      `PGPASSWORD` wprost z sekretu (`_helpers.tpl`), libpq czyta je sam.
+      Sprawdzone na Postgresie haslem `a/b@c?d#e:f%` (`tests/test_haslo_poza_url.py`)
 - [ ] ZMIANA SEKRETU NIE ZMIENIA HASLA W BAZIE — ustawia je migracja, ktora
       chodzi w kontenerze startowym API. Restart samego workera niczego nie
       naprawia. Warto to zapisac w procedurze, bo kosztowalo dwa nieudane starty

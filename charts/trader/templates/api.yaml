@@ -29,7 +29,7 @@ spec:
           command: ["python", "db/migrate.py"]
           env:
             # Migracje ida rola WLASCICIELA - tylko one moga zmieniac strukture.
-            - name: POSTGRES_PASSWORD
+            - name: PGPASSWORD
               valueFrom:
                 secretKeyRef: { name: {{ .Values.secretName }}, key: POSTGRES_PASSWORD }
             - name: DATABASE_URL
@@ -49,7 +49,7 @@ spec:
           imagePullPolicy: {{ .Values.api.image.pullPolicy }}
           {{- include "trader.kontenerBezUprawnien" . | nindent 10 }}
           env:
-            {{- include "trader.appDbPasswordEnv" . | nindent 12 }}
+            {{- include "trader.appPgPasswordEnv" . | nindent 12 }}
             - name: DATABASE_URL
               value: {{ include "trader.appDatabaseUrl" . | quote }}
             # Klucz do szyfrowania kluczy API gield i sekretow TOTP w bazie.

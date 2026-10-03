@@ -13,9 +13,19 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version }}
 {{- end -}}
 
+{{/*
+HASLO NIGDY W URL-U - IDZIE W `PGPASSWORD` (2026-10-03, docs/08 brama 3, F-9.4).
+
+URL skladal sie podstawieniem Kubernetesa (`user:$(HASLO)@host`), gdzie
+kodowanie procentowe jest niemozliwe: haslo ze znakiem `/`, `@`, `?` albo `#`
+rozcinalo lancuch, a komunikat mowil o nierozwiazanym hoscie. libpq bierze
+haslo z `PGPASSWORD`, gdy w lancuchu go nie ma - wiec kod (psycopg, pula,
+psql) zostaje bez zmian. Pilnuje tego tests/test_haslo_poza_url.py.
+*/}}
+
 {{/* Połączenie WŁAŚCICIELA schematów. Wyłącznie do migracji i konserwacji. */}}
 {{- define "trader.databaseUrl" -}}
-postgresql://{{ .Values.db.username }}:$(POSTGRES_PASSWORD)@{{ include "trader.fullname" . }}-db:5432/{{ .Values.db.database }}
+postgresql://{{ .Values.db.username }}@{{ include "trader.fullname" . }}-db:5432/{{ .Values.db.database }}
 {{- end -}}
 
 {{/*
@@ -26,7 +36,14 @@ chroniącego niezmienność dziennika decyzji ani zmienić struktury bazy —
 niezależnie od tego, co zdołałby wykonać błąd w kodzie albo wstrzyknięcie SQL.
 */}}
 {{- define "trader.appDatabaseUrl" -}}
-postgresql://{{ .Values.db.appUsername }}:$(APP_DB_PASSWORD)@{{ include "trader.fullname" . }}-db:5432/{{ .Values.db.database }}
+postgresql://{{ .Values.db.appUsername }}@{{ include "trader.fullname" . }}-db:5432/{{ .Values.db.database }}
+{{- end -}}
+
+{{/* Haslo roli aplikacji dla libpq - obok `appDatabaseUrl`, ktory hasla nie ma. */}}
+{{- define "trader.appPgPasswordEnv" -}}
+- name: PGPASSWORD
+  valueFrom:
+    secretKeyRef: { name: {{ .Values.secretName }}, key: APP_DB_PASSWORD }
 {{- end -}}
 
 {{/* Zmienna z hasłem roli aplikacji — wstrzykiwana wszędzie, gdzie użyto appDatabaseUrl. */}}
@@ -58,11 +75,11 @@ i połączy się jako nikt.
 {{- $ := .ctx -}}
 {{- $r := index $.Values.db.role .rola -}}
 {{- if not $r }}{{ fail (printf "Nie ma roli bazodanowej %q w .Values.db.role" .rola) }}{{ end }}
-- name: ROLA_DB_PASSWORD
+- name: PGPASSWORD
   valueFrom:
     secretKeyRef: { name: {{ $.Values.secretName }}, key: {{ $r.secretKey }} }
 - name: DATABASE_URL
-  value: "postgresql://{{ $r.user }}:$(ROLA_DB_PASSWORD)@{{ include "trader.fullname" $ }}-db:5432/{{ $.Values.db.database }}"
+  value: "postgresql://{{ $r.user }}@{{ include "trader.fullname" $ }}-db:5432/{{ $.Values.db.database }}"
 {{- end -}}
 
 {{/*
