@@ -96,11 +96,13 @@ def test_karta_z_niezmierzonym_skladnikiem_NIE_JEST_pelna():
 
 def test_karta_staje_sie_pelna_dopiero_po_podaniu_WSZYSTKICH_pomiarow():
     # Od 2026-10-03 karta spot ma tez skladnik `pyl`; pelna jest dopiero z nim.
+    # Tego samego dnia limit dostal `wyjscie takerem` (audyt F-4.3).
     k = karta_rundy("spot", maker=True, spread_bps=3.0, niewypelnienie=0.0005,
-                    pyl=3e-5)
+                    pyl=3e-5, wyjscia_takerem=0.1)
     assert k.pelna is True
     assert k.nieznane == ()
     # 2 x 0,10% prowizji + 3 pb spreadu + 5 pb niewypelnienia + 0,3 pb pylu
+    # + 10% wyjsc x (taker - maker) - na "spot" obie stawki 0,10%, wiec zero.
     assert k.policzone == pytest.approx(2 * 0.0010 + 3.0 / 1e4 + 0.0005 + 3e-5)
 
 
@@ -139,14 +141,14 @@ def test_opis_karty_MOWI_ze_suma_jest_NIEPELNA():
     # `funding_rate`) — po prostu zalezy od czasu trzymania, wiec stalej rundy
     # dla niego nie ma. Wpisane do `nieznane` oglaszaloby luke, ktora zostala
     # zamknieta, i kazaloby szukac czegos, czego nie brakuje.
-    assert set(k.nieznane) == {"niewypelnienie", "spread"}
+    assert set(k.nieznane) == {"niewypelnienie", "spread", "wyjscie takerem"}
     assert "finansowanie" in linie
 
 
 def test_opis_pelnej_karty_NIE_STRASZY_niepelnoscia():
     linie = " | ".join(opis_karty(
         karta_rundy("spot", maker=True, spread_bps=3.0, niewypelnienie=0.0005,
-                    pyl=3e-5)))
+                    pyl=3e-5, wyjscia_takerem=0.1)))
     assert "CO NAJMNIEJ" not in linie.upper()
 
 
@@ -155,3 +157,24 @@ def test_skladnik_jest_niezmienny():
     s = Skladnik("x", 1.0, POMIAR)
     with pytest.raises(Exception):
         s.wartosc = 2.0
+
+
+def test_karta_limitu_NAZYWA_wyjscie_takerem_i_liczy_je_ze_STAWEK_toru():
+    """Wyjście po dwóch odrzuceniach PostOnly idzie GTC po drugiej stronie
+    spreadu (audyt F-4.3) i płaci takera na jednej nodze. Bez udziału z
+    produkcji składnik jest NIEZMIERZONY, nie zerem; z udziałem - udział razy
+    (taker - maker) tego toru. Na spot_eu taker 0,25% wobec makera 0,10%."""
+    bez = next(s for s in karta_rundy("spot_eu", maker=True).skladniki
+               if s.nazwa == "wyjscie takerem")
+    assert bez.wartosc is None and bez.zrodlo == NIEZMIERZONE
+
+    z = next(s for s in karta_rundy("spot_eu", maker=True,
+                                    wyjscia_takerem=0.2).skladniki
+             if s.nazwa == "wyjscie takerem")
+    assert z.zrodlo == POMIAR
+    assert z.wartosc == pytest.approx(0.2 * (0.0025 - 0.0010))
+    assert z.w_symulacji is False
+
+    # Egzekucja RYNKOWA placi takera na obu nogach juz w `prowizja`.
+    assert "wyjscie takerem" not in {
+        s.nazwa for s in karta_rundy("spot_eu", maker=False).skladniki}

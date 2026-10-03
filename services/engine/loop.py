@@ -178,6 +178,9 @@ OPIS_POWODU_HOLDU = {
     "rezim_bez_progu": "Nie wchodzimy: w tym reżimie próg wejścia NIE ZOSTAŁ "
                        "SKALIBROWANY — próba na oknach treningowych była za "
                        "mała, żeby percentyl cokolwiek znaczył.",
+    "decyzja_przeterminowana": "Nie wchodzimy: od zamknięcia świecy minęło "
+                               "ponad 20 minut — sygnał opisuje rynek, którego "
+                               "już nie ma (opóźniony potok danych).",
 }
 
 
@@ -321,6 +324,32 @@ def okno_decyzji(bar_start: datetime, h: Horizon) -> datetime:
     B + dlugosc swiecy. Wczesniej silnik rozstrzyga swiece POPRZEDNIA.
     """
     return bar_start + timedelta(minutes=h.bar_minutes)
+
+
+# ILE PO ZAMKNIECIU SWIECY WOLNO JESZCZE WEJSC (2026-10-03, audyt F-4.4).
+#
+# Cena decyzyjna to zamkniecie swiecy, a sygnal opisuje rynek z tej chwili.
+# Zmierzone przed poprawka potoku: decyzje 63-88 min po zamknieciu i kupna
+# wypelniane 76-95 pb nad cena decyzji (NEAR #86, BTC #83). Prog cenowy
+# (`zlecenia.prog_zwloki`) tego nie lapal, bo byl skalibrowany na zwloke
+# 75 min. Teraz granica jest wprost CZASOWA: po 20 minutach wejscie odpada
+# z wlasnym powodem holdu, a nie po cichu. Po skroceniu interwalow potoku
+# (F-4.1) najgorszy przypadek to 15 min, wiec prog ma odcinac wylacznie
+# awarie potoku - i liczba takich holdow jest jej miara.
+#
+# WYJSC TO NIE DOTYCZY. Spozniona decyzja o wyjsciu nadal zdejmuje ryzyko,
+# ktorego decyzja juz nie popiera.
+MAKS_ZWLOKA_WEJSCIA = timedelta(minutes=20)
+
+
+def decyzja_przeterminowana(teraz: datetime, bar_start: datetime,
+                            h: Horizon) -> bool:
+    """Czy od zamkniecia swiecy decyzyjnej minelo wiecej niz `MAKS_ZWLOKA_WEJSCIA`.
+
+    CZYSTA FUNKCJA. Koniec swiecy z `okno_decyzji` - tej samej, ktora mowi,
+    od kiedy decyzja dla swiecy w ogole zapada.
+    """
+    return teraz - okno_decyzji(bar_start, h) > MAKS_ZWLOKA_WEJSCIA
 
 
 def decided_for_bar(cur, engine: str, mode: str, instrument_id: int,
@@ -1966,6 +1995,9 @@ def nowe_stats(**flagi) -> dict:
              # dzialo. A wypadniecie jest tu decyzja projektowa (patrz
              # `services/engine/bramki.py`), wiec musi byc widoczne z zewnatrz.
              "rezim_bez_progu": 0,
+             # Wejscia odrzucone, bo od zamkniecia swiecy minelo ponad
+             # `MAKS_ZWLOKA_WEJSCIA`. Niezerowe znaczy: potok danych sie spoznia.
+             "decyzja_przeterminowana": 0,
              # POMINIECIA Z ROZBICIEM NA POWOD. Obie te sciezki konczyly sie
              # samym `continue`: instrument wypadal z przebiegu, nie zostawiajac
              # ani wiersza, ani liczby. Tu odpowiadaja na pytanie "ile pominieto
@@ -2559,6 +2591,16 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
             verdict = werdykt_wstrzymania
             action = "hold"
             powod_holdu = "wstrzymanie_ryzykiem"
+        elif action.startswith("enter") and decyzja_przeterminowana(now, bar_start, h):
+            # PO WSTRZYMANIU RYZYKIEM, NIE PRZED NIM. Proba pozarowa
+            # (`proba_killswitcha`) rozpoznaje dzialajace ogniwo 3 po
+            # `wstrzymanie_ryzykiem`; zamiar wejscia przy spoznionym potoku
+            # w oknie proby musi nadal je pokazac.
+            verdict = type("V", (), {"verdict": "allow", "reason": None, "qty": qty,
+                                     "violations": [], "usage": []})()
+            action = "hold"
+            powod_holdu = "decyzja_przeterminowana"
+            stats["decyzja_przeterminowana"] += 1
         elif action.startswith("enter"):
             verdict = risk.check(iid, notional, qty)
         else:

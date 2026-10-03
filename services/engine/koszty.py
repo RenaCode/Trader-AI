@@ -400,7 +400,8 @@ def karta_rundy(kind: str, maker: bool = False, *,
                 spread_nasza_ksiega: bool = True,
                 niewypelnienie: float | None = None,
                 finansowanie: float | None = None,
-                pyl: float | None = None) -> Karta:
+                pyl: float | None = None,
+                wyjscia_takerem: float | None = None) -> Karta:
     """Koszt rundy rozbity na skladniki. Kazdy ze swoim pochodzeniem.
 
     ARGUMENTY OPCJONALNE SA POMIARAMI, KTORYCH JESZCZE NIE MA. Podanie ich
@@ -439,6 +440,12 @@ def karta_rundy(kind: str, maker: bool = False, *,
         ktory przez to przepadl.
       * `finansowanie` - laczna oplata za czas trzymania pozycji, jako ulamek
         ceny. Zrodlo: `market.funding_rate`.
+      * `wyjscia_takerem` - UDZIAL wyjsc zlozonych agresywnie (GTC bez
+        PostOnly po dwoch odrzuceniach, `gielda_exec.PROBY_POSTONLY_WYJSCIA`),
+        0..1. Zrodlo: `poslizg.udzial_wyjsc_takerem` z `exec.order`. Skladnik
+        to udzial razy (taker - maker): jedna noga rundy placi stawke takera
+        zamiast makera. Tylko przy limicie - egzekucja rynkowa placi takera
+        na obu nogach juz w `prowizja`.
       * `pyl` - oczekiwana strata na reszcie ponizej kroku ilosci po sprzedazy,
         jako ulamek rundy. Liczy ja `pyl_rundy`; None = kroku albo ceny nie ma
         w danych, i wtedy skladnik jest NIEZMIERZONY, a nie zerem.
@@ -464,6 +471,18 @@ def karta_rundy(kind: str, maker: bool = False, *,
             POMIAR if niewypelnienie is not None else NIEZMIERZONE,
             "symulacja przyjmuje, ze limit wchodzi ZAWSZE, gdy swieca dotknela "
             "ceny; `exec.fill` nie zawiera zlecen, ktore nie weszly"))
+        # WYJSCIE TAKEREM (2026-10-03, audyt F-4.3). Wyjscie odrzucone dwa
+        # razy przez PostOnly idzie trzeci raz po drugiej stronie spreadu, bez
+        # PostOnly - czyli placi takera, ktorego symulacja (maker na obu
+        # nogach) nie zna. Bez udzialu z produkcji skladnik jest NIEZMIERZONY,
+        # a nie zerem: zero znaczyloby "zadne wyjscie nie eskalowalo".
+        s.append(Skladnik(
+            "wyjscie takerem",
+            None if wyjscia_takerem is None
+            else wyjscia_takerem * (k.taker - k.maker),
+            POMIAR if wyjscia_takerem is not None else NIEZMIERZONE,
+            "udzial wyjsc zlozonych agresywnie razy (taker - maker) na jednej "
+            "nodze; symulacja zaklada makera na obu"))
     else:
         s.append(Skladnik(
             "poslizg", 2 * POSLIZG_TAKER, ZALOZENIE,

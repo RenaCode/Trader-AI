@@ -413,7 +413,23 @@ class Oferty:
 #   * rynek POSZEDL W DOL - kupujemy taniej, ale cechy, z ktorych powstal
 #     sygnal, opisuja rynek, ktorego juz nie ma. Wejscie po tej cenie jest nowym
 #     zakladem, ktorego nikt nie zatwierdzil.
-KROTNOSC_ZWLOKI = Decimal("1.5")
+#
+# OD 2026-10-03: 0,5 x ATR, A NIE 1,5 (audyt F-4.4). Tabela wyzej uzasadnia 1,5
+# jako p98-p99,5 dryfu przy zwloce 75 MINUT - czyli prog przepuszczal 99%
+# wejsc po godzinie i nie odcinal niczego, co ma znaczenie. Zwloke ogranicza
+# teraz wprost prog CZASOWY w petli (`loop.MAKS_ZWLOKA_WEJSCIA`, 20 min od
+# zamkniecia swiecy), a ten prog cenowy lapie ruch niezwykly JAK NA 20 MINUT.
+# 0,5 x ATR swiecy 4h to przy SOL 0,93%, przy BTC 0,56%. SZACUNEK, nie pomiar:
+# przeskalowanie tabeli wyzej pierwiastkiem czasu (sqrt(20/75) = 0,52) daje
+# dla dryfu 20-minutowego p90 0,52% / p99 1,21% (SOL) i 0,30% / 0,77% (BTC).
+# Prog lezy wiec miedzy p90 a p99 - przy zwloce pelnych 20 min odmawia rzedu
+# kilku procent wejsc, przy zwloce typowej po F-4.1 (5-15 min) mniej. Pomiar
+# do zrobienia: odsetek `cena_odjechala` w `journal.pominiecie` po wdrozeniu.
+#
+# PROG AWARYJNY NIZEJ ZOSTAJE 3%. Nie opisuje swiezosci, tylko brak cechy ATR;
+# zacisniecie go zatrzymywaloby wejscia zmiennych par przy kazdej luce potoku
+# cech, a swiezosc pilnuje juz prog czasowy.
+KROTNOSC_ZWLOKI = Decimal("0.5")
 
 # PROG AWARYJNY, GDY ZMIENNOSCI NIE ZNAMY. `1,5 x mediana ATR uniwersum`
 # (2,08% z tabeli wyzej) zaokraglone do 3%. Nie jest to pomiar tej pary - jest
@@ -457,8 +473,8 @@ class Zwloka:
         return self.odchylenie > self.prog
 
     def opis(self) -> str:
-        skad = ("1,5×ATR pary" if self.ze_zmiennosci
-                else "prog awaryjny (ATR nieznany)")
+        skad = (f"{str(KROTNOSC_ZWLOKI).replace('.', ',')}×ATR pary"
+                if self.ze_zmiennosci else "prog awaryjny (ATR nieznany)")
         return (f"cena odjechala od ceny decyzyjnej o "
                 f"{self.odchylenie * 100:.2f}% przy dopuszczalnych "
                 f"{self.prog * 100:.2f}% [{skad}]; decyzja stala na "
@@ -503,8 +519,17 @@ def sprawdz_zlecenie(ilosc: Decimal, cena: Decimal, f: Filtry, *,
                      atr_pct: float | None = None,
                      bary: float = BARY_ZYCIA_PLANU,
                      najlepsze: Oferty | None = None,
-                     slad: dict | None = None) -> tuple[Decimal, Decimal, str | None]:
+                     slad: dict | None = None,
+                     agresywna: bool = False) -> tuple[Decimal, Decimal, str | None]:
     """Zwraca (ilosc, cena, powod_odmowy). `powod_odmowy is None` znaczy: wolno.
+
+    `agresywna=True` (2026-10-03, audyt F-4.3) STAWIA CENE PO DRUGIEJ STRONIE
+    SPREADU - sprzedaz na bidzie, kupno na asku - zamiast o krok od strony
+    pasywnej. Jedynym wolajacym jest wyjscie po dwoch odrzuceniach PostOnly
+    w tym samym cyklu (`gielda_exec.zloz_plan`), ktore idzie wtedy na gielde
+    jako GTC bez PostOnly. Siatka ceny zaokragla tu W STRONE RYNKU, a nie na
+    nasza korzysc: cena przyciagnieta "korzystnie" lezalaby o krok od bidu
+    i znow czekala, czyli dokladnie to, czego ta sciezka ma uniknac.
 
     `slad` (OPCJONALNY) JEST WYPELNIANY W MIEJSCU, GDZIE ZRODLO CENY SIE
     ROZSTRZYGA - i tylko dlatego jest tu, a nie u wywolujacego. Egzekucja musi
@@ -625,7 +650,14 @@ def sprawdz_zlecenie(ilosc: Decimal, cena: Decimal, f: Filtry, *,
     # Ta funkcja nie wie, czy wolajacy w ogole pytal gieldy (`czy_zamykalna`
     # i `proba_egzekucji` nie pytaja i nie musza) - rozstrzyga to
     # `gielda_exec.zloz_plan`, ktory jako jedyny zna wynik odczytow.
-    if najlepsze is not None and najlepsze.kompletne:
+    if agresywna and najlepsze is not None and najlepsze.kompletne:
+        rynkowa = cena_do_kroku(najlepsze.agresywna(kupno=kupno), f.krok_ceny,
+                                kupno=not kupno)
+        zrodlo = "arkusz_agresywna"
+    elif agresywna and pasmo is not None:
+        rynkowa = cena_do_kroku(pasmo.odniesienie, f.krok_ceny, kupno=not kupno)
+        zrodlo = "cena_odniesienia_agresywna"
+    elif najlepsze is not None and najlepsze.kompletne:
         rynkowa = cena_makera(najlepsze.pasywna(kupno=kupno), f.krok_ceny,
                               kupno=kupno)
         zrodlo = "arkusz"

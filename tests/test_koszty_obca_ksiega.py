@@ -70,7 +70,8 @@ def test_ten_sam_spread_z_NASZEJ_ksiegi_domyka_karte():
     """Kanarek do poprzedniego: różni je wyłącznie księga, nie wartość."""
     # Od 2026-10-03 karta spot ma tez skladnik `pyl`; pelna jest dopiero z nim.
     k = karta_rundy("spot", maker=True, spread_bps=0.802,
-                    niewypelnienie=0.0005, spread_nasza_ksiega=True, pyl=3e-5)
+                    niewypelnienie=0.0005, spread_nasza_ksiega=True, pyl=3e-5,
+                    wyjscia_takerem=0.1)
     assert k.pelna is True
     assert k.nieznane == ()
 

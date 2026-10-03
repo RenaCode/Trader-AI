@@ -713,7 +713,9 @@ def test_padniecie_JEDNEGO_endpointu_nie_zatrzymuje_handlu():
     z chwili wysyłki i zlecenie idzie normalnie. Test sprawdza jedno i drugie:
     że poszło ORAZ że poszło po cenie z arkusza, a nie z planu.
     """
-    plan = dict(PLAN, atr_pct=1.0)
+    # ATR 2%: od 2026-10-03 prog dryfu to 0,5 x ATR (`zlecenia.KROTNOSC_ZWLOKI`),
+    # a 100 -> 99,49 to 0,51% - przy ATR 1% test mierzylby prog, nie zrodla ceny.
+    plan = dict(PLAN, atr_pct=2.0)
     g = Gielda(odniesienie=None, ksiega=arkusz("99.50", "99.52"))
     _, gielda, ok, _ = _zloz(plan=plan, gielda=g)
 
@@ -1332,3 +1334,324 @@ def test_identyfikator_proby_JEST_INNY_przy_kazdym_uruchomieniu():
     assert all(len(i) <= 36 for i in ident)            # limit orderLinkId u Bybita
 
 
+
+
+# =========================================== wyjscie nie czeka swiecy (T6, F-4.3)
+#
+# Do 2026-10-03 wyjscie odrzucone przez `EC_PostOnlyWillTakeLiquidity` wygasalo
+# i czekalo na nastepna decyzje - 4 h. Zmierzony koszt: 85 USD na 4 przypadkach
+# (NEAR #38 sam 60 USD, 480 pb pozycji). Teraz: druga proba PostOnly po swiezym
+# arkuszu, potem GTC po drugiej stronie spreadu. Wejscia NIE eskaluja.
+
+from services.engine.gielda_exec import (  # noqa: E402
+    PROBY_POSTONLY_WYJSCIA, proba_z_id)
+from services.exchanges.base import PowodOdmowy  # noqa: E402
+
+POSTONLY = PowodOdmowy(kod="EC_PostOnlyWillTakeLiquidity", rodzaj="postonly",
+                       opis="zlecenie przecielo spread [rejectReason="
+                            "EC_PostOnlyWillTakeLiquidity]")
+
+WYJSCIE = dict(PLAN, id=42, side="sell", qty=D("10"), limit_price=D("100"),
+               base_ccy="SOL", atr_pct=2.0,
+               trigger={"rodzaj": "wyjscie", "bar": BAR, "position_id": 32})
+
+
+def _odrzucone(id_wlasne, n):
+    return StanZlecenia(id_wlasne=id_wlasne, id_gieldy=f"G{n}", status="cancelled",
+                        ilosc=D("10"), wypelniono=D("0"), srednia_cena=None,
+                        prowizja=D("0"), powod_odmowy=POSTONLY)
+
+
+class GieldaPostOnly:
+    """Gielda, ktora PAMIETA zlecenia po `orderLinkId` i odrzuca PostOnly.
+
+    `odrzuc` - ile kolejnych zlecen PostOnly gielda odrzuci (stan widoczny
+    w `stan_zlecenia` zaraz po POST-cie, jak `EC_PostOnlyWillTakeLiquidity`
+    na Bybicie). Zlecenie bez PostOnly zawsze przyjmuje. `arkusze` - kolejne
+    odczyty arkusza; ostatni powtarza sie do konca.
+    """
+
+    def __init__(self, *, odrzuc=0, arkusze=None, znane=None, blad_stanu_po=False):
+        self._odrzuc = odrzuc
+        self._arkusze = list(arkusze or [("100.00", "100.02")])
+        self.zlecenia = dict(znane or {})
+        self.zlozone = []
+        self.pytania_o_stan = []
+        self._blad_stanu_po = blad_stanu_po
+
+    async def stan_zlecenia(self, id_wlasne, kategoria="spot"):
+        self.pytania_o_stan.append(id_wlasne)
+        if self._blad_stanu_po and self.zlozone and \
+                self.zlozone[-1]["id_wlasne"] == id_wlasne:
+            raise ExchangeError("timeout odczytu stanu")
+        return self.zlecenia.get(id_wlasne)
+
+    async def zloz_zlecenie(self, **kw):
+        self.zlozone.append(kw)
+        n = len(self.zlozone)
+        if kw.get("post_only", True) and self._odrzuc > 0:
+            self._odrzuc -= 1
+            self.zlecenia[kw["id_wlasne"]] = _odrzucone(kw["id_wlasne"], n)
+        else:
+            self.zlecenia[kw["id_wlasne"]] = StanZlecenia(
+                id_wlasne=kw["id_wlasne"], id_gieldy=f"G{n}", status="new",
+                ilosc=kw["ilosc"], wypelniono=D("0"), srednia_cena=None,
+                prowizja=D("0"))
+        return ZlozoneZlecenie(id_wlasne=kw["id_wlasne"], id_gieldy=f"G{n}",
+                               status="new")
+
+    async def cena_odniesienia(self, symbol, kategoria=None):
+        return None
+
+    async def fetch_order_book(self, symbol, depth=50, *, ksiega_egzekucji=True):
+        bid, ask = self._arkusze.pop(0) if len(self._arkusze) > 1 else self._arkusze[0]
+        return arkusz(bid, ask)
+
+
+def _zloz_wyjscie(g, plan=WYJSCIE):
+    cur = Kursor()
+    ok, msg = asyncio.run(zloz_plan(cur, g, plan, F, engine="crypto",
+                                    mode="demo", kategoria="spot"))
+    return cur, ok, msg
+
+
+def _wiersze_zlecen(cur):
+    """(sql, params, raw) kazdego INSERT-u do exec.order."""
+    import json as _json
+    return [(s, p, _json.loads(p[-1])) for s, p in cur.zapytania("INSERT INTO exec.order")]
+
+
+def test_wyjscie_odrzucone_DWA_RAZY_idzie_trzeci_raz_BEZ_PostOnly_w_tym_samym_cyklu():
+    """SEDNO T6. Trzy wywołania `zloz_zlecenie`: dwa PostOnly, trzecie GTC.
+
+    Druga próba ma cenę ze ŚWIEŻEGO arkusza (rynek zszedł między odczytami),
+    trzecia stoi NA BIDZIE - po drugiej stronie spreadu - i dlatego wypełnia
+    się takerem zamiast wrócić jako trzecie odrzucenie."""
+    # Kazda proba czyta arkusz DWA razy: przed POST-em (cena) i po nim
+    # (`arkusz_po_wysylce`, diagnostyka).
+    g = GieldaPostOnly(odrzuc=2, arkusze=[("100.00", "100.02")] * 2
+                                         + [("99.90", "99.92")] * 2
+                                         + [("99.80", "99.82")])
+    cur, ok, msg = _zloz_wyjscie(g)
+
+    assert ok is True, msg
+    assert [z["id_wlasne"] for z in g.zlozone] == ["tai-p42", "tai-p42-r1", "tai-p42-a"]
+    assert "post_only" not in g.zlozone[0] and "post_only" not in g.zlozone[1]
+    assert g.zlozone[2]["post_only"] is False
+    # Pasywnie o tick nad askiem, potem znowu - z NOWEGO arkusza.
+    assert g.zlozone[0]["cena_limitu"] == D("100.03")
+    assert g.zlozone[1]["cena_limitu"] == D("99.93")
+    # Agresywnie: sprzedaz NA BIDZIE, nie nad askiem.
+    assert g.zlozone[2]["cena_limitu"] == D("99.80")
+
+
+def test_odrzucone_ogniwa_zostaja_jako_ZLECENIA_BEZ_PLANU_a_plan_ma_JEDEN_wiersz():
+    """Jeden wiersz z `planned_order_id` na plan - na tym stoi rozstrzyganie
+    (`ORDER BY id LIMIT 1`). Odrzucone ogniwa zostają w `exec.order`, bo poszły
+    na giełdę i liczą się do wypełnialności - ale BEZ planu i z sufiksem, żeby
+    UNIQUE (mode, client_order_id) niczego później nie wywróciło."""
+    g = GieldaPostOnly(odrzuc=2)
+    cur, ok, _ = _zloz_wyjscie(g)
+    assert ok is True
+
+    wiersze = _wiersze_zlecen(cur)
+    assert len(wiersze) == 3
+    z_planem = [w for w in wiersze if "VALUES (%s,NULL," not in w[0]]
+    bez_planu = [w for w in wiersze if "VALUES (%s,NULL," in w[0]]
+    assert len(z_planem) == 1 and len(bez_planu) == 2
+
+    (_, params, raw), = z_planem
+    assert params[1] == 42 and "tai-p42-a" in params
+    assert raw["wyjscie_agresywne"] is True
+    assert raw["proba"] == PROBY_POSTONLY_WYJSCIA
+
+    for _, params, raw in bez_planu:
+        assert raw["planned_order_id"] == 42
+        assert raw["powod_odmowy_rodzaj"] == "postonly"
+        assert any(isinstance(p, str) and p.endswith("~postonly") for p in params)
+    # Plan NIE jest odrzucony - jego zlecenie lezy w arkuszu.
+    assert not cur.zapytania("journal.planned_order")
+
+
+def test_wyjscie_przyjete_za_DRUGIM_razem_nie_eskaluje_dalej():
+    g = GieldaPostOnly(odrzuc=1)
+    cur, ok, _ = _zloz_wyjscie(g)
+    assert ok is True
+    assert [z["id_wlasne"] for z in g.zlozone] == ["tai-p42", "tai-p42-r1"]
+    assert all("post_only" not in z for z in g.zlozone)
+    (_, _, raw), = [w for w in _wiersze_zlecen(cur) if "VALUES (%s,NULL," not in w[0]]
+    assert raw["wyjscie_agresywne"] is False and raw["proba"] == 1
+
+
+def test_wyjscie_bez_odrzucenia_zostawia_FLAGE_false_jako_grupe_odniesienia():
+    """Udział agresywnych wyjść (`poslizg.udzial_wyjsc_takerem`) potrzebuje
+    mianownika - flaga `false` na każdym zwykłym wyjściu."""
+    g = GieldaPostOnly(odrzuc=0)
+    cur, ok, _ = _zloz_wyjscie(g)
+    assert ok is True and len(g.zlozone) == 1
+    (_, _, raw), = _wiersze_zlecen(cur)
+    assert raw["wyjscie_agresywne"] is False and raw["proba"] == 0
+
+
+def test_WEJSCIE_odrzucone_przez_PostOnly_NIE_eskaluje():
+    """Niewypełnione wejście kosztuje okazję; wejście takerem to strategia,
+    której symulacja nie zna. Jedno zlecenie, bez pytania o stan po wysyłce.
+
+    KONTRAST W TYM SAMYM TEŚCIE: ta sama giełda eskaluje wyjście - inaczej
+    test przechodziłby także dla kodu, który nie eskaluje niczego."""
+    g_wyj = GieldaPostOnly(odrzuc=5)
+    _zloz_wyjscie(g_wyj)
+    assert len(g_wyj.zlozone) == PROBY_POSTONLY_WYJSCIA + 1
+
+    g = GieldaPostOnly(odrzuc=5)
+    plan = dict(PLAN, atr_pct=2.0)
+    cur = Kursor()
+    ok, _ = asyncio.run(zloz_plan(cur, g, plan, F, engine="crypto",
+                                  mode="demo", kategoria="spot"))
+    assert ok is True
+    assert len(g.zlozone) == 1
+    assert "post_only" not in g.zlozone[0]
+    assert g.pytania_o_stan == ["tai-p42"]          # tylko idempotencja PRZED
+    (_, _, raw), = _wiersze_zlecen(cur)
+    assert "wyjscie_agresywne" not in raw
+
+
+def test_BLAD_odczytu_stanu_po_wysylce_NIE_eskaluje():
+    """O zleceniu nic nie wiemy. Drugie zlecenie obok żywego pierwszego to
+    podwójna sprzedaż - zostaje zwykły wiersz, resztę złapie rozstrzyganie."""
+    g = GieldaPostOnly(odrzuc=2, blad_stanu_po=True)
+    cur, ok, _ = _zloz_wyjscie(g)
+    assert ok is True
+    assert len(g.zlozone) == 1
+    # Kontrast: bez bledu odczytu ta sama gielda daje trzy zlecenia.
+    assert len(_zloz_wyjscie(GieldaPostOnly(odrzuc=2))[0].zapytania(
+        "INSERT INTO exec.order")) == 3
+    (_, params, _), = _wiersze_zlecen(cur)
+    assert params[1] == 42
+
+
+def test_IDEMPOTENCJA_po_restarcie_odnajduje_ZYWE_ogniwo_i_niczego_nie_sklada():
+    """Cykl wysłał `tai-p42` (odrzucone) i `tai-p42-r1` (leży), po czym zginął
+    przed commitem. Następny cykl pyta po ogniwach - i nie składa NICZEGO."""
+    zywe = StanZlecenia(id_wlasne="tai-p42-r1", id_gieldy="G2", status="new",
+                        ilosc=D("10"), wypelniono=D("0"), srednia_cena=None,
+                        prowizja=D("0"))
+    g = GieldaPostOnly(znane={"tai-p42": _odrzucone("tai-p42", 1),
+                              "tai-p42-r1": zywe})
+    cur, ok, msg = _zloz_wyjscie(g)
+    assert ok is True, msg
+    assert g.zlozone == []
+    assert g.pytania_o_stan == ["tai-p42", "tai-p42-r1"]
+    (_, params, raw), = _wiersze_zlecen(cur)
+    assert "tai-p42-r1" in params and params[1] == 42
+    assert raw["juz_istnialo"] is True
+
+
+def test_IDEMPOTENCJA_po_restarcie_kontynuuje_OD_NASTEPNEGO_ogniwa():
+    """Gielda zna tylko odrzucone `tai-p42` - nastepna proba to `-r1`, a nie
+    drugi raz `tai-p42` (duplikat 170141) ani od razu taker."""
+    g = GieldaPostOnly(znane={"tai-p42": _odrzucone("tai-p42", 1)})
+    cur, ok, _ = _zloz_wyjscie(g)
+    assert ok is True
+    assert [z["id_wlasne"] for z in g.zlozone] == ["tai-p42-r1"]
+    assert "post_only" not in g.zlozone[0]
+
+
+def test_identyfikatory_ogniw_sa_ROZNE_STALE_i_ODWRACALNE():
+    ids = [id_zlecenia(42, p) for p in range(PROBY_POSTONLY_WYJSCIA + 1)]
+    assert ids == ["tai-p42", "tai-p42-r1", "tai-p42-a"]
+    assert len(set(ids)) == len(ids)
+    assert all(len(i) <= 36 for i in ids)          # limit orderLinkId u Bybita
+    assert [proba_z_id(42, i) for i in ids] == [0, 1, 2]
+    assert proba_z_id(43, "tai-p42") is None
+
+
+def _rozstrzygnij_wyjscie(stan, *, ponow, client_order_id="tai-p42"):
+    class G(Gielda):
+        async def stan_zlecenia(self, id_wlasne, kategoria="spot"):
+            self.pytano_o_stan = id_wlasne
+            return stan
+    g = G()
+    plan = dict(WYJSCIE, client_order_id=client_order_id,
+                valid_until=None)
+    cur = Kursor([dict(id=501, qty=D("10"), submitted_at=None)])
+    wynik = asyncio.run(rozstrzygnij_plan(
+        cur, g, plan, F, engine="crypto", mode="demo", kategoria="spot",
+        teraz=__import__("datetime").datetime(2026, 10, 3, 12, 5,
+                                              tzinfo=__import__("datetime").timezone.utc),
+        kind="spot", ponow_wyjscie=ponow))
+    return cur, g, wynik
+
+
+def test_odrzucenie_widoczne_DOPIERO_przy_rozstrzyganiu_nie_wygasza_planu():
+    """Pierwszy odczyt po wysyłce widział `new`, giełda opisała odrzucenie
+    później. Przed terminem planu ogniwo jest wycofywane, plan zostaje
+    `pending` bez wiersza i `zloz_oczekujace` złoży następną próbę w tym
+    samym cyklu."""
+    cur, g, (rodzaj, _) = _rozstrzygnij_wyjscie(_odrzucone("tai-p42", 1), ponow=True)
+    assert rodzaj == "wyjscie_ponowione"
+    assert not cur.zapytania("journal.planned_order")
+    (sql, params), = cur.zapytania("UPDATE exec.order")
+    assert "planned_order_id=NULL" in sql and "'~postonly'" in sql
+    assert params[-1] == 501
+
+
+def test_po_terminie_planu_odrzucone_wyjscie_WYGASA_jak_dotad():
+    """Po terminie następna świeca ma własną decyzję - drugie wyjście z tej
+    samej pozycji obok jej planu byłoby podwójną sprzedażą."""
+    cur, _, (rodzaj, _) = _rozstrzygnij_wyjscie(_odrzucone("tai-p42", 1), ponow=False)
+    assert rodzaj == "brak"
+    assert cur.zapytania("SET status='expired'")
+
+
+def test_rozstrzyganie_pyta_o_ID_Z_WIERSZA_a_nie_o_pierwsze_ogniwo():
+    """Zastępcze zlecenie żyje pod `tai-p42-a`. Pytanie o `tai-p42` oddałoby
+    pierwsze, odrzucone ogniwo i rozstrzygnęło plan jako niewypełniony."""
+    zywe = StanZlecenia(id_wlasne="tai-p42-a", id_gieldy="G3", status="new",
+                        ilosc=D("10"), wypelniono=D("0"), srednia_cena=None,
+                        prowizja=D("0"))
+    _, g, _ = _rozstrzygnij_wyjscie(zywe, ponow=True, client_order_id="tai-p42-a")
+    assert g.pytano_o_stan == "tai-p42-a"
+
+
+def test_bybit_post_only_False_wysyla_GTC_a_domysl_zostaje_PostOnly():
+    """Patrzymy na CIAŁO zapytania, które naprawdę poszło."""
+    import json as _json
+
+    import httpx
+
+    from services.exchanges.bybit import BybitAdapter
+
+    wyslane = []
+
+    def handler(req):
+        if "order/create" in req.url.path:
+            wyslane.append(_json.loads(req.content))
+            return httpx.Response(200, json=dict(retCode=0, result=dict(orderId="G1")))
+        return httpx.Response(200, json=dict(retCode=0, result=dict(list=[])))
+
+    a = BybitAdapter("klucz", "sekret", mode="demo")
+    a._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    asyncio.run(a.zloz_zlecenie(symbol="SOLUSDC", strona="sell", ilosc=D("1"),
+                                cena_limitu=D("99.80"), id_wlasne="tai-p42-a",
+                                post_only=False, istnienie_sprawdzone=True))
+    asyncio.run(a.zloz_zlecenie(symbol="SOLUSDC", strona="sell", ilosc=D("1"),
+                                cena_limitu=D("100.03"), id_wlasne="tai-p42",
+                                istnienie_sprawdzone=True))
+    asyncio.run(a.close())
+    assert wyslane[0]["timeInForce"] == "GTC" and wyslane[0]["orderType"] == "Limit"
+    assert wyslane[0]["price"] == "99.80"
+    assert wyslane[1]["timeInForce"] == "PostOnly"
+
+
+def test_udzial_wyjsc_takerem_liczy_TYLKO_wiersze_z_flaga():
+    """Mianownik to wyjścia z polem `wyjscie_agresywne` (z bazy przychodzi
+    jako tekst 'true'/'false'); wejścia i zlecenia sprzed zmiany nie są ani
+    agresywne, ani pasywne. Pusta próba to None, nie zero."""
+    from services.engine.poslizg import udzial_wyjsc_takerem
+
+    zl = [{"wyjscie_agresywne": "true"}, {"wyjscie_agresywne": "false"},
+          {"wyjscie_agresywne": "false"}, {"wyjscie_agresywne": "false"},
+          {"wyjscie_agresywne": None}, {}]
+    assert udzial_wyjsc_takerem(zl) == {"wyjsc": 4, "agresywnych": 1, "udzial": 0.25}
+    assert udzial_wyjsc_takerem([{}])["udzial"] is None

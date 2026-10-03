@@ -2308,7 +2308,7 @@ async def sprawdz_poslizg(fetch_all, *, engine: str = "crypto",
     cykliczne na czerwono, czyli podnioslby alarm bez tresci.
     """
     from services.engine.poslizg import (opis, pobierz, pobierz_zlecenia, pomiar,
-                                         wypelnialnosc)
+                                         udzial_wyjsc_takerem, wypelnialnosc)
 
     wiersze = await pobierz(fetch_all, engine=engine, mode=mode, okno_h=okno_h)
     # WYPELNIALNOSC TEZ TUTAJ (2026-10-03, audyt 3 T2). Do tej daty liczyl ja
@@ -2321,7 +2321,9 @@ async def sprawdz_poslizg(fetch_all, *, engine: str = "crypto",
     print(f"poślizg ({engine}/{mode}, {okno}), "
           f"wypełnień w rejestrze: {len(wiersze)}, "
           f"złożonych zleceń: {len(zlecenia)}")
-    for linia in opis(pomiar(wiersze) | {"wypelnialnosc": wypelnialnosc(zlecenia)}):
+    for linia in opis(pomiar(wiersze) | {
+            "wypelnialnosc": wypelnialnosc(zlecenia),
+            "wyjscia_takerem": udzial_wyjsc_takerem(zlecenia)}):
         print(f"  {linia}")
     return 0
 

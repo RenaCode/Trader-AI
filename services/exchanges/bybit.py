@@ -1151,7 +1151,8 @@ class BybitAdapter:
                             cena_limitu: Decimal | None, id_wlasne: str,
                             kategoria: str = "spot",
                             rynkowe: bool = False,
-                            istnienie_sprawdzone: bool = False) -> ZlozoneZlecenie:
+                            istnienie_sprawdzone: bool = False,
+                            post_only: bool = True) -> ZlozoneZlecenie:
         """Składa zlecenie. Z limitem (domyślnie) albo RYNKOWE. IDEMPOTENTNIE.
 
         `id_wlasne` musi być wyprowadzone z decyzji, a NIE z czasu ani losowo -
@@ -1175,6 +1176,15 @@ class BybitAdapter:
         (`POSLIZG_TAKER` = 4 pb, n=0). Jedynym wołającym z `rynkowe=True` jest
         likwidacja po kill-switchu (`services/engine/likwidacja.py`), gdzie
         NIEWYPEŁNIENIE kosztuje więcej niż poślizg.
+
+        `post_only=False` (2026-10-03, audyt F-4.3) TO DRUGA TAKA ŚCIEŻKA, też
+        z jednym wołającym: wyjście, którego dwie próby PostOnly giełda
+        odrzuciła w tym samym cyklu (`gielda_exec.zloz_plan`). Limit zostaje,
+        zmienia się tylko `timeInForce` na `GTC` - cena po drugiej stronie
+        spreadu wypełnia się wtedy takerem zamiast wracać jako odrzucenie.
+        Pozycja czekająca 4 h na następną świecę kosztowała zmierzone 85 USD
+        na 4 przypadkach; taker na spot_eu to 25 pb, przy pozycji 1 250 USD
+        około 3 USD. Wejście tej ścieżki nie dostaje nigdy.
 
         `cena_limitu` MUSI być `None` przy zleceniu rynkowym i jest to
         sprawdzane, nie zakładane. Przyjęcie ceny i zignorowanie jej kończy się
@@ -1266,7 +1276,11 @@ class BybitAdapter:
             #
             # Odrzucenie zamiast cichego takera jest przy tym WIDOCZNE: trafia
             # do czujki zdrowia egzekucji, ktora liczy odrzucone do przyjetych.
-            "timeInForce": "PostOnly",
+            #
+            # WYJATEK JEST JAWNY I JEDEN: `post_only=False` dla wyjscia po
+            # dwoch odrzuceniach PostOnly (docstring). Taker jest wtedy
+            # zamowiony, a nie cichy - `raw.wyjscie_agresywne` go oznacza.
+            "timeInForce": "PostOnly" if post_only else "GTC",
             "orderLinkId": id_wlasne,
         })
         return ZlozoneZlecenie(id_wlasne=id_wlasne, id_gieldy=wynik.get("orderId"),

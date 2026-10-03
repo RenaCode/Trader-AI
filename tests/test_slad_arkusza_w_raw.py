@@ -484,4 +484,94 @@ def test_blok_ma_PELNY_zestaw_pol_i_jest_SERIALIZOWALNY():
         "wiek_przy_wysylce_s",
         # Diagnostyka odrzucen PostOnly (2026-10-03): nasz zegar wokol POST-a
         # i drugi odczyt ksiegi zaraz po odpowiedzi gieldy.
-        "wyslano_at", "odpowiedz_at", "po_wysylce"}
+        "wyslano_at", "odpowiedz_at", "po_wysylce",
+        # Mid ksiegi egzekucji z chwili wysylki (2026-10-03, audyt F-4.2).
+        "mid_eu_przy_wysylce"}
+
+
+# ================================ 5. mid z chwili wysylki i rozbicie fill - target (T7)
+#
+# F-4.2: kupna wypelnialy sie 76-95 pb nad cena decyzji. Bez mid z chwili
+# wysylki nie da sie powiedziec, ile z tego to zwloka (rynek odjechal przed
+# wysylka), a ile egzekucja (spread EU, tick, baza USDC).
+
+@pytest.mark.parametrize("nr,symbol,strona,cena_planu,qty,bid,ask,wyslana,rodzaj",
+                         PRODUKCJA)
+def test_mid_eu_przy_wysylce_to_SRODEK_tego_samego_arkusza(
+        nr, symbol, strona, cena_planu, qty, bid, ask, wyslana, rodzaj):
+    """Wartość, nie obecność klucza: (bid + ask) / 2 z odczytu PRZED POST-em,
+    na danych, w których bid != ask - pomylenie z bidem albo askiem pada."""
+    g = Gielda(ksiega=arkusz(bid, ask, wiek_s=3.0), odniesienie=D(bid))
+    cur, ok, msg = zloz(plan(pid=nr, symbol=symbol, strona=strona,
+                             cena_planu=cena_planu, qty=qty, rodzaj=rodzaj,
+                             atr=5.0),
+                        gielda=g)
+    assert ok is True, msg
+    b = blok(cur)
+    assert D(b["mid_eu_przy_wysylce"]) == (D(bid) + D(ask)) / 2
+    assert D(bid) < D(b["mid_eu_przy_wysylce"]) < D(ask)
+    # Drugi odczyt (po wysylce) niesie WLASNY mid, nie nadpisuje pierwszego.
+    assert "mid_eu_przy_wysylce" in b["po_wysylce"]
+
+
+def test_mid_przy_arkuszu_NIEODCZYTANYM_jest_brakiem_a_nie_zerem():
+    g = Gielda(blad_ksiegi=ExchangeError("503 z hosta egzekucji"),
+               odniesienie=D("0.2551"))
+    cur, ok, msg = zloz(plan(pid=61, symbol="ADAUSDC", strona="buy",
+                             cena_planu="0.2580", qty="3960.5814"), gielda=g)
+    assert ok is True, msg
+    assert blok(cur)["mid_eu_przy_wysylce"] is None
+
+
+def _wiersz_fill(strona, cel, mid, fill, zrodlo="gielda"):
+    return dict(zrodlo=zrodlo, strona=strona, cena_decyzji=cel,
+                mid_wysylki=mid, cena_wykonania=fill)
+
+
+def test_rozbicie_fill_minus_target_SUMUJE_SIE_do_calosci():
+    """NEAR #86 odtworzone: decyzja 5,000, mid w chwili wysyłki 5,030, fill
+    5,038 (+76 pb). Do wysyłki +60 pb, od wysyłki +16 pb - dwa różne
+    lekarstwa (potok vs egzekucja) i oba widoczne osobno."""
+    from services.engine.poslizg import rozbicie_do_celu
+
+    r = rozbicie_do_celu([_wiersz_fill("buy", "5.000", "5.030", "5.038")])["buy"]
+    assert r["calosc"]["n"] == 1
+    assert r["calosc"]["srednia"] == pytest.approx(0.0076)
+    assert r["do_wysylki"]["srednia"] == pytest.approx(0.0060)
+    assert r["od_wysylki"]["srednia"] == pytest.approx(0.0016)
+    assert (r["do_wysylki"]["srednia"] + r["od_wysylki"]["srednia"]
+            == pytest.approx(r["calosc"]["srednia"]))
+
+
+def test_rozbicie_ZNAK_dodatni_na_nasza_niekorzysc_po_obu_stronach():
+    """Sprzedaż PONIŻEJ ceny decyzji to koszt, tak jak kupno powyżej."""
+    from services.engine.poslizg import rozbicie_do_celu
+
+    r = rozbicie_do_celu([_wiersz_fill("sell", "100", "99.5", "99.4")])["sell"]
+    assert r["calosc"]["srednia"] == pytest.approx(0.006)
+    assert r["do_wysylki"]["srednia"] == pytest.approx(0.005)
+    assert r["od_wysylki"]["srednia"] == pytest.approx(0.001)
+
+
+def test_rozbicie_BEZ_MID_pomija_z_powodem_a_nie_liczy_zera():
+    """Zlecenia sprzed 2026-10-03 nie mają mid. Wliczenie ich jako zera do
+    `do_wysylki` ściągałoby składnik zwłoki do zera tym mocniej, im starsza
+    próba - a zwłoka to dokładnie to, co mierzymy."""
+    from services.engine.poslizg import rozbicie_do_celu
+
+    r = rozbicie_do_celu([_wiersz_fill("buy", "100", None, "100.5"),
+                          _wiersz_fill("buy", "100", "100.1", "100.2", zrodlo="papier")])
+    assert r["buy"]["calosc"]["n"] == 0
+    assert sum(r["pominiete"].values()) == 1      # papier odpada bez licznika
+    assert any("mid" in k for k in r["pominiete"])
+
+
+def test_ZAPYTANIE_poslizgu_czyta_mid_TYLKO_z_przyjetego_odczytu():
+    """Mid z arkusza odrzuconego jako stary (`powod_braku`) opisywałby inną
+    chwilę niż wysyłka."""
+    from services.engine.poslizg import ZAPYTANIE
+
+    zapytanie = " ".join(ZAPYTANIE.split())
+    assert "mid_eu_przy_wysylce" in zapytanie and "AS mid_wysylki" in zapytanie
+    assert "powod_braku' IS NULL" in zapytanie
+
