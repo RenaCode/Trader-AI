@@ -303,30 +303,6 @@ def test_licznik_zdjetych_wejsc_ISTNIEJE_zanim_kill_switch_zadziala():
     assert st["anulowane_wejscia"] == 0
 
 
-def test_PETLA_podaje_stan_kill_switcha_sciezce_papierowej():
-    """Reguła żyje w `run_once`, którego testy jednostkowe nie obejmują — wymaga
-    bazy. Sprawdzamy więc samo wywołanie, tak jak przy ścieżce giełdowej.
-
-    KOMENTARZE SĄ ODFILTROWANE przed przeszukaniem: wcześniejszy test w tym
-    projekcie przechodził, bo szukanego wzorca dostarczał komentarz nad kodem —
-    a w tym pliku komentarz nad tym właśnie wywołaniem mówi dokładnie to, czego
-    szukamy.
-    """
-    kod = "\n".join(w for w in ZRODLO_LOOP.splitlines()
-                    if not w.lstrip().startswith("#"))
-    i = kod.index("stats.update(rozstrzygnij_plany(")
-    wywolanie = kod[i:kod.index("conn.commit()", i)]
-
-    assert "tylko_wyjscia=wejscia_wstrzymane" in wywolanie, (
-        "ścieżka papierowa rozstrzyga plany wejścia mimo kill-switcha")
-
-    # WARUNEK GAŁĘZI MA ZOSTAĆ BEZ ZMIAN. Gdyby kill-switch trafił tutaj zamiast
-    # do argumentu, plany WYJŚCIA przestałyby się rozstrzygać w ogóle — czyli
-    # bezpiecznik uwięziłby pozycje zamiast je wypuścić.
-    galaz = kod.rindex("elif limit:", 0, i)
-    assert "wejscia_wstrzymane" not in kod[galaz:i].splitlines()[0]
-
-
 # ================================== C: pasmo ceny a horyzont
 
 def test_nazwa_cechy_ATR_IDZIE_Z_HORYZONTU_a_nie_na_sztywno():

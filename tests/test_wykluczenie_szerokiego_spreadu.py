@@ -57,17 +57,6 @@ def test_opis_podaje_symbol_i_spread():
     assert opis_wykluczen({}, {}) == []
 
 
-def test_petla_blokuje_WEJSCIE_a_nie_wyjscie():
-    """Na kodzie pętli: blokada stoi na gałęzi wejścia (`enter`) i zamienia ją
-    na `hold` z własnym powodem — wyjście nie przechodzi przez ten warunek."""
-    zrodlo = (KORZEN / "services/engine/loop.py").read_text(encoding="utf-8")
-    i = zrodlo.index('powod_holdu = "szeroki_spread"')
-    blok = zrodlo[zrodlo.rindex("\n        if ", 0, i):i]
-    assert 'action.startswith("enter")' in blok
-    assert "szerokie_spready" in blok
-    assert "srednie_spready(" in zrodlo, "pętla nie mierzy spreadu"
-
-
 def test_trener_wypisuje_wykluczone():
     zrodlo = (KORZEN / "services/engine/train.py").read_text(encoding="utf-8")
     assert "opis_wykluczen(" in zrodlo

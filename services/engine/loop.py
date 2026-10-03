@@ -49,7 +49,7 @@ from services.engine.koszty import POSLIZG_MAKER, POSLIZG_TAKER, koszty
 from services.engine.portfolio import _wypelnione
 from services.engine.risk_rules import (
     MIN_CONFIDENCE, START_EQUITY as START_EQUITY_WSPOLNY, RiskVerdict,
-    position_budget, udzial_budzetu,
+    position_budget, wielkosc_pozycji,
 )
 from services.engine.zlecenia import Filtry, do_kroku_w_dol
 from services.engine.bramki import (
@@ -2616,12 +2616,12 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
             stats["szeroki_spread"] += 1
 
         # Wielkosc pozycji rosnie z sila sygnalu, ale nigdy powyzej limitu -
-        # o tym decyduje risk kernel, nie ten kod.
+        # o tym decyduje risk kernel, nie ten kod. Wzor i zaokraglenia z
+        # `risk_rules.wielkosc_pozycji` - tej samej funkcji liczy symulacja (U-3).
         qty = Decimal(0)
         notional = Decimal(0)
         if action in ("enter_long", "enter_short"):
-            notional = (baza * Decimal(str(udzial_budzetu(score)))).quantize(Decimal("0.01"))
-            qty = (notional / price).quantize(Decimal("0.000001"))
+            notional, qty = wielkosc_pozycji(baza, score, price)
 
         if action.startswith("enter") and wejscia_wstrzymane:
             # Kill-switch, przekroczony limit konta albo niepelny pomiar

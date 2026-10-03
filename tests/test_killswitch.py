@@ -82,19 +82,9 @@ def test_aktywny_killswitch_NIE_zada_kolejnego():
 
 
 # ---------------------------------------------- ogniwo 4: wyjścia nadal działają
-
-def test_petla_wstrzymuje_WYLACZNIE_wejscia():
-    """Najgroźniejsza możliwa pomyłka w tym miejscu.
-
-    Kill-switch zadziałał, bo kapitał spada. Jeśli zablokuje też wyjścia,
-    system zostaje z otwartymi pozycjami w rynku, który właśnie ucieka
-    przeciwko niemu — czyli robi dokładnie odwrotność tego, po co istnieje.
-    """
-    zrodlo = Path("services/engine/loop.py").read_text(encoding="utf-8")
-    assert 'if action.startswith("enter") and wejscia_wstrzymane:' in zrodlo, (
-        "warunek wstrzymania musi dotyczyć wyłącznie wejść; jeśli zmienił "
-        "kształt, sprawdź, czy nadal przepuszcza wyjścia")
-    assert "wejscia_wstrzymane" in zrodlo
+#
+# Sprawdzane WYKONANIEM `run_once` (wejście wstrzymane, wyjście idzie dalej,
+# także na giełdę): `tests/test_run_once.py`, audyt Fable U-1.
 
 
 # ------------------------------------------------- ogniwo 5: zwolnienie ręczne
