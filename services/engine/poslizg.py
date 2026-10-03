@@ -96,6 +96,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
+import random
 import statistics
 import sys
 from decimal import Decimal, InvalidOperation
@@ -727,6 +728,109 @@ def opis(p: dict) -> list[str]:
     return linie
 
 
+# ------------------------------------------------- selekcja negatywna (F-4.5)
+#
+# CO TRACIMY PRZEZ NIEWYPELNIENIE (audyt Fable F-4.5, 2026-10-03).
+# Wypelnialnosc mowi, ILE zlecen przepada, ale nie CZYM sie roznia. Zlecenie
+# PostOnly pod rynkiem wypelnia sie wtedy, gdy rynek do niego zejdzie - czyli
+# czesciej w zlych wejsciach niz w dobrych. Miara: sredni zwrot naprzod od
+# ceny zlecenia dla wejsc wypelnionych i niewypelnionych oraz ich ROZNICA
+# (niewypelnione - wypelnione; dodatnia = selekcja negatywna). Analiza z 03.10
+# (§3.4) dala +407 pb / 48 h, CI [+70; +773] - policzona recznie, raz.
+#
+# BOOTSTRAP, NIE t-Studenta: kilkanascie obserwacji z grubymi ogonami, a przy
+# roznicy dwoch prob o roznych wariancjach t i tak bylby przyblizeniem.
+# Ziarno stale - ten sam stan bazy daje ten sam przedzial w kazdym przebiegu.
+HORYZONTY_NAPRZOD_H = (24, 48)
+BOOTSTRAP_LOSOWAN = 2000
+BOOTSTRAP_ZIARNO = 20261003
+
+
+def bootstrap_przedzial(xs: list[float], *, losowan: int = BOOTSTRAP_LOSOWAN,
+                        ziarno: int = BOOTSTRAP_ZIARNO) -> tuple[float, float] | None:
+    """Percentylowy przedzial 95% sredniej. None przy n < 2 - jedna obserwacja
+    nie mowi o rozrzucie nic. CZYSTA FUNKCJA."""
+    if len(xs) < 2:
+        return None
+    los = random.Random(ziarno)
+    n = len(xs)
+    srednie = sorted(statistics.fmean(los.choices(xs, k=n)) for _ in range(losowan))
+    return srednie[int(0.025 * losowan)], srednie[int(0.975 * losowan) - 1]
+
+
+def bootstrap_roznicy(a: list[float], b: list[float], *,
+                      losowan: int = BOOTSTRAP_LOSOWAN,
+                      ziarno: int = BOOTSTRAP_ZIARNO) -> tuple[float, float] | None:
+    """Przedzial 95% dla srednia(a) - srednia(b), proby losowane niezaleznie."""
+    if len(a) < 2 or len(b) < 2:
+        return None
+    los = random.Random(ziarno)
+    roznice = sorted(statistics.fmean(los.choices(a, k=len(a)))
+                     - statistics.fmean(los.choices(b, k=len(b)))
+                     for _ in range(losowan))
+    return roznice[int(0.025 * losowan)], roznice[int(0.975 * losowan) - 1]
+
+
+def _grupa(xs: list[float]) -> dict:
+    return {"n": len(xs), "srednia": statistics.fmean(xs) if xs else None,
+            "przedzial": bootstrap_przedzial(xs)}
+
+
+def zwrot_naprzod(wiersze: list[dict]) -> dict:
+    """Zwrot naprzod wejsc wypelnionych i niewypelnionych. CZYSTA FUNKCJA.
+
+    Wiersz: `status`, `strona` (buy/sell), `cena` (limit zlecenia), `cena_24h`,
+    `cena_48h` (zamkniecie swiecy 1h najblizej chwili wysylki + H; None, gdy
+    tej chwili jeszcze nie bylo). Zwrot ze znakiem strony: dla sprzedazy
+    spadek ceny jest zyskiem. Zlecenia w locie (`new`, `unknown`) poza proba.
+    """
+    wynik = {}
+    for godz in HORYZONTY_NAPRZOD_H:
+        grupy: dict[str, list[float]] = {"wypelnione": [], "niewypelnione": []}
+        for w in wiersze:
+            s = (w.get("status") or "").strip().lower()
+            if s in STATUS_WYPELNIONE | STATUS_CZESCIOWE:
+                grupa = "wypelnione"
+            elif s in STATUS_NIEWYPELNIONE:
+                grupa = "niewypelnione"
+            else:
+                continue
+            cena, potem = w.get("cena"), w.get(f"cena_{godz}h")
+            if not cena or potem is None:
+                continue
+            znak = 1 if w.get("strona") == "buy" else -1
+            grupy[grupa].append(znak * float(Decimal(potem) / Decimal(cena) - 1))
+        a, b = grupy["niewypelnione"], grupy["wypelnione"]
+        wynik[godz] = {
+            "wypelnione": _grupa(b), "niewypelnione": _grupa(a),
+            "roznica": {"srednia": (statistics.fmean(a) - statistics.fmean(b))
+                        if a and b else None,
+                        "przedzial": bootstrap_roznicy(a, b)}}
+    return wynik
+
+
+def _ci(p: tuple[float, float] | None) -> str:
+    return "CI —" if p is None else f"CI [{_bp(p[0])}; {_bp(p[1])}]"
+
+
+def opis_selekcji(z: dict) -> list[str]:
+    """Wiersze raportu. Kazdy niesie `n` - srednia z dwoch obserwacji wyglada
+    tak samo jak z dwustu."""
+    if all(z[g]["wypelnione"]["n"] + z[g]["niewypelnione"]["n"] == 0 for g in z):
+        return ["selekcja negatywna (zwrot naprzód wejść): NIE ZMIERZONO — brak "
+                "rozstrzygniętych wejść z ceną po 24 h"]
+    linie = ["selekcja negatywna — zwrot naprzód od ceny zlecenia, wejścia "
+             "giełdowe (różnica = niewypełnione − wypełnione; dodatnia = "
+             "przepadają lepsze wejścia):"]
+    for godz, g in z.items():
+        w, nw, r = g["wypelnione"], g["niewypelnione"], g["roznica"]
+        linie.append(
+            f"  {godz} h: wypełnione n={w['n']} {_bp(w['srednia'])} {_ci(w['przedzial'])}"
+            f" | niewypełnione n={nw['n']} {_bp(nw['srednia'])} {_ci(nw['przedzial'])}"
+            f" | różnica {_bp(r['srednia'])} {_ci(r['przedzial'])}")
+    return linie
+
+
 # -------------------------------------------------------------- warstwa danych
 
 # Zapytanie zakotwiczone na `exec.fill`, NIE na `exec.order`. Jeden plan ma
@@ -796,6 +900,47 @@ async def pobierz_zlecenia(fetch_all, *, engine: str = "crypto",
                                 {"engine": engine, "mode": mode, "h": okno_h}))
 
 
+# Wejscia gieldowe (jeden wiersz `exec.order` na plan) z cena po 24 i 48 h:
+# zamkniecie ostatniej swiecy 1h, ktora skonczyla sie przed chwila wysylki + H.
+# Dolna granica (H - 3 h) odcina dziure w danych - stara swieca udawalaby cene
+# z innej chwili. Brak swiecy = None, czyli "jeszcze nie wiadomo".
+ZAPYTANIE_ZWROT_NAPRZOD = """
+SELECT o.status                                AS status,
+       o.side                                  AS strona,
+       coalesce(o.limit_price, d.target_price) AS cena,
+       o.submitted_at                          AS czas,
+       i.symbol                                AS symbol,
+       (SELECT c.close FROM market.candle c
+         WHERE c.instrument_id = o.instrument_id AND c.timeframe = '1h'
+           AND c.event_time <= o.submitted_at + interval '23 hours'
+           AND c.event_time >  o.submitted_at + interval '21 hours'
+         ORDER BY c.event_time DESC LIMIT 1)   AS cena_24h,
+       (SELECT c.close FROM market.candle c
+         WHERE c.instrument_id = o.instrument_id AND c.timeframe = '1h'
+           AND c.event_time <= o.submitted_at + interval '47 hours'
+           AND c.event_time >  o.submitted_at + interval '45 hours'
+         ORDER BY c.event_time DESC LIMIT 1)   AS cena_48h
+  FROM exec.order o
+  JOIN journal.decision d ON d.id = o.decision_id
+  JOIN ref.instrument i   ON i.id = o.instrument_id
+ WHERE o.engine::text = %(engine)s
+   AND o.mode::text = %(mode)s
+   AND o.raw->>'execution' = 'gielda'
+   AND d.action IN ('enter_long', 'enter_short')
+   AND (%(h)s::int IS NULL
+        OR o.submitted_at > now() - make_interval(hours => %(h)s::int))
+ ORDER BY o.submitted_at
+"""
+
+
+async def pobierz_zwrot_naprzod(fetch_all, *, engine: str = "crypto",
+                                mode: str = "demo",
+                                okno_h: int | None = None) -> list[dict]:
+    """Cienka warstwa: wejscia gieldowe z cena po 24 i 48 h. Bez rachunku."""
+    return list(await fetch_all(ZAPYTANIE_ZWROT_NAPRZOD,
+                                {"engine": engine, "mode": mode, "h": okno_h}))
+
+
 async def pobierz(fetch_all, *, engine: str = "crypto", mode: str = "demo",
                   okno_h: int | None = None) -> list[dict]:
     """Cienka warstwa: wypełnienia z bazy. Bez rachunku — ten jest wyżej.
@@ -835,6 +980,10 @@ async def main() -> int:
               f"złożonych zleceń: {len(zlecenia)}")
         pom = pomiar(wiersze) | {"wypelnialnosc": wypelnialnosc(zlecenia)}
         for linia in opis(pom):
+            print(f"  {linia}")
+        wejscia = await pobierz_zwrot_naprzod(fetch_all, engine=args.engine,
+                                              mode=args.mode, okno_h=args.okno_h)
+        for linia in opis_selekcji(zwrot_naprzod(wejscia)):
             print(f"  {linia}")
     finally:
         await close_pool()

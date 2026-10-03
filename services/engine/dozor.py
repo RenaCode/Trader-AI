@@ -2323,8 +2323,9 @@ async def sprawdz_poslizg(fetch_all, *, engine: str = "crypto",
     Zwraca zawsze 0 z tego samego powodu: niezerowy kod zapalilby zadanie
     cykliczne na czerwono, czyli podnioslby alarm bez tresci.
     """
-    from services.engine.poslizg import (opis, pobierz, pobierz_zlecenia, pomiar,
-                                         wypelnialnosc)
+    from services.engine.poslizg import (opis, opis_selekcji, pobierz,
+                                         pobierz_zlecenia, pobierz_zwrot_naprzod,
+                                         pomiar, wypelnialnosc, zwrot_naprzod)
 
     wiersze = await pobierz(fetch_all, engine=engine, mode=mode, okno_h=okno_h)
     # WYPELNIALNOSC TEZ TUTAJ (2026-10-03, audyt 3 T2). Do tej daty liczyl ja
@@ -2338,6 +2339,12 @@ async def sprawdz_poslizg(fetch_all, *, engine: str = "crypto",
           f"wypełnień w rejestrze: {len(wiersze)}, "
           f"złożonych zleceń: {len(zlecenia)}")
     for linia in opis(pomiar(wiersze) | {"wypelnialnosc": wypelnialnosc(zlecenia)}):
+        print(f"  {linia}")
+    # SELEKCJA NEGATYWNA (F-4.5): czym roznia sie wejscia, ktore przepadly, od
+    # tych, ktore weszly - zwrot naprzod 24/48 h z przedzialem z bootstrapu.
+    wejscia = await pobierz_zwrot_naprzod(fetch_all, engine=engine, mode=mode,
+                                          okno_h=okno_h)
+    for linia in opis_selekcji(zwrot_naprzod(wejscia)):
         print(f"  {linia}")
     return 0
 
