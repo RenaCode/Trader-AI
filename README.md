@@ -37,7 +37,7 @@ z osobnymi modelami, osobnym ryzykiem i osobnymi zakładkami w UI.
 - [x] Symulacja **portfelowa** przez ten sam risk kernel co produkcja
 - [x] Rola bazy bez uprawnień superużytkownika + kontrola uprawnień
 - [x] Kopie zapasowe (weryfikowane), rotacja `SECRETS_KEY`, limit wydatków na API
-- [x] 2618 testów jednostkowych (reguły ryzyka, portfel, koszty, TOTP, kryptografia),
+- [x] 3085 testów jednostkowych (reguły ryzyka, portfel, koszty, TOTP, kryptografia),
       zmierzone 03.10.2026 — polecenie i sposób sprawdzenia w sekcji [Testy](#testy)
 - [x] Ustawienia, powiadomienia (w aplikacji / WhatsApp / webhook), profil konta
 - [x] Prowizja w mierze, a nie tylko w krzywej kapitału — odsetek dodatnich
