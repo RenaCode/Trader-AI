@@ -73,11 +73,10 @@ MIGRACJE_NADAN = [
     # Próba zapisuje wynik w `risk.killswitch_event.proba_wynik` (0072) -
     # nadanie kolumnowe, tylko tej jednej kolumny.
     KORZEN / "db" / "migrations" / "0072_wynik_proby_pozarowej.sql",
-    # Silnik traci SELECT na `app.secret` (U-9): czyta wylacznie widok
-    # `app.secret_llm`, ktory chodzi prawami wlasciciela.
-    KORZEN / "db" / "migrations" / "0076_silnik_bez_app_secret.sql",
-    # Proba czyta puls silnika - ogniwo 3 ze stanu bramki (0077, U-12).
-    KORZEN / "db" / "migrations" / "0077_proba_czyta_puls_silnika.sql",
+    # Silnik traci SELECT na `app.secret` (U-9) - czyta wylacznie widok
+    # `app.secret_llm`; proba czyta puls silnika - ogniwo 3 ze stanu bramki
+    # (U-12). Obie zmiany w 0076.
+    KORZEN / "db" / "migrations" / "0076_nadania_sekrety_i_puls_proby.sql",
 ]
 
 # Role procesów z 0034 i 0052. Wypisane tutaj, a nie wyciągnięte z chartu, bo to

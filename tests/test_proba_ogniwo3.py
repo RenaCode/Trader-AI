@@ -419,7 +419,7 @@ def test_petla_zapisuje_w_pulsie_id_killswitcha_ktory_wstrzymal_wejscia():
 
 
 def test_proba_ma_odczyt_pulsu_silnika():
-    sql = (KORZEN / "db/migrations/0077_proba_czyta_puls_silnika.sql").read_text(
+    sql = (KORZEN / "db/migrations/0076_nadania_sekrety_i_puls_proby.sql").read_text(
         encoding="utf-8")
     assert "GRANT SELECT ON risk.engine_heartbeat TO trader_proba" in sql
 
@@ -427,7 +427,7 @@ def test_proba_ma_odczyt_pulsu_silnika():
 @pytest.mark.skipif(not __import__("os").environ.get("TEST_DB_URL"),
                     reason="ustaw TEST_DB_URL na jednorazowa baze")
 def test_BAZA_pytanie_o_bramke_przechodzi_rola_proby():
-    """Rola `trader_proba` musi umieć zadać to pytanie (0077) - Postgres
+    """Rola `trader_proba` musi umieć zadać to pytanie (0076) - Postgres
     powiedziałby o braku nadania dopiero w środku próby."""
     import os
 
