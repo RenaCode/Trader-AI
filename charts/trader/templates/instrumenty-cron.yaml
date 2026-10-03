@@ -41,6 +41,8 @@ spec:
       # a odswiezenie jest bezpieczne do powtorzenia (UPDATE po id).
       backoffLimit: 1
       template:
+        metadata:
+          labels: {{- include "trader.etykietyZadania" . | nindent 12 }}
         spec:
           restartPolicy: Never
           # Bez tokenu API klastra i bez roota - patrz `trader.podBezUprawnien`

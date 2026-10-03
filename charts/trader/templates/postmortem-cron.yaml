@@ -61,6 +61,8 @@ spec:
       # cichu kazdy kolejny termin - dziennik zamarza, a nic o tym nie mowi.
       activeDeadlineSeconds: 1800
       template:
+        metadata:
+          labels: {{- include "trader.etykietyZadania" . | nindent 12 }}
         spec:
           restartPolicy: Never
           # Bez tokenu API klastra i bez roota - patrz `trader.podBezUprawnien`

@@ -1,0 +1,125 @@
+{{/*
+NETWORKPOLICY - tylko ruch PRZYCHODZACY do podow tego chartu.
+
+Mapa przeplywow i powod kazdej reguly: `networkPolicy` w values.yaml.
+
+PORTY SA PORTAMI PODA, nie Service'u: polityka dziala po DNAT kube-proxy,
+wiec liczy sie `targetPort`. Tu oba sa rowne, ale nie przepisuj ich z Service'u
+na slepo.
+
+Deploymenty sa wskazane po ISTNIEJACEJ etykiecie `app` - nowa etykieta na
+szablonie poda wymusilaby rollout calego chartu (api + wszystkie workery)
+w tej samej synchronizacji, w ktorej wchodzi polityka, a stare pody bez etykiety
+stracilyby baze, zanim nowe wstana. Lista workerow idzie z `.Values.workers`,
+wiec wlaczony worker dostaje dostep do bazy razem z wlasnym Deploymentem.
+*/}}
+{{- if .Values.networkPolicy.enabled }}
+{{- $pelna := include "trader.fullname" . }}
+{{- $workery := list }}
+{{- range $nazwa, $w := .Values.workers }}
+{{- if $w.enabled }}
+{{- $workery = append $workery (printf "%s-%s" $pelna $nazwa) }}
+{{- end }}
+{{- end }}
+# Baza: api (migracje + aplikacja), workery i Joby. Nikt inny - w szczegolnosci
+# zadna inna aplikacja z `default`.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $pelna }}-db
+  labels: {{- include "trader.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app: {{ $pelna }}-db
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchExpressions:
+              - key: app
+                operator: In
+                values:
+                  - {{ $pelna }}-api
+                  {{- range $workery }}
+                  - {{ . }}
+                  {{- end }}
+        - podSelector:
+            matchLabels: {{- include "trader.etykietyZadania" . | nindent 14 }}
+      ports:
+        - { protocol: TCP, port: 5432 }
+---
+# API: wylacznie nginx z trader-web (`location /api` w docker/nginx.conf).
+# Traefik NIE trafia tu wprost - oba Ingressy wskazuja trader-web.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $pelna }}-api
+  labels: {{- include "trader.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app: {{ $pelna }}-api
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: {{ $pelna }}-web
+      ports:
+        - { protocol: TCP, port: 8000 }
+---
+# Front: tylko Traefik (Ingress trader.renacode.com, HTTP i HTTPS).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $pelna }}-web
+  labels: {{- include "trader.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app: {{ $pelna }}-web
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.traefik.namespace }}
+          podSelector:
+            matchLabels: {{- toYaml .Values.networkPolicy.traefik.podLabels | nindent 14 }}
+      ports:
+        - { protocol: TCP, port: 80 }
+{{- if $workery }}
+---
+# Workery nie nasluchuja na zadnym porcie (sprawdzone `ss -tln` 2026-10-03),
+# a sonda zywotnosci to `exec`. `policyTypes: [Ingress]` BEZ listy `ingress`
+# = zaden przychodzacy (deny-all). Bez `ingress: []`, bo pusta lista i brak
+# pola to dla API to samo, a narzedzia do diffu nie zawsze tak je traktuja.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $pelna }}-workery
+  labels: {{- include "trader.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app
+        operator: In
+        values:
+          {{- range $workery }}
+          - {{ . }}
+          {{- end }}
+  policyTypes: [Ingress]
+{{- end }}
+---
+# Pody CronJobow - tak samo nic nie nasluchuje.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $pelna }}-zadania
+  labels: {{- include "trader.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels: {{- include "trader.etykietyZadania" . | nindent 6 }}
+  policyTypes: [Ingress]
+{{- end }}

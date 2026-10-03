@@ -69,6 +69,8 @@ spec:
       # powstala.
       activeDeadlineSeconds: 5400
       template:
+        metadata:
+          labels: {{- include "trader.etykietyZadania" . | nindent 12 }}
         spec:
           restartPolicy: OnFailure
           # Bez tokenu API klastra - zadanie z nim nie rozmawia. Kontekstu

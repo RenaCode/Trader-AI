@@ -180,3 +180,16 @@ zejsc na sam tag. Ta sama zasada co w `trader.llmEnv`.
 {{- define "trader.obrazBazy" -}}
 {{ .Values.db.image.repository }}:{{ .Values.db.image.tag }}@{{ required "db.image.digest musi byc ustawiony (przypiecie obrazu bazy)" .Values.db.image.digest }}
 {{- end -}}
+
+{{/*
+ETYKIETA PODOW CRONJOBOW (2026-10-03) - po niej templates/networkpolicy.yaml
+wpuszcza Joby do bazy.
+
+Pody Jobow nie mialy zadnej wlasnej etykiety (tylko `job-name` z unikalnym
+sufiksem), wiec nie dalo sie ich wskazac w polityce inaczej niz "kazdy pod
+w przestrzeni nazw" - czyli razem z kidwatchem i dietetykiem. Klucz ten sam co
+`trader.renacode.com/component: worker` na Deploymentach workerow.
+*/}}
+{{- define "trader.etykietyZadania" -}}
+trader.renacode.com/component: job
+{{- end -}}

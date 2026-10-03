@@ -162,6 +162,45 @@ ingress:
     enabled: false
     secretName: trader-basicauth
 
+# NETWORKPOLICY - KTO MOZE OTWORZYC POLACZENIE DO PODOW TEGO CHARTU
+# (templates/networkpolicy.yaml, 2026-10-03).
+#
+# Do tej daty w `default` nie bylo ani jednej polityki: KAZDY pod w klastrze -
+# kidwatch, dietetyk, strona, cokolwiek przejetego w ktorymkolwiek z nich -
+# mogl otworzyc trader-db:5432 i probowac hasel rol. Polityki dotycza WYLACZNIE
+# ruchu przychodzacego (bez Egress) i tylko podow tego chartu:
+#
+#   trader-db   :5432  <- trader-api, kazdy wlaczony worker (etykieta `app`)
+#                         i pody CronJobow (`trader.renacode.com/component: job`)
+#   trader-api  :8000  <- trader-web (nginx, `location /api`)
+#   trader-web  :80    <- Traefik z kube-system (Ingress trader.renacode.com)
+#   workery, Joby      <- nikt (nie nasluchuja na zadnym porcie)
+#
+# Zmierzone na klastrze 2026-10-03 (`ss` w przestrzeniach sieciowych podow):
+# do bazy laczyly sie api i dozorcy, do trader-web wylacznie Traefik
+# (10.42.0.6). Monitoring, bramka i Argo CD NIE lacza sie z zadnym podem tego
+# chartu - monitoring pyta API klastra i kubeleta, Argo CD tylko API klastra.
+#
+# Czego polityka NIE blokuje, i to jest wlasnosc kube-routera w k3s, nie
+# zaniedbanie: ruchu z adresu WEZLA (`--src-type LOCAL` przed lancuchem
+# polityk). Dzieki temu sondy kubeleta i `kubectl port-forward` dzialaja bez
+# reguly ipBlock.
+#
+# RECZNY JOB bez szablonu CronJoba (np. `kubectl create job ... --image=...`)
+# NIE dostanie sie do bazy. `kubectl create job --from=cronjob/...` dostanie,
+# bo kopiuje etykiety szablonu.
+#
+# Szybkie wycofanie: `enabled: false` (Argo CD usunie polityki przy synchro).
+networkPolicy:
+  enabled: true
+  # Skad przychodzi ruch z Ingressu. Traefik z k3s proxuje z WLASNEGO adresu
+  # poda (hostPort idzie przez svclb do Service traefika, a dopiero ten pod
+  # otwiera polaczenie do trader-web), wiec zrodlem jest pod, nie wezel.
+  traefik:
+    namespace: kube-system
+    podLabels:
+      app.kubernetes.io/name: traefik
+
 # MODELE I LIMITY ANALIZY WIADOMOSCI.
 #
 # DLACZEGO TE WARTOSCI STOJA TUTAJ, A NIE W DOMYSLACH KODU

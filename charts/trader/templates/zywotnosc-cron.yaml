@@ -80,6 +80,8 @@ spec:
       # trzydziestokrotnym zapasem - limit zabija zawieszenie, nie prace.
       activeDeadlineSeconds: 540
       template:
+        metadata:
+          labels: {{- include "trader.etykietyZadania" . | nindent 12 }}
         spec:
           restartPolicy: Never
           # Bez tokenu API klastra i bez roota - patrz `trader.podBezUprawnien`

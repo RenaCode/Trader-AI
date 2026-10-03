@@ -42,6 +42,8 @@ spec:
       backoffLimit: 0
       activeDeadlineSeconds: 5400
       template:
+        metadata:
+          labels: {{- include "trader.etykietyZadania" . | nindent 12 }}
         spec:
           restartPolicy: Never
           # Bez tokenu API klastra i bez roota - patrz `trader.podBezUprawnien`

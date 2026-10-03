@@ -54,6 +54,8 @@ spec:
       # polecenie w raporcie (czas trwania ostatnich Jobow trenera).
       activeDeadlineSeconds: 10800
       template:
+        metadata:
+          labels: {{- include "trader.etykietyZadania" . | nindent 12 }}
         spec:
           restartPolicy: Never
           # Bez tokenu API klastra i bez roota - patrz `trader.podBezUprawnien`
