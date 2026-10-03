@@ -39,7 +39,7 @@ MOJE_ZDARZENIE = 77
 
 
 def _atrapa(*, zdarzenie=None, powiadomienia=(), wstrzymane=0, wejscia=0,
-            dni_pelne=None):
+            dni_pelne=None, bramka=False):
     """Atrapa bazy dla próby. Oddaje wiersze, o które próba pyta.
 
     `powiadomienia` to lista krotek `(engine, event_id)` — atrapa liczy z nich
@@ -52,6 +52,12 @@ def _atrapa(*, zdarzenie=None, powiadomienia=(), wstrzymane=0, wejscia=0,
         params = tuple(params or ())
         if "exec.equity_point" in p:
             return {"equity": 10_000}
+        if "risk.engine_heartbeat" in p:
+            # STAN BRAMKI (audyt Fable U-12): puls silnika po zdarzeniu niesie
+            # id kill-switcha, ktory wstrzymal wejscia w tym cyklu.
+            assert MOJE_ZDARZENIE in params and "crypto" in params, (
+                "pytanie o bramke nie jest zakotwiczone na wlasnym zdarzeniu")
+            return {"wstrzymal": bramka}
         if "count(*)" in p and "released_at IS NULL" in p:
             return {"n": 0, "dni_blokady": 0.0}
         if "proba_wynik = 'zaliczona'" in p:
@@ -374,3 +380,62 @@ def test_rola_proby_MA_NADANIE_na_dziennik_decyzji():
             "zamiast zachowania silnika")
     assert ("GRANT SELECT ON ALL TABLES IN SCHEMA journal TO trader_proba"
             not in zwarty), "nadanie na cały schemat dziennika"
+
+
+
+# ------------------------------------- ogniwo 3 ze STANU BRAMKI (U-12, 03.10)
+
+def test_ogniwo_3_ZALICZONE_stanem_bramki_bez_zamiaru_wejscia(bez_czekania, capsys):
+    """Audyt Fable U-12: trzy próby z rzędu „NIEROZSTRZYGNIĘTA — ogniwo 3 NIE
+    ZMIERZONO", bo w 10-minutowym oknie nie było żadnego zamiaru wejścia.
+    Pytanie ogniwa 3 brzmi „czy silnik wstrzymał wejścia", a odpowiada na nie
+    STAN BRAMKI w cyklu po zdarzeniu - nie to, czy akurat ktoś chciał wejść."""
+    pk = bez_czekania
+    fetch_one, fetch_all, execute, wykonane = _atrapa(
+        zdarzenie=ZDARZENIE, powiadomienia=MOJE_POWIADOMIENIE,
+        wstrzymane=0, wejscia=0, bramka=True)
+    assert asyncio.run(pk.uruchom(fetch_all, fetch_one, execute)) == 0
+    assert "PRÓBA ZALICZONA" in capsys.readouterr().out
+    assert any("proba_wynik = 'zaliczona'" in s for s, _ in wykonane)
+
+
+def test_bramka_NIE_przykrywa_wejscia_mimo_bezpiecznika(bez_czekania):
+    pk = bez_czekania
+    fetch_one, fetch_all, execute, _ = _atrapa(
+        zdarzenie=ZDARZENIE, powiadomienia=MOJE_POWIADOMIENIE,
+        wstrzymane=0, wejscia=1, bramka=True)
+    assert asyncio.run(pk.uruchom(fetch_all, fetch_one, execute)) == 1
+
+
+def test_petla_zapisuje_w_pulsie_id_killswitcha_ktory_wstrzymal_wejscia():
+    from services.engine.loop import id_wstrzymania_killswitchem, nowe_stats
+
+    assert "wstrzymanie_killswitch_id" in nowe_stats()
+    assert nowe_stats()["wstrzymanie_killswitch_id"] is None
+    assert id_wstrzymania_killswitchem(True, {"id": 77}) == 77
+    # Wstrzymanie z innego powodu (stary pomiar kapitału) to nie kill-switch.
+    assert id_wstrzymania_killswitchem(True, None) is None
+    assert id_wstrzymania_killswitchem(False, {"id": 77}) is None
+
+
+def test_proba_ma_odczyt_pulsu_silnika():
+    sql = (KORZEN / "db/migrations/0077_proba_czyta_puls_silnika.sql").read_text(
+        encoding="utf-8")
+    assert "GRANT SELECT ON risk.engine_heartbeat TO trader_proba" in sql
+
+
+@pytest.mark.skipif(not __import__("os").environ.get("TEST_DB_URL"),
+                    reason="ustaw TEST_DB_URL na jednorazowa baze")
+def test_BAZA_pytanie_o_bramke_przechodzi_rola_proby():
+    """Rola `trader_proba` musi umieć zadać to pytanie (0077) - Postgres
+    powiedziałby o braku nadania dopiero w środku próby."""
+    import os
+
+    import psycopg
+
+    from services.engine.proba_killswitcha import SQL_BRAMKA
+
+    with psycopg.connect(os.environ["TEST_DB_URL"]) as c:
+        c.execute("SET ROLE trader_proba")
+        assert c.execute(SQL_BRAMKA, (1, 1, "crypto", "demo")).fetchall() == []
+        c.rollback()

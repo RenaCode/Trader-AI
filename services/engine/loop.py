@@ -2004,9 +2004,21 @@ def nowe_stats(**flagi) -> dict:
              # `risk.engine_heartbeat.detail` jest nadpisywany co przebieg:
              # brak klucza nie dalby sie odroznic od wersji, ktora tego nie
              # liczy (ta sama zasada co przy licznikach wyzej).
-             "likwidacja": None}
+             "likwidacja": None,
+             # ID KILL-SWITCHA, KTORY W TYM CYKLU WSTRZYMAL WEJSCIA (U-12).
+             # Ogniwo 3 proby pozarowej czyta stad stan bramki - slad
+             # w dzienniku decyzji powstaje tylko przy zamiarze wejscia, a tego
+             # w oknie proby zwykle nie ma. None: bramka otwarta albo zamknieta
+             # z innego powodu niz kill-switch.
+             "wstrzymanie_killswitch_id": None}
     stats.update(flagi)
     return stats
+
+
+def id_wstrzymania_killswitchem(wejscia_wstrzymane: bool,
+                                killswitch: dict | None) -> int | None:
+    """Id zdarzenia, ktore zamknelo bramke wejsc w tym cyklu. CZYSTA FUNKCJA."""
+    return killswitch["id"] if wejscia_wstrzymane and killswitch else None
 
 def zapisz_puls(cur, engine: str, mode: str, stats: dict) -> None:
     """Puls silnika po cyklu. JEDNO miejsce zapisu, bo wyjsc z `run_once` jest kilka.
@@ -2302,6 +2314,8 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
     # nikt nie czyta o trzeciej w nocy. `None` zostaje, gdy likwidacja nie
     # ruszyla - patrz `nowe_stats`.
     stats["likwidacja"] = likwidacja_stat
+    stats["wstrzymanie_killswitch_id"] = id_wstrzymania_killswitchem(
+        wejscia_wstrzymane, risk.killswitch_active())
 
     # ROZSTRZYGNIECIE PLANOW IDZIE PRZED OCENA, nie po niej.
     #

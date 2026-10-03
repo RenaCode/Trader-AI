@@ -76,6 +76,8 @@ MIGRACJE_NADAN = [
     # Silnik traci SELECT na `app.secret` (U-9): czyta wylacznie widok
     # `app.secret_llm`, ktory chodzi prawami wlasciciela.
     KORZEN / "db" / "migrations" / "0076_silnik_bez_app_secret.sql",
+    # Proba czyta puls silnika - ogniwo 3 ze stanu bramki (0077, U-12).
+    KORZEN / "db" / "migrations" / "0077_proba_czyta_puls_silnika.sql",
 ]
 
 # Role procesów z 0034 i 0052. Wypisane tutaj, a nie wyciągnięte z chartu, bo to

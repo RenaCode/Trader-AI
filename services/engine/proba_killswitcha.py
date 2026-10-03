@@ -401,6 +401,31 @@ async def _ogniwo_3(fetch_one, engine: str, mode: str, id_zdarzenia: int
     return int(r["wstrzymane"] or 0), int(r["wejscia"] or 0)
 
 
+SQL_BRAMKA = (
+    "SELECT coalesce((h.detail->>'wstrzymanie_killswitch_id')::bigint = %s"
+    "                AND h.last_beat_at > k.triggered_at, false) AS wstrzymal"
+    "  FROM risk.engine_heartbeat h"
+    "  JOIN risk.killswitch_event k ON k.id = %s"
+    " WHERE h.engine::text = %s AND h.mode::text = %s")
+
+
+async def _bramka_wstrzymala(fetch_one, engine: str, mode: str,
+                             id_zdarzenia: int) -> bool:
+    """Czy silnik w cyklu PO zdarzeniu mial wejscia wstrzymane TYM kill-switchem.
+
+    OGNIWO 3 MIERZONE STANEM BRAMKI (audyt Fable U-12, 2026-10-03). Slad
+    wstrzymania w `journal.decision` powstaje tylko, gdy silnik w oknie proby
+    CHCIAL wejsc - a przy dwoch zamiarach wejscia na dobe w 10-minutowym oknie
+    nie ma ich prawie nigdy (trzy proby z rzedu "NIEROZSTRZYGNIETA"). Pytanie
+    ogniwa brzmi jednak "czy silnik wstrzymal wejscia", a odpowiada na nie
+    bramka: `loop.run_once` zapisuje w pulsie id kill-switcha, ktory w tym
+    cyklu wstrzymal wejscia (`wstrzymanie_killswitch_id`). Puls nowszy niz
+    `triggered_at` z TYM id = silnik zobaczyl zdarzenie i zamknal wejscia.
+    """
+    r = await fetch_one(SQL_BRAMKA, (id_zdarzenia, id_zdarzenia, engine, mode))
+    return bool(r and r.get("wstrzymal"))
+
+
 async def przeprowadz(fetch_all, fetch_one, execute, engine: str = "crypto",
                       mode: str = "demo", sucho: bool = False) -> int:
     stan = await fetch_one(
@@ -642,10 +667,18 @@ async def przeprowadz(fetch_all, fetch_one, execute, engine: str = "crypto",
                 f"silnik zapisał {wejscia} decyzji wejściowych PO zadziałaniu "
                 f"kill-switcha — bezpiecznik nie wstrzymał wejść, czyli nie "
                 f"zrobił jedynej rzeczy, która chroni pieniądze")
+        bramka = await _bramka_wstrzymala(fetch_one, engine, mode, z["id"])
         if wstrzymane:
             ogniwa[OGNIWO_3] = ZADZIALALO
             print(f"  wstrzymanych zamiarów wejścia: {wstrzymane} "
                   f"({OPIS_WSTRZYMANIA})")
+        elif bramka:
+            # Bez zamiaru wejscia, ale ze stanu bramki: cykl po zdarzeniu mial
+            # wejscia wstrzymane TYM kill-switchem (U-12).
+            ogniwa[OGNIWO_3] = ZADZIALALO
+            print("  bramka wejść w cyklu po zdarzeniu: ZAMKNIĘTA tym "
+                  "kill-switchem (puls silnika) — zamiaru wejścia w oknie nie "
+                  "było, ale silnik wejść by nie przepuścił")
         else:
             print("  ani jednego zamiaru wejścia w oknie próby — ogniwa 3 NIE "
                   "DA SIĘ z tego przebiegu rozstrzygnąć")

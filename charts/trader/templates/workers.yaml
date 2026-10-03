@@ -41,8 +41,9 @@ jest wlasciwa reakcja, bo nowy proces otworzy nowe polaczenie.
 BRAK PLIKU = SONDA PRZEPUSZCZA. Szablon chartu synchronizuje sie od razu,
 a obraz z `puls.zyje` dopiero po podbiciu tagu - sonda nie moze w tym oknie
 restartowac workerow, ktore jeszcze nie umieja jej karmic. Tak samo dla
-modulu, ktory nie wpial `puls.zyje` (petla silnika `loop.py` - do dopisania
-osobno): dla niego sonda jest nieaktywna, a nie zabojcza. Moduly, ktore ja
+modulu, ktory nie wpial `puls.zyje`: dla niego sonda jest nieaktywna, a nie
+zabojcza. (Petla silnika `loop.py` karmi sonde od 133fc58 - sprawdzone na
+produkcji 03.10: termin w `/tmp/trader-zywy` przed zegarem.) Moduly, ktore ja
 karmia, pisza plik juz NA STARCIE, wiec zawieszenie w pierwszym cyklu tez
 jest lapane. Pilnuje tego tests/test_sonda_zywotnosci.py.
 */}}
