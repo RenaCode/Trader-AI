@@ -62,6 +62,23 @@ def tabela(wyniki: list[dict]) -> list[str]:
     return linie
 
 
+def tabela_odniesien(wyniki: list[dict]) -> list[str]:
+    """Strategia obok B1-B3 w tych samych oknach: sredni zwrot w oknie (%
+    kapitalu), srednia ekspozycja, okna z zyskiem - srednio po przesunieciach."""
+    linie = ["| | średni zwrot w oknie (% kapitału) | średnia ekspozycja | okna z zyskiem |",
+             "|---|---|---|---|"]
+    for nazwa in ("strategia", "B1", "B2", "B3"):
+        v = [w["odniesienia"][nazwa] for w in wyniki
+             if w.get("odniesienia", {}).get(nazwa)]
+        if not v:
+            linie.append(f"| {nazwa} | — | — | — |")
+            continue
+        zysk, okna = sum(x[2] for x in v), sum(x[3] for x in v)
+        linie.append(f"| {nazwa} | {sum(x[0] for x in v) / len(v):+.3f} | "
+                     f"{sum(x[1] for x in v) / len(v):.1%} | {zysk}/{okna} ({zysk / okna:.0%}) |")
+    return linie
+
+
 def werdykt(wyniki: list[dict]) -> tuple[bool, str]:
     dodatnie = sum(1 for w in wyniki
                    if w["zwrot_na_runde_pb"] is not None and w["zwrot_na_runde_pb"] > 0)
@@ -125,6 +142,9 @@ def main(argv: list[str] | None = None) -> int:
         print(linia)
     pelne = [w for w in wyniki if w.get("okna")]
     if pelne:
+        print()
+        for linia in tabela_odniesien(pelne):
+            print(linia)
         print(werdykt(pelne)[1])
     return 0
 

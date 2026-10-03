@@ -2539,6 +2539,11 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
     # ODNIESIENIA B0-B3 (`baseline.py`): {nazwa: [pobite, porownywalne]}.
     bije_odn: dict[str, list[int]] = {n: [0, 0] for n in ("B1", "B2", "B3")}
     b0_dodatnie = [0, 0]      # [zwrot > 0, okna]
+    # Zwrot (% kapitalu) i ekspozycja strategii oraz odniesien w oknach
+    # informatywnych - do podsumowania: same „bije/nie bije" nie mowia, czy
+    # odniesienie zarabia, czy tylko strategia traci mniej.
+    przebieg_odn: dict[str, list[tuple[float, float]]] = {
+        n: [] for n in ("strategia", "B1", "B2", "B3")}
     b0_4_pobite = 0
     # Zwrot na runde PO DOPLACIE per okno - do tabeli STOP/GO.
     all_sharpes_brutto: list[float] = []
@@ -2852,6 +2857,11 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
                 agg[f"{nazwa.lower()}_zwrot"] = odn_okna[nazwa].zwrot
                 agg[f"{nazwa.lower()}_ekspozycja"] = odn_okna[nazwa].ekspozycja
         if informative:
+            przebieg_odn["strategia"].append((oos_m["total_return"], ekspozycja_por))
+            for nazwa in ("B1", "B2", "B3"):
+                if odn_okna[nazwa] is not None:
+                    przebieg_odn[nazwa].append((odn_okna[nazwa].zwrot,
+                                                odn_okna[nazwa].ekspozycja))
             b0_dodatnie[1] += 1
             b0_dodatnie[0] += int(oos_m["total_return"] > 0)
             b0_4_pobite += int(oos_m["total_return"] > odn_okna["B0_4"].zwrot)
@@ -3659,6 +3669,11 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
         "brak_swiec_1h": brak_swiec_oos,
         "bije_b1": bije_odn["B1"], "bije_b2": bije_odn["B2"], "bije_b3": bije_odn["B3"],
         "b0_dodatnie": b0_dodatnie, "status": status,
+        # {nazwa: [sredni zwrot % w oknie, srednia ekspozycja, okna z zwrotem > 0, okna]}
+        "odniesienia": {n: ([statistics.fmean(z for z, _ in v),
+                             statistics.fmean(e for _, e in v),
+                             sum(1 for z, _ in v if z > 0), len(v)] if v else None)
+                        for n, v in przebieg_odn.items()},
     }
     print("PODSUMOWANIE_JSON " + json.dumps(podsumowanie, ensure_ascii=False))
     return podsumowanie
