@@ -62,4 +62,64 @@ spec:
                 name: {{ include "trader.fullname" . }}-web
                 port:
                   number: 80
+---
+# LIMIT PER IP NA LOGOWANIU (audyt Fable U-4, 2026-10-03).
+#
+# Blokada konta w API (5 prob / 15 min, `routers/auth.py`) nie zeruje sie po
+# blokadzie: jedno zle zadanie co 15 min z DOWOLNEGO adresu odnawia ja bez
+# konca i odcina wlasciciela - a tylko on zwalnia kill-switch. Ten limit dziala
+# PRZED aplikacja i per adres zrodlowy: zalewajacy adres dostaje 429 od
+# Traefika, nie dochodzi do licznika blokady, a logowanie z innego adresu dziala.
+#
+# TYLKO `/api/auth`, OSOBNY INGRESS. Ten sam limit na calym hoscie dlawilby
+# panel (kilkanascie zapytan na odswiezenie). Traefik wybiera router o
+# dluzszej regule, wiec ta sciezka wygrywa z `/`.
+#
+# ADRES ZE ZRODLA POLACZENIA, nie z X-Forwarded-For (`depth: 0` = ignoruj
+# naglowek): Service traefika ma `externalTrafficPolicy: Local`, wiec RemoteAddr
+# to prawdziwy klient, a XFF podaje sam klient - limit po nim dalby sie obejsc.
+#
+# BEZ `cert-manager.io/cluster-issuer`: certyfikat wystawia Ingress glowny,
+# a dwa Ingressy z tym samym `secretName` i adnotacja walczylyby o jeden
+# obiekt Certificate. Ten tylko z niego korzysta.
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: {{ include "trader.fullname" . }}-limit-logowania
+  labels: {{- include "trader.labels" . | nindent 4 }}
+spec:
+  rateLimit:
+    average: {{ .Values.ingress.limitLogowania.average }}
+    period: {{ .Values.ingress.limitLogowania.period }}
+    burst: {{ .Values.ingress.limitLogowania.burst }}
+    sourceCriterion:
+      ipStrategy:
+        depth: 0
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "trader.fullname" . }}-auth
+  labels: {{- include "trader.labels" . | nindent 4 }}
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    traefik.ingress.kubernetes.io/router.middlewares: {{ .Release.Namespace }}-{{ include "trader.fullname" . }}-limit-logowania@kubernetescrd
+      {{- if .Values.ingress.basicAuth.enabled }},{{ .Release.Namespace }}-{{ include "trader.fullname" . }}-basicauth@kubernetescrd{{ end }}
+spec:
+  ingressClassName: {{ .Values.ingress.className }}
+  tls:
+    - hosts:
+        - {{ .Values.ingress.host | quote }}
+      secretName: {{ .Values.ingress.tlsSecret }}
+  rules:
+    - host: {{ .Values.ingress.host | quote }}
+      http:
+        paths:
+          - path: /api/auth
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "trader.fullname" . }}-web
+                port:
+                  number: 80
 {{- end }}

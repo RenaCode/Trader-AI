@@ -161,6 +161,12 @@ ingress:
   basicAuth:
     enabled: false
     secretName: trader-basicauth
+  # Limit per adres na `/api/auth/*` w Traefiku (audyt Fable U-4,
+  # templates/ingress.yaml): 10 zadan na minute, zapas 20.
+  limitLogowania:
+    average: 10
+    period: 1m
+    burst: 20
 
 # NETWORKPOLICY - KTO MOZE OTWORZYC POLACZENIE DO PODOW TEGO CHARTU
 # (templates/networkpolicy.yaml, 2026-10-03).
