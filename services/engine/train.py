@@ -41,7 +41,7 @@ import os
 import random
 import statistics
 from collections import Counter
-from dataclasses import replace as dc_replace
+from dataclasses import dataclass, field, replace as dc_replace
 from decimal import Decimal
 import sys
 from datetime import datetime, timedelta, timezone
@@ -1975,26 +1975,26 @@ def wersja_produkcyjna(cur, model_id: int, mv_id: int) -> int | None:
 
 
 # ------------------------------------------------------------------ trening
-def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
-          kind: str = "spot", egzekucja: Egzekucja | None = None,
-          sucho: bool = False, wybor: str = "argmax",
-          tylko: set[str] | None = None,
-          zakladane_pozycje: int | None = None,
-          zgoda_na_promocje: bool = False,
-          spread_bps: float | None = None,
-          spread_nasza_ksiega: bool = True,
-          progi_per_rezim: bool = True,
-          panel: dict | None = None) -> dict:
-    # `panel` - dane z `panel_plik.wczytaj` (harness offline, `--panel`).
-    # Wtedy NIC nie idzie do bazy: `conn` moze byc None, a wszystko, co
-    # przebieg z bazy czyta, przychodzi z pliku. Zapisy pomijamy, bo przebieg
-    # z pliku jest z definicji suchy.
-    plik = panel
-    if plik is not None and not sucho:
-        raise ValueError("przebieg z pliku panelu (--panel) jest zawsze suchy")
-    cur = conn.cursor() if plik is None else None
-    rng = random.Random(SEED)
+#
+# `train()` PODZIELONE NA CZYSTE FUNKCJE (audyt Fable F-10.1 / T2, 2026-10-03).
+#
+# Do tego dnia `train()` mialo 1 700 linii: siatka okien, dobor wag, ocena OOS,
+# werdykt i zapisy do bazy w jednym ciele, z kilkudziesiecioma licznikami
+# wspoldzielonymi przez cala petle. Werdykt dalo sie sprawdzic testem tylko
+# tam, gdzie ktos go wczesniej wyjal (`status_walidacji`, `werdykt_dsr`);
+# reszta byla testowalna wylacznie przez caly przebieg.
+#
+# Teraz `train()` jest orkiestratorem, a kazdy etap osobna funkcja:
+#   okna_wf      - siatka okien walk-forward (granice + aktywne instrumenty),
+#   kandydat_wag - wybor wag na oknie treningowym,
+#   ocen_okno    - ocena OOS jednego okna (bez zapisow i bez wydruku),
+#   werdykt      - status, powod i DSR z miar wszystkich okien,
+#   zapisz_wynik - parametry produkcji, promocja i stan nauki w bazie.
+# Rownowaznosc z kodem sprzed podzialu: `tests/test_trener_rownowaznosc.py`
+# (caly wydruk i PODSUMOWANIE_JSON na zrzucie referencyjnym).
 
+
+def _utrwal(conn, sucho: bool) -> None:
     # PRZEBIEG SUCHY NIE ZOSTAWIA W BAZIE NICZEGO (audyt Fable F-2.4).
     #
     # Do 2026-10-03 `--sucho` zakladalo wiersz w `learn.model_version`
@@ -2008,17 +2008,18 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
     # liczy ja do N) i istnieje - tylko dla tego polaczenia. Cena: przez czas
     # przebiegu suchego rownolegly trening tego samego modelu czeka na wolny
     # numer wersji (UNIQUE (model_id, version)) - przebiegi suche sa reczne.
-    def _utrwal():
-        if conn is None:
-            return
-        if sucho:
-            conn.rollback()
-        else:
-            conn.commit()
-    now = datetime.now(timezone.utc) if plik is None else plik["do"]
-    egzekucja = egzekucja or Egzekucja()
-    z_godzin = bool(egzekucja.opoznienie_min or egzekucja.pesymistyczna)
+    if conn is None:
+        return
+    if sucho:
+        conn.rollback()
+    else:
+        conn.commit()
 
+
+def _uniwersum(cur, plik: dict | None, engine: str, h: Horizon, days: int,
+               tylko: set[str] | None) -> list[dict]:
+    """Uniwersum przebiegu: `tradeable` z bazy albo z pliku, zawezone
+    `--instrumenty`; puste uniwersum i equity bez korekty podzialow przerywaja."""
     # `tradeable` decyduje o uniwersum produkcyjnym - ta sama flaga, ktora czyta
     # petla decyzyjna (0020). Flaga --instrumenty sluzy WYLACZNIE eksperymentom
     # i zaweza to, co juz z bazy wyszlo; nie potrafi dodac niczego z powrotem.
@@ -2146,7 +2147,25 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
     if tylko:
         print(f"  uniwersum zawężone do {len(instruments)}: "
               f"{', '.join(i['symbol'] for i in instruments)}")
+    return instruments
 
+
+@dataclass(frozen=True)
+class Koszty:
+    """Karta kosztu przebiegu i dwie doplaty z niej (strategia, odniesienie)."""
+    karta: Karta
+    doplata: float
+    doplata_odniesienia: float
+    pyl: float | None
+    spread_bps: float | None
+    spread_nasza_ksiega: bool
+    egzekucja: Egzekucja
+
+
+def _koszty(cur, plik: dict | None, engine: str, kind: str, h: Horizon,
+            instruments: list[dict], now: datetime, days: int, egzekucja: Egzekucja,
+            spread_bps: float | None, spread_nasza_ksiega: bool,
+            zakladane_pozycje: int | None) -> Koszty:
     # --- SPREAD: POMIAR Z BAZY, NIE STALA Z CHARTU ---------------------------
     #
     # Liczony TUTAJ, a nie w `main()`, i to jest cala rzecz: dopiero w tym
@@ -2276,7 +2295,14 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
     # niewypelnienie jest NIEZMIERZONE i do dopłaty nie wchodzi; bez tego
     # zdania „po dopłacie" czytaloby sie jak „po wszystkich kosztach".
     print(f"  {opis_doplaty(karta)}")
+    return Koszty(karta, doplata, doplata_odniesienia, pyl, spread_bps,
+                  spread_nasza_ksiega, egzekucja)
 
+
+def _przekroj(cur, plik: dict | None, instruments: list[dict], h: Horizon,
+              days: int, tylko: set[str] | None) -> tuple[str, dict[str, str]]:
+    """Odcisk uniwersum i waluta kwotowana per symbol; ostrzega, gdy brak
+    cech przekrojowych dla tego odcisku."""
     # ODCISK UNIWERSUM. Cechy przekrojowe sa nim filtrowane - patrz load_panel.
     #
     #
@@ -2300,7 +2326,12 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
               f"--days {days} --tylko-przekroj"
               + (f" --instrumenty {','.join(i['symbol'] for i in instruments)}"
                  if tylko else ""))
+    return fp, waluta_symbolu
 
+
+def params_przebiegu(h: Horizon, trials_per_window: int, wybor: str, kind: str,
+                     progi_per_rezim: bool, egzekucja: Egzekucja) -> dict:
+    """`params` wersji modelu - MIANOWNIK N deflacji (patrz `n_konfiguracji`)."""
     eksperymenty = sorted(wlaczone_eksperymenty())
     # `kind` I `limit` MUSZA TU BYC, BO `params` JEST MIANOWNIKIEM N - patrz
     # komentarz przy INSERT nizej. Model wypelnien takze: przebieg pesymistyczny
@@ -2323,6 +2354,13 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
         params_przebiegu["egzekucja_pesymistyczna"] = True
     if egzekucja.opoznienie_min:
         params_przebiegu["opoznienie_min"] = egzekucja.opoznienie_min
+    return params_przebiegu
+
+
+def _zaloz_wersje(cur, conn, plik: dict | None, sucho: bool, engine: str, h: Horizon,
+                  fp: str, params_przebiegu: dict, now: datetime,
+                  days: int) -> tuple[int | None, int | None, int | None]:
+    """`learn.model`, nowa `learn.model_version` w `training` i `learn.training_run`."""
     model_id = mv_id = run_id = None
     if plik is None:
         cur.execute(
@@ -2385,7 +2423,13 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
         run_id = cur.fetchone()["id"]
         if not sucho:
             conn.commit()
+    return model_id, mv_id, run_id
 
+
+def _wczytaj_panele(cur, plik: dict | None, instruments: list[dict], h: Horizon,
+                    fp: str, now: datetime, days: int, z_godzin: bool):
+    """Panele instrumentow (> 500 punktow), swiece 1h do modelu wypelnien
+    i liczba rewizji po czasie decyzji - wypisana."""
     # Panel wczytujemy RAZ na instrument - to najdrozsza operacja w calym treningu.
     panels = {}
     inst_ids = {inst["symbol"]: inst["id"] for inst in instruments}
@@ -2421,6 +2465,14 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
     print(f"  rewizje po czasie decyzji: {zrew:,} z {wszystkie:,} wartości cech"
           f" ({100 * zrew / wszystkie if wszystkie else 0:.3f}%)"
           f" — na tych silnik widział inną liczbę niż ta, na której uczy się trener")
+    return panels, swiece_wykonania, inst_ids
+
+
+def _sprawdz_panele(cur, conn, sucho: bool, plik: dict | None,
+                    panels: dict[str, list[dict]], inst_ids: dict[str, int],
+                    h: Horizon, now: datetime, run_id: int | None) -> None:
+    """Brak paneli albo cechy w tyle za swiecami - przebieg przerwany kodem
+    `KOD_NIC_NIE_POLICZONO`, `training_run` oznaczony jako `failed`."""
     if not panels:
         # KOD WYJSCIA MUSI TO ODZWIERCIEDLAC.
         #
@@ -2438,7 +2490,7 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
         if cur is not None:
             cur.execute("UPDATE learn.training_run SET status='failed', finished_at=now(),"
                         " error='za mało punktów panelu' WHERE id=%s", (run_id,))
-        _utrwal()
+        _utrwal(conn, sucho)
         raise SystemExit(KOD_NIC_NIE_POLICZONO)
 
     # CECHY, KTORE PRZESTALY PRZYCHODZIC, TO NIE JEST WYNIK - TO AWARIA.
@@ -2501,98 +2553,30 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
         if cur is not None:
             cur.execute("UPDATE learn.training_run SET status='failed', finished_at=now(),"
                         " error=%s WHERE id=%s", (komunikat, run_id))
-        _utrwal()
+        _utrwal(conn, sucho)
         raise SystemExit(KOD_NIC_NIE_POLICZONO)
 
-    idx = 0
-    positive = 0
-    # HISTORIA PROGOW PER REZIM: rezim -> lista progow z kolejnych okien.
-    # Produkcja dostaje z tego MEDIANE OSOBNO DLA KAZDEGO REZIMU. Jedna
-    # wspolna lista (tak bylo do 2026-09-27) mieszala progi z rozlacznych
-    # skal i jej mediana nie byla percentylem zadnego z nich.
-    historia_bramek: dict[str, list[float]] = {}
-    # W ilu oknach rezim NIE dostal progu, bo proba byla za mala. Liczba
-    # potrzebna w podsumowaniu: rezim bez progu nie handluje, a to musi byc
-    # widoczne jako decyzja, nie jako cisza.
-    okna_bez_progu: dict[str, int] = {}
-    weight_history: list[dict] = []
-    # Rownolegla do weight_history: ktore sygnaly byly martwe w danym oknie.
-    # Bez tego zero po martwym sygnale nie da sie odroznic od zera zmierzonego.
-    martwe_w_oknie: list[set[str]] = []
-    wybrane_ic = 0
-    # Porownanie z nierobieniem niczego. Bez tego odsetek dodatnich okien nie
-    # mowi, czy strategia jest LEPSZA od kupienia i trzymania - a strategia
-    # wylacznie dluga na rosnacym rynku ma duzo dodatnich okien z samej bety.
-    pokonane_odniesienie = 0
-    pokonane_pelne = 0        # przy odniesieniu 100% zaangazowanym - do raportu
-    # BRUTTO, czyli przed doplata - wylacznie do wydruku obok miar po doplacie
-    # z karty. Do bramki nie wchodzi zadna z tych liczb.
-    positive_brutto = 0
-    # Zlecenia z limitem, ktore w symulacji OOS NIE weszly (wejscia + wyjscia).
-    # Do wydruku obok karty: niewypelnienie w karcie jest NIEZMIERZONE jako
-    # koszt, a ta liczba mowi przynajmniej, jak czesto symulacja go ponosi.
-    niewypelnione_oos = 0
-    # Mianownik wypelnialnosci i material na skladnik `niewypelnienie` karty.
-    wypelnione_oos = 0
-    utracone_oos: list[float] = []
-    brak_swiec_oos = 0
-    # ODNIESIENIA B0-B3 (`baseline.py`): {nazwa: [pobite, porownywalne]}.
-    bije_odn: dict[str, list[int]] = {n: [0, 0] for n in ("B1", "B2", "B3")}
-    b0_dodatnie = [0, 0]      # [zwrot > 0, okna]
-    # Zwrot (% kapitalu) i ekspozycja strategii oraz odniesien w oknach
-    # informatywnych - do podsumowania: same „bije/nie bije" nie mowia, czy
-    # odniesienie zarabia, czy tylko strategia traci mniej.
-    przebieg_odn: dict[str, list[tuple[float, float]]] = {
-        n: [] for n in ("strategia", "B1", "B2", "B3")}
-    b0_4_pobite = 0
-    # Zwrot na runde PO DOPLACIE per okno - do tabeli STOP/GO.
-    all_sharpes_brutto: list[float] = []
-    pokonane_odniesienie_brutto = 0
-    ekspozycje: list[float] = []
-    zwroty_okien: list[float] = []
-    rozklad: list[dict] = []          # czynniki ekspozycji, okno po oknie
-    # Ile transakcji przypadlo kazdemu instrumentowi. Uniwersum ma tyle miejsc,
-    # ile instrumentow, ale kandydaci konkuruja o wspolny kapital i sa sortowani
-    # PO SILE SYGNALU - wiec instrument o mocniejszych sygnalach moze wypchnac
-    # pozostale. Bez tej liczby "dolozylismy instrumenty" i "handlujemy tymi
-    # instrumentami" wygladaja tak samo.
-    udzial_instrumentu: dict[str, int] = {}
-    # Sharpe policzony OSOBNO dla kazdej grupy instrumentow, w tym samym oknie
-    # i tym samym przebiegu. {grupa: [sharpe okno po oknie]}
-    #
-    # PYTANIE, NA KTORE TO ODPOWIADA. Dwa uniwersa maja osobno mediane Sharpe
-    # okolo +0,11, a ich suma +0,011. Cztery naturalne wyjasnienia zostaly
-    # obalone pomiarem (docs/03). Zostaje jedno miejsce: `Sharpe/transakcje`
-    # w oknie to SREDNIA DZIELONA PRZEZ ODCHYLENIE po wszystkich transakcjach
-    # tego okna - a grupy o roznej zmiennosci wrzucone do jednej takiej
-    # statystyki daja wynik, ktory nie jest srednia ich wynikow.
-    #
-    # Jesli grupy liczone osobno W TYM SAMYM PRZEBIEGU maja nadal ~+0,11,
-    # to znaczy, ze transakcje sa w porzadku, a zalamuje sie MIARA. Jesli
-    # rowniez spadaja - to zmienil sie zestaw transakcji, czyli konstrukcja
-    # portfela, i szukac trzeba tam.
-    sharpe_grup: dict[str, list[float]] = {}
-    porownywalne = 0
-    all_sharpes: list[float] = []
-    # Sharpe OOS per KONFIGURACJA (odcisk wektora wag) - material na V[SR_n]
-    # Baileya. Zbierany w pamieci i dopisywany do `learn.hypothesis_trial`
-    # po calym walk-forwardzie, a nie okno po oknie: ta sama konfiguracja moze
-    # wygrac w kilku oknach i wtedy `oos_sharpe` ma byc ich SREDNIA, a nie
-    # wartoscia z ostatniego okna, ktore ja nadpisalo.
-    oos_wg_konfiguracji: dict[bytes, list[float]] = {}
-    # Zwroty WSZYSTKICH transakcji OOS, nie usrednione po oknach - patrz
-    # `podsumowanie_przewagi`.
-    wszystkie_zwroty: list[float] = []
-    transakcje_stron: list[tuple[float, int, str]] = []
-    transakcje_pokrycia: list[tuple[float, float, str]] = []
-    # To samo rozbite na okna: potrzebne, zeby przeliczyc srednia PO OKNACH
-    # przy doliczonym koszcie. Sama lista Sharpe'ow tego nie pozwala.
-    zwroty_okien_transakcje: list[list[float]] = []
-    worst_dd = 0.0
-    predictions: list[tuple[float, bool]] = []
-    start = now - timedelta(days=days)
 
-    while start + timedelta(days=h.train_days + h.test_days) <= now:
+@dataclass(frozen=True)
+class Okno:
+    """Granice jednego okna walk-forward i instrumenty, ktore w nim licza sie."""
+    train_from: datetime
+    train_to: datetime
+    test_from: datetime
+    test_to: datetime
+    aktywne: list[str]
+
+
+def okna_wf(panels: dict[str, list[dict]], h: Horizon, od: datetime,
+            do: datetime) -> list[Okno]:
+    """Siatka okien walk-forward od `od` do `do`, krok `h.step_days`. CZYSTA FUNKCJA.
+
+    Okno, w ktorym mniej niz `MIN_INSTRUMENTS` instrumentow ma dosc swiec
+    treningowych, odpada (przesuniecie siatki idzie dalej).
+    """
+    okna: list[Okno] = []
+    start = od
+    while start + timedelta(days=h.train_days + h.test_days) <= do:
         train_from = start
         train_to = start + timedelta(days=h.train_days)
         test_from = train_to
@@ -2633,151 +2617,439 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
         # Portfel z garstki instrumentow to juz inna strategia, nie ta sama
         # w chudszym okresie - ponizej tego progu okno naprawde nie niesie
         # informacji o tym, co testujemy.
-        if len(aktywne) < MIN_INSTRUMENTS:
-            start += timedelta(days=h.step_days)
-            continue
+        if len(aktywne) >= MIN_INSTRUMENTS:
+            okna.append(Okno(train_from, train_to, test_from, test_to, aktywne))
+        start += timedelta(days=h.step_days)
+    return okna
 
-        train_slices = {s: [r for r in panels[s] if train_from <= r["t"] < train_to]
-                        for s in aktywne}
-        test_slices = {s: [r for r in panels[s] if test_from <= r["t"] < test_to]
-                       for s in aktywne}
 
-        thresholds = {s: atr_threshold(train_slices[s]) for s in aktywne}
-        # Rezimy i sygnaly liczymy RAZ na okno. Bez tego kazda z prob liczyla
-        # komplet sygnalow od nowa, choc nie zaleza one od wag.
-        cache_tr = precompute_panels(train_slices, thresholds, h)
-        # Sygnaly stale na tym oknie wykluczamy z kalibracji - patrz
-        # komentarz przy martwe_sygnaly().
-        martwe = martwe_sygnaly(cache_tr)
-        if martwe and idx == 0:
-            print(f"  sygnały bez zmienności na danych, wyłączone z kalibracji: "
-                  f"{', '.join(sorted(martwe))}")
-        cache_te = precompute_panels({s: v for s, v in test_slices.items() if v},
-                                     thresholds, h)
-        # Progi wyniku ustalane raz na okno, z zalozen poczatkowych i wylacznie
-        # na danych treningowych. Te same progi obowiazuja wszystkie hipotezy
-        # w tym oknie - inaczej kazda konfiguracja dostawalaby wlasny prog
-        # dobrany pod siebie, co jest kolejnym stopniem swobody do przeuczenia.
+@dataclass(frozen=True)
+class Kontekst:
+    """To, co jest wspolne dla wszystkich okien przebiegu."""
+    h: Horizon
+    kind: str
+    egzekucja: Egzekucja
+    zakladane_pozycje: int | None
+    swiece_wykonania: dict | None
+    inst_ids: dict[str, int]
+    panels: dict[str, list[dict]]
+    waluta_symbolu: dict[str, str]
+    doplata: float
+    doplata_odniesienia: float
+    karta: Karta
+    progi_per_rezim: bool
+
+
+@dataclass(frozen=True)
+class DaneOkna:
+    """Wycinki okna, progi ATR, sygnaly policzone raz i bramki wejscia."""
+    train_slices: dict[str, list[dict]]
+    test_slices: dict[str, list[dict]]
+    thresholds: dict[str, float | None]
+    cache_tr: dict
+    cache_te: dict
+    martwe: set[str]
+    bazowe: dict[str, dict[str, float]]
+    gates: Bramki
+
+
+def przygotuj_okno(kt: Kontekst, okno: Okno) -> DaneOkna:
+    """Wycinki treningowy i testowy, rezimy i sygnaly okna oraz progi wejscia
+    liczone WYLACZNIE na oknie treningowym."""
+    h, panels, aktywne = kt.h, kt.panels, okno.aktywne
+    progi_per_rezim = kt.progi_per_rezim
+    train_from, train_to = okno.train_from, okno.train_to
+    test_from, test_to = okno.test_from, okno.test_to
+    train_slices = {s: [r for r in panels[s] if train_from <= r["t"] < train_to]
+                    for s in aktywne}
+    test_slices = {s: [r for r in panels[s] if test_from <= r["t"] < test_to]
+                   for s in aktywne}
+
+    thresholds = {s: atr_threshold(train_slices[s]) for s in aktywne}
+    # Rezimy i sygnaly liczymy RAZ na okno. Bez tego kazda z prob liczyla
+    # komplet sygnalow od nowa, choc nie zaleza one od wag.
+    cache_tr = precompute_panels(train_slices, thresholds, h)
+    # Sygnaly stale na tym oknie wykluczamy z kalibracji - patrz
+    # komentarz przy martwe_sygnaly().
+    martwe = martwe_sygnaly(cache_tr)
+    cache_te = precompute_panels({s: v for s, v in test_slices.items() if v},
+                                 thresholds, h)
+    # Progi wyniku ustalane raz na okno, z zalozen poczatkowych i wylacznie
+    # na danych treningowych. Te same progi obowiazuja wszystkie hipotezy
+    # w tym oknie - inaczej kazda konfiguracja dostawalaby wlasny prog
+    # dobrany pod siebie, co jest kolejnym stopniem swobody do przeuczenia.
+    #
+    # Wagi bazowe MUSZA byc te same, ktorymi potem sie handluje, czyli juz
+    # po wyzerowaniu martwych sygnalow. Liczenie progu z pelnych zalozen,
+    # a handlowanie wagami po renormalizacji dawalo wyniki systematycznie
+    # wieksze od progu - liczba transakcji na okno skoczyla wtedy z ~40 do
+    # ~120, co nie bylo zmiana strategii, tylko rozjazdem miedzy progiem
+    # a tym, co go przekracza.
+    bazowe = _bez_martwych(DEFAULT_WEIGHTS, martwe)
+    gates = bramki_okna({s: train_slices[s] for s in aktywne}, bazowe,
+                        thresholds, h, cache_tr, per_rezim=progi_per_rezim)
+    return DaneOkna(train_slices, test_slices, thresholds, cache_tr, cache_te,
+                    martwe, bazowe, gates)
+
+
+def _ocena_treningowa(kt: Kontekst, dane: DaneOkna):
+    # --- dobor wag WYLACZNIE na oknie treningowym ------------------------
+    # Celem jest Sharpe CALEGO PORTFELA, nie srednia z Sharpe'ow liczonych
+    # osobno per instrument. Roznica nie jest kosmetyczna: portfel podlega
+    # limitowi lacznej ekspozycji i kill-switchowi, wiec uklad wag, ktory
+    # wygląda dobrze na kazdym instrumencie z osobna, moze byc niewykonalny,
+    # gdy wszystkie chca wejsc jednoczesnie.
+    def ocen(w, sl, c):
+        res = simulate_portfolio(sl, w, dane.thresholds, dane.gates, kt.h, MIN_CONF,
+                                 instrument_ids=kt.inst_ids, cache=c,
+                                 kind=kt.kind, egzekucja=kt.egzekucja,
+                                 zakladane_pozycje=kt.zakladane_pozycje,
+                                 swiece_wykonania=kt.swiece_wykonania)
+        return portfolio_metrics(res, kt.h.min_trades)
+    return ocen
+
+
+def _zapis_hipotez(cur, sucho: bool, model_id: int | None):
+    def zapisz_hipoteze(cand):
+        if sucho:
+            return
+        cur.execute(
+            "INSERT INTO learn.hypothesis_trial (model_id, config_hash, params,"
+            " n_windows) VALUES (%s,%s,%s,0)"
+            " ON CONFLICT (model_id, config_hash) DO NOTHING",
+            (model_id, _hash_konfiguracji(cand), json.dumps(cand)))
+        # `n_windows = 0`, NIE 1 - I TO NIE JEST KOSMETYKA.
         #
-        # Wagi bazowe MUSZA byc te same, ktorymi potem sie handluje, czyli juz
-        # po wyzerowaniu martwych sygnalow. Liczenie progu z pelnych zalozen,
-        # a handlowanie wagami po renormalizacji dawalo wyniki systematycznie
-        # wieksze od progu - liczba transakcji na okno skoczyla wtedy z ~40 do
-        # ~120, co nie bylo zmiana strategii, tylko rozjazdem miedzy progiem
-        # a tym, co go przekracza.
-        bazowe = _bez_martwych(DEFAULT_WEIGHTS, martwe)
-        gates = bramki_okna({s: train_slices[s] for s in aktywne}, bazowe,
-                            thresholds, h, cache_tr, per_rezim=progi_per_rezim)
-        if idx == 0:
-            rodzaj = "per reżim" if progi_per_rezim else "WSPÓLNY dla reżimów"
-            print(f"  progi wejścia ({rodzaj}, percentyl {ENTER_PCTL:.2f}, "
-                  f"min. {MIN_PROB_PROGU} próbek): {gates.opis()}")
-
-        # --- dobor wag WYLACZNIE na oknie treningowym ------------------------
-        # Celem jest Sharpe CALEGO PORTFELA, nie srednia z Sharpe'ow liczonych
-        # osobno per instrument. Roznica nie jest kosmetyczna: portfel podlega
-        # limitowi lacznej ekspozycji i kill-switchowi, wiec uklad wag, ktory
-        # wygląda dobrze na kazdym instrumencie z osobna, moze byc niewykonalny,
-        # gdy wszystkie chca wejsc jednoczesnie.
-        # `thresholds` i `gates` z TEGO okna: `ocen` jest wolane wylacznie
-        # w tej samej iteracji petli, w ktorej powstaje (ruff B023 - falszywy).
-        def ocen(w, sl, c):
-            res = simulate_portfolio(sl, w, thresholds, gates, h, MIN_CONF,  # noqa: B023
-                                     instrument_ids=inst_ids, cache=c,
-                                     kind=kind, egzekucja=egzekucja,
-                                     zakladane_pozycje=zakladane_pozycje,
-                                     swiece_wykonania=swiece_wykonania)
-            return portfolio_metrics(res, h.min_trades)
-
-        def zapisz_hipoteze(cand):
-            if sucho:
-                return
-            cur.execute(
-                "INSERT INTO learn.hypothesis_trial (model_id, config_hash, params,"
-                " n_windows) VALUES (%s,%s,%s,0)"
-                " ON CONFLICT (model_id, config_hash) DO NOTHING",
-                (model_id, _hash_konfiguracji(cand), json.dumps(cand)))
-            # `n_windows = 0`, NIE 1 - I TO NIE JEST KOSMETYKA.
-            #
-            # Kolumna liczy okna, w ktorych ta konfiguracja MA policzony wynik
-            # OOS. W chwili INSERT-u nie ma go jeszcze zadna: kandydat jest
-            # dopiero oceniony na oknie TRENINGOWYM. Wpisana jedynka twierdzila,
-            # ze jedno okno OOS juz policzono, przy `oos_sharpe` rownym NULL -
-            # czyli dwie kolumny tego samego wiersza mowily co innego. Przez to
-            # ani nie dalo sie uzyc `n_windows` jako dzielnika do sredniej, ani
-            # odroznic "nie policzono" od "policzono i wyszlo nic".
-            #
-            # Historyczne 16 050 wierszy poprawia migracja 0061.
-
-        # WARIANT WYBORU. Domyslny `argmax` bierze najlepszego z trials_per_window
-        # losowan, zalozen poczatkowych i wag z IC - czyli MAKSIMUM Z PROBKI.
-        # Maksimum z probki jest na oknie treningowym zawyzone o klatwe zwyciezcy
-        # i tym bardziej, im wiecej losowan; poza oknem to zawyzenie znika, wiec
-        # samo "wygral kandydat X" nic nie mowi o jego wartosci.
+        # Kolumna liczy okna, w ktorych ta konfiguracja MA policzony wynik
+        # OOS. W chwili INSERT-u nie ma go jeszcze zadna: kandydat jest
+        # dopiero oceniony na oknie TRENINGOWYM. Wpisana jedynka twierdzila,
+        # ze jedno okno OOS juz policzono, przy `oos_sharpe` rownym NULL -
+        # czyli dwie kolumny tego samego wiersza mowily co innego. Przez to
+        # ani nie dalo sie uzyc `n_windows` jako dzielnika do sredniej, ani
+        # odroznic "nie policzono" od "policzono i wyszlo nic".
         #
-        # `ic` i `bazowe` nie wybieraja niczego - biora jeden kandydat wyliczony
-        # albo ustalony z gory - wiec nie maja czego zawyzac. Roznica OOS miedzy
-        # wariantami na TYCH SAMYCH oknach, progach i bramkach jest jedynym
-        # uczciwym pomiarem tego, czy losowe przeszukiwanie cokolwiek wnosi.
-        if wybor == "bazowe":
-            best_w = bazowe
-            zapisz_hipoteze(bazowe)
-        elif wybor == "ic":
-            best_w = ic_weights(train_slices, cache_tr, martwe)
-            zapisz_hipoteze(best_w)
+        # Historyczne 16 050 wierszy poprawia migracja 0061.
+    return zapisz_hipoteze
+
+
+def kandydat_wag(train_slices: dict[str, list[dict]], cache_tr: dict, martwe: set[str],
+                 wybor: str, *, bazowe: dict[str, dict[str, float]], ocen,
+                 zapisz_hipoteze, rng: random.Random,
+                 trials_per_window: int) -> tuple[dict[str, dict[str, float]], int]:
+    """Wagi na jedno okno, dobrane WYLACZNIE na oknie treningowym.
+
+    Zwraca (wagi, 1 gdy wygraly wagi z IC, inaczej 0). `ocen(w, wycinki, cache)`
+    to symulacja portfela na oknie treningowym, `zapisz_hipoteze(w)` liczy
+    kazdego ocenionego kandydata do `learn.hypothesis_trial`.
+    """
+    wybrane_ic = 0
+    # WARIANT WYBORU. Domyslny `argmax` bierze najlepszego z trials_per_window
+    # losowan, zalozen poczatkowych i wag z IC - czyli MAKSIMUM Z PROBKI.
+    # Maksimum z probki jest na oknie treningowym zawyzone o klatwe zwyciezcy
+    # i tym bardziej, im wiecej losowan; poza oknem to zawyzenie znika, wiec
+    # samo "wygral kandydat X" nic nie mowi o jego wartosci.
+    #
+    # `ic` i `bazowe` nie wybieraja niczego - biora jeden kandydat wyliczony
+    # albo ustalony z gory - wiec nie maja czego zawyzac. Roznica OOS miedzy
+    # wariantami na TYCH SAMYCH oknach, progach i bramkach jest jedynym
+    # uczciwym pomiarem tego, czy losowe przeszukiwanie cokolwiek wnosi.
+    if wybor == "bazowe":
+        best_w = bazowe
+        zapisz_hipoteze(bazowe)
+    elif wybor == "ic":
+        best_w = ic_weights(train_slices, cache_tr, martwe)
+        zapisz_hipoteze(best_w)
+        wybrane_ic += 1
+    else:
+        best_w, best_score = DEFAULT_WEIGHTS, -1e9
+        for _ in range(trials_per_window):
+            cand = _bez_martwych(random_weights(rng), martwe)
+            score = ocen(cand, train_slices, cache_tr)["sharpe"]
+            zapisz_hipoteze(cand)
+            if score > best_score:
+                best_w, best_score = cand, score
+
+        # Zalozenia poczatkowe tez sa kandydatem - jesli losowanie nie potrafi ich
+        # pobic na oknie treningowym, to znaczy, ze nie ma czego kalibrowac.
+        base_score = ocen(bazowe, train_slices, cache_tr)["sharpe"]
+        # ZALOZENIA POCZATKOWE TEZ SA PROBA I TEZ MUSZA BYC POLICZONE.
+        # `ocen` wlasnie je przetestowal i wynik bierze udzial w wyborze,
+        # a `zapisz_hipoteze` bylo tu jedynym pominietym wywolaniem - przez
+        # co licznik ZANIZAL liczbe prob. Zanizony licznik podnosi deflowany
+        # Sharpe (mniejsza poprzeczka selekcji), czyli ulatwia bramke: nie
+        # jest to zaniedbanie kosmetyczne, tylko w zla strone.
+        zapisz_hipoteze(bazowe)
+        if base_score > best_score:
+            best_w, best_score = bazowe, base_score
+
+        # Kandydat WYLICZONY, nie wylosowany: wagi proporcjonalne do zdolnosci
+        # predykcyjnej sygnalow na tym oknie. Patrz komentarz przy ic_weights().
+        ic_w = ic_weights(train_slices, cache_tr, martwe)
+        ic_score = ocen(ic_w, train_slices, cache_tr)["sharpe"]
+        zapisz_hipoteze(ic_w)
+        if ic_score > best_score:
+            best_w, best_score = ic_w, ic_score
             wybrane_ic += 1
-        else:
-            best_w, best_score = DEFAULT_WEIGHTS, -1e9
-            for _ in range(trials_per_window):
-                cand = _bez_martwych(random_weights(rng), martwe)
-                score = ocen(cand, train_slices, cache_tr)["sharpe"]
-                zapisz_hipoteze(cand)
-                if score > best_score:
-                    best_w, best_score = cand, score
+    return best_w, wybrane_ic
 
-            # Zalozenia poczatkowe tez sa kandydatem - jesli losowanie nie potrafi ich
-            # pobic na oknie treningowym, to znaczy, ze nie ma czego kalibrowac.
-            base_score = ocen(bazowe, train_slices, cache_tr)["sharpe"]
-            # ZALOZENIA POCZATKOWE TEZ SA PROBA I TEZ MUSZA BYC POLICZONE.
-            # `ocen` wlasnie je przetestowal i wynik bierze udzial w wyborze,
-            # a `zapisz_hipoteze` bylo tu jedynym pominietym wywolaniem - przez
-            # co licznik ZANIZAL liczbe prob. Zanizony licznik podnosi deflowany
-            # Sharpe (mniejsza poprzeczka selekcji), czyli ulatwia bramke: nie
-            # jest to zaniedbanie kosmetyczne, tylko w zla strone.
-            zapisz_hipoteze(bazowe)
-            if base_score > best_score:
-                best_w, best_score = bazowe, base_score
 
-            # Kandydat WYLICZONY, nie wylosowany: wagi proporcjonalne do zdolnosci
-            # predykcyjnej sygnalow na tym oknie. Patrz komentarz przy ic_weights().
-            ic_w = ic_weights(train_slices, cache_tr, martwe)
-            ic_score = ocen(ic_w, train_slices, cache_tr)["sharpe"]
-            zapisz_hipoteze(ic_w)
-            if ic_score > best_score:
-                best_w, best_score = ic_w, ic_score
-                wybrane_ic += 1
+@dataclass
+class Metryki:
+    """Wynik OOS jednego okna. `pusty` = symulacja bez krzywej kapitalu
+    (okno pominiete, ale jego wypelnienia licza sie do wypelnialnosci)."""
+    oos_brutto: object
+    oos_res: object
+    oos_m: dict
+    oos_m_brutto: dict
+    pusty: bool = False
+    n_trades: int = 0
+    informative: bool = False
+    agg: dict = field(default_factory=dict)
+    ekspozycja_por: float = 0.0
+    odn_okna: dict = field(default_factory=dict)
+    bije_okna: dict = field(default_factory=dict)
+    dominant: str | None = None
+    odniesienie: float = 0.0
+    odniesienie_brutto: float = 0.0
+    ekspozycja: float = 0.0
+    odniesienie_dop: float = 0.0
+    porownywalne_okno: bool = False
 
-        # --- ocena OUT-OF-SAMPLE --------------------------------------------
-        oos_brutto = simulate_portfolio(
-            {s: v for s, v in test_slices.items() if v}, best_w, thresholds, gates, h,
-            MIN_CONF, instrument_ids=inst_ids, cache=cache_te,
-            kind=kind, egzekucja=egzekucja, zakladane_pozycje=zakladane_pozycje,
-            swiece_wykonania=swiece_wykonania)
-        # OD TEGO MIEJSCA `oos_res` I `oos_m` SA PO DOPLACIE Z KARTY - patrz
-        # komentarz przy `doplata`. Wersja brutto zostaje pod wlasna nazwa
-        # i idzie WYLACZNIE do wydruku oraz do dwoch odbiorcow, ktorzy doplate
-        # odejmuja sami (`werdykt_dsr`, `opis_przewagi`) - patrz nizej.
-        oos_res = wynik_po_doplacie(oos_brutto, doplata)
-        oos_m = portfolio_metrics(oos_res, h.min_trades)
-        oos_m_brutto = portfolio_metrics(oos_brutto, h.min_trades)
-        niewypelnione_oos += oos_m["niewypelnione"]
-        wypelnione_oos += oos_m["wypelnione"]
-        utracone_oos.extend(oos_brutto.utracone_ruchy)
-        brak_swiec_oos += oos_brutto.brak_swiec_wykonania
-        if not oos_res.equity_curve:
-            start += timedelta(days=h.step_days)
-            continue
 
+def ocen_okno(kt: Kontekst, okno: Okno, dane: DaneOkna,
+              best_w: dict[str, dict[str, float]]) -> Metryki:
+    """Ocena OUT-OF-SAMPLE jednego okna wagami `best_w`. Bez zapisow i wydruku."""
+    h, kind, doplata, doplata_odniesienia = kt.h, kt.kind, kt.doplata, kt.doplata_odniesienia
+    test_slices, thresholds, gates = dane.test_slices, dane.thresholds, dane.gates
+    aktywne, test_from, test_to = okno.aktywne, okno.test_from, okno.test_to
+    inst_ids, egzekucja, panels = kt.inst_ids, kt.egzekucja, kt.panels
+    zakladane_pozycje, swiece_wykonania = kt.zakladane_pozycje, kt.swiece_wykonania
+    cache_te, karta = dane.cache_te, kt.karta
+    # --- ocena OUT-OF-SAMPLE --------------------------------------------
+    oos_brutto = simulate_portfolio(
+        {s: v for s, v in test_slices.items() if v}, best_w, thresholds, gates, h,
+        MIN_CONF, instrument_ids=inst_ids, cache=cache_te,
+        kind=kind, egzekucja=egzekucja, zakladane_pozycje=zakladane_pozycje,
+        swiece_wykonania=swiece_wykonania)
+    # OD TEGO MIEJSCA `oos_res` I `oos_m` SA PO DOPLACIE Z KARTY - patrz
+    # komentarz przy `doplata`. Wersja brutto zostaje pod wlasna nazwa
+    # i idzie WYLACZNIE do wydruku oraz do dwoch odbiorcow, ktorzy doplate
+    # odejmuja sami (`werdykt_dsr`, `opis_przewagi`) - patrz nizej.
+    oos_res = wynik_po_doplacie(oos_brutto, doplata)
+    oos_m = portfolio_metrics(oos_res, h.min_trades)
+    oos_m_brutto = portfolio_metrics(oos_brutto, h.min_trades)
+    if not oos_res.equity_curve:
+        return Metryki(oos_brutto, oos_res, oos_m, oos_m_brutto, pusty=True)
+    # Transakcje pochodza z JEDNEJ symulacji portfela, wiec sa juz wspolne
+    # dla wszystkich instrumentow i podlegaly wspolnym limitom.
+    #
+    # ZASTRZEZENIE, ktore trzeba czytac razem z wynikiem: instrumenty krypto
+    # sa silnie skorelowane, wiec te transakcje nie sa niezalezne. Efektywna
+    # liczba obserwacji jest MNIEJSZA niz ich liczba, a istotnosc
+    # statystyczna odpowiednio nizsza, niz sugerowalby sam licznik.
+    n_trades = oos_m["n_trades"]
+    informative = not oos_m.get("insufficient")
+    agg = {k: oos_m[k] for k in
+           ("sharpe", "sortino", "max_dd", "hit_rate", "avg_r", "profit_factor")}
+    # ZNACZNIK MIARY: dopłata, przy której policzono miary tego okna.
+    #
+    # Od 2026-10-02 miary okna są PO dopłacie z karty, wcześniej brutto.
+    # Wiersz `learn.learning_state_log` nie ma kolumny, która by to mówiła,
+    # więc `dozor.miara_przebiegu` czyta ją stąd (przez `model_version_id`
+    # -> `training_run` -> `wf_window`). Brak tej metryki = przebieg sprzed
+    # zmiany; zero = ta sama liczba co brutto. Dozór porównuje wyłącznie
+    # przebiegi liczone tą samą miarą - inaczej pierwszy przebieg po
+    # wdrożeniu zgłaszałby „zmianę znaku mediany", która jest zmianą
+    # definicji, nie rynku.
+    #
+    # Plus DRUGI znacznik: czy spread w karcie byl w ogole zmierzony. Bez
+    # niego doplata zero z powodu luki w `book_snapshot` (`zmierz_spread`
+    # oddaje `bps=None`) byla nieodroznialna od przebiegu brutto - patrz
+    # `znacznik_miary`.
+    agg.update(znacznik_miary(karta))
+    # SIODMA MIARA NA OKNO: odsetek transakcji bedacych POWROTEM w ten sam
+    # instrument ponizej trzech swiec po wyjsciu z niego. NIE jest to
+    # czestotliwosc handlu - patrz `portfolio.udzial_powtornych_wejsc`.
+    #
+    # Liczona dla KAZDEGO okna, nie tylko dla `range`: bez wartosci
+    # w pozostalych rezimach nie ma z czym porownac i liczba nie rozstrzyga
+    # niczego. Przy oknie bez transakcji NIE zapisujemy zera - zero znaczy
+    # "zmierzono i wyszlo zero", a tu nie ma czego mierzyc.
+    powtorne = udzial_powtornych_wejsc(oos_res.trades, h.bar_minutes)
+    if powtorne is not None:
+        agg["udzial_powtornych_wejsc"] = powtorne
+    # ODNIESIENIA B0-B3 NA TYM SAMYM OKNIE (audyt Fable R3 / T5). Ekspozycja
+    # strategii to `ekspozycja_przenoszona` - kazdy przedzial, przez ktory
+    # pozycja niesie cene, raz (patrz `PortfolioResult`). Kolumny `bije_b*`
+    # ida do `learn.wf_metric` jako 1/0; brak porownania = brak wiersza.
+    ekspozycja_por = oos_m["ekspozycja_przenoszona"]
+    odn_okna = odniesienia.odniesienia_okna(
+        {s: panels[s] for s in aktywne}, test_from, test_to,
+        h.bar_minutes, kind, doplata_odniesienia)
+    bije_okna: dict[str, bool | None] = {}
+    for nazwa in ("B1", "B2", "B3"):
+        b = odniesienia.bije(oos_m["total_return"], ekspozycja_por, odn_okna[nazwa])
+        bije_okna[nazwa] = b if informative else None
+        if bije_okna[nazwa] is not None:
+            agg[f"bije_{nazwa.lower()}"] = 1.0 if b else 0.0
+    for nazwa in ("B2", "B3"):
+        if odn_okna[nazwa] is not None:
+            agg[f"{nazwa.lower()}_zwrot"] = odn_okna[nazwa].zwrot
+            agg[f"{nazwa.lower()}_ekspozycja"] = odn_okna[nazwa].ekspozycja
+    step = max(1, len(next(iter(test_slices.values()), [])) // 50)
+    regimes = [classify_regime(r["f"], thresholds[s])[0]
+               for s in aktywne for r in test_slices[s][::step]]
+    dominant = rezim_dominujacy(regimes)
+    odniesienie = kup_i_trzymaj({s: v for s, v in test_slices.items() if v}, kind,
+                                doplata=doplata_odniesienia)
+    odniesienie_brutto = kup_i_trzymaj({s: v for s, v in test_slices.items() if v},
+                                       kind)
+    # ODNIESIENIE DOPASOWANE EKSPOZYCJA - uzasadnienie przy `bije_odniesienie`.
+    # Kup-i-trzymaj angazuje caly kapital przez cale okno; strategia
+    # srednio `ekspozycja` jego czesci. Zwrot z kupienia i trzymania
+    # jest w wielkosci pozycji liniowy, wiec czesc `f` kapitalu
+    # w tym samym koszyku (reszta w gotowce) zarobilaby dokladnie
+    # `f * odniesienie`. To jest kontrfaktyczny wynik przy TYM SAMYM
+    # zaangazowaniu i dopiero z nim porownanie mowi cokolwiek
+    # o umiejetnosci.
+    #
+    # POROWNANIE JEST WOLNE OD SKALI, a nie zlagodzone. Zwrot z konta jest
+    # w wielkosci pozycji liniowy po obu stronach: przy ekspozycji `f`
+    # strategia zarabia `f` razy tyle, co przy pelnej, i odniesienie tak
+    # samo. Warunek `r > f * bh` to dokladnie `r/f > bh` - "czy zloty
+    # zaangazowany przez strategie zarobil wiecej niz zloty wlozony
+    # w koszyk". Malejaca ekspozycja skraca obie strony jednakowo, wiec
+    # nie da sie tego warunku przejsc samym zmniejszeniem pozycji.
+    # EKSPOZYCJA DO POROWNANIA = PRZENOSZONA, nie `avg_exposure`
+    # (2026-10-03, audyt Fable F-3.5): `avg_exposure` gubi po jednym
+    # przedziale na transakcje, takze na domknieciu koncem okna, czyli
+    # zanizala koszyk „przy tej samej ekspozycji" na korzysc strategii.
+    # `ekspozycja` (stara miara) zostaje w rozkladzie na czynniki, ktory
+    # sie na niej zamyka.
+    ekspozycja = oos_m["avg_exposure"]
+    odniesienie_dop = odniesienie * ekspozycja_por
+    # Okno bez ani jednej swiecy z pozycja nie ma czego porownywac:
+    # odniesienie dopasowane bylo by zerem, ktore "pokonuje" kazdy dodatni
+    # zwrot. Zwykle idzie to w parze z brakiem transakcji, ale nie musi -
+    # pozycja otwarta i zamknieta miedzy dwiema swiecami nie zdazy trafic
+    # do pomiaru ekspozycji, a transakcje do dziennika juz tak.
+    #
+    # Wyklucza to okno WYLACZNIE z porownania z odniesieniem. Do odsetka
+    # dodatnich okien liczy sie dalej, bo tam zerowa ekspozycja niczego
+    # nie psuje - a ciche wypadniecie okna z dwoch miar naraz bylo by
+    # trudniejsze do zauwazenia niz z jednej.
+    porownywalne_okno = informative and ekspozycja_por > 0.0
+    return Metryki(oos_brutto, oos_res, oos_m, oos_m_brutto, False, n_trades,
+                   informative, agg, ekspozycja_por, odn_okna, bije_okna, dominant,
+                   odniesienie, odniesienie_brutto, ekspozycja, odniesienie_dop,
+                   porownywalne_okno)
+
+
+class Przebieg:
+    """Liczniki i listy zbierane okno po oknie przez caly walk-forward."""
+
+    def __init__(self):
+        self.positive = 0
+        # HISTORIA PROGOW PER REZIM: rezim -> lista progow z kolejnych okien.
+        # Produkcja dostaje z tego MEDIANE OSOBNO DLA KAZDEGO REZIMU. Jedna
+        # wspolna lista (tak bylo do 2026-09-27) mieszala progi z rozlacznych
+        # skal i jej mediana nie byla percentylem zadnego z nich.
+        self.historia_bramek: dict[str, list[float]] = {}
+        # W ilu oknach rezim NIE dostal progu, bo proba byla za mala. Liczba
+        # potrzebna w podsumowaniu: rezim bez progu nie handluje, a to musi byc
+        # widoczne jako decyzja, nie jako cisza.
+        self.okna_bez_progu: dict[str, int] = {}
+        self.weight_history: list[dict] = []
+        # Rownolegla do weight_history: ktore sygnaly byly martwe w danym oknie.
+        # Bez tego zero po martwym sygnale nie da sie odroznic od zera zmierzonego.
+        self.martwe_w_oknie: list[set[str]] = []
+        self.wybrane_ic = 0
+        # Porownanie z nierobieniem niczego. Bez tego odsetek dodatnich okien nie
+        # mowi, czy strategia jest LEPSZA od kupienia i trzymania - a strategia
+        # wylacznie dluga na rosnacym rynku ma duzo dodatnich okien z samej bety.
+        self.pokonane_odniesienie = 0
+        self.pokonane_pelne = 0        # przy odniesieniu 100% zaangazowanym - do raportu
+        # BRUTTO, czyli przed doplata - wylacznie do wydruku obok miar po doplacie
+        # z karty. Do bramki nie wchodzi zadna z tych liczb.
+        self.positive_brutto = 0
+        # Zlecenia z limitem, ktore w symulacji OOS NIE weszly (wejscia + wyjscia).
+        # Do wydruku obok karty: niewypelnienie w karcie jest NIEZMIERZONE jako
+        # koszt, a ta liczba mowi przynajmniej, jak czesto symulacja go ponosi.
+        self.niewypelnione_oos = 0
+        # Mianownik wypelnialnosci i material na skladnik `niewypelnienie` karty.
+        self.wypelnione_oos = 0
+        self.utracone_oos: list[float] = []
+        self.brak_swiec_oos = 0
+        # ODNIESIENIA B0-B3 (`baseline.py`): {nazwa: [pobite, porownywalne]}.
+        self.bije_odn: dict[str, list[int]] = {n: [0, 0] for n in ("B1", "B2", "B3")}
+        self.b0_dodatnie = [0, 0]      # [zwrot > 0, okna]
+        # Zwrot (% kapitalu) i ekspozycja strategii oraz odniesien w oknach
+        # informatywnych - do podsumowania: same „bije/nie bije" nie mowia, czy
+        # odniesienie zarabia, czy tylko strategia traci mniej.
+        self.przebieg_odn: dict[str, list[tuple[float, float]]] = {
+            n: [] for n in ("strategia", "B1", "B2", "B3")}
+        self.b0_4_pobite = 0
+        # Zwrot na runde PO DOPLACIE per okno - do tabeli STOP/GO.
+        self.all_sharpes_brutto: list[float] = []
+        self.pokonane_odniesienie_brutto = 0
+        self.ekspozycje: list[float] = []
+        self.zwroty_okien: list[float] = []
+        self.rozklad: list[dict] = []          # czynniki ekspozycji, okno po oknie
+        # Ile transakcji przypadlo kazdemu instrumentowi. Uniwersum ma tyle miejsc,
+        # ile instrumentow, ale kandydaci konkuruja o wspolny kapital i sa sortowani
+        # PO SILE SYGNALU - wiec instrument o mocniejszych sygnalach moze wypchnac
+        # pozostale. Bez tej liczby "dolozylismy instrumenty" i "handlujemy tymi
+        # instrumentami" wygladaja tak samo.
+        self.udzial_instrumentu: dict[str, int] = {}
+        # Sharpe policzony OSOBNO dla kazdej grupy instrumentow, w tym samym oknie
+        # i tym samym przebiegu. {grupa: [sharpe okno po oknie]}
+        #
+        # PYTANIE, NA KTORE TO ODPOWIADA. Dwa uniwersa maja osobno mediane Sharpe
+        # okolo +0,11, a ich suma +0,011. Cztery naturalne wyjasnienia zostaly
+        # obalone pomiarem (docs/03). Zostaje jedno miejsce: `Sharpe/transakcje`
+        # w oknie to SREDNIA DZIELONA PRZEZ ODCHYLENIE po wszystkich transakcjach
+        # tego okna - a grupy o roznej zmiennosci wrzucone do jednej takiej
+        # statystyki daja wynik, ktory nie jest srednia ich wynikow.
+        #
+        # Jesli grupy liczone osobno W TYM SAMYM PRZEBIEGU maja nadal ~+0,11,
+        # to znaczy, ze transakcje sa w porzadku, a zalamuje sie MIARA. Jesli
+        # rowniez spadaja - to zmienil sie zestaw transakcji, czyli konstrukcja
+        # portfela, i szukac trzeba tam.
+        self.sharpe_grup: dict[str, list[float]] = {}
+        self.porownywalne = 0
+        self.all_sharpes: list[float] = []
+        # Sharpe OOS per KONFIGURACJA (odcisk wektora wag) - material na V[SR_n]
+        # Baileya. Zbierany w pamieci i dopisywany do `learn.hypothesis_trial`
+        # po calym walk-forwardzie, a nie okno po oknie: ta sama konfiguracja moze
+        # wygrac w kilku oknach i wtedy `oos_sharpe` ma byc ich SREDNIA, a nie
+        # wartoscia z ostatniego okna, ktore ja nadpisalo.
+        self.oos_wg_konfiguracji: dict[bytes, list[float]] = {}
+        # Zwroty WSZYSTKICH transakcji OOS, nie usrednione po oknach - patrz
+        # `podsumowanie_przewagi`.
+        self.wszystkie_zwroty: list[float] = []
+        self.transakcje_stron: list[tuple[float, int, str]] = []
+        self.transakcje_pokrycia: list[tuple[float, float, str]] = []
+        # To samo rozbite na okna: potrzebne, zeby przeliczyc srednia PO OKNACH
+        # przy doliczonym koszcie. Sama lista Sharpe'ow tego nie pozwala.
+        self.zwroty_okien_transakcje: list[list[float]] = []
+        self.worst_dd = 0.0
+        self.predictions: list[tuple[float, bool]] = []
+
+    def dodaj_wypelnienia(self, m: Metryki) -> None:
+        z = self
+        z.niewypelnione_oos += m.oos_m["niewypelnione"]
+        z.wypelnione_oos += m.oos_m["wypelnione"]
+        z.utracone_oos.extend(m.oos_brutto.utracone_ruchy)
+        z.brak_swiec_oos += m.oos_brutto.brak_swiec_wykonania
+
+    def dodaj(self, m: Metryki, okno: Okno, h: Horizon,
+              waluta_symbolu: dict[str, str], best_w: dict) -> None:
+        z = self
+        oos_m, oos_m_brutto, oos_res, oos_brutto = m.oos_m, m.oos_m_brutto, m.oos_res, m.oos_brutto
+        informative, agg, odn_okna, dominant = m.informative, m.agg, m.odn_okna, m.dominant
+        ekspozycja_por, porownywalne_okno, ekspozycja = m.ekspozycja_por, m.porownywalne_okno, m.ekspozycja
+        odniesienie, odniesienie_brutto = m.odniesienie, m.odniesienie_brutto
+        odniesienie_dop, aktywne = m.odniesienie_dop, okno.aktywne
         # SHARPE OOS KANDYDATA - TUTAJ I TYLKO TUTAJ JEST ZNANY.
         #
         # `zapisz_hipoteze` wola sie wyzej, w momencie, w ktorym znany jest
@@ -2796,83 +3068,29 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
         # `sharpe` moze byc None przy oknie o jednej transakcji - wtedy nie ma
         # czego zapisac i nie zapisujemy zera.
         if oos_m.get("sharpe") is not None and not oos_m.get("insufficient"):
-            oos_wg_konfiguracji.setdefault(
+            z.oos_wg_konfiguracji.setdefault(
                 _hash_konfiguracji(best_w), []).append(oos_m["sharpe"])
-        # Transakcje pochodza z JEDNEJ symulacji portfela, wiec sa juz wspolne
-        # dla wszystkich instrumentow i podlegaly wspolnym limitom.
-        #
-        # ZASTRZEZENIE, ktore trzeba czytac razem z wynikiem: instrumenty krypto
-        # sa silnie skorelowane, wiec te transakcje nie sa niezalezne. Efektywna
-        # liczba obserwacji jest MNIEJSZA niz ich liczba, a istotnosc
-        # statystyczna odpowiednio nizsza, niz sugerowalby sam licznik.
-        n_trades = oos_m["n_trades"]
-        informative = not oos_m.get("insufficient")
-        agg = {k: oos_m[k] for k in
-               ("sharpe", "sortino", "max_dd", "hit_rate", "avg_r", "profit_factor")}
-        # ZNACZNIK MIARY: dopłata, przy której policzono miary tego okna.
-        #
-        # Od 2026-10-02 miary okna są PO dopłacie z karty, wcześniej brutto.
-        # Wiersz `learn.learning_state_log` nie ma kolumny, która by to mówiła,
-        # więc `dozor.miara_przebiegu` czyta ją stąd (przez `model_version_id`
-        # -> `training_run` -> `wf_window`). Brak tej metryki = przebieg sprzed
-        # zmiany; zero = ta sama liczba co brutto. Dozór porównuje wyłącznie
-        # przebiegi liczone tą samą miarą - inaczej pierwszy przebieg po
-        # wdrożeniu zgłaszałby „zmianę znaku mediany", która jest zmianą
-        # definicji, nie rynku.
-        #
-        # Plus DRUGI znacznik: czy spread w karcie byl w ogole zmierzony. Bez
-        # niego doplata zero z powodu luki w `book_snapshot` (`zmierz_spread`
-        # oddaje `bps=None`) byla nieodroznialna od przebiegu brutto - patrz
-        # `znacznik_miary`.
-        agg.update(znacznik_miary(karta))
-        # SIODMA MIARA NA OKNO: odsetek transakcji bedacych POWROTEM w ten sam
-        # instrument ponizej trzech swiec po wyjsciu z niego. NIE jest to
-        # czestotliwosc handlu - patrz `portfolio.udzial_powtornych_wejsc`.
-        #
-        # Liczona dla KAZDEGO okna, nie tylko dla `range`: bez wartosci
-        # w pozostalych rezimach nie ma z czym porownac i liczba nie rozstrzyga
-        # niczego. Przy oknie bez transakcji NIE zapisujemy zera - zero znaczy
-        # "zmierzono i wyszlo zero", a tu nie ma czego mierzyc.
-        powtorne = udzial_powtornych_wejsc(oos_res.trades, h.bar_minutes)
-        if powtorne is not None:
-            agg["udzial_powtornych_wejsc"] = powtorne
-        # ODNIESIENIA B0-B3 NA TYM SAMYM OKNIE (audyt Fable R3 / T5). Ekspozycja
-        # strategii to `ekspozycja_przenoszona` - kazdy przedzial, przez ktory
-        # pozycja niesie cene, raz (patrz `PortfolioResult`). Kolumny `bije_b*`
-        # ida do `learn.wf_metric` jako 1/0; brak porownania = brak wiersza.
-        ekspozycja_por = oos_m["ekspozycja_przenoszona"]
-        odn_okna = odniesienia.odniesienia_okna(
-            {s: panels[s] for s in aktywne}, test_from, test_to,
-            h.bar_minutes, kind, doplata_odniesienia)
-        bije_okna: dict[str, bool | None] = {}
         for nazwa in ("B1", "B2", "B3"):
-            b = odniesienia.bije(oos_m["total_return"], ekspozycja_por, odn_okna[nazwa])
-            bije_okna[nazwa] = b if informative else None
-            if bije_okna[nazwa] is not None:
-                agg[f"bije_{nazwa.lower()}"] = 1.0 if b else 0.0
-                bije_odn[nazwa][1] += 1
-                bije_odn[nazwa][0] += int(b)
-        for nazwa in ("B2", "B3"):
-            if odn_okna[nazwa] is not None:
-                agg[f"{nazwa.lower()}_zwrot"] = odn_okna[nazwa].zwrot
-                agg[f"{nazwa.lower()}_ekspozycja"] = odn_okna[nazwa].ekspozycja
+            if m.bije_okna.get(nazwa) is not None:
+                z.bije_odn[nazwa][1] += 1
+                z.bije_odn[nazwa][0] += int(m.bije_okna[nazwa])
         if informative:
-            przebieg_odn["strategia"].append((oos_m["total_return"], ekspozycja_por))
+            z.przebieg_odn["strategia"].append((oos_m["total_return"], ekspozycja_por))
             for nazwa in ("B1", "B2", "B3"):
                 if odn_okna[nazwa] is not None:
-                    przebieg_odn[nazwa].append((odn_okna[nazwa].zwrot,
+                    z.przebieg_odn[nazwa].append((odn_okna[nazwa].zwrot,
                                                 odn_okna[nazwa].ekspozycja))
-            b0_dodatnie[1] += 1
-            b0_dodatnie[0] += int(oos_m["total_return"] > 0)
-            b0_4_pobite += int(oos_m["total_return"] > odn_okna["B0_4"].zwrot)
+            z.b0_dodatnie[1] += 1
+            z.b0_dodatnie[0] += int(oos_m["total_return"] > 0)
+            z.b0_4_pobite += int(oos_m["total_return"] > odn_okna["B0_4"].zwrot)
         if informative:
-            all_sharpes.append(agg["sharpe"])
-            worst_dd = min(worst_dd, agg["max_dd"])
+            z.all_sharpes.append(agg["sharpe"])
+            z.worst_dd = min(z.worst_dd, agg["max_dd"])
             if agg["sharpe"] > 0:
-                positive += 1
-            all_sharpes_brutto.append(oos_m_brutto["sharpe"])
+                z.positive += 1
+            z.all_sharpes_brutto.append(oos_m_brutto["sharpe"])
             if oos_m_brutto["sharpe"] > 0:
-                positive_brutto += 1
+                z.positive_brutto += 1
             # ZLACZONA PROBA WSZYSTKICH TRANSAKCJI OOS.
             #
             # `all_sharpes` zbiera ILORAZY policzone osobno w kazdym oknie,
@@ -2886,20 +3104,19 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
             # `koszty.zwroty_po_doplacie`, i podaja ja w opisie. Lista juz po
             # doplacie odjelaby ja tam drugi raz.
             zwroty_okna = [t["ret"] for t in oos_brutto.trades]
-            wszystkie_zwroty.extend(zwroty_okna)
+            z.wszystkie_zwroty.extend(zwroty_okna)
             # ROZBITE NA OKNA, a nie tylko zlaczone - zeby te sama miare, ktora
             # raport podaje dzis (srednia po oknach), dalo sie PRZELICZYC po
             # doliczeniu kosztu. Bez tego „przed" i „po" byloby liczone dwiema
             # roznymi miarami i roznica nie znaczylaby nic.
-            zwroty_okien_transakcje.append(zwroty_okna)
-
+            z.zwroty_okien_transakcje.append(zwroty_okna)
         # Kalibracja: deklarowana PRZED wejsciem pewnosc kontra faktyczny wynik.
         # Wczesniejsza wersja budowala "prognoze" z wielkosci samego zwrotu
         # (abs(t) * 50 + 0.5), czyli z rzeczy znanej dopiero po fakcie - wykres
         # kalibracji mierzyl wtedy wlasny wynik i zawsze wygladal dobrze.
         for t in oos_res.trades:
-            predictions.append((t["conf"], t["ret"] > 0))
-            udzial_instrumentu[t["symbol"]] = udzial_instrumentu.get(t["symbol"], 0) + 1
+            z.predictions.append((t["conf"], t["ret"] > 0))
+            z.udzial_instrumentu[t["symbol"]] = z.udzial_instrumentu.get(t["symbol"], 0) + 1
 
         # Grupujemy po walucie kwotowanej: to samo, co dzieli uniwersum
         # decyzyjne (USDC) od reszty historii (USDT), bez zadnej nowej flagi.
@@ -2913,13 +3130,7 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
                 if len(rety) < h.min_trades:
                     continue
                 sd = max(statistics.pstdev(rety), 1e-9)
-                sharpe_grup.setdefault(grupa, []).append(statistics.fmean(rety) / sd)
-
-        step = max(1, len(next(iter(test_slices.values()), [])) // 50)
-        regimes = [classify_regime(r["f"], thresholds[s])[0]
-                   for s in aktywne for r in test_slices[s][::step]]
-        dominant = rezim_dominujacy(regimes)
-
+                z.sharpe_grup.setdefault(grupa, []).append(statistics.fmean(rety) / sd)
         # STRONA I REZIM PRZY KAZDEJ TRANSAKCJI - material na `opis_stron`.
         #
         # STOI TU, A NIE WYZEJ PRZY `wszystkie_zwroty`, I TO JEST CALY POWOD:
@@ -2936,28 +3147,30 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
         # probe - inaczej Sharpe stron nie skladalby sie do Sharpe'a calosci
         # i dwie liczby w jednym raporcie mowilyby o dwoch roznych probach.
         if informative:
-            transakcje_stron.extend(
+            z.transakcje_stron.extend(
                 (t["ret"], int(t.get("side", 1)), dominant or "(reżim nieznany)")
                 for t in oos_res.trades)
             # OSOBNA LISTA, A NIE CZWARTY ELEMENT TAMTEJ KROTKI: `opis_stron`
             # i `opis_pokrycia` odpowiadaja na rozne pytania i maja rozne testy;
             # wspolna krotka wiazalaby je tak, ze zmiana jednej psulaby druga.
-            transakcje_pokrycia.extend(
+            z.transakcje_pokrycia.extend(
                 (t["ret"], float(t.get("pokrycie", 1.0)),
                  dominant or "(reżim nieznany)") for t in oos_res.trades)
+        if porownywalne_okno:
+            z.porownywalne += 1
+            z.ekspozycje.append(ekspozycja)
+            z.zwroty_okien.append(oos_m["total_return"])
+            z.rozklad.append(probka_rozkladu(oos_m, len(aktywne)))
+            if oos_m["total_return"] > odniesienie_dop:
+                z.pokonane_odniesienie += 1
+            if oos_m["total_return"] > odniesienie:
+                z.pokonane_pelne += 1
+            # Ta sama ekspozycja - doplata nie zmienia ani jednej pozycji.
+            if oos_m_brutto["total_return"] > odniesienie_brutto * ekspozycja_por:
+                z.pokonane_odniesienie_brutto += 1
 
-        if not sucho:
-            cur.execute(
-                "INSERT INTO learn.wf_window (training_run_id, idx, train_from, train_to,"
-                " test_from, test_to, n_trades, dominant_regime)"
-                " VALUES (%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",
-                (run_id, idx, train_from, train_to, test_from, test_to, n_trades, dominant))
-            w_id = cur.fetchone()["id"]
-            cur.executemany(
-                "INSERT INTO learn.wf_metric (wf_window_id, metric, value) VALUES (%s,%s,%s)",
-                [(w_id, k, round(v, 4)) for k, v in agg.items()])
-            conn.commit()
-
+    def dodaj_progi(self, gates: Bramki, best_w: dict, martwe: set[str]) -> None:
+        z = self
         for rezim in REGIMES:
             prog_rezimu = gates.wejscie(rezim)
             if prog_rezimu is None:
@@ -2965,105 +3178,76 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
                 # Rezim, ktorego w oknie nie bylo wcale, nie jest brakiem
                 # kalibracji i do tego licznika nie wchodzi.
                 if gates.prob.get(rezim):
-                    okna_bez_progu[rezim] = okna_bez_progu.get(rezim, 0) + 1
+                    z.okna_bez_progu[rezim] = z.okna_bez_progu.get(rezim, 0) + 1
                 continue
-            historia_bramek.setdefault(rezim, []).append(prog_rezimu)
-        weight_history.append(best_w)
-        martwe_w_oknie.append(martwe)
+            z.historia_bramek.setdefault(rezim, []).append(prog_rezimu)
+        z.weight_history.append(best_w)
+        z.martwe_w_oknie.append(martwe)
 
-        odniesienie = kup_i_trzymaj({s: v for s, v in test_slices.items() if v}, kind,
-                                    doplata=doplata_odniesienia)
-        odniesienie_brutto = kup_i_trzymaj({s: v for s, v in test_slices.items() if v},
-                                           kind)
-        # ODNIESIENIE DOPASOWANE EKSPOZYCJA - uzasadnienie przy `bije_odniesienie`.
-        # Kup-i-trzymaj angazuje caly kapital przez cale okno; strategia
-        # srednio `ekspozycja` jego czesci. Zwrot z kupienia i trzymania
-        # jest w wielkosci pozycji liniowy, wiec czesc `f` kapitalu
-        # w tym samym koszyku (reszta w gotowce) zarobilaby dokladnie
-        # `f * odniesienie`. To jest kontrfaktyczny wynik przy TYM SAMYM
-        # zaangazowaniu i dopiero z nim porownanie mowi cokolwiek
-        # o umiejetnosci.
-        #
-        # POROWNANIE JEST WOLNE OD SKALI, a nie zlagodzone. Zwrot z konta jest
-        # w wielkosci pozycji liniowy po obu stronach: przy ekspozycji `f`
-        # strategia zarabia `f` razy tyle, co przy pelnej, i odniesienie tak
-        # samo. Warunek `r > f * bh` to dokladnie `r/f > bh` - "czy zloty
-        # zaangazowany przez strategie zarobil wiecej niz zloty wlozony
-        # w koszyk". Malejaca ekspozycja skraca obie strony jednakowo, wiec
-        # nie da sie tego warunku przejsc samym zmniejszeniem pozycji.
-        # EKSPOZYCJA DO POROWNANIA = PRZENOSZONA, nie `avg_exposure`
-        # (2026-10-03, audyt Fable F-3.5): `avg_exposure` gubi po jednym
-        # przedziale na transakcje, takze na domknieciu koncem okna, czyli
-        # zanizala koszyk „przy tej samej ekspozycji" na korzysc strategii.
-        # `ekspozycja` (stara miara) zostaje w rozkladzie na czynniki, ktory
-        # sie na niej zamyka.
-        ekspozycja = oos_m["avg_exposure"]
-        odniesienie_dop = odniesienie * ekspozycja_por
-        # Okno bez ani jednej swiecy z pozycja nie ma czego porownywac:
-        # odniesienie dopasowane bylo by zerem, ktore "pokonuje" kazdy dodatni
-        # zwrot. Zwykle idzie to w parze z brakiem transakcji, ale nie musi -
-        # pozycja otwarta i zamknieta miedzy dwiema swiecami nie zdazy trafic
-        # do pomiaru ekspozycji, a transakcje do dziennika juz tak.
-        #
-        # Wyklucza to okno WYLACZNIE z porownania z odniesieniem. Do odsetka
-        # dodatnich okien liczy sie dalej, bo tam zerowa ekspozycja niczego
-        # nie psuje - a ciche wypadniecie okna z dwoch miar naraz bylo by
-        # trudniejsze do zauwazenia niz z jednej.
-        porownywalne_okno = informative and ekspozycja_por > 0.0
-        if porownywalne_okno:
-            porownywalne += 1
-            ekspozycje.append(ekspozycja)
-            zwroty_okien.append(oos_m["total_return"])
-            rozklad.append(probka_rozkladu(oos_m, len(aktywne)))
-            if oos_m["total_return"] > odniesienie_dop:
-                pokonane_odniesienie += 1
-            if oos_m["total_return"] > odniesienie:
-                pokonane_pelne += 1
-            # Ta sama ekspozycja - doplata nie zmienia ani jednej pozycji.
-            if oos_m_brutto["total_return"] > odniesienie_brutto * ekspozycja_por:
-                pokonane_odniesienie_brutto += 1
-        mark = "" if informative else (f"  (poniżej {h.min_trades} transakcji — "
-                                       "pominięte w ocenie)")
-        if informative:
-            mark += (f"  [strategia {oos_m['total_return']:+.2f}% przy ekspozycji "
-                     f"{ekspozycja_por:.1%} vs kup-i-trzymaj {odniesienie:+.2f}% → "
-                     f"przy tej samej ekspozycji {odniesienie_dop:+.2f}%]"
-                     if porownywalne_okno else
-                     "  [zerowa ekspozycja — poza porównaniem z odniesieniem]")
-        if informative:
-            znak = {True: "tak", False: "nie", None: "—"}
-            mark += "  bije " + " ".join(
-                f"{n}={znak[bije_okna[n]]}" for n in ("B1", "B2", "B3"))
-        if oos_res.killswitch_at:
-            mark += f"  [KILL-SWITCH {oos_res.killswitch_at:%m-%d %H:%M}]"
-        if oos_m["blocked"]:
-            mark += f"  odrzuconych wejść: {oos_m['blocked']}"
-        # POWROTY IDA DO WYDRUKU, A NIE TYLKO DO `learn.wf_metric`.
-        #
-        # Miara istnieje od 2026-09-27 i odpowiada na pytanie, czy EXIT_RATIO
-        # = 0,45 nie wypycha nas z pozycji, w ktora zaraz wracamy. Zapisana
-        # WYLACZNIE do bazy odpowiadalaby na nie dopiero po nocnym przebiegu
-        # i tylko temu, kto zna nazwe metryki - a `--sucho` nie zapisuje nic,
-        # wiec porownanie wariantow (po to `--sucho` jest) tej liczby nie
-        # widzialo wcale. Warunek rozstrzygajacy postawiono ZAWCZASU: udzial
-        # powyzej 40% w oknach `range` o co najmniej 55 transakcjach i ponizej
-        # 15% w `range` o mniej niz 55 - a do jego sprawdzenia potrzebne sa
-        # wartosci PO OKNACH, z rezimem i liczba transakcji w tej samej linii.
-        powroty = (f"  powroty={agg['udzial_powtornych_wejsc']:.0%}"
-                   if "udzial_powtornych_wejsc" in agg else "")
-        # BRUTTO PO `reżim=`, nie przed: `scripts/porownaj_warianty.py` czyta
-        # `Sharpe/transakcję=... transakcje=... reżim=...` jednym wzorcem
-        # (WZOR_OKNA), wiec liczba w nim jest ta po doplacie z karty, a dopisek
-        # trafia do ogona, ktory skrypt tylko przeszukuje.
-        brutto = (f"  [brutto: Sharpe/transakcję={oos_m_brutto['sharpe']:+.4f}, "
-                  f"zwrot {oos_m_brutto['total_return']:+.2f}%]"
-                  if doplata and informative else "")
-        print(f"  okno {idx:>2d}  {test_from:%m-%d}–{test_to:%m-%d}  "
-              f"Sharpe/transakcję={agg['sharpe']:+.4f}  transakcje={n_trades}  "
-              f"reżim={dominant}{powroty}{brutto}{mark}")
-        idx += 1
-        start += timedelta(days=h.step_days)
 
+def zapisz_okno(cur, conn, run_id: int, idx: int, okno: Okno, m: Metryki) -> None:
+    cur.execute(
+        "INSERT INTO learn.wf_window (training_run_id, idx, train_from, train_to,"
+        " test_from, test_to, n_trades, dominant_regime)"
+        " VALUES (%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",
+        (run_id, idx, okno.train_from, okno.train_to, okno.test_from, okno.test_to,
+         m.n_trades, m.dominant))
+    w_id = cur.fetchone()["id"]
+    cur.executemany(
+        "INSERT INTO learn.wf_metric (wf_window_id, metric, value) VALUES (%s,%s,%s)",
+        [(w_id, k, round(v, 4)) for k, v in m.agg.items()])
+    conn.commit()
+
+
+def opis_okna(idx: int, okno: Okno, m: Metryki, h: Horizon, doplata: float) -> str:
+    """Linia wydruku okna (czytana wzorcem przez `scripts/porownaj_warianty.py`)."""
+    informative, agg, oos_m, oos_m_brutto = m.informative, m.agg, m.oos_m, m.oos_m_brutto
+    oos_res, bije_okna, n_trades, dominant = m.oos_res, m.bije_okna, m.n_trades, m.dominant
+    ekspozycja_por, odniesienie, odniesienie_dop = m.ekspozycja_por, m.odniesienie, m.odniesienie_dop
+    porownywalne_okno, test_from, test_to = m.porownywalne_okno, okno.test_from, okno.test_to
+    mark = "" if informative else (f"  (poniżej {h.min_trades} transakcji — "
+                                   "pominięte w ocenie)")
+    if informative:
+        mark += (f"  [strategia {oos_m['total_return']:+.2f}% przy ekspozycji "
+                 f"{ekspozycja_por:.1%} vs kup-i-trzymaj {odniesienie:+.2f}% → "
+                 f"przy tej samej ekspozycji {odniesienie_dop:+.2f}%]"
+                 if porownywalne_okno else
+                 "  [zerowa ekspozycja — poza porównaniem z odniesieniem]")
+    if informative:
+        znak = {True: "tak", False: "nie", None: "—"}
+        mark += "  bije " + " ".join(
+            f"{n}={znak[bije_okna[n]]}" for n in ("B1", "B2", "B3"))
+    if oos_res.killswitch_at:
+        mark += f"  [KILL-SWITCH {oos_res.killswitch_at:%m-%d %H:%M}]"
+    if oos_m["blocked"]:
+        mark += f"  odrzuconych wejść: {oos_m['blocked']}"
+    # POWROTY IDA DO WYDRUKU, A NIE TYLKO DO `learn.wf_metric`.
+    #
+    # Miara istnieje od 2026-09-27 i odpowiada na pytanie, czy EXIT_RATIO
+    # = 0,45 nie wypycha nas z pozycji, w ktora zaraz wracamy. Zapisana
+    # WYLACZNIE do bazy odpowiadalaby na nie dopiero po nocnym przebiegu
+    # i tylko temu, kto zna nazwe metryki - a `--sucho` nie zapisuje nic,
+    # wiec porownanie wariantow (po to `--sucho` jest) tej liczby nie
+    # widzialo wcale. Warunek rozstrzygajacy postawiono ZAWCZASU: udzial
+    # powyzej 40% w oknach `range` o co najmniej 55 transakcjach i ponizej
+    # 15% w `range` o mniej niz 55 - a do jego sprawdzenia potrzebne sa
+    # wartosci PO OKNACH, z rezimem i liczba transakcji w tej samej linii.
+    powroty = (f"  powroty={agg['udzial_powtornych_wejsc']:.0%}"
+               if "udzial_powtornych_wejsc" in agg else "")
+    # BRUTTO PO `reżim=`, nie przed: `scripts/porownaj_warianty.py` czyta
+    # `Sharpe/transakcję=... transakcje=... reżim=...` jednym wzorcem
+    # (WZOR_OKNA), wiec liczba w nim jest ta po doplacie z karty, a dopisek
+    # trafia do ogona, ktory skrypt tylko przeszukuje.
+    brutto = (f"  [brutto: Sharpe/transakcję={oos_m_brutto['sharpe']:+.4f}, "
+              f"zwrot {oos_m_brutto['total_return']:+.2f}%]"
+              if doplata and informative else "")
+    return (f"  okno {idx:>2d}  {test_from:%m-%d}–{test_to:%m-%d}  "
+            f"Sharpe/transakcję={agg['sharpe']:+.4f}  transakcje={n_trades}  "
+            f"reżim={dominant}{powroty}{brutto}{mark}")
+
+
+def _zapisz_oos(cur, conn, sucho: bool, model_id: int | None,
+                oos_wg_konfiguracji: dict[bytes, list[float]]) -> None:
     # --- Sharpe OOS do learn.hypothesis_trial ------------------------------
     #
     # Kolumna `oos_sharpe` istnieje od migracji 0006 i do 2026-09-27 byla pusta
@@ -3082,6 +3266,9 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
         print(f"\n  Sharpe OOS zapisany dla {len(oos_wg_konfiguracji)} "
               f"konfiguracji (learn.hypothesis_trial.oos_sharpe)")
 
+
+def kalibracja(predictions: list[tuple[float, bool]], cur, mv_id: int | None) -> float | None:
+    """ECE deklarowanej pewnosci; koszyki do `learn.calibration_bin` przy bazie."""
     # --- kalibracja -------------------------------------------------------
     ece = None
     if predictions:
@@ -3100,7 +3287,11 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
                 " bin_hi, predicted_mean, observed_rate, n_samples)"
                 " VALUES (%s, now(), %s,%s,%s,%s,%s) ON CONFLICT DO NOTHING",
                 (mv_id, lo, lo + 0.1, round(pred, 4), round(obs, 4), len(bucket)))
+    return ece
 
+
+def dryf_cech(cur, instruments: list[dict], h: Horizon, fp: str, now: datetime,
+              mv_id: int | None) -> float:
     # --- dryf cech --------------------------------------------------------
     #
     # DWIE WADY NAPRAWIONE TU 2026-09-23 (znaleziska 3 i 6 audytu). Obie robily
@@ -3212,17 +3403,58 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
             "INSERT INTO learn.drift_metric (model_version_id, feature_def_id, event_time, psi)"
             " VALUES (%s,%s, now(), %s) ON CONFLICT DO NOTHING",
             (mv_id, fd["id"], round(psi, 4)))
+    return max_psi
 
-    # --- podsumowanie -----------------------------------------------------
-    total = len(all_sharpes)
-    pct = (positive / total * 100) if total else 0.0
-    median = statistics.median(all_sharpes) if all_sharpes else None
+
+def _mianowniki_dsr(cur, plik: dict | None, model_id: int | None, mv_id: int | None,
+                    params_przebiegu: dict):
+    """(trials, sd_prob, konfiguracji_z_oos, n_selekcji) - z bazy albo z pliku."""
     if plik is not None:
         trials = plik["dsr"]["trials"]
     else:
         cur.execute("SELECT count(*) AS n FROM learn.hypothesis_trial WHERE model_id=%s", (model_id,))
         trials = cur.fetchone()["n"]
+    if plik is not None:
+        sd_prob, konfiguracji_z_oos = plik["dsr"]["odchylenie"]
+        n_selekcji = n_konfiguracji_z_listy(plik["dsr"]["konfiguracje"],
+                                            params_przebiegu)
+    else:
+        sd_prob, konfiguracji_z_oos = odchylenie_prob_z_bazy(cur, model_id)
+        n_selekcji = n_konfiguracji(cur, model_id, mv_id)
+    return trials, sd_prob, konfiguracji_z_oos, n_selekcji
 
+
+@dataclass(frozen=True)
+class Status:
+    """Werdykt przebiegu: status nauki, zdanie dla czlowieka i miary pod nim."""
+    status: str
+    reason: str
+    opis_dsr: str
+    total: int
+    positive: int
+    pct: float
+    median: float | None
+    ci_lo: float
+    ci_hi: float
+    odn_lo: float
+    odn_hi: float
+
+
+def werdykt(z: Przebieg, *, karta: Karta, n: int, trials: int, sd_prob,
+            konfiguracji_z_oos: int) -> Status:
+    """Status, powod i DSR z miar wszystkich okien. CZYSTA FUNKCJA.
+
+    `n` - liczba konfiguracji (mianownik selekcji DSR), `trials` - licznik
+    `learn.hypothesis_trial` (tylko do opisu), `sd_prob` / `konfiguracji_z_oos`
+    - rozrzut Sharpe'ow miedzy konfiguracjami (`odchylenie_prob_z_bazy`).
+    """
+    all_sharpes, positive = z.all_sharpes, z.positive
+    wszystkie_zwroty = z.wszystkie_zwroty
+    pokonane_odniesienie, porownywalne = z.pokonane_odniesienie, z.porownywalne
+    ekspozycje, zwroty_okien = z.ekspozycje, z.zwroty_okien
+    total = len(all_sharpes)
+    pct = (positive / total * 100) if total else 0.0
+    median = statistics.median(all_sharpes) if all_sharpes else None
     # DEFLOWANY SHARPE - LICZONY TU, BO BEZ NIEGO BRAMKA NIE MIERZY SELEKCJI.
     #
     # Licznik `trials` istnieje od migracji 0006 WYLACZNIE po to, zeby te liczbe
@@ -3263,17 +3495,9 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
     #    zmiennosc rynku plus szum estymacji z jednego okna, nie konfiguracje.
     #    Gdyby pomiar wyszedl PONIZEJ podlogi, `deflowany_sharpe` bierze podloge
     #    i to mowi: pomiar mniejszy od samego szumu jest dowodem niepelnosci.
-    if plik is not None:
-        sd_prob, konfiguracji_z_oos = plik["dsr"]["odchylenie"]
-        n_selekcji = n_konfiguracji_z_listy(plik["dsr"]["konfiguracje"],
-                                            params_przebiegu)
-    else:
-        sd_prob, konfiguracji_z_oos = odchylenie_prob_z_bazy(cur, model_id)
-        n_selekcji = n_konfiguracji(cur, model_id, mv_id)
     dsr_ok, opis_dsr = werdykt_dsr(
         wszystkie_zwroty, doplata=karta.doplata_poza_symulacja,
-        n=n_konfiguracji(cur, model_id, mv_id) if plik is None else n_selekcji,
-        trials_kumulatywnie=trials,
+        n=n, trials_kumulatywnie=trials,
         nieznane=karta.nieznane, odchylenie_prob=sd_prob,
         konfiguracji_z_oos=konfiguracji_z_oos)
 
@@ -3383,7 +3607,27 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
             "degraded": f"Dodatnie tylko {positive}/{total} okien ({pct:.0f}%).{ci} "
                         f"Strategia nie wykazuje przewagi.{skala}",
         }[status]
+    return Status(status, reason, opis_dsr, total, positive, pct, median,
+                  ci_lo, ci_hi, odn_lo, odn_hi)
 
+
+@dataclass(frozen=True)
+class Produkcja:
+    """Parametry, ktore dostaje produkcja: progi per rezim i mediana wag."""
+    prod_progi: dict[str, float]
+    prod_okien: dict[str, int]
+    prod_enter: float
+    prod_weights: dict[str, dict[str, float]]
+    bez_progu_w_produkcji: list[str]
+    linie: list[str]
+
+
+def parametry_produkcji(z: Przebieg) -> Produkcja:
+    """Progi i wagi dla produkcji z historii okien. CZYSTA FUNKCJA; `linie`
+    to wydruk (rezimy bez progu, progi dla produkcji)."""
+    historia_bramek, okna_bez_progu = z.historia_bramek, z.okna_bez_progu
+    weight_history, martwe_w_oknie = z.weight_history, z.martwe_w_oknie
+    linie: list[str] = []
     # Progi obowiazujace produkcje - mediana z okien, OSOBNO DLA KAZDEGO REZIMU.
     # Petla decyzyjna czyta je z rejestru, zeby nie ustalac ich wlasna,
     # rownolegla logika.
@@ -3404,7 +3648,7 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
                   else PROG_WEJSCIA_POCZATKOWY)
     if okna_bez_progu:
         opis_brakow = ", ".join(f"{r}: {n}" for r, n in sorted(okna_bez_progu.items()))
-        print(f"  reżimy bez progu wejścia (próba poniżej {MIN_PROB_PROGU} "
+        linie.append(f"  reżimy bez progu wejścia (próba poniżej {MIN_PROB_PROGU} "
               f"obserwacji), liczba okien — {opis_brakow}")
     bez_progu_w_produkcji = [r for r in REGIMES
                              if r not in prod_progi and okna_bez_progu.get(r)]
@@ -3416,7 +3660,7 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
         opis_progow = ", ".join(
             f"{r}={prod_progi[r]:.4f} ({prod_okien[r]} okien)"
             for r in REGIMES if r in prod_progi)
-        print(f"\nProgi wejścia dla produkcji (mediana po oknach, percentyl "
+        linie.append(f"\nProgi wejścia dla produkcji (mediana po oknach, percentyl "
               f"{ENTER_PCTL:.2f}): {opis_progow}")
 
     # WAGI DLA PRODUKCJI.
@@ -3454,7 +3698,20 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
                 per_signal[name] = statistics.median(zywe) if len(zywe) >= MIN_OKIEN_ZYWEGO else 0.0
             total_w = sum(abs(v) for v in per_signal.values()) or 1.0
             prod_weights[regime] = {k: round(v / total_w, 4) for k, v in per_signal.items()}
+    return Produkcja(prod_progi, prod_okien, prod_enter, prod_weights,
+                     bez_progu_w_produkcji, linie)
 
+
+def zapisz_wynik(cur, conn, sucho: bool, engine: str, h: Horizon,
+                 model_id: int | None, mv_id: int | None, run_id: int | None,
+                 w: Status, prod: Produkcja, *, worst_dd: float, ece: float | None,
+                 max_psi: float, trials: int, zgoda_na_promocje: bool) -> str:
+    """Parametry produkcji, bramka promocji, `training_run`, stan nauki
+    i jego dziennik. Zwraca `reason` z dopiskami bramki (do wydruku)."""
+    status, reason, total, positive = w.status, w.reason, w.total, w.positive
+    median, ci_lo, ci_hi = w.median, w.ci_lo, w.ci_hi
+    prod_enter, prod_progi, prod_okien = prod.prod_enter, prod.prod_progi, prod.prod_okien
+    prod_weights, bez_progu_w_produkcji = prod.prod_weights, prod.bez_progu_w_produkcji
     # W trybie SUCHYM nie dotykamy bazy w ogole: porownanie wariantow nie moze
     # promowac wersji modelu ani nadpisywac stanu nauki. Podsumowanie i tak
     # sie wypisuje - po to ten tryb istnieje.
@@ -3539,8 +3796,29 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
     elif cur is not None:
         cur.execute("UPDATE learn.training_run SET status='done', finished_at=now(),"
                     " error='tryb suchy - porownanie wariantow' WHERE id=%s", (run_id,))
-    _utrwal()
+    _utrwal(conn, sucho)
+    return reason
 
+
+def wypisz_podsumowanie(z: Przebieg, w: Status, k: Koszty, *, kind: str, wybor: str,
+                        idx: int, opis_dsr: str, trials: int,
+                        reason: str) -> tuple[float | None, float | None]:
+    """Wydruk podsumowania przebiegu. Zwraca (wypelnialnosc, koszt niewypelnienia)."""
+    status, total, positive, pct, median = w.status, w.total, w.positive, w.pct, w.median
+    ci_lo, ci_hi, odn_lo, odn_hi = w.ci_lo, w.ci_hi, w.odn_lo, w.odn_hi
+    wybrane_ic, porownywalne = z.wybrane_ic, z.porownywalne
+    pokonane_odniesienie, pokonane_pelne = z.pokonane_odniesienie, z.pokonane_pelne
+    ekspozycje, rozklad = z.ekspozycje, z.rozklad
+    wypelnione_oos, niewypelnione_oos = z.wypelnione_oos, z.niewypelnione_oos
+    utracone_oos, brak_swiec_oos = z.utracone_oos, z.brak_swiec_oos
+    bije_odn, b0_dodatnie, b0_4_pobite = z.bije_odn, z.b0_dodatnie, z.b0_4_pobite
+    positive_brutto, all_sharpes_brutto = z.positive_brutto, z.all_sharpes_brutto
+    pokonane_odniesienie_brutto, worst_dd = z.pokonane_odniesienie_brutto, z.worst_dd
+    wszystkie_zwroty, zwroty_okien_transakcje = z.wszystkie_zwroty, z.zwroty_okien_transakcje
+    transakcje_stron, transakcje_pokrycia = z.transakcje_stron, z.transakcje_pokrycia
+    sharpe_grup, udzial_instrumentu = z.sharpe_grup, z.udzial_instrumentu
+    egzekucja, karta, doplata, pyl = k.egzekucja, k.karta, k.doplata, k.pyl
+    spread_bps, spread_nasza_ksiega = k.spread_bps, k.spread_nasza_ksiega
     if wybor == "argmax":
         print(f"\nWagi z IC wybrane w {wybrane_ic}/{idx} okien "
               f"(reszta: losowanie albo założenia początkowe)")
@@ -3646,7 +3924,17 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
                   f"{', '.join(dominujace)}")
     print(f"Przetestowanych konfiguracji: {trials}")
     print(f"Stan: {status} — {reason}")
+    return wypelnialnosc, koszt_niewyp
 
+
+def podsumowanie_przebiegu(z: Przebieg, w: Status, k: Koszty, *, days: int, now: datetime,
+                           n_selekcji: int, sd_prob, wypelnialnosc: float | None,
+                           koszt_niewyp: float | None) -> dict:
+    """PODSUMOWANIE_JSON przebiegu. CZYSTA FUNKCJA."""
+    egzekucja, karta = k.egzekucja, k.karta
+    total, positive, median, status = w.total, w.positive, w.median, w.status
+    wszystkie_zwroty, brak_swiec_oos = z.wszystkie_zwroty, z.brak_swiec_oos
+    bije_odn, b0_dodatnie, przebieg_odn = z.bije_odn, z.b0_dodatnie, z.przebieg_odn
     # PODSUMOWANIE MASZYNOWE - jedna linia JSON dla `scripts/eksperyment.py`
     # (tabela przesuniec) i dla porownan wariantow. Te same liczby co wyzej,
     # bez parsowania zdan. Zwrot na runde PO doplacie z karty, w pb.
@@ -3675,8 +3963,99 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
                              sum(1 for z, _ in v if z > 0), len(v)] if v else None)
                         for n, v in przebieg_odn.items()},
     }
+    return podsumowanie
+
+
+def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
+          kind: str = "spot", egzekucja: Egzekucja | None = None,
+          sucho: bool = False, wybor: str = "argmax",
+          tylko: set[str] | None = None,
+          zakladane_pozycje: int | None = None,
+          zgoda_na_promocje: bool = False,
+          spread_bps: float | None = None,
+          spread_nasza_ksiega: bool = True,
+          progi_per_rezim: bool = True,
+          panel: dict | None = None) -> dict:
+    """Walk-forward jednego toru: orkiestrator etapow opisanych wyzej."""
+    # `panel` - dane z `panel_plik.wczytaj` (harness offline, `--panel`).
+    # Wtedy NIC nie idzie do bazy: `conn` moze byc None, a wszystko, co
+    # przebieg z bazy czyta, przychodzi z pliku. Zapisy pomijamy, bo przebieg
+    # z pliku jest z definicji suchy.
+    plik = panel
+    if plik is not None and not sucho:
+        raise ValueError("przebieg z pliku panelu (--panel) jest zawsze suchy")
+    cur = conn.cursor() if plik is None else None
+    rng = random.Random(SEED)
+    now = datetime.now(timezone.utc) if plik is None else plik["do"]
+    egzekucja = egzekucja or Egzekucja()
+    z_godzin = bool(egzekucja.opoznienie_min or egzekucja.pesymistyczna)
+
+    instruments = _uniwersum(cur, plik, engine, h, days, tylko)
+    k = _koszty(cur, plik, engine, kind, h, instruments, now, days, egzekucja,
+                spread_bps, spread_nasza_ksiega, zakladane_pozycje)
+    egzekucja = k.egzekucja
+    fp, waluta_symbolu = _przekroj(cur, plik, instruments, h, days, tylko)
+    params = params_przebiegu(h, trials_per_window, wybor, kind, progi_per_rezim,
+                              egzekucja)
+    model_id, mv_id, run_id = _zaloz_wersje(cur, conn, plik, sucho, engine, h, fp,
+                                            params, now, days)
+    panels, swiece_wykonania, inst_ids = _wczytaj_panele(
+        cur, plik, instruments, h, fp, now, days, z_godzin)
+    _sprawdz_panele(cur, conn, sucho, plik, panels, inst_ids, h, now, run_id)
+
+    kt = Kontekst(h, kind, egzekucja, zakladane_pozycje, swiece_wykonania, inst_ids,
+                  panels, waluta_symbolu, k.doplata, k.doplata_odniesienia, k.karta,
+                  progi_per_rezim)
+    z = Przebieg()
+    zapisz_hipoteze = _zapis_hipotez(cur, sucho, model_id)
+    idx = 0
+    for okno in okna_wf(panels, h, now - timedelta(days=days), now):
+        dane = przygotuj_okno(kt, okno)
+        if dane.martwe and idx == 0:
+            print(f"  sygnały bez zmienności na danych, wyłączone z kalibracji: "
+                  f"{', '.join(sorted(dane.martwe))}")
+        if idx == 0:
+            rodzaj = "per reżim" if progi_per_rezim else "WSPÓLNY dla reżimów"
+            print(f"  progi wejścia ({rodzaj}, percentyl {ENTER_PCTL:.2f}, "
+                  f"min. {MIN_PROB_PROGU} próbek): {dane.gates.opis()}")
+        best_w, z_ic = kandydat_wag(
+            dane.train_slices, dane.cache_tr, dane.martwe, wybor, bazowe=dane.bazowe,
+            ocen=_ocena_treningowa(kt, dane), zapisz_hipoteze=zapisz_hipoteze,
+            rng=rng, trials_per_window=trials_per_window)
+        z.wybrane_ic += z_ic
+        m = ocen_okno(kt, okno, dane, best_w)
+        z.dodaj_wypelnienia(m)
+        if m.pusty:
+            continue
+        z.dodaj(m, okno, h, waluta_symbolu, best_w)
+        if not sucho:
+            zapisz_okno(cur, conn, run_id, idx, okno, m)
+        z.dodaj_progi(dane.gates, best_w, dane.martwe)
+        print(opis_okna(idx, okno, m, h, k.doplata))
+        idx += 1
+
+    _zapisz_oos(cur, conn, sucho, model_id, z.oos_wg_konfiguracji)
+    ece = kalibracja(z.predictions, cur, mv_id)
+    max_psi = dryf_cech(cur, instruments, h, fp, now, mv_id)
+    trials, sd_prob, konfiguracji_z_oos, n_selekcji = _mianowniki_dsr(
+        cur, plik, model_id, mv_id, params)
+    w = werdykt(z, karta=k.karta, n=n_selekcji, trials=trials, sd_prob=sd_prob,
+                konfiguracji_z_oos=konfiguracji_z_oos)
+    prod = parametry_produkcji(z)
+    for linia in prod.linie:
+        print(linia)
+    reason = zapisz_wynik(cur, conn, sucho, engine, h, model_id, mv_id, run_id, w, prod,
+                          worst_dd=z.worst_dd, ece=ece, max_psi=max_psi, trials=trials,
+                          zgoda_na_promocje=zgoda_na_promocje)
+    wypelnialnosc, koszt_niewyp = wypisz_podsumowanie(
+        z, w, k, kind=kind, wybor=wybor, idx=idx, opis_dsr=w.opis_dsr, trials=trials,
+        reason=reason)
+    podsumowanie = podsumowanie_przebiegu(
+        z, w, k, days=days, now=now, n_selekcji=n_selekcji, sd_prob=sd_prob,
+        wypelnialnosc=wypelnialnosc, koszt_niewyp=koszt_niewyp)
     print("PODSUMOWANIE_JSON " + json.dumps(podsumowanie, ensure_ascii=False))
     return podsumowanie
+
 
 
 def main() -> int:

@@ -658,7 +658,10 @@ def test_bramka_w_trenerze_liczy_DSR_PO_koszcie_i_z_N_z_konfiguracji():
     # stoi w `training` w chwili liczenia N, wiec bez niego filtr statusu gubi
     # dokladnie te probe, ktora bramka wlasnie ocenia. Osobno pilnuje tego
     # `test_n_selekcji_tylko_przebiegi_z_wynikiem`.
-    assert "n=n_konfiguracji(cur, model_id, mv_id)" in arg, (
+    # Od refaktoru T2 `werdykt` dostaje N z `_mianowniki_dsr`, a `train()`
+    # podaje mu dokladnie `n_selekcji` stamtad.
+    assert "n=n," in arg and "w = werdykt(z, karta=k.karta, n=n_selekcji," in ZRODLO_TRENERA
+    assert "n_selekcji = n_konfiguracji(cur, model_id, mv_id)" in ZRODLO_TRENERA, (
         "N nie pochodzi z liczby rozroznialnych konfiguracji ALBO nie dolicza "
         "wlasnej wersji biezacego przebiegu")
     assert "trials_kumulatywnie=trials" in arg

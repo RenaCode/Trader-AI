@@ -148,6 +148,18 @@ def test_referencja_ma_okna_i_transakcje(zrzut):
         assert ref["json"]["transakcji"] >= 100, wariant
 
 
+def test_zadna_funkcja_trenera_nie_ma_ponad_200_linii():
+    """`train()` jest orkiestratorem, nie miejscem na logike (audyt Fable T2):
+    mierzone AST-em, razem z docstringiem i komentarzami."""
+    import ast
+    drzewo = ast.parse(Path(tr.__file__).read_text(encoding="utf-8"))
+    dlugosci = {n.name: n.end_lineno - n.lineno + 1 for n in ast.walk(drzewo)
+                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    za_dlugie = {n: d for n, d in dlugosci.items() if d > 200}
+    assert not za_dlugie, f"funkcje dluzsze niz 200 linii: {za_dlugie}"
+    assert dlugosci["train"] <= 200
+
+
 if __name__ == "__main__":
     if "--zapisz" not in sys.argv:
         sys.exit("uzycie: tests/test_trener_rownowaznosc.py --zapisz")

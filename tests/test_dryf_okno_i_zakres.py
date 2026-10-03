@@ -47,7 +47,9 @@ def _blok_dryfu() -> str:
     """
     zrodlo = (KORZEN / "services/engine/train.py").read_text(encoding="utf-8")
     od = zrodlo.index("# --- dryf cech ---")
-    do = zrodlo.index("# --- podsumowanie ---", od)
+    # Koniec bloku = koniec funkcji `dryf_cech` (od refaktoru T2 dryf jest
+    # osobna funkcja; wczesniej konczyla go etykieta „podsumowanie").
+    do = zrodlo.index("\ndef ", od)
     return "\n".join(w for w in zrodlo[od:do].splitlines()
                      if not w.lstrip().startswith("#"))
 

@@ -60,18 +60,31 @@ def test_sucho_nie_zostawia_wersji_ani_przebiegu():
 
 
 def test_sucho_nie_zatwierdza_niczego_w_kodzie():
-    """Na kodzie: każde `conn.commit()` w `train()` jest za warunkiem
-    przebiegu nie-suchego albo idzie przez `_utrwal`, które przy `--sucho`
-    wycofuje transakcję."""
+    """Na kodzie: każde `conn.commit()` trenera jest za warunkiem przebiegu
+    nie-suchego albo idzie przez `_utrwal`, które przy `--sucho` wycofuje
+    transakcję. Od refaktoru T2 zapisy są w osobnych funkcjach."""
     import inspect
 
     from services.engine import train as tr
 
-    zrodlo = inspect.getsource(tr.train)
-    gole = [w for w in zrodlo.splitlines()
-            if w.strip() == "conn.commit()"]
-    # zostają: gałąź nie-sucha w `_utrwal` oraz trzy gałęzie `if not sucho:`
-    # - po zapisie wersji, w pętli WF i przy zapisie Sharpe OOS
-    assert len(gole) == 4, (
-        f"{len(gole)} bezwarunkowych `conn.commit()` w train() — przebieg suchy "
-        f"zatwierdzi wiersze, których nie powinien zostawić")
+    def gole(f):
+        return [w for w in inspect.getsource(f).splitlines()
+                if w.strip() == "conn.commit()"]
+
+    # `train()` samo nie zatwierdza niczego - robią to funkcje zapisu.
+    assert gole(tr.train) == []
+    # `_utrwal`: gałąź nie-sucha; po zapisie wersji i przy Sharpe OOS: `if not sucho`
+    for f in (tr._utrwal, tr._zaloz_wersje, tr._zapisz_oos):
+        zrodlo = inspect.getsource(f)
+        assert len(gole(f)) == 1, f.__name__
+        assert "if not sucho" in zrodlo or "if sucho:" in zrodlo, f.__name__
+    # zapis okna jest wołany wyłącznie za `if not sucho:`
+    assert len(gole(tr.zapisz_okno)) == 1
+    zrodlo_train = inspect.getsource(tr.train)
+    assert zrodlo_train.count("zapisz_okno(") == 1
+    assert "if not sucho:\n            zapisz_okno(" in zrodlo_train
+    # żadna inna funkcja modułu nie zatwierdza transakcji
+    reszta = [n for n, f in inspect.getmembers(tr, inspect.isfunction)
+              if f.__module__ == tr.__name__ and gole(f)
+              and n not in {"_utrwal", "_zaloz_wersje", "_zapisz_oos", "zapisz_okno"}]
+    assert reszta == [], f"`conn.commit()` poza funkcjami zapisu: {reszta}"

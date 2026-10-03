@@ -428,7 +428,8 @@ def test_miara_powrotow_idzie_TAKZE_DO_WYDRUKU_a_nie_tylko_do_bazy():
     razem z rezimem i liczba transakcji - czyli w tej samej linii wydruku.
     """
     zrodlo = TRAIN.read_text(encoding="utf-8")
-    i = zrodlo.index('print(f"  okno {idx:>2d}')
+    # od refaktoru T2 linie sklada `opis_okna`, a drukuje ja `train()`
+    i = zrodlo.index('f"  okno {idx:>2d}')
     linia = zrodlo[i:zrodlo.index("\n", zrodlo.index("reżim=", i))]
     assert "powroty" in linia, (
         "wydruk okna nie podaje odsetka powrotow. Przy `--sucho` nie ma go "

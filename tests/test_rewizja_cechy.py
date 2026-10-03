@@ -127,7 +127,9 @@ def test_raport_rewizji_liczy_odsetek_wartosci_cech():
 
 def test_trener_raportuje_rewizje_w_logu():
     zrodlo = (KORZEN / "services" / "engine" / "train.py").read_text()
-    blok = zrodlo[zrodlo.index("def train("):]
+    # od refaktoru T2 panele wczytuje `_wczytaj_panele`, wolane z `train()`
+    blok = zrodlo[zrodlo.index("def _wczytaj_panele("):]
+    assert "_wczytaj_panele(" in zrodlo[zrodlo.index("def train("):]
     assert "rewizje_po_decyzji(panels)" in blok, (
         "trener nie raportuje rewizji po czasie decyzji")
 
