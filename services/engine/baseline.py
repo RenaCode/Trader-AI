@@ -37,7 +37,7 @@ w chwili decyzji.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from services.engine.koszty import POSLIZG_TAKER, koszty, zwroty_po_doplacie
 from services.engine.portfolio import kup_i_trzymaj
@@ -97,7 +97,17 @@ def b1_koszyk(okno: dict[str, list[dict]], kind: str, doplata: float) -> Odniesi
 # ---------------------------------------------------------------- narzedzia
 
 def _koniec_doby(t: datetime, bar_minutes: int) -> bool:
-    """Czy swieca zaczynajaca sie w `t` zamyka sie o polnocy UTC."""
+    """Czy swieca zaczynajaca sie w `t` zamyka sie o polnocy UTC.
+
+    PRZELICZENIE NA UTC (przeglad 2026-10-04, T-18). Znaczniki z bazy przychodza
+    w strefie sesji (`TimeZone`), a `.hour == 0` sprawdzane w innej strefie
+    nie trafialo w ani jedna polnoc: te same swiece dawaly 60 zamkniec dobowych
+    w UTC i 0 w `Europe/Warsaw` - EMA None, filtr False i caly sklad po cichu
+    do gotowki. Dzis dzialalo, bo baza ma `Etc/UTC`; wystarczylby `PGTZ` w podzie.
+    `tzinfo=None` traktujemy jako UTC (tak zapisuja testy i symulacja).
+    """
+    if t.tzinfo is not None:
+        t = t.astimezone(timezone.utc)
     k = t + timedelta(minutes=bar_minutes)
     return k.hour == 0 and k.minute == 0
 

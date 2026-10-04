@@ -115,3 +115,10 @@ def test_przebieg_BEZ_OKIEN_wypada_a_nie_przerywa(capsys, tmp_path):
     assert "pomijam" in wyjscie
     assert "+0.0200" in wyjscie, (
         f"po pominięciu pustego toru nie doszło do porównania B z C: {wyjscie}")
+
+
+def test_dwa_razy_stdin_to_czytelny_blad_a_nie_jeden_przebieg():
+    """T-17: udokumentowane `- -` nie działało - drugi odczyt stdin jest pusty."""
+    with pytest.raises(SystemExit, match="stdin można podać raz"):
+        pw.main(["-", "-"])
+    assert "porownaj_warianty.py - -" not in Path(pw.__file__).read_text(encoding="utf-8")

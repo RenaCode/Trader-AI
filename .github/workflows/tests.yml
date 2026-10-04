@@ -48,7 +48,7 @@ jobs:
     # `citext` i `pgcrypto`. Zwykly `postgres:17` nie przejdzie migracji 0001.
     services:
       db:
-        image: timescale/timescaledb-ha:pg17
+        image: timescale/timescaledb-ha:pg17@sha256:a693dd7fbb75b51c3d717507a9956501686edb123b48dd90b094fd5612d53abe
         env:
           # Rola WLASCICIELA musi nazywac sie `trader`: migracje nadaja
           # `ALTER DEFAULT PRIVILEGES FOR ROLE trader`, wiec przy innej nazwie
@@ -61,8 +61,8 @@ jobs:
           --health-cmd "pg_isready -U trader -d trader"
           --health-interval 5s --health-timeout 5s --health-retries 20
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with: { python-version: "3.12" }
       - run: pip install -q -r services/api/requirements.txt -r requirements-dev.txt
       # Migracje ida rola wlasciciela, tak jak kontener startowy `migrate`

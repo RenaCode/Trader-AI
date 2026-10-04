@@ -18,6 +18,17 @@ SYGNALY IDA DO POLECENIA. Opakowanie jest PID 1 kontenera, wiec to ono dostaje
 SIGTERM przy `activeDeadlineSeconds` albo usunieciu poda. Proba pozarowa ma
 wlasny handler SIGTERM, ktory przywraca prog limitu - sygnal musi do niej dojsc,
 inaczej zginie razem z podem z podniesionym progiem.
+
+BRAMKA SCHEMATU (przeglad 2026-10-04, T-15). Workery czekaja na migracje
+w kontenerze startowym `czekaj-na-migracje`, CronJoby nie: gdy migracja padla
+albo wisi, nowy kod zadania szedl na starym schemacie. Zwykle konczylo sie to
+bledem SQL, ale proba pozarowa w polowie (prog podniesiony, zapytanie o nowa
+kolumne pada) liczyla wtedy wylacznie na swoje `finally`. Teraz zadanie
+porownuje `max(schema_migrations)` z najnowszym plikiem w obrazie i przy
+starszej bazie konczy sie kodem 3 z wierszem w `risk.job_run` - nie ruszajac
+polecenia. Fail-open: brak uprawnien albo bazy = ostrzezenie i dalej.
+`--mimo-starego-schematu` (czujka `trader-zywotnosc`): ostrzezenie zamiast
+odmowy, bo czujka jest wlasnie tym, co ma krzyczec przy nieudanej migracji.
 """
 from __future__ import annotations
 
@@ -28,7 +39,11 @@ import socket
 import subprocess
 import sys
 import time
+from pathlib import Path
 from urllib.parse import urlsplit
+
+MIGRACJE = Path(__file__).resolve().parents[2] / "db" / "migrations"
+KOD_STARY_SCHEMAT = 3
 
 
 def zapisz(nazwa: str, czas_s: float, kod: int) -> bool:
@@ -88,8 +103,43 @@ def czekaj_na_baze(limit_s: float = 60.0, odstep_s: float = 2.0,
             time.sleep(odstep_s)
 
 
-def uruchom(nazwa: str, polecenie: list[str]) -> int:
+def najnowsza_w_obrazie(katalog: Path = MIGRACJE) -> str | None:
+    pliki = sorted(p.stem for p in katalog.glob("*.sql"))
+    return pliki[-1] if pliki else None
+
+
+def sprawdz_schemat(katalog: Path = MIGRACJE) -> str | None:
+    """Opis rozjazdu, gdy baza ma STARSZY schemat niz obraz; None = w porzadku
+    albo nie da sie sprawdzic (fail-open, ostrzezenie na stderr)."""
+    url = os.environ.get("DATABASE_URL")
+    obraz = najnowsza_w_obrazie(katalog)
+    if not url or not obraz:
+        return None
+    try:
+        import psycopg
+
+        with psycopg.connect(url, connect_timeout=10) as c:
+            baza = c.execute("SELECT max(version) FROM schema_migrations").fetchone()[0]
+    except Exception as e:                                    # noqa: BLE001
+        print(f"przebieg_zadania: wersji schematu nie da sie sprawdzić "
+              f"({type(e).__name__}: {e}) — uruchamiam bez bramki", file=sys.stderr)
+        return None
+    if baza is None or baza < obraz:
+        return f"baza ma schemat {baza}, obraz oczekuje {obraz}"
+    return None
+
+
+def uruchom(nazwa: str, polecenie: list[str], *, mimo_starego: bool = False) -> int:
     czekaj_na_baze()
+    rozjazd = sprawdz_schemat()
+    if rozjazd and not mimo_starego:
+        print(f"przebieg_zadania: {nazwa} NIE URUCHOMIONE — {rozjazd} (migracja "
+              f"nie przeszla albo jeszcze trwa)", file=sys.stderr)
+        zapisz(nazwa, 0.0, KOD_STARY_SCHEMAT)
+        return KOD_STARY_SCHEMAT
+    if rozjazd:
+        print(f"przebieg_zadania: UWAGA {rozjazd} — {nazwa} idzie mimo to "
+              f"(--mimo-starego-schematu)", file=sys.stderr)
     start = time.monotonic()
     proc = subprocess.Popen(polecenie)
 
@@ -116,6 +166,8 @@ def main(argv: list[str] | None = None) -> int:
     # tam polecenie bez bazy i tak nie ma sensu, a nieudany kontener ponowi Job.
     ap.add_argument("--tylko-czekaj", type=float, metavar="S", dest="tylko_czekaj",
                     help="poczekaj najwyzej S sekund na port bazy i zakoncz")
+    ap.add_argument("--mimo-starego-schematu", action="store_true", dest="mimo_starego",
+                    help="przy starszym schemacie bazy tylko ostrzez (czujka)")
     ap.add_argument("polecenie", nargs=argparse.REMAINDER,
                     help="polecenie po `--`")
     args = ap.parse_args(argv)
@@ -126,7 +178,7 @@ def main(argv: list[str] | None = None) -> int:
     polecenie = args.polecenie[1:] if args.polecenie[:1] == ["--"] else args.polecenie
     if not polecenie:
         ap.error("brak polecenia po `--`")
-    return uruchom(args.nazwa, polecenie)
+    return uruchom(args.nazwa, polecenie, mimo_starego=args.mimo_starego)
 
 
 if __name__ == "__main__":

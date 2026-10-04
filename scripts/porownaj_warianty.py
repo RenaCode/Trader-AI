@@ -2,7 +2,8 @@
 """Porownanie dwoch wariantow trenera: test PAROWY po oknach, nie naglowki.
 
     python scripts/porownaj_warianty.py log_A.txt log_B.txt
-    kubectl logs job/pomiar -n default | python scripts/porownaj_warianty.py - -
+    kubectl logs job/pomiar -n default | python scripts/porownaj_warianty.py -
+        (jeden log z dwoma sekcjami `===== ... =====`)
 
 DLACZEGO TO ISTNIEJE
 
@@ -163,6 +164,10 @@ def main(argv: list[str]) -> int:
                              " podaj dwa pliki albo log z dwoma przebiegami")
         nazwy = list(s)
     elif len(argv) == 2:
+        # Drugi odczyt stdin jest pusty - `- -` dawalo "zostal jeden przebieg".
+        if argv.count("-") > 1:
+            raise SystemExit("stdin można podać raz: dwa przebiegi z jednego "
+                             "wejścia to jeden `-` i log z sekcjami `===== ... =====`")
         s = {}
         nazwy = []
         for i, sciezka in enumerate(argv):

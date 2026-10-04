@@ -125,6 +125,25 @@ def zapisz_oczekujace(plik_wyjscia: str) -> int:
     return 0
 
 
+# BLOKADA MIEDZY MIGRATORAMI (przeglad 2026-10-04, T-14). Dwa szybkie synci
+# Argo, stary pod API zabijany dopiero po terminie - i dwa kontenery `migrate`
+# naraz czytaly te sama liste oczekujacych i stosowaly ja oba. Blokada doradcza
+# na czas calego przebiegu: drugi czeka, a po wejsciu czyta `schema_migrations`
+# od nowa, wiec widzi juz to, co zastosowal pierwszy.
+#
+# To blokada miedzy PROCESAMI, nie atomowosc pliku z wpisem w
+# `schema_migrations`: pliki od 0070 maja wlasny `BEGIN/COMMIT`, wiec ich
+# COMMIT zamyka transakcje przed INSERT-em wpisu. Smierc procesu miedzy jednym
+# a drugim daje ponowne zastosowanie przy nastepnym starcie - i dlatego pliki
+# maja byc idempotentne (konwencja, pilnowana testami migracji).
+BLOKADA_MIGRATORA = 7_419_001
+
+# Domyslny `lock_timeout` polaczenia, na ktorym idzie plik. Plik moze ustawic
+# wlasny (`SET LOCAL`); bez tego DDL czekal za dlugim odczytem trenera bez
+# konca i blokowal kolejke na tabeli, ktora silnik czyta w kazdym cyklu.
+LOCK_TIMEOUT = "5s"
+
+
 def main() -> int:
     # ARGPARSE, NIE `sys.argv[1] == ...`. Przy recznym porownaniu kazde inne
     # wywolanie - literowka w nazwie flagi w chartcie - konczylo sie PELNYM
@@ -142,52 +161,61 @@ def main() -> int:
 
     with psycopg.connect(dsn(), autocommit=True) as conn:
         conn.execute(BOOTSTRAP)
-        applied = {
-            row[0]: bytes(row[1])
-            for row in conn.execute("SELECT version, checksum FROM schema_migrations")
-        }
+        conn.execute("SELECT pg_advisory_lock(%s)", (BLOKADA_MIGRATORA,))
+        try:
+            return _migruj(conn, files)
+        finally:
+            conn.execute("SELECT pg_advisory_unlock(%s)", (BLOKADA_MIGRATORA,))
 
-        pending = []
-        for path in files:
-            version = path.stem
-            checksum = hashlib.sha256(path.read_bytes()).digest()
-            if version in applied:
-                if applied[version] != checksum:
-                    sys.exit(
-                        f"Migracja {version} zostala zmieniona po zastosowaniu.\n"
-                        "Migracje sa niemutowalne - dodaj nowy plik zamiast edytowac stary."
-                    )
-                continue
-            pending.append((version, path, checksum))
 
-        if not pending:
-            print(f"Baza aktualna ({len(applied)} migracji).")
-            # Hasla ustawiamy TAKZE gdy nie ma nic do zastosowania. Wczesniej ten
-            # krok byl za `return 0`, wiec rotacja hasla wymagala, zeby akurat
-            # czekala jakas migracja - a bez niej nowy sekret byl w podzie
-            # i nie byl w bazie. Roznica objawia sie dopiero przy restarcie,
-            # czyli najpozniej jak sie da.
-            ustaw_hasla_rol(conn)
-            return 0
+def _migruj(conn, files: list[Path]) -> int:
+    """Przebieg migracji pod blokada `BLOKADA_MIGRATORA` (patrz wyzej)."""
+    applied = {
+        row[0]: bytes(row[1])
+        for row in conn.execute("SELECT version, checksum FROM schema_migrations")
+    }
 
-        for version, path, checksum in pending:
-            print(f"-> {version} ...", end=" ", flush=True)
-            started = time.monotonic()
-            # Jedna migracja = jedna transakcja. Blad cofa calosc.
-            with psycopg.connect(dsn()) as tx:
-                with tx.cursor() as cur:
-                    cur.execute(path.read_text())
-                    duration = int((time.monotonic() - started) * 1000)
-                    cur.execute(
-                        "INSERT INTO schema_migrations (version, checksum, duration_ms)"
-                        " VALUES (%s, %s, %s)",
-                        (version, checksum, duration),
-                    )
-                tx.commit()
-            print(f"ok ({duration} ms)")
+    pending = []
+    for path in files:
+        version = path.stem
+        checksum = hashlib.sha256(path.read_bytes()).digest()
+        if version in applied:
+            if applied[version] != checksum:
+                sys.exit(
+                    f"Migracja {version} zostala zmieniona po zastosowaniu.\n"
+                    "Migracje sa niemutowalne - dodaj nowy plik zamiast edytowac stary."
+                )
+            continue
+        pending.append((version, path, checksum))
 
-        print(f"Zastosowano {len(pending)} migracji.")
+    if not pending:
+        print(f"Baza aktualna ({len(applied)} migracji).")
+        # Hasla ustawiamy TAKZE gdy nie ma nic do zastosowania. Wczesniej ten
+        # krok byl za `return 0`, wiec rotacja hasla wymagala, zeby akurat
+        # czekala jakas migracja - a bez niej nowy sekret byl w podzie
+        # i nie byl w bazie. Roznica objawia sie dopiero przy restarcie,
+        # czyli najpozniej jak sie da.
         ustaw_hasla_rol(conn)
+        return 0
+
+    for version, path, checksum in pending:
+        print(f"-> {version} ...", end=" ", flush=True)
+        started = time.monotonic()
+        # Jedna migracja = jedna transakcja. Blad cofa calosc.
+        with psycopg.connect(dsn(), options=f"-c lock_timeout={LOCK_TIMEOUT}") as tx:
+            with tx.cursor() as cur:
+                cur.execute(path.read_text())
+                duration = int((time.monotonic() - started) * 1000)
+                cur.execute(
+                    "INSERT INTO schema_migrations (version, checksum, duration_ms)"
+                    " VALUES (%s, %s, %s)",
+                    (version, checksum, duration),
+                )
+            tx.commit()
+        print(f"ok ({duration} ms)")
+
+    print(f"Zastosowano {len(pending)} migracji.")
+    ustaw_hasla_rol(conn)
     return 0
 
 

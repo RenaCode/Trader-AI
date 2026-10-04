@@ -10,7 +10,9 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-trader_dev}
       TS_TUNE_MAX_CONNS: "50"
     ports:
-      - "${DB_PORT:-5433}:5432"
+      # Tylko petla zwrotna (przeglad 2026-10-04, T-17): haslo deweloperskie
+      # `trader_dev` nie moze byc wystawione na cala siec lokalna.
+      - "127.0.0.1:${DB_PORT:-5433}:5432"
     volumes:
       - trader-db-data:/home/postgres/pgdata/data
     healthcheck:
@@ -25,7 +27,7 @@ services:
     container_name: trader-redis
     command: ["redis-server", "--appendonly", "yes"]
     ports:
-      - "${REDIS_PORT:-6380}:6379"
+      - "127.0.0.1:${REDIS_PORT:-6380}:6379"
     volumes:
       - trader-redis-data:/data
     healthcheck:

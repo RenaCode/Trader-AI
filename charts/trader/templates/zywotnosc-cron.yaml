@@ -149,6 +149,9 @@ spec:
                 - services/engine/przebieg_zadania.py
                 - --nazwa
                 - zywotnosc
+                # Czujka idzie TAKZE na starym schemacie - przy nieudanej
+                # migracji jest jedynym, co ma o tym krzyczec (T-15).
+                - --mimo-starego-schematu
                 - "--"
                 - sh
                 - -c
