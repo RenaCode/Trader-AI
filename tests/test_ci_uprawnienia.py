@@ -26,14 +26,16 @@ def test_globalnie_tylko_odczyt():
             f"{nazwa}: globalne permissions inne niż contents: read")
 
 
-def test_zapis_wylacznie_w_build_i_update_git():
+def test_zapis_wylacznie_w_build_update_git_i_deploy():
+    """`deploy` (2026-10-04) pcha WYLACZNIE galaz `deploy` i nie wykonuje
+    kodu z zaleznosci - tylko git i skrypt z biblioteka standardowa."""
     joby = _wf("docker-publish.yml")["jobs"]
     for nazwa, job in joby.items():
         prawa = job.get("permissions") or {}
         zapis = {k for k, v in prawa.items() if v == "write"}
         if nazwa == "build":
             assert zapis == {"packages"}, f"build: {zapis}"
-        elif nazwa == "update-git":
-            assert zapis == {"contents"}, f"update-git: {zapis}"
+        elif nazwa in ("update-git", "deploy"):
+            assert zapis == {"contents"}, f"{nazwa}: {zapis}"
         else:
             assert not zapis, f"{nazwa} dostaje zapis: {zapis}"

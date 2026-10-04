@@ -11,6 +11,7 @@ razem z hashem tresci - probna zmiana juz zastosowanego pliku jest wykrywana.
 """
 from __future__ import annotations
 
+import argparse
 import hashlib
 import os
 import sys
@@ -125,8 +126,16 @@ def zapisz_oczekujace(plik_wyjscia: str) -> int:
 
 
 def main() -> int:
-    if len(sys.argv) == 3 and sys.argv[1] == "--oczekujace":
-        return zapisz_oczekujace(sys.argv[2])
+    # ARGPARSE, NIE `sys.argv[1] == ...`. Przy recznym porownaniu kazde inne
+    # wywolanie - literowka w nazwie flagi w chartcie - konczylo sie PELNYM
+    # przebiegiem migracji zamiast odmowa. tests/test_chart_flagi_cli.py
+    # sprawdza flagi z chartu tym parserem.
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--oczekujace", metavar="PLIK",
+                    help="zapisz liste migracji do zastosowania i zakoncz (bez stosowania)")
+    args = ap.parse_args()
+    if args.oczekujace:
+        return zapisz_oczekujace(args.oczekujace)
     files = sorted(MIGRATIONS_DIR.glob("*.sql"))
     if not files:
         sys.exit(f"Brak migracji w {MIGRATIONS_DIR}")

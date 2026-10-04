@@ -333,12 +333,14 @@ czym potwierdzić.
 
 ### Ręczny kill-switch
 
-Zakładka Ryzyko → „Zatrzymaj handel…" (powód + hasło). To ta sama ścieżka co
+Zakładka Ryzyko → „Zatrzymaj handel…" (sam powód, **bez hasła** — zablokowane
+konto nie może odebrać hamulca). To ta sama ścieżka co
 automat: wiersz w `risk.killswitch_event` (`limit_name = 'reczny'`,
 `triggered_by` = konto), który silnik czyta w każdym cyklu, więc wejścia stają,
 a wyjścia działają. Tryb (`demo`/`live`) bierze serwer z pulsu silnika.
 Automat wznowienia go nie zwalnia — tylko człowiek, tym samym formularzem co
-po limicie. Alarm `killswitch.triggered` idzie do dzwonka i przez bramkę;
+po limicie. **Zwolnienie wymaga hasła** (wznawia handel; pomyłki liczą się
+razem z logowaniem). Alarm `killswitch.triggered` idzie do dzwonka i przez bramkę;
 dozór traktuje go jako pierwsze zgłoszenie i przypomina w swoim rytmie.
 
 ### Alarmy przez bramkę RenaCode
@@ -400,7 +402,11 @@ zastosowany plik został zmieniony. Poprawki idą jako nowy plik.
 ## Wdrożenie
 
 GitOps: push do `main` → GitHub Actions buduje obrazy do `ghcr.io` i podbija tagi
-w `charts/trader/values.yaml` → ArgoCD na VPS synchronizuje klaster.
+w `charts/trader/values.yaml` → CI przesuwa gałąź **`deploy`** na commit, którego
+obrazy istnieją (`.github/skrypty/galaz_deploy.py`) → ArgoCD na VPS śledzi
+`deploy` (nie `main`) i synchronizuje klaster. Commit samego chartu albo
+dokumentacji też dochodzi do `deploy`, bez buildu. Gałęzi `deploy` nie
+przesuwa się ręcznie — CI odmawia, gdy przestaje być przodkiem `main`.
 
 Sekrety **nie** trafiają do repozytorium — tworzone raz, ręcznie:
 
@@ -420,7 +426,7 @@ i klucze giełd.
 Każda synchronizacja z nowymi migracjami robi najpierw zrzut bazy (hook
 PreSync `kopia-przed-migracja`, 5 ostatnich w `/opt/trader-backups/
 trader-przedmigracja-*`); nieudany zrzut albo brak miejsca zatrzymuje
-synchronizację.
+synchronizację. Awaryjnie: `kopiaPrzedMigracja.enabled: false`.
 
 TLS: cert-manager (`letsencrypt-prod`) + Traefik, tak jak reszta usług na VPS.
 Kontener nginx serwuje czysty HTTP — certyfikat żyje wyłącznie na krawędzi.

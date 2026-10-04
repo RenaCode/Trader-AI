@@ -1,8 +1,9 @@
 name: Build and publish Docker images
 
 # Buduje obrazy api i web, wypycha do ghcr.io, a nastepnie aktualizuje tagi w
-# charts/trader/values.yaml. ArgoCD na VPS obserwuje ten plik i sam synchronizuje
-# klaster - nie ma tu kroku SSH ani deployu, bo to GitOps.
+# charts/trader/values.yaml. Na koniec przesuwa galaz `deploy` na commit, ktorego
+# obrazy istnieja - ArgoCD na VPS sledzi `deploy` (NIE `main`) i sam synchronizuje
+# klaster. Nie ma tu kroku SSH ani deployu, bo to GitOps.
 #
 # Filtr sciezek sprawia, ze zmiana wylacznie we froncie nie przebudowuje API i odwrotnie.
 
@@ -34,9 +35,13 @@ jobs:
         uses: dorny/paths-filter@v3
         with:
           filters: |
+            # Te same sciezki, z ktorych powstaje obraz (COPY w Dockerfile) -
+            # `galaz_deploy.py` porownuje kod commita z kodem obrazu na tej
+            # samej liscie. Rozjazd pilnuje tests/test_galaz_deploy.py.
             api:
               - 'services/**'
               - 'db/**'
+              - 'scripts/**'
               - 'docker/api.Dockerfile'
               # Zmiana samego workflow MUSI go uruchomic.
               #
@@ -50,6 +55,7 @@ jobs:
               - 'web/**'
               - 'docker/web.Dockerfile'
               - 'docker/nginx.conf'
+              - 'docker/naglowki-bezpieczenstwa.conf'
 
   # Migracje sa niemutowalne z zalozenia (runner sprawdza sumy kontrolne).
   # Ten job wykrywa edycje zastosowanego pliku ZANIM trafi na produkcje, gdzie
@@ -311,11 +317,19 @@ jobs:
           for attempt in 1 2 3 4 5; do
             git fetch origin main && git reset --hard origin/main
 
+            # TAG NIE COFA SIE. Gdy nowszy commit zmienil kod tego obrazu,
+            # podbicie na NASZ sha wskazaloby obraz starszy niz kod w `main`
+            # (a jego przebieg moglby juz podbic tag na swoj). Podbije go
+            # przebieg tamtego commita.
             if [ "${{ needs.changes.outputs.api }}" = "true" ] || [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-              sed -i '/^api:/,/tag:/ { s|tag: .*|tag: "sha-${{ steps.vars.outputs.sha_short }}"| }' charts/trader/values.yaml
+              if git diff --quiet "${{ github.sha }}" HEAD -- services db scripts docker/api.Dockerfile; then
+                sed -i '/^api:/,/tag:/ { s|tag: .*|tag: "sha-${{ steps.vars.outputs.sha_short }}"| }' charts/trader/values.yaml
+              else echo "api: nowszy commit zmienil kod - tag podbije jego przebieg"; fi
             fi
             if [ "${{ needs.changes.outputs.web }}" = "true" ] || [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-              sed -i '/^web:/,/tag:/ { s|tag: .*|tag: "sha-${{ steps.vars.outputs.sha_short }}"| }' charts/trader/values.yaml
+              if git diff --quiet "${{ github.sha }}" HEAD -- web docker/web.Dockerfile docker/nginx.conf docker/naglowki-bezpieczenstwa.conf; then
+                sed -i '/^web:/,/tag:/ { s|tag: .*|tag: "sha-${{ steps.vars.outputs.sha_short }}"| }' charts/trader/values.yaml
+              else echo "web: nowszy commit zmienil kod - tag podbije jego przebieg"; fi
             fi
 
             git add charts/trader/values.yaml
@@ -325,3 +339,45 @@ jobs:
             [ "$attempt" = "5" ] && { echo "::error::Push nieudany po 5 probach"; exit 1; }
             sleep $(( (RANDOM % 5) + 1 ))
           done
+
+  # GALAZ `deploy` - TO JA SLEDZI ARGO CD, NIE `main` (2026-10-04).
+  #
+  # Na HEAD `main` chart wyprzedza obraz: commit z kodem i chartem laduje od
+  # razu, a tag obrazu dopiero po buildzie, osobnym commitem bota. 04.10
+  # 05:50-06:03 UTC silnik lezal w BackOff, bo chart z 6c9f28d podal flage
+  # `--strategia momentum` obrazowi sprzed niej. `deploy` dostaje wylacznie
+  # commity, w ktorych kazdy obraz zbudowano z kodu tego commita - regula
+  # i uzasadnienie w .github/skrypty/galaz_deploy.py.
+  #
+  # BEZ FILTRA SCIEZEK. Commit samego chartu albo dokumentacji nie buduje
+  # niczego, ale do `deploy` dojsc musi - inaczej zmiana chartu nie
+  # wdrozylaby sie do nastepnego commita kodu. Dlatego `always()`: build
+  # i podbicie pominiete przez filtr sa tu w porzadku, nieudane - nie.
+  # Testy jednostkowe MUSZA przejsc (pilnuja m.in., ze flagi z chartu
+  # przyjmuje parser kodu z tego commita - tests/test_chart_flagi_cli.py).
+  deploy:
+    name: Galaz deploy
+    permissions:
+      contents: write
+      packages: read
+    needs: [changes, verify-migrations, smoke, testy, build, update-git]
+    if: |
+      always() &&
+      needs.testy.result == 'success' &&
+      (needs.verify-migrations.result == 'success' || needs.verify-migrations.result == 'skipped') &&
+      (needs.smoke.result == 'success' || needs.smoke.result == 'skipped') &&
+      (needs.build.result == 'success' || needs.build.result == 'skipped') &&
+      (needs.update-git.result == 'success' || needs.update-git.result == 'skipped')
+    runs-on: ubuntu-latest
+    # Czekanie na podbicie tagu z rownoleglego przebiegu: patrz LIMIT_CZEKANIA_S.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.DEPLOY_PAT || secrets.GITHUB_TOKEN }}
+      - name: Przesun deploy na commit z istniejacymi obrazami
+        env:
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python .github/skrypty/galaz_deploy.py --zweryfikowany "${{ github.sha }}"
