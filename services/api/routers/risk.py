@@ -132,9 +132,15 @@ class RecznyKillSwitchBody(BaseModel):
     # Powod z tego samego powodu co przy zwolnieniu: zostaje w bazie na
     # pytanie "dlaczego system przestal handlowac".
     powod: str = Field(min_length=10, max_length=500)
-    # Haslo jak przy kazdej operacji wrazliwej (`auth.potwierdz_haslo`):
-    # przejety cookie sesji nie wystarczy, zeby zatrzymac handel.
-    haslo: str = Field(min_length=1, max_length=1024)
+    # BEZ HASLA - I TO JEST CALA OCHRONA TEGO KIERUNKU (przeglad 2026-10-04).
+    #
+    # Do tej poprawki zatrzymanie wymagalo hasla, a `potwierdz_haslo` odmawia
+    # przy zablokowanym koncie. Piec zlych logowan z dowolnego miejsca
+    # blokowalo konto na 15 minut - i przez te 15 minut wlasciciel NIE MOGL
+    # zatrzymac handlu z panelu, choc jego sesja byla wazna. Zatrzymanie
+    # niczego nie ryzykuje: najgorsze, co zrobi przejeta sesja, to wstrzymanie
+    # wejsc, ktore widac w alarmie i w audycie. Haslo chroni teraz kierunek,
+    # ktory ryzykuje pieniadze - zwolnienie.
 
 
 @router.post("/killswitch",
@@ -156,8 +162,14 @@ async def wlacz_killswitch(engine: Silnik, body: RecznyKillSwitchBody, request: 
 
     JEDNO AKTYWNE ZATRZYMANIE. Gdy bezpiecznik juz trzyma silnik, drugi wiersz
     niczego nie zmienia, a do zwolnienia bylyby dwa. `INSERT ... WHERE NOT
-    EXISTS` rozstrzyga to w jednej instrukcji, bez okna miedzy sprawdzeniem
-    a zapisem.
+    EXISTS` odrzuca drugie klikniecie, ale NIE wyklucza wyscigu: w READ
+    COMMITTED dwie rownolegle instrukcje nie widza nawzajem swoich
+    niezatwierdzonych wierszy, a tabela nie ma indeksu unikalnego na aktywne
+    zatrzymanie. Skutek wyscigu jest bezpieczny - dwa aktywne wiersze, silnik
+    stoi, dopoki oba nie zostana zwolnione - wiec nie ma tu blokady.
+
+    BEZ HASLA I BEZ SPRAWDZANIA BLOKADY KONTA - uzasadnienie przy
+    `RecznyKillSwitchBody`. Zostaje CSRF, rola wlasciciela, audyt i alarm.
 
     ALARM przez `notify` (kod `killswitch.triggered`, krytyczny), czyli do
     dzwonka i do bramki RenaCode. W tle - nieudana wysylka nie moze cofnac ani
@@ -165,9 +177,6 @@ async def wlacz_killswitch(engine: Silnik, body: RecznyKillSwitchBody, request: 
     (`sprawdz_ryzyko`) za pierwsze zgloszenie, wiec nie wysle drugiego
     "Kill-switch zadzialal", tylko przypomnienia w swoim rytmie.
     """
-    await potwierdz_haslo(user, body.haslo, request, akcja="risk.killswitch_manual",
-                          status=403, komunikat="Hasło jest nieprawidłowe")
-
     puls = await fetch_one(
         "SELECT mode::text AS mode FROM risk.engine_heartbeat WHERE engine::text = %s",
         (engine,))
@@ -225,6 +234,12 @@ class ZwolnienieBody(BaseModel):
     # cokolwiek napisal - i zostawia to w bazie na potem, gdy ktos bedzie pytal,
     # dlaczego system wrocil do handlu.
     note: str = Field(min_length=10, max_length=500)
+    # HASLO, BO ZWOLNIENIE WZNAWIA HANDEL (przeglad 2026-10-04). Do tej poprawki
+    # wystarczal CSRF i rola wlasciciela, czyli przejeta sesja mogla zwolnic
+    # KAZDY kill-switch - takze automatyczny `max_drawdown`, ktory wlasnie
+    # zatrzymal strate. `potwierdz_haslo` liczy pomylki razem z logowaniem
+    # i blokuje konto po MAX_FAILED.
+    haslo: str = Field(min_length=1, max_length=1024)
 
 
 @router.post("/killswitch/{event_id}/release",
@@ -245,7 +260,14 @@ async def zwolnij_killswitch(engine: Silnik, event_id: int, body: ZwolnienieBody
     Ryzyko w interfejsie", a interfejs pokazywal komunikat "Odblokowanie wymaga
     recznego potwierdzenia" bez zadnej kontrolki. Instrukcja odsylala do rzeczy,
     ktorej nie bylo.
+
+    HASLO PRZED CZYMKOLWIEK INNYM: odpowiedz 404/409 nie moze mowic
+    zgadujacemu, ktore zdarzenia istnieja. 403, nie 401 - front na 401
+    wylogowuje, a sesja jest wazna.
     """
+    await potwierdz_haslo(user, body.haslo, request, akcja="risk.killswitch_released",
+                          status=403, komunikat="Hasło jest nieprawidłowe")
+
     z = await fetch_one(
         "SELECT id, engine::text AS engine, reason, released_at"
         " FROM risk.killswitch_event WHERE id = %s", (event_id,))

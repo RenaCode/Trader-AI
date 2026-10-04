@@ -39,8 +39,12 @@ const WZNOWIENIE_PL = {
    granica przyjmowana przez API. */
 const KS_LIMIT = 100;
 
+/* ZWOLNIENIE Z HASLEM - zwolnienie wznawia handel, wiec przejety cookie sesji
+   nie moze go wystarczyc (przeglad 2026-10-04). Pomylki licza sie razem
+   z logowaniem i blokuja konto, tak jak zmiana hasla. */
 function ZwolnijKillSwitch({ engine, zdarzenie, onZwolniony }) {
   const [note, setNote] = useState('');
+  const [haslo, setHaslo] = useState('');
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState(null);
 
@@ -60,16 +64,23 @@ function ZwolnijKillSwitch({ engine, zdarzenie, onZwolniony }) {
                  placeholder="np. przyczyną był błąd w danych świec, poprawiony w sha-…"
                  onChange={(e) => { setNote(e.target.value); setErr(null); }} />
         </label>
-        <button className="btn" disabled={busy || note.trim().length < 10}
+        <label className="field" style={{ marginBottom: 8 }}>
+          <span className="field-label">Hasło — zwolnienie wznawia handel</span>
+          <input className="input-field" type="password" value={haslo}
+                 autoComplete="current-password"
+                 onChange={(e) => { setHaslo(e.target.value); setErr(null); }} />
+        </label>
+        <button className="btn" disabled={busy || note.trim().length < 10 || !haslo}
                 onClick={async () => {
                   setBusy(true); setErr(null);
                   try {
                     await post(`/api/engines/${engine}/risk/killswitch/${zdarzenie.id}/release`,
-                               { note: note.trim() });
-                    setNote('');
+                               { note: note.trim(), haslo });
+                    setNote(''); setHaslo('');
                     onZwolniony?.();
                   } catch (e) {
                     setErr(e.message || 'Nie udało się zwolnić');
+                    setHaslo('');
                   } finally { setBusy(false); }
                 }}>
           {busy ? 'Zwalniam…' : 'Zwolnij kill-switch'}
@@ -86,18 +97,19 @@ function ZwolnijKillSwitch({ engine, zdarzenie, onZwolniony }) {
 }
 
 /* RECZNY KILL-SWITCH - ta sama sciezka co automat (wiersz w
-   risk.killswitch_event), z haslem jak kazda operacja wrazliwa. Formularz jest
-   zwiniety za przyciskiem: zatrzymanie handlu nie moze byc jednym przypadkowym
-   kliknieciem, a stale otwarte pole hasla kusiloby menedzera hasel. Tryb
-   (demo/live) wybiera serwer z pulsu silnika. */
+   risk.killswitch_event). BEZ HASLA (przeglad 2026-10-04): haslo odmawia przy
+   zablokowanym koncie, a konto blokuje piec zlych logowan z dowolnego miejsca -
+   zatrzymanie handlu nie moze od tego zalezec. Haslo chroni zwolnienie.
+   Formularz jest zwiniety za przyciskiem z powodem: zatrzymanie handlu nie moze
+   byc jednym przypadkowym kliknieciem. Tryb (demo/live) wybiera serwer z pulsu
+   silnika. */
 function WlaczKillSwitch({ engine, onWlaczony }) {
   const [otwarty, setOtwarty] = useState(false);
   const [powod, setPowod] = useState('');
-  const [haslo, setHaslo] = useState('');
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState(null);
 
-  const zamknij = () => { setOtwarty(false); setPowod(''); setHaslo(''); setErr(null); };
+  const zamknij = () => { setOtwarty(false); setPowod(''); setErr(null); };
 
   if (!otwarty) {
     return (
@@ -122,12 +134,11 @@ function WlaczKillSwitch({ engine, onWlaczony }) {
               setBusy(true); setErr(null);
               try {
                 await post(`/api/engines/${engine}/risk/killswitch`,
-                           { powod: powod.trim(), haslo });
+                           { powod: powod.trim() });
                 zamknij();
                 onWlaczony?.();
               } catch (ex) {
                 setErr(ex.message || 'Nie udało się włączyć kill-switcha');
-                setHaslo('');
               } finally { setBusy(false); }
             }}>
         <label className="field" style={{ marginBottom: 8 }}>
@@ -136,14 +147,8 @@ function WlaczKillSwitch({ engine, onWlaczony }) {
                  placeholder="np. podejrzany ruch na rachunku, sprawdzam przed dalszym handlem"
                  onChange={(e) => { setPowod(e.target.value); setErr(null); }} />
         </label>
-        <label className="field" style={{ marginBottom: 8 }}>
-          <span className="field-label">Hasło — potwierdzenie tożsamości</span>
-          <input className="input-field" type="password" value={haslo}
-                 autoComplete="current-password"
-                 onChange={(e) => { setHaslo(e.target.value); setErr(null); }} />
-        </label>
         <button className="btn" type="submit"
-                disabled={busy || powod.trim().length < 10 || !haslo}>
+                disabled={busy || powod.trim().length < 10}>
           {busy ? 'Zatrzymuję…' : 'Włącz kill-switch'}
         </button>
         <button className="btn" type="button" style={{ marginLeft: 8 }}

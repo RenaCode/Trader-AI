@@ -1,13 +1,18 @@
 """Ręczny kill-switch z panelu (decyzja właściciela 2026-10-04).
 
 Ta sama ścieżka co automat — wiersz w `risk.killswitch_event` bez
-`released_at`, który silnik czyta w każdym cyklu — z hasłem, wpisem w audycie
+`released_at`, który silnik czyta w każdym cyklu — z wpisem w audycie
 i alarmem krytycznym (dzwonek + bramka). Na produkcji tego się NIE wyzwala;
 pilnują tego te testy.
+
+KIERUNEK OCHRONY (przegląd 2026-10-04): zatrzymanie BEZ hasła i bez blokady
+konta (pięć złych logowań nie może odebrać właścicielowi hamulca), zwolnienie
+Z hasłem (przejęta sesja nie może wznowić handlu po `max_drawdown`).
 """
 from __future__ import annotations
 
 import asyncio
+import re
 from pathlib import Path
 
 import pytest
@@ -21,16 +26,22 @@ UZYTKOWNIK = {"id": 7, "login": "wlasciciel", "role": "owner", "session_id": 3}
 
 
 class Atrapa:
-    def __init__(self, *, puls="demo", aktywny=False, haslo_ok=True):
+    def __init__(self, *, puls="demo", aktywny=False, haslo_ok=True, blokada=False,
+                 zdarzenie=None):
         self.puls = puls
         self.aktywny = aktywny
         self.haslo_ok = haslo_ok
+        self.blokada = blokada
+        self.zdarzenie = zdarzenie
         self.wstawione = []
+        self.zwolnione = []
         self.audyt = []
         self.alarmy = []
         self.hasla = []
 
     async def fetch_one(self, sql, params=None):
+        if "FROM risk.killswitch_event WHERE id" in sql:
+            return self.zdarzenie
         if "risk.engine_heartbeat" in sql:
             return {"mode": self.puls} if self.puls else None
         if "INSERT INTO risk.killswitch_event" in sql:
@@ -45,11 +56,18 @@ class Atrapa:
         assert 'app."user"' in sql
         return [{"id": 7}, {"id": 8}]
 
+    async def execute(self, sql, params=None):
+        assert "UPDATE risk.killswitch_event" in sql
+        self.zwolnione.append(params)
+
     async def audit(self, akcja, **kw):
         self.audyt.append((akcja, kw))
 
     async def potwierdz_haslo(self, user, haslo, request, *, akcja, status, komunikat):
+        """Jak `auth.potwierdz_haslo`: blokada konta odmawia PRZED sprawdzeniem."""
         self.hasla.append((haslo, akcja, status))
+        if self.blokada:
+            raise HTTPException(429, "Konto zablokowane")
         if not self.haslo_ok:
             raise HTTPException(status, komunikat)
 
@@ -57,14 +75,29 @@ class Atrapa:
         self.alarmy.append((user_id, kod, tytul, tresc, kw))
 
 
-def wlacz(monkeypatch, atrapa, engine="crypto", powod="sprawdzam podejrzany ruch na rachunku",
-          haslo="tajne"):
+def _podstaw(monkeypatch, atrapa):
     for nazwa, f in (("fetch_one", atrapa.fetch_one), ("fetch_all", atrapa.fetch_all),
+                     ("execute", atrapa.execute),
                      ("audit", atrapa.audit), ("potwierdz_haslo", atrapa.potwierdz_haslo),
                      ("powiadom_o_bezpieczenstwie", atrapa.powiadom)):
         monkeypatch.setattr(risk, nazwa, f)
-    body = risk.RecznyKillSwitchBody(powod=powod, haslo=haslo)
+
+
+def wlacz(monkeypatch, atrapa, engine="crypto", powod="sprawdzam podejrzany ruch na rachunku"):
+    _podstaw(monkeypatch, atrapa)
+    body = risk.RecznyKillSwitchBody(powod=powod)
     return asyncio.run(risk.wlacz_killswitch(engine, body, request=None, user=UZYTKOWNIK))
+
+
+AKTYWNE = {"id": 501, "engine": "crypto", "reason": "max_drawdown", "released_at": None}
+
+
+def zwolnij(monkeypatch, atrapa, engine="crypto", haslo="tajne",
+            note="obsunięcie wyjaśnione, dane świec poprawione"):
+    _podstaw(monkeypatch, atrapa)
+    body = risk.ZwolnienieBody(note=note, haslo=haslo)
+    return asyncio.run(risk.zwolnij_killswitch(engine, 501, body, request=None,
+                                               user=UZYTKOWNIK))
 
 
 def test_zapisuje_TEN_SAM_wiersz_co_automat_z_tym_kto(monkeypatch):
@@ -89,14 +122,51 @@ def test_bez_pulsu_silnika_odmawia(monkeypatch):
     assert e.value.status_code == 409 and not a.wstawione and not a.alarmy
 
 
-def test_wymaga_hasla_i_bez_niego_nic_nie_robi(monkeypatch):
+def test_zatrzymanie_NIE_pyta_o_haslo(monkeypatch):
     a = Atrapa(haslo_ok=False)
+    assert wlacz(monkeypatch, a)["ok"]
+    assert a.hasla == [] and a.wstawione
+
+
+def test_zablokowane_konto_NIE_blokuje_zatrzymania(monkeypatch):
+    """Pięć złych logowań z dowolnego miejsca blokuje konto na 15 minut.
+    Do 2026-10-04 przez te 15 minut nie dało się zatrzymać handlu z panelu."""
+    a = Atrapa(blokada=True)
+    odp = wlacz(monkeypatch, a)
+    assert odp["ok"] and a.wstawione and a.audyt and a.alarmy
+
+
+def test_zwolnienie_WYMAGA_hasla_i_bez_niego_nic_nie_robi(monkeypatch):
+    a = Atrapa(haslo_ok=False, zdarzenie=AKTYWNE)
     with pytest.raises(HTTPException) as e:
-        wlacz(monkeypatch, a)
+        zwolnij(monkeypatch, a)
     # 403, nie 401: front na 401 wylogowuje, a sesja JEST wazna.
     assert e.value.status_code == 403
-    assert a.hasla == [("tajne", "risk.killswitch_manual", 403)]
-    assert not a.wstawione and not a.audyt and not a.alarmy
+    assert a.hasla == [("tajne", "risk.killswitch_released", 403)]
+    assert not a.zwolnione and not a.audyt
+
+
+def test_zwolnienie_przy_zablokowanym_koncie_odmawia(monkeypatch):
+    a = Atrapa(blokada=True, zdarzenie=AKTYWNE)
+    with pytest.raises(HTTPException) as e:
+        zwolnij(monkeypatch, a)
+    assert e.value.status_code == 429 and not a.zwolnione
+
+
+def test_zwolnienie_z_haslem_zapisuje_kto_i_audyt(monkeypatch):
+    a = Atrapa(zdarzenie=AKTYWNE)
+    assert zwolnij(monkeypatch, a)["ok"]
+    (kto, notatka, eid), = a.zwolnione
+    assert (kto, eid) == (7, 501) and "obsunięcie" in notatka
+    assert [akcja for akcja, _ in a.audyt] == ["risk.killswitch_released"]
+
+
+def test_haslo_sprawdzane_ZANIM_odpowiedz_zdradzi_zdarzenie(monkeypatch):
+    """404 dla nieistniejącego zdarzenia nie może iść przed hasłem."""
+    a = Atrapa(haslo_ok=False, zdarzenie=None)
+    with pytest.raises(HTTPException) as e:
+        zwolnij(monkeypatch, a)
+    assert e.value.status_code == 403
 
 
 def test_drugie_zatrzymanie_przy_aktywnym_to_409(monkeypatch):
@@ -120,11 +190,17 @@ def test_zostawia_slad_w_audycie_i_wysyla_alarm_krytyczny(monkeypatch):
     assert "ręcznie" in tytul and "wlasciciel" in tresc
 
 
-@pytest.mark.parametrize("pole,wartosc", [("powod", "krótko"), ("powod", ""), ("haslo", "")])
-def test_powod_i_haslo_sa_wymagane(pole, wartosc):
-    dane = {"powod": "sprawdzam podejrzany ruch", "haslo": "x", pole: wartosc}
+@pytest.mark.parametrize("wartosc", ["krótko", ""])
+def test_powod_zatrzymania_jest_wymagany(wartosc):
     with pytest.raises(ValidationError):
-        risk.RecznyKillSwitchBody(**dane)
+        risk.RecznyKillSwitchBody(powod=wartosc)
+
+
+@pytest.mark.parametrize("pole,wartosc", [("note", "krótko"), ("haslo", "")])
+def test_powod_i_haslo_zwolnienia_sa_wymagane(pole, wartosc):
+    dane = {"note": "dane świec poprawione w sha-abc", "haslo": "x", pole: wartosc}
+    with pytest.raises(ValidationError):
+        risk.ZwolnienieBody(**dane)
 
 
 def test_nieznany_silnik_odpada_walidacja():
@@ -177,8 +253,17 @@ def test_endpoint_chroniony_csrf_i_rola_wlasciciela():
     assert "require_csrf" in dekorator and "wymagaj_wlasciciela" in dekorator
 
 
-def test_interfejs_ma_czym_wlaczyc_i_pyta_o_haslo():
+def _komponent(zrodlo: str, nazwa: str) -> str:
+    i = zrodlo.index(f"function {nazwa}(")
+    return zrodlo[i:re.search(r"\n(export default )?function ", zrodlo[i:]).start() + i]
+
+
+def test_interfejs_zatrzymuje_bez_hasla_a_zwalnia_z_haslem():
     zrodlo = Path("web/src/components/Risk.jsx").read_text(encoding="utf-8")
-    assert "`/api/engines/${engine}/risk/killswitch`" in zrodlo
-    assert 'type="password"' in zrodlo and "haslo" in zrodlo
+    wlacz_ui = _komponent(zrodlo, "WlaczKillSwitch")
+    zwolnij_ui = _komponent(zrodlo, "ZwolnijKillSwitch")
+    assert "`/api/engines/${engine}/risk/killswitch`" in wlacz_ui
+    assert 'type="password"' not in wlacz_ui and "haslo" not in wlacz_ui
+    assert "/release`" in zwolnij_ui
+    assert 'type="password"' in zwolnij_ui and "{ note: note.trim(), haslo }" in zwolnij_ui
     assert "triggered_by" in zrodlo, "historia ma mówić, kto zatrzymał ręcznie"

@@ -96,10 +96,10 @@ def test_zwolnienie_wymaga_POWODU_a_nie_tylko_kliknięcia():
     złudzenie namysłu."""
     from services.api.routers.risk import ZwolnienieBody
 
-    ZwolnienieBody(note="dane świec poprawione w sha-abc1234")
+    ZwolnienieBody(note="dane świec poprawione w sha-abc1234", haslo="x")
     for zly in ("", "ok", "bo tak"):
         with pytest.raises(Exception):
-            ZwolnienieBody(note=zly)
+            ZwolnienieBody(note=zly, haslo="x")
 
 
 def test_endpoint_zwolnienia_ISTNIEJE_i_pisze_do_wlasciwych_kolumn():
