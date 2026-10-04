@@ -16,6 +16,7 @@ i wchodzi dopiero ręcznym przebiegiem z `--zatwierdz-promocje`, po wpisie tutaj
 | H-B2 | 2026-10-03 | Odniesienie B2 (momentum przekrojowe z filtrem trendu) jest baseline'em, który ensemble musi pobić | definicja, nie test | — | obowiązuje od pierwszego przebiegu |
 | H-1 | 2026-10-03 | Ensemble 4h ma przewagę pod uczciwym modelem wypełnień (STOP/GO 1) | zwrot/rundę po dopłacie > 0 w ≥ 3/5 przesunięć **i** bije B2 przy tej samej ekspozycji w ≥ 60% okien | zwrot/rundę −11,2 pb (0/5 przesunięć > 0), bije B2 w 61% okien | **STOP** — kalibracja wag ensemble zamknięta, dalej tylko R4 |
 | H-2 | 2026-10-03 | Zmiana METODY z audytu T4 (stała siatka okien + status z minimum 5 przesunięć, progi wejścia na wagach IC, horyzont IC przy `Horizon`): wpływ na werdykt toru 4h | opisowe — bez decyzji GO; wynik nie zmienia H-1 | patrz niżej | H-1 STOP obowiązuje |
+| H-3 | 2026-10-04 | Tor R4: momentum przekrojowe 30 d na decyzji dobowej z filtrem BTC > EMA 50 d, top 3 long-only, pod pesymistycznym modelem wejść (STOP/GO 2) | wszystkie cztery naraz: K1 okna dodatnie ≥ 65% **i** bije B1 przy tej samej ekspozycji w ≥ 65% okien; K2 DSR ≥ 0,95 na 5/5 przesunięć; K3 percentyl permutacyjny ≥ 70 na 5/5 przesunięć; K4 bije B2 przy tej samej ekspozycji w ≥ 55% okien | — | — |
 
 ---
 
@@ -239,3 +240,102 @@ Odtworzenie: `scripts/eksperyment.py --panel … --kind spot_eu --limit --trials
 --hipoteza H-2 [--egzekucja-pesymistyczna --opoznienie 20] [--od teraz]`; (d) to
 (b) z `train.bramki_na_wagach` podmienionym na progi z `dane.bazowe` (skrypt
 pomiarowy poza repo, jednorazowy).
+
+## H-3: STOP/GO 2, tor R4 (momentum dobowe z filtrem trendu)
+
+Zapisane 2026-10-04 **przed** napisaniem kodu pomiaru i przed jakimkolwiek przebiegiem.
+Źródło: porada Fable R4, audyt Fable sekcja 12 (tydzień 3, STOP/GO 2). Parametry
+z literatury o momentum przekrojowym w krypto, te same liczby co B2 (H-B2), **nie
+strojone**. Kod: `services/engine/r4_momentum.py`, uruchomienie
+`scripts/eksperyment.py --r4 --hipoteza H-3`. Każda zmiana czegokolwiek niżej po
+zobaczeniu wyniku to nowa hipoteza (H-4…) i kolejna próba do N.
+
+- **Pytanie**: czy wolna klasa sygnału (ranking 30-dniowy, decyzja raz na dobę,
+  filtr reżimu rynku) ma przewagę po kosztach i pod tym samym pesymistycznym
+  modelem wejść, pod którym ensemble 4h jej nie ma (H-1)? I czy dokłada coś
+  do B2, czyli do tego samego pomysłu w wersji „rynkowo, co tydzień”?
+
+**Sygnał i decyzja** (stałe):
+
+| parametr | wartość |
+|---|---|
+| uniwersum | instrumenty aktywne w danym oknie WF (`train.okna_wf`, to samo co strategia, H-1 i B1–B3) |
+| sygnał | zwrot od T−30 d do T−1 d (pominięty ostatni dzień), z zamknięć świec 4h znanych w chwili T |
+| decyzja | raz na dobę, na zamknięciu doby UTC (zamknięcie świecy 4h 20:00–24:00); pierwsza decyzja okna na pierwszym takim zamknięciu wewnątrz okna (jak B2) |
+| wybór | top 3 po sygnale (remis: kolejność alfabetyczna symbolu), long-only, równe wagi przy wejściu, bez dorównywania wag w trakcie trzymania |
+| filtr trendu | zamknięcie dobowe BTC > EMA 50 zamknięć dobowych (ta sama funkcja co B2/B3); inaczej cel = gotówka (wszystko wychodzi) |
+| wyjście | wyłącznie wypadnięcie z top 3 albo wyłączenie filtrem; **bez** progu `EXIT_RATIO`, bez stopów; mean reversion i reszta sygnałów ensemble **wyłączone** (nie liczone wcale) |
+| rebalans | codziennie (różnica wobec B2: B2 zmienia skład co 7 dni) |
+| koniec okna | wszystko domknięte po cenie ostatniej świecy okna, takerem (jak B2) |
+
+**Ekspozycja — dwa warianty, oba zapisane z góry, N = 2:**
+
+- **P (budżet produkcyjny)**: łączna ekspozycja = limit produkcyjny
+  `max_total_exposure` = 15% kapitału, czyli 5% na pozycję. To „ta sama co
+  strategia” w sensie budżetu, którym strategia jest ograniczona.
+- **F (pełna, jak B2)**: 1/3 kapitału na pozycję, łącznie do 100%.
+
+Porównania „przy tej samej ekspozycji” są wolne od skali, więc oba warianty
+dają te same zwroty na rundę z dokładnością do składnika „pył” karty (zależy od
+notionalu). Werdykt wydaje się dla **każdego** wariantu osobno; GO wymaga, by
+przynajmniej jeden spełnił wszystkie cztery kryteria, a raport podaje oba.
+
+**Model wykonania** (`--egzekucja-pesymistyczna --opoznienie 20` z H-1, plus wyjście takerem):
+
+- **wejście**: zlecenie z limitem wysłane 20 min po zamknięciu doby; cena wysyłki
+  z interpolacji na świecach 1h (`portfolio.wycena_wysylki`), limit = cena − ½
+  spreadu instrumentu (`book_spread_bps` per instrument z pliku panelu); wypełnienie
+  tylko, gdy `low` kolejnej godziny ≤ limit, po cenie limitu, prowizja maker.
+  Niewypełnione wejście przepada; jeśli instrument nadal jest w top 3, kolejna
+  próba następuje przy następnej decyzji dobowej (dzień później). Brak świecy 1h
+  potrzebnej do wyceny = niewypełnione (liczone osobno).
+- **wyjście**: taker (produkcja od T6 przechodzi na takera po odrzuceniu PostOnly),
+  cena wysyłki 20 min po zamknięciu doby z tej samej interpolacji, poślizg
+  `POSLIZG_TAKER` 4 pb, prowizja taker; wyjście zawsze wypełnione.
+- **karta kosztu**: ta sama co w H-1 (`karta_rundy` dla `spot_eu`, spread z pliku
+  panelu, pył dla notionalu wariantu), dopłata spoza symulacji odejmowana od każdej
+  rundy (`koszty.zwroty_po_doplacie`); niewypełnienie mierzone w symulacji, więc
+  do dopłaty nie wchodzi. Odniesienia B1–B3 z kartą rynkową, jak w H-1.
+
+**Dane i siatka**: plik panelu z kopii produkcji (`trader_prod_kopia`, dump
+20261003T043403Z, `panele_crypto_4h_20261003.json.gz`, ten sam co H-1/H-2), `--kind
+spot_eu`, `--days 1400`, siatka okien toru 4h zakotwiczona w `KOTWICA_SIATKI`
+(2022-09-01, krok 30 dni, okno testowe 30 dni, 180 dni przed oknem jako historia —
+R4 niczego na niej nie uczy, potrzebuje tylko 30 d momentum i 50 d EMA),
+przesunięcia −2…+2 dni. Te same okna testowe co H-2, więc odniesienia B1–B3
+są liczone w identycznych oknach.
+
+**Miary na przesunięcie**: liczba okien; okna z ekspozycją > 0 (porównywalne);
+okna dodatnie = zwrot okna po dopłacie > 0, liczone wśród okien z ekspozycją > 0
+(okno całe w gotówce nie ma czego porównywać — ta sama zasada co
+`baseline.bije`, wypisywane osobno); bije B1/B2/B3 przy tej samej ekspozycji
+(`baseline.bije`); średni zwrot na rundę po dopłacie (pb); DSR na złączonej próbie
+rund po dopłacie (`statystyka.deflowany_sharpe`, N = 2 warianty H-3, odchylenie
+prób = podstawienie H0, bo innych konfiguracji R4 nie ma; informacyjnie także
+DSR przy N = 59 + 2 z licznika toru 4h); wypełnialność wejść; percentyl permutacyjny.
+
+**Test permutacyjny**: 200 permutacji na przesunięcie (ziarno 20261004). W każdej
+permutacji przy każdej decyzji dobowej wartości sygnału są losowo przetasowane
+między instrumentami dostępnymi w tej decyzji; filtr BTC, model wykonania, koszty
+i okna bez zmian. Statystyka: suma zwrotów okien (% kapitału) po dopłacie.
+Percentyl = odsetek permutacji ze statystyką mniejszą od faktycznej (remisy po
+połowie). Test sprawdza **wybór instrumentów**, nie timing filtra — timing ocenia
+porównanie z B1.
+
+**Kryteria GO** (wszystkie naraz, dla co najmniej jednego wariantu ekspozycji):
+
+- **K1**: okna dodatnie ≥ 65% **i** bije B1 przy tej samej ekspozycji w ≥ 65% okien
+  (oba zbiorczo po 5 przesunięciach). Kryterium z sekcji 12 („≥ 65% okien
+  dodatnich przy odniesieniu o tej samej ekspozycji”) jest dwuznaczne; z góry
+  przyjmuję obie lektury naraz, czyli wersję surowszą.
+- **K2**: DSR ≥ 0,95 na 5/5 przesunięć (N = 2).
+- **K3**: percentyl permutacyjny ≥ 70 na 5/5 przesunięć.
+- **K4**: bije B2 przy tej samej ekspozycji w ≥ 55% okien (zbiorczo).
+
+Niespełnienie dowolnego = **STOP** dla toru R4: nie wchodzi na demo. Jeśli
+żaden tor (ensemble H-1, R4 H-3) nie przechodzi, decyzja właściciela z sekcji 12:
+B2 na demo jako strategia albo zamknięcie z wnioskiem „brak przewagi”.
+
+**Czego wynik nie rozstrzyga**: czy 20 min to właściwe opóźnienie i czy godzina
+to właściwe okno życia zlecenia wejścia (jak w H-1); ok. 39 okien po 30 dni to
+mało — przedziały Wilsona przy odsetkach okien są w raporcie, nie tylko punkty.
