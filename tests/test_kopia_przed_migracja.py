@@ -51,7 +51,8 @@ def test_hook_presync_z_lista_oczekujacych_przed_zrzutem():
     pod = job["spec"]["template"]["spec"]
     assert pod["automountServiceAccountToken"] is False
     init = pod["initContainers"][0]
-    assert init["command"][-2:] == ["--oczekujace", "/wspolne/oczekujace"]
+    assert init["command"][-1].endswith(
+        "&& exec python db/migrate.py --oczekujace /wspolne/oczekujace")
     # Lista oczekujących z roli czujki (sam odczyt), zrzut rolą właściciela.
     assert init["env"][1]["value"].startswith("postgresql://trader_czujka@")
     assert job["metadata"].get("labels") and \
@@ -60,8 +61,40 @@ def test_hook_presync_z_lista_oczekujacych_przed_zrzutem():
         "trader.renacode.com/component"] == "job", "netpol bazy wpuszcza joby po etykiecie"
 
 
+@bez_helma
+def test_hook_CZEKA_na_baze_zanim_sie_polaczy_i_ponawia():
+    """kube-router wpuszcza nowy pod `component: job` z opóźnieniem - pierwsze
+    połączenie dostawało `Connection refused`, a `backoffLimit: 0` zamieniał
+    to w zatrzymaną synchronizację (ten sam błąd co CronJoby, b0f659a)."""
+    job = next(d for d in _render()
+               if d["metadata"]["name"] == "trader-kopia-przed-migracja")
+    polecenie = job["spec"]["template"]["spec"]["initContainers"][0]["command"]
+    assert polecenie[:2] == ["sh", "-c"]
+    czekaj, _, migracja = polecenie[2].partition(" && ")
+    assert czekaj.startswith("python services/engine/przebieg_zadania.py --tylko-czekaj ")
+    assert "db/migrate.py" in migracja, "czekanie PRZED pierwszym połączeniem"
+    assert job["spec"]["backoffLimit"] == 2
+
+
+def test_tylko_czekaj_konczy_sie_kodem_bazy(monkeypatch):
+    from services.engine import przebieg_zadania as pz
+    wolane = []
+    monkeypatch.setattr(pz, "czekaj_na_baze", lambda limit_s: wolane.append(limit_s) or False)
+    monkeypatch.setattr(pz, "uruchom", lambda *a: pytest.fail("bez polecenia"))
+    assert pz.main(["--tylko-czekaj", "120"]) == 1 and wolane == [120.0]
+    monkeypatch.setattr(pz, "czekaj_na_baze", lambda limit_s: True)
+    assert pz.main(["--tylko-czekaj", "5"]) == 0
+    with pytest.raises(SystemExit):
+        pz.main(["--", "true"])
+
+
+def test_awaryjne_wylaczenie_jest_opisane_przy_hooku():
+    tresc = (KORZEN / "charts/trader/templates/kopia-przed-migracja.yaml").read_text()
+    assert "kopiaPrzedMigracja.enabled: false" in tresc
+
+
 def _uruchom(tmp_path, oczekujace="0092_x\n", *, wolne_mib=50000, dump_pada=False,
-             zostaw=5, min_wolne_mib=2048):
+             zostaw=5, min_wolne_mib=2048, restore_pada=False):
     """Skrypt kontenera `kopia` z atrapami narzędzi. Zwraca (wynik, ślad wywołań).
 
     Atrapy także dla `stat` i `df`: skrypt chodzi na obrazie bazy (GNU), a test
@@ -84,7 +117,7 @@ def _uruchom(tmp_path, oczekujace="0092_x\n", *, wolne_mib=50000, dump_pada=Fals
         "pg_dump": (f'echo pg_dump >> {slad}\n'
                     + ('exit 1\n' if dump_pada else '')
                     + 'for a in "$@"; do case $a in --file=*) echo zrzut > "${a#--file=}";; esac; done\n'),
-        "pg_restore": f"echo pg_restore >> {slad}\n",
+        "pg_restore": f"echo pg_restore >> {slad}\n" + ("exit 1\n" if restore_pada else ""),
         "psql": f'echo psql >> {slad}\ncase "$*" in *extversion*) echo 2.17.2;; *) echo 17.5;; esac\n',
         "stat": 'wc -c < "$3" | tr -d " "\n',
         "df": f'echo "Filesystem 1024-blocks Used Available Capacity Mounted"\n'
@@ -138,6 +171,30 @@ def test_nieudany_zrzut_konczy_sie_bledem_i_nie_zostawia_pliku(tmp_path):
     w, _, kopie = _uruchom(tmp_path, dump_pada=True)
     assert w.returncode != 0
     assert not list(kopie.glob("trader-przedmigracja-*")), list(kopie.iterdir())
+
+
+@bez_helma
+def test_zrzut_bez_kontroli_NIE_zostaje_jako_kopia(tmp_path):
+    """`pg_restore --list` odrzuca plik: ani `.dump`, ani `.tmp` na dysku."""
+    w, wywolane, kopie = _uruchom(tmp_path, restore_pada=True)
+    assert w.returncode != 0 and "pg_restore" in wywolane
+    assert not list(kopie.glob("trader-przedmigracja-*")), list(kopie.iterdir())
+
+
+@bez_helma
+def test_porzucony_tmp_po_SIGKILL_nie_udaje_kopii_i_znika(tmp_path):
+    """`trap` nie działa przy SIGKILL (OOM, `activeDeadlineSeconds`): zostaje
+    obcięty `.dump.tmp`. Nie liczy się do progu miejsca ani do retencji,
+    a następny przebieg go sprząta."""
+    kopie = tmp_path / "backup"
+    kopie.mkdir()
+    porzucony = kopie / "trader-przedmigracja-20261004T000000Z.dump.tmp"
+    porzucony.write_bytes(b"x" * (2 * 1048576))
+    w, wywolane, _ = _uruchom(tmp_path, wolne_mib=5, min_wolne_mib=1)
+    assert w.returncode == 0 and "pg_dump" in wywolane, w.stdout + w.stderr
+    assert not porzucony.exists()
+    # Prog liczony z porzuconego (2 MiB x 3 > 5 MiB wolnych) zatrzymalby zrzut.
+    assert len(list(kopie.glob("trader-przedmigracja-*.dump"))) == 1
 
 
 @bez_helma

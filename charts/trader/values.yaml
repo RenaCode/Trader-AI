@@ -717,11 +717,6 @@ workers:
 # Pole `timeZone` wymaga Kubernetesa 1.27+ (k3s 1.27+).
 strefaCzasowa: "Europe/Warsaw"
 
-# Kopia zapasowa bazy. Zrzut trafia na dysk hosta, poza wolumen bazy danych.
-# KOPIA PRZED MIGRACJA - hook Argo CD `PreSync` (audyt Fable U-13,
-# templates/kopia-przed-migracja.yaml). Zrzut tylko, gdy obraz niesie nowe
-# migracje; nieudany zrzut ZATRZYMUJE synchronizacje. Wylaczone do decyzji
-# wlasciciela, bo zmienia zachowanie kazdego wdrozenia.
 # Bramka powiadomien RenaCode (renacode-infra, charts/bramka): alarmy krytyczne
 # poza panel - WhatsApp, zapasowo mail. Klucz w Sekrecie (`BRAMKA_KLUCZ`),
 # uzasadnienie przy `trader.bramkaEnv` w _helpers.tpl.
@@ -729,9 +724,11 @@ bramkaPowiadomien:
   url: http://bramka.bramka.svc.cluster.local/v1/wyslij
 
 # Zrzut bazy przed kazda synchronizacja z nowymi migracjami (hook PreSync,
-# templates/kopia-przed-migracja.yaml). Wlaczone decyzja wlasciciela
-# 2026-10-04. Zrzut ~360 MB (04.10.2026), wiec 5 kompletow to ~2 GB na
-# /opt/trader-backups obok 14 nocnych.
+# templates/kopia-przed-migracja.yaml, audyt Fable U-13). Wlaczone decyzja
+# wlasciciela 2026-10-04. Zrzut ~360 MB (04.10.2026), wiec 5 kompletow to ~2 GB
+# na /opt/trader-backups obok 14 nocnych. Nieudany zrzut ZATRZYMUJE
+# synchronizacje; AWARYJNIE `enabled: false` - wdrozenie idzie wtedy bez kopii
+# (szczegoly w naglowku szablonu).
 kopiaPrzedMigracja:
   enabled: true
   zostaw: 5
@@ -739,6 +736,7 @@ kopiaPrzedMigracja:
   # z tej liczby i trzykrotnosci ostatniego zrzutu.
   minWolneMiB: 2048
 
+# Kopia zapasowa bazy. Zrzut trafia na dysk hosta, poza wolumen bazy danych.
 backup:
   enabled: true
   # GODZINY SA LOKALNE (Europe/Warsaw), NIE UTC — zmierzone, nie zalozone.

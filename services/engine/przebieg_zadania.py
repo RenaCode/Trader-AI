@@ -108,11 +108,21 @@ def uruchom(nazwa: str, polecenie: list[str]) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--nazwa", required=True,
+    ap.add_argument("--nazwa",
                     help="nazwa zadania w risk.job_run, np. trainer")
+    # SAMO CZEKANIE, BEZ POLECENIA I BEZ WIERSZA W `risk.job_run` - dla
+    # kontenerow, ktore nie sa CronJobem (hook `kopia-przed-migracja`), a lacza
+    # sie z baza w pierwszej sekundzie zycia poda. Kod 1, gdy baza nie odpowie:
+    # tam polecenie bez bazy i tak nie ma sensu, a nieudany kontener ponowi Job.
+    ap.add_argument("--tylko-czekaj", type=float, metavar="S", dest="tylko_czekaj",
+                    help="poczekaj najwyzej S sekund na port bazy i zakoncz")
     ap.add_argument("polecenie", nargs=argparse.REMAINDER,
                     help="polecenie po `--`")
     args = ap.parse_args(argv)
+    if args.tylko_czekaj is not None:
+        return 0 if czekaj_na_baze(limit_s=args.tylko_czekaj) else 1
+    if not args.nazwa:
+        ap.error("--nazwa jest wymagane (poza --tylko-czekaj)")
     polecenie = args.polecenie[1:] if args.polecenie[:1] == ["--"] else args.polecenie
     if not polecenie:
         ap.error("brak polecenia po `--`")

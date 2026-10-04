@@ -36,6 +36,20 @@
 # przy odtwarzaniu na tym samym klastrze juz istnieja.
 #
 # WLACZONE 2026-10-04 decyzja wlasciciela (`kopiaPrzedMigracja.enabled`).
+#
+# CZEKANIE NA BAZE. Pod ma etykiete `component: job`, a kube-router wpuszcza
+# nowy pod do bazy kilka sekund po jego starcie - do tego czasu `Connection
+# refused` (ten sam blad co w CronJobach, b0f659a). Kontener `oczekujace`
+# czeka wiec na port bazy (`przebieg_zadania.py --tylko-czekaj`) zanim sie
+# polaczy; `kopia` startuje po nim, z ta sama regula NetworkPolicy. Do tego
+# `backoffLimit: 2`, a aplikacja Argo CD ma `syncPolicy.retry`
+# (renacode-infra, argocd-apps.yaml) - jeden przypadkowy blad nie zatrzymuje
+# wdrozenia na stale.
+#
+# AWARYJNIE: gdy hook blokuje synchronizacje, a wdrozenie nie moze czekac -
+# `kopiaPrzedMigracja.enabled: false` w values.yaml (commit na `main`) albo
+# parametr aplikacji w Argo CD. Wdrozenie idzie wtedy BEZ kopii: najblizsza
+# jest nocna (`backup`, 03:17), wiec przy nowych migracjach zrob zrzut recznie.
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -45,7 +59,7 @@ metadata:
     argocd.argoproj.io/hook: PreSync
     argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
 spec:
-  backoffLimit: 0
+  backoffLimit: 2
   activeDeadlineSeconds: 1800
   template:
     metadata:
@@ -69,7 +83,7 @@ spec:
             allowPrivilegeEscalation: false
             capabilities:
               drop: ["ALL"]
-          command: ["python", "db/migrate.py", "--oczekujace", "/wspolne/oczekujace"]
+          command: ["sh", "-c", "python services/engine/przebieg_zadania.py --tylko-czekaj 120 && exec python db/migrate.py --oczekujace /wspolne/oczekujace"]
           env:
             {{- include "trader.rolaDbEnv" (dict "ctx" $ "rola" "czujka") | nindent 12 }}
           volumeMounts:
@@ -116,7 +130,8 @@ spec:
               echo "==> nowe migracje: $(tr '\n' ' ' < /wspolne/oczekujace)"
               DB="-h {{ include "trader.fullname" . }}-db -U {{ .Values.db.username }} -d {{ .Values.db.database }}"
 
-              # MIEJSCE PRZED ZRZUTEM - baza jest na tym samym dysku.
+              # MIEJSCE PRZED ZRZUTEM - baza jest na tym samym dysku. Tylko
+              # `*.dump`: `*.dump.tmp` to zrzut, ktory nie przeszedl kontroli.
               OSTATNI="$(ls -1t /backup/trader-*.dump 2>/dev/null | head -1 || true)"
               OSTATNI_MIB=0
               [ -z "$OSTATNI" ] || OSTATNI_MIB=$(( $(stat -c %s "$OSTATNI") / 1048576 ))
@@ -132,6 +147,7 @@ spec:
               ZNACZNIK="$(date -u +%Y%m%dT%H%M%SZ)"
               BAZA="/backup/trader-przedmigracja-$ZNACZNIK"
               PLIK="$BAZA.dump"
+              TYMCZASOWY="$PLIK.tmp"
               WERSJA_TS="$(psql $DB -tAc "SELECT extversion FROM pg_extension WHERE extname = 'timescaledb'")"
               WERSJA_PG="$(psql $DB -tAc "SHOW server_version")"
               [ -n "$WERSJA_TS" ] || { echo "!! baza nie ma rozszerzenia timescaledb"; exit 1; }
@@ -140,9 +156,16 @@ spec:
                      "$(tr '\n' ' ' < /wspolne/oczekujace)" > "$BAZA.wersje"
 
               # Nieudany albo obciety zrzut ma NIE zostawac na dysku jako kopia.
-              trap 'rm -f "$PLIK" "$BAZA.wersje"' EXIT
-              pg_dump $DB --format=custom --compress=9 --file="$PLIK"
-              pg_restore --list "$PLIK" > /dev/null
+              # Zrzut idzie do `.dump.tmp` i dostaje nazwe `.dump` dopiero po
+              # `pg_restore --list`: `trap` nie zadziala przy SIGKILL (OOM,
+              # `activeDeadlineSeconds`), a wtedy na dysku zostaje plik obciety.
+              # Retencja i prog miejsca patrza wylacznie na `*.dump`, wiec
+              # porzucony `.tmp` nie udaje kopii; sprzata go nastepny przebieg.
+              rm -f /backup/trader-przedmigracja-*.dump.tmp
+              trap 'rm -f "$TYMCZASOWY" "$BAZA.wersje"' EXIT
+              pg_dump $DB --format=custom --compress=9 --file="$TYMCZASOWY"
+              pg_restore --list "$TYMCZASOWY" > /dev/null
+              mv "$TYMCZASOWY" "$PLIK"
               trap - EXIT
 
               cat > "$BAZA.odtwarzanie.txt" <<KONIEC
