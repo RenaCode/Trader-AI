@@ -2741,12 +2741,22 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
         # `risk_rules.wielkosc_pozycji` - tej samej funkcji liczy symulacja (U-3).
         qty = Decimal(0)
         notional = Decimal(0)
+        kwota_momentum = ekspozycja_momentum = None
         if action in ("enter_long", "enter_short"):
             if momentum:
                 # ROWNE WAGI PRZY WEJSCIU (H-3): 5% kapitalu niezaleznie od
                 # sily sygnalu - stad udzial 1,0 zamiast `score`. Bez kapitalu
                 # `baza` jest juz zerem, a wejscia wstrzymane (wyzej).
-                notional, qty = wielkosc_pozycji(baza_momentum, 1.0, price)
+                #
+                # RESZTA DO SUFITU (T-8, 2026-10-04): gdy trzymane pozycje
+                # urosly i pelne 5% przekroczyloby 15%, wejscie idzie za reszte
+                # do sufitu (`kwota_wejscia`), a nie odpada w calosci.
+                kwota_momentum = baza_momentum
+                if baza_momentum > 0:
+                    ekspozycja_momentum = risk.ekspozycja()
+                    kwota_momentum = strategia_momentum.kwota_wejscia(
+                        kapital, ekspozycja_momentum)
+                notional, qty = wielkosc_pozycji(kwota_momentum, 1.0, price)
             else:
                 notional, qty = wielkosc_pozycji(baza, score, price)
 
@@ -2768,18 +2778,23 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
             powod_holdu = "decyzja_przeterminowana"
             stats["decyzja_przeterminowana"] += 1
         elif action.startswith("enter"):
-            if momentum and not strategia_momentum.miesci_sie(
-                    kapital, risk.ekspozycja(), notional):
+            if momentum and (notional <= 0 or not strategia_momentum.miesci_sie(
+                    kapital, ekspozycja_momentum, notional)):
                 # WLASNY SUFIT STRATEGII (15%), na tej samej ekspozycji co
                 # `max_total_exposure` (pozycje po cenie rynkowej + zlecenia
                 # i plany wejsc). Limit konta moze kiedys urosnac; budzet
                 # pomiaru nie. Odmowa jak z risk kernela: `block` z powodem.
+                # `notional <= 0` = reszta do sufitu ponizej 1% kapitalu.
+                # `ekspozycja_momentum` None = budzet zero (brak pomiaru), a wtedy
+                # wejscia i tak sa wstrzymane wyzej - reszta nie ma znaczenia.
+                reszta = (strategia_momentum.sufit(kapital) - ekspozycja_momentum
+                          if ekspozycja_momentum is not None else Decimal(0))
                 verdict = RiskVerdict(
                     verdict="block",
-                    reason=f"Budżet strategii {strategia_momentum.OPIS}: ekspozycja "
-                           f"po wejściu przekroczyłaby "
-                           f"{strategia_momentum.UDZIAL_LACZNY:.0%} kapitału "
-                           f"({strategia_momentum.sufit(kapital):.0f})")
+                    reason=f"Budżet strategii {strategia_momentum.OPIS}: reszta do "
+                           f"sufitu {strategia_momentum.UDZIAL_LACZNY:.0%} kapitału "
+                           f"({strategia_momentum.sufit(kapital):.0f}) to "
+                           f"{max(reszta, Decimal(0)):.2f}, mniej niż 1% kapitału")
             else:
                 verdict = risk.check(iid, notional, qty)
         else:
@@ -2790,6 +2805,10 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
         top_txt = ", ".join(f"{c['label'].lower()} ({c['contribution']:+.3f})" for c in top)
         rationale = (
             strategia_momentum.uzasadnienie(cel, symbol)
+            + (f" Wejście {kwota_momentum} (budżet {baza_momentum}, reszta do "
+               f"sufitu {strategia_momentum.sufit(kapital) - ekspozycja_momentum:.2f})."
+               if kwota_momentum is not None and 0 < kwota_momentum < baza_momentum
+               else "")
             + (f" Ryzyko: {verdict.reason}." if verdict.reason else "")
             + (f" {OPIS_POWODU_HOLDU[powod_holdu]}" if powod_holdu else "")
         ) if momentum else (

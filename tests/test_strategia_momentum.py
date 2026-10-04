@@ -87,6 +87,26 @@ def test_wlasny_sufit_niezalezny_od_limitu_konta():
     assert not sm.miesci_sie(D("10000"), D("1100"), D("500"))
 
 
+@pytest.mark.parametrize("ekspozycja,kwota", [
+    ("0", "500.00"), ("1000", "500.00"), ("1001", "499.00"),
+    ("1400", "100.00"), ("1450", "0"), ("1500", "0"), ("1600", "0")])
+def test_kwota_wejscia_reszta_do_sufitu_albo_nic(ekspozycja, kwota):
+    """T-8: 5%, a gdy sufit nie pozwala - reszta do 15%, o ile ≥ 1% kapitału."""
+    assert sm.kwota_wejscia(D("10000"), D(ekspozycja)) == D(kwota)
+
+
+def test_kwota_wejscia_WLASNOSC_nigdy_ponad_sufit_i_nigdy_pyl():
+    import random
+    los = random.Random(4)
+    for _ in range(2000):
+        k = D(str(round(los.uniform(50, 2_000_000), 2)))
+        e = (sm.sufit(k) * D(str(los.uniform(0, 1.1)))).quantize(D("0.01"))
+        kw = sm.kwota_wejscia(k, e)
+        b = sm.budzet_pozycji(k)
+        assert kw == 0 or (b * sm.PODLOGA_RESZTY <= kw <= b), (k, e, kw)
+        assert kw == 0 or e + kw <= sm.sufit(k), (k, e, kw)
+
+
 # ------------------------------------------------------------ kalendarz
 
 def test_wejscie_tylko_na_swiecy_konczacej_dobe():
@@ -339,9 +359,11 @@ def test_poza_polnoca_bez_wejsc_ale_WYJSCIE_idzie(momentum):
 
 
 def test_wlasny_sufit_15_procent_blokuje_wejscie(momentum, monkeypatch):
-    """Ekspozycja 1 200 przy kapitale 10 000: 1 200 + 500 > 1 500. Odmowa
-    PRZED risk kernelem - limit konta moglby kiedys byc luzniejszy."""
-    momentum.ekspozycja = D("1200")
+    """Ekspozycja 1 450 przy kapitale 10 000: reszta do sufitu 50 < 1%
+    kapitału. Odmowa PRZED risk kernelem - limit konta mógłby kiedyś być
+    luźniejszy. (Do 2026-10-04 test stał na 1 200, które blokowało całe 5%;
+    od T-8 1 200 daje wejście za resztę 300 - test niżej.)"""
+    momentum.ekspozycja = D("1450")
     sprawdzone = []
     monkeypatch.setattr(loop.RiskKernel, "check",
                         lambda self, *a, **kw: sprawdzone.append(a)
@@ -352,6 +374,28 @@ def test_wlasny_sufit_15_procent_blokuje_wejscie(momentum, monkeypatch):
     assert d[1]["action"] == "enter_long" and d[1]["verdict"] == "block"
     assert plany(cur) == [] and sprawdzone == []
     assert stats["zablokowane"] == 1 and stats["wejscia"] == 0
+
+
+def test_pozycje_UROSLY_wejscie_za_RESZTE_do_sufitu(momentum, monkeypatch):
+    """T-8: dwie trzymane pozycje urosły do 1 001 (kapitał 10 000). Pełne 5%
+    przekroczyłoby 15% o grosz - do 2026-10-04 wejście odpadało w całości,
+    czyli rotacja dochodziła do skutku głównie po stratach. Teraz wejście za
+    resztę 499,00, kernel dostaje ten nominał i ma ostatnie słowo."""
+    momentum.ekspozycja = D("1001")
+    sprawdzone = []
+    monkeypatch.setattr(loop.RiskKernel, "check",
+                        lambda self, *a, **kw: sprawdzone.append(a)
+                        or RiskVerdict("allow", qty=a[2]))
+    stats, cur = cykl(momentum, strategia="momentum")
+
+    (plan,) = plany(cur)
+    _, qty = wielkosc_pozycji(D("499.00"), 1.0, CENA)
+    assert plan[1] == 1 and plan[2] == "buy" and plan[3] == qty
+    ((iid, nominal, ilosc),) = sprawdzone
+    assert (iid, nominal, ilosc) == (1, D("499.00"), qty)
+    assert stats["wejscia"] == 1
+    d = {x["iid"]: x for x in momentum.decyzje}
+    assert d[1]["verdict"] == "allow"
 
 
 def test_filtr_wylaczony_wszystko_wychodzi_nic_nie_wchodzi(momentum):

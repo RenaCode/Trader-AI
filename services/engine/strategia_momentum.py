@@ -46,7 +46,14 @@ ODSTEPSTWA OD SYMULACJI H-3 (znane, nazwane, nie korygowane):
   * wyjscie z rotacji zwalnia ekspozycje dopiero po wypelnieniu, wiec wejscie
     tego samego cyklu moze odbic sie od sufitu 15% i przepasc do jutra;
   * pozycje otwarte przez ensemble przed przelaczeniem sa traktowane jak kazde
-    inne: spoza skladu wychodza, w skladzie zostaja.
+    inne: spoza skladu wychodza, w skladzie zostaja;
+  * sufit 15% liczony po WARTOSCI RYNKOWEJ (jak `max_total_exposure`
+    w kernelu), wiec po wzroscie trzymanych pozycji kolejne wejscie jest
+    MNIEJSZE niz 5% - reszta do 15% (`kwota_wejscia`) - albo nie nastepuje,
+    gdy reszta < 1% kapitalu. H-3 wchodzilo stalym nominalem bez sufitu.
+    Zmiana z 2026-10-04 po przegladzie (T-8): poprzednia wersja wchodzila
+    tylko wtedy, gdy trzymane pozycje byly warte nie wiecej niz koszt, czyli
+    wejscia dochodzily do skutku glownie po stratach.
 """
 from __future__ import annotations
 
@@ -213,6 +220,28 @@ def miesci_sie(kapital: Decimal, ekspozycja: Decimal, kwota: Decimal) -> bool:
     (wariant P z H-3), wiec nie moze rosnac razem z limitem konta.
     """
     return ekspozycja + kwota <= sufit(kapital)
+
+
+# Najmniejsze wejscie jako ulamek budzetu pozycji: 0,2 * 5% = 1% kapitalu.
+# Reszta do sufitu ponizej tego to pyl - prowizja i krok ilosci zjadaja ja
+# w wiekszej czesci niz pelne wejscie, a pomiar egzekucji nic z niej nie ma.
+PODLOGA_RESZTY = Decimal("0.2")
+
+
+def kwota_wejscia(kapital: Decimal, ekspozycja: Decimal) -> Decimal:
+    """Kwota wejscia: budzet pozycji, a gdy sufit na to nie pozwala - reszta
+    do sufitu, o ile nie jest pylem. 0 = nie wchodzimy. CZYSTA FUNKCJA.
+
+    Sufit zostaje twardy i liczony po wartosci rynkowej, tak jak w kernelu -
+    inaczej kernel i tak by zablokowal. Zmienia sie tylko wielkosc wejscia:
+    zamiast "dokladnie 5% albo nic" - "5%, albo reszta do 15%" (T-8).
+    """
+    budzet = budzet_pozycji(kapital)
+    reszta = (sufit(kapital) - ekspozycja).quantize(GROSZ, rounding=ROUND_DOWN)
+    kwota = min(budzet, reszta)
+    if kwota <= 0 or kwota < budzet * PODLOGA_RESZTY:
+        return Decimal(0)
+    return kwota
 
 
 def uzasadnienie(cel: Cel, symbol: str) -> str:
