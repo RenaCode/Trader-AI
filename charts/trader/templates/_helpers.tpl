@@ -187,8 +187,8 @@ securityContext:
 To samo co `trader.kontenerBezUprawnien` plus ROOT FILESYSTEM TYLKO DO ODCZYTU
 (audyt Fable U-8). Dla workerow: jedynym zapisem procesu jest plik zywotnosci
 `/tmp/trader-zywy` (puls.zyje), wiec /tmp dostaje `emptyDir`. Sprawdzone
-03.10 obrazem z `--read-only --tmpfs /tmp`. API i Joby zostaja na wersji bez
-tej flagi - nikt nie zmierzyl, czy nie pisza poza /tmp.
+03.10 obrazem z `--read-only --tmpfs /tmp`. Od 04.10 (T-13) takze API i front;
+Joby zostaja na wersji bez tej flagi - nikt nie zmierzyl, czy nie pisza poza /tmp.
 */}}
 {{- define "trader.kontenerTylkoOdczyt" -}}
 securityContext:

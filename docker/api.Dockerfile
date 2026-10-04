@@ -27,7 +27,13 @@ COPY db/ ./db/
 COPY scripts/ ./scripts/
 
 # Nie root - kontener nie ma powodu miec uprawnien administracyjnych.
-RUN useradd --system --uid 10001 trader && chown -R trader:trader /app
+#
+# KOD NALEZY DO ROOTA (przeglad 2026-10-04, T-13). Do tej poprawki
+# `chown -R trader /app` dawal procesowi prawo zapisu do wlasnego kodu - w podzie
+# API, ktory przyjmuje zadania z internetu. Teraz /app jest tylko do odczytu dla
+# `trader`, a w chartcie dochodzi `readOnlyRootFilesystem`. Zadania, ktore cos
+# zapisuja (np. `eksperyment.py --logi`), pisza do /tmp.
+RUN useradd --system --uid 10001 trader
 USER trader
 
 EXPOSE 8000

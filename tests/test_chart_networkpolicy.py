@@ -133,7 +133,8 @@ def test_api_tylko_z_frontu_a_front_tylko_z_traefika():
     assert p["trader-web"]["ingress"] == [{
         "from": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "kube-system"}},
                   "podSelector": {"matchLabels": {"app.kubernetes.io/name": "traefik"}}}],
-        "ports": [{"protocol": "TCP", "port": 80}]}]
+        # Port PODA: nginx-unprivileged na 8080 (T-13), Service zostaje na 80.
+        "ports": [{"protocol": "TCP", "port": 8080}]}]
 
 
 @z_helmem

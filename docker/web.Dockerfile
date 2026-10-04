@@ -11,8 +11,12 @@ RUN npm ci
 COPY web/ ./
 RUN npm run build
 
-# nginx:alpine, digest odczytany z registry-1.docker.io 2026-09-23.
-FROM nginx:alpine@sha256:1ed1b0e1d7652937d6cbdaf4018c7b6fc009a7dd6c3047351e2eddda745de43f
+# nginx-unprivileged:alpine (przeglad 2026-10-04, T-13): proces jako UID 101,
+# port 8080, pid i pliki tymczasowe w /tmp - wiec pod dziala z
+# `readOnlyRootFilesystem` i `emptyDir` na /tmp. Front jest jedynym podem
+# wystawionym do internetu; do tej pory nginx chodzil jako root.
+# Digest indeksu odczytany z registry-1.docker.io 2026-10-04.
+FROM nginxinc/nginx-unprivileged:alpine@sha256:26b0bf6fbf07297983cb341998d79c831508787de26627dd2a112321b9c3a4af
 # TLS terminuje Traefik (cert-manager, letsencrypt-prod) - nginx serwuje czysty HTTP.
 # Dublowanie certyfikatow w kontenerze bylo zbedne i trudne w utrzymaniu.
 COPY --from=builder /app/dist /usr/share/nginx/html
@@ -20,5 +24,5 @@ COPY docker/nginx.conf /etc/nginx/conf.d/default.conf
 # Naglowki bezpieczenstwa sa `include`'owane z DWOCH miejsc w nginx.conf -
 # bez tego pliku nginx nie wstanie w ogole (a nie wstanie po cichu bez CSP).
 COPY docker/naglowki-bezpieczenstwa.conf /etc/nginx/naglowki-bezpieczenstwa.conf
-EXPOSE 80
+EXPOSE 8080
 CMD ["nginx", "-g", "daemon off;"]

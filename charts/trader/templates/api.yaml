@@ -49,7 +49,12 @@ spec:
         - name: api
           image: "{{ .Values.api.image.repository }}:{{ .Values.api.image.tag }}"
           imagePullPolicy: {{ .Values.api.image.pullPolicy }}
-          {{- include "trader.kontenerBezUprawnien" . | nindent 10 }}
+          # ROOT FILESYSTEM TYLKO DO ODCZYTU (przeglad 2026-10-04, T-13): kod
+          # w /app nalezy do roota (api.Dockerfile), a proces nie pisze nic poza
+          # /tmp (PYTHONDONTWRITEBYTECODE, brak zapisow plikow w services/api).
+          {{- include "trader.kontenerTylkoOdczyt" . | nindent 10 }}
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
           env:
             {{- include "trader.bramkaEnv" $ | nindent 12 }}
             {{- include "trader.appPgPasswordEnv" . | nindent 12 }}
@@ -157,6 +162,9 @@ spec:
             timeoutSeconds: 5
             failureThreshold: 3
           resources: {{- toYaml .Values.api.resources | nindent 12 }}
+      volumes:
+        - name: tmp
+          emptyDir: { sizeLimit: 64Mi }
 ---
 apiVersion: v1
 kind: Service

@@ -87,8 +87,9 @@ spec:
               kubernetes.io/metadata.name: {{ .Values.networkPolicy.traefik.namespace }}
           podSelector:
             matchLabels: {{- toYaml .Values.networkPolicy.traefik.podLabels | nindent 14 }}
+      # Port PODA (targetPort Service), nie Service: nginx-unprivileged na 8080.
       ports:
-        - { protocol: TCP, port: 80 }
+        - { protocol: TCP, port: 8080 }
 {{- if $workery }}
 ---
 # Workery nie nasluchuja na zadnym porcie (sprawdzone `ss -tln` 2026-10-03),

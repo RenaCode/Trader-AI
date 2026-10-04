@@ -19,17 +19,33 @@ spec:
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets: {{- toYaml . | nindent 8 }}
       {{- end }}
+      # BEZ ROOTA (przeglad 2026-10-04, T-13). Front jest jedynym podem
+      # wystawionym do internetu, a nginx chodzil jako root z zapisywalnym
+      # systemem plikow. `nginx-unprivileged` (docker/web.Dockerfile) slucha na
+      # 8080 jako UID 101 i pisze wylacznie do /tmp.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 101
+        runAsGroup: 101
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: web
           image: "{{ .Values.web.image.repository }}:{{ .Values.web.image.tag }}"
           imagePullPolicy: {{ .Values.web.image.pullPolicy }}
+          {{- include "trader.kontenerTylkoOdczyt" . | nindent 10 }}
           ports:
-            - containerPort: 80
+            - containerPort: 8080
           readinessProbe:
-            httpGet: { path: /, port: 80 }
+            httpGet: { path: /, port: 8080 }
             initialDelaySeconds: 5
             periodSeconds: 10
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
           resources: {{- toYaml .Values.web.resources | nindent 12 }}
+      volumes:
+        - name: tmp
+          emptyDir: { sizeLimit: 64Mi }
 ---
 apiVersion: v1
 kind: Service
@@ -39,6 +55,7 @@ metadata:
 spec:
   selector:
     app: {{ include "trader.fullname" . }}-web
+  # Service zostaje na 80 (Ingress sie nie zmienia), pod slucha na 8080.
   ports:
     - port: 80
-      targetPort: 80
+      targetPort: 8080
