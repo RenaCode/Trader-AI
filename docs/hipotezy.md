@@ -16,7 +16,7 @@ i wchodzi dopiero ręcznym przebiegiem z `--zatwierdz-promocje`, po wpisie tutaj
 | H-B2 | 2026-10-03 | Odniesienie B2 (momentum przekrojowe z filtrem trendu) jest baseline'em, który ensemble musi pobić | definicja, nie test | — | obowiązuje od pierwszego przebiegu |
 | H-1 | 2026-10-03 | Ensemble 4h ma przewagę pod uczciwym modelem wypełnień (STOP/GO 1) | zwrot/rundę po dopłacie > 0 w ≥ 3/5 przesunięć **i** bije B2 przy tej samej ekspozycji w ≥ 60% okien | zwrot/rundę −11,2 pb (0/5 przesunięć > 0), bije B2 w 61% okien | **STOP** — kalibracja wag ensemble zamknięta, dalej tylko R4 |
 | H-2 | 2026-10-03 | Zmiana METODY z audytu T4 (stała siatka okien + status z minimum 5 przesunięć, progi wejścia na wagach IC, horyzont IC przy `Horizon`): wpływ na werdykt toru 4h | opisowe — bez decyzji GO; wynik nie zmienia H-1 | patrz niżej | H-1 STOP obowiązuje |
-| H-3 | 2026-10-04 | Tor R4: momentum przekrojowe 30 d na decyzji dobowej z filtrem BTC > EMA 50 d, top 3 long-only, pod pesymistycznym modelem wejść (STOP/GO 2) | wszystkie cztery naraz: K1 okna dodatnie ≥ 65% **i** bije B1 przy tej samej ekspozycji w ≥ 65% okien; K2 DSR ≥ 0,95 na 5/5 przesunięć; K3 percentyl permutacyjny ≥ 70 na 5/5 przesunięć; K4 bije B2 przy tej samej ekspozycji w ≥ 55% okien | — | — |
+| H-3 | 2026-10-04 | Tor R4: momentum przekrojowe 30 d na decyzji dobowej z filtrem BTC > EMA 50 d, top 3 long-only, pod pesymistycznym modelem wejść (STOP/GO 2) | wszystkie cztery naraz: K1 okna dodatnie ≥ 65% **i** bije B1 przy tej samej ekspozycji w ≥ 65% okien; K2 DSR ≥ 0,95 na 5/5 przesunięć; K3 percentyl permutacyjny ≥ 70 na 5/5 przesunięć; K4 bije B2 przy tej samej ekspozycji w ≥ 55% okien | K1 NIE (okna dodatnie 46%, bije B1 35%), K2 TAK (DSR 0,950–0,980, N = 2), K3 TAK (percentyl 100), K4 NIE (bije B2 44%); oba warianty ekspozycji | **STOP** — R4 nie wchodzi na demo; żaden tor nie spełnia kryteriów, decyzja właściciela (sekcja 12) |
 
 ---
 
@@ -339,3 +339,99 @@ B2 na demo jako strategia albo zamknięcie z wnioskiem „brak przewagi”.
 **Czego wynik nie rozstrzyga**: czy 20 min to właściwe opóźnienie i czy godzina
 to właściwe okno życia zlecenia wejścia (jak w H-1); ok. 39 okien po 30 dni to
 mało — przedziały Wilsona przy odsetkach okien są w raporcie, nie tylko punkty.
+
+### Wynik H-3 (2026-10-04)
+
+Kod: gałąź `fable-r4`, `899ec9f` (rejestr `3c41f5b` przed kodem i przed przebiegiem).
+Przebieg jeden, na końcowym kodzie, bez wcześniejszego podglądu wyników na danych
+produkcyjnych (testy szły wyłącznie na danych syntetycznych). Panel jak w H-1/H-2
+(`trader_prod_kopia`, dump 20261003T043403Z), `scripts/eksperyment.py --panel …
+--r4 --hipoteza H-3 --days 1400 --kind spot_eu`, przesunięcia −2…+2, 200 permutacji.
+Zero połączeń z bazą. Czas: 95 s.
+
+Spread per instrument w modelu wejść (pb): ADA 6,53, ARB 7,34, BTC 0,23, DOGE 7,23,
+ETH 0,41, LINK 15,57, NEAR 34,08, SOL 1,63, SUI 4,21, XRP 2,04. Dopłata z karty:
+P 8,14 pb, F 7,96 pb na rundę (spread innej księgi 7,93 + pył); odniesienia B1–B3
+8,03 pb. Prowizja w symulacji: maker 10 pb przy wejściu, taker 25 pb + poślizg 4 pb
+przy wyjściu. Niewypełnienie zmierzone w symulacji: 30 pb/rundę (już w zwrotach).
+
+**Wariant F (pełna ekspozycja, 1/3 kapitału na pozycję):**
+
+| przesunięcie | okna (z ekspozycją) | dodatnie | rund | zwrot/rundę po dopłacie (pb) | Sharpe/rundę | DSR (N=2) | DSR (N=61) | wypełnialność | bije B1 | bije B2 | bije B3 | percentyl perm. |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| −2 | 39 (35) | 15/35 (43%) | 328 | +178,6 | +0,1053 | 0,9695 | 0,5166 | 77,0% | 12/35 (34%) | 16/35 (46%) | 15/35 (43%) | 100,0 |
+| −1 | 39 (35) | 16/35 (46%) | 335 | +175,1 | +0,1035 | 0,9709 | 0,5251 | 77,9% | 13/35 (37%) | 15/35 (43%) | 13/35 (37%) | 100,0 |
+| 0 | 39 (35) | 17/35 (49%) | 337 | +168,8 | +0,1025 | 0,9681 | 0,5089 | 78,6% | 14/35 (40%) | 16/35 (46%) | 18/35 (51%) | 100,0 |
+| +1 | 39 (35) | 16/35 (46%) | 334 | +187,7 | +0,1076 | 0,9795 | 0,5842 | 79,5% | 12/35 (34%) | 15/35 (43%) | 18/35 (51%) | 100,0 |
+| +2 | 39 (35) | 16/35 (46%) | 336 | +154,8 | +0,0938 | 0,9504 | 0,4272 | 79,6% | 10/35 (29%) | 15/35 (43%) | 16/35 (46%) | 100,0 |
+
+**Wariant P (budżet produkcyjny 15%)**: te same okna, rundy i odsetki co F (porównania
+są wolne od skali); zwrot/rundę +154,6…+187,6 pb, DSR (N=2) 0,9500…0,9794 — minimum
+na przesunięciu +2 to 0,95003, czyli K2 przechodzi o włos; bije B3 na +2: 15/35.
+
+Odniesienia w tych samych oknach (średnio na okno 30 dni, po 5 przesunięciach):
+
+| | średni zwrot w oknie (% kapitału) | średnia ekspozycja | zwrot na jednostkę ekspozycji | okna z zyskiem |
+|---|---|---|---|---|
+| R4 F | +4,94 | 50,8% | +9,7% | 80/195 (41%) |
+| R4 P | +0,74 | 7,6% | +9,7% | 80/195 (41%) |
+| B1 koszyk | +3,14 | 100% | +3,1% | 105/195 (54%) |
+| B2 momentum + filtr (co tydzień, rynkowo) | +4,17 | 53,4% | +7,8% | 83/195 (43%) |
+| B3 trend BTC/ETH | +0,21 | 4,9% | +4,3% | 77/195 (39%) |
+
+Kryteria (zbiorczo po 5 przesunięciach, identycznie dla P i F):
+
+| kryterium | wynik | próg | spełnione |
+|---|---|---|---|
+| K1a okna dodatnie | 80/175 = 46% (CI95 39–53%) | ≥ 65% | NIE |
+| K1b bije B1 przy tej samej ekspozycji | 61/175 = 35% (CI95 28–42%) | ≥ 65% | NIE |
+| K2 DSR (N = 2) | 0,950–0,980, 5/5 | ≥ 0,95 na 5/5 | TAK (minimum o włos) |
+| K3 percentyl permutacyjny | 100, 5/5 | ≥ 70 na 5/5 | TAK |
+| K4 bije B2 przy tej samej ekspozycji | 77/175 = 44% (CI95 37–51%) | ≥ 55% | NIE |
+
+**Werdykt STOP/GO 2 dla R4: STOP** (oba warianty). Tor R4 nie wchodzi na demo.
+
+Co mówi pomiar:
+
+- **Ranking ma wartość, strategia nie ma stabilnej przewagi.** Średnio R4 zarabia
+  więcej na złotówkę zaangażowaną niż B2 i trzy razy więcej niż koszyk, a zwrot na
+  rundę po wszystkich kosztach (+155…+188 pb) jest dodatni na każdym przesunięciu.
+  Ale ta średnia stoi na kilku oknach hossy altów (X–XI 2023, X–XI 2024: +35…+82%
+  w oknie przy pełnej ekspozycji). W typowym oknie R4 traci: dodatnich 46%,
+  lepiej od koszyka przy tej samej ekspozycji 35%, lepiej od B2 44%. To profil
+  „długa opcja na trend rynku”, nie przewaga, którą da się potwierdzić na 6 tygodniach
+  demo — przez większość miesięcy będzie pod kreską.
+- **Filtr trendu kosztuje w rynku bocznym.** Okna, w których BTC krąży wokół EMA 50 d
+  (np. okna od 2024-08-21, 2025-08-16, 2026-03-14, 2026-07-12), dają wejście na kilka dni i wyjście ze
+  stratą; ekspozycja jest wtedy mała, więc porównanie „na jednostkę ekspozycji”
+  wypada źle (2024-08: −25% na jednostkę wobec +7% koszyka; 2026-07: −58% wobec
+  −4%). Okna z filtrem
+  wyłączonym przez całe 30 dni (4 z 39) są poza porównaniami (ekspozycja 0).
+- **R4 a B2.** R4 to B2 z codziennym rebalansem i wejściem limitem. Codzienny
+  rebalans podnosi zwrot na jednostkę ekspozycji (+9,7% wobec +7,8%), ale nie
+  zmienia profilu: oba wygrywają w mniejszości okien. Pytanie „czy R4 dokłada coś
+  do B2” ma odpowiedź: w średniej tak, w typowym oknie nie (44%).
+- **DSR zależy od N.** Przy N = 2 (warianty H-3, jak zarejestrowano) DSR 0,950–0,980;
+  przy N = 61 (licznik toru 4h + H-3) 0,43–0,58. Minimum przy N = 2 leży na samym
+  progu (0,95003), więc K2 jest spełnione formalnie, nie z zapasem.
+- **Zastrzeżenie do K3 (bez wpływu na werdykt).** Permutacja zarejestrowana w H-3
+  tasuje sygnał przy każdej decyzji osobno, więc losowy ranking zmienia skład co
+  dzień: ok. 1 100 rund na przesunięcie wobec 337 faktycznych, czyli trzy razy
+  więcej kosztów. Percentyl 100 jest przez to zawyżony. Diagnostyka **po fakcie**
+  (nie kryterium): permutacja z jednym losowym przyporządkowaniem symboli na całe
+  okno, która zachowuje trwałość sygnału i liczbę rund (mediana 325–336), daje
+  percentyl 98,5–100 na 5/5 przesunięć. Wybór instrumentów ma więc wartość także
+  po wyrównaniu obrotu. Skrypt: poza repo (`scratchpad/r4/diag_perm.py`).
+- Wypełnialność wejść 77–80% (produkcja demo ok. 65%), koszt niewypełnienia 30 pb na
+  rundę mierzony w symulacji. Brak dziur w świecach 1h na tych oknach.
+
+**Decyzja (zgodnie z kryterium zapisanym przed pomiarem):** R4 STOP. Razem z H-1
+(STOP) żaden tor nie spełnia kryteriów STOP/GO 2. Według sekcji 12 audytu to
+**[DECYZJA] właściciela**: B2 na demo jako strategia albo zamknięcie toru badawczego
+z wnioskiem „brak przewagi spełniającej kryteria”. Rekomendacja i jej uzasadnienie
+w raporcie dla właściciela. Każdy wariant R4 (inne okno, inny filtr, rebalans) to
+nowa hipoteza i kolejna próba do N — przy obecnym N = 61 DSR toru i tak nie
+przekracza 0,6.
+
+Odtworzenie: `scripts/eksperyment.py --panel panele_crypto_4h_20261003.json.gz --r4
+--hipoteza H-3 --days 1400 --kind spot_eu [--logi katalog/]`.
