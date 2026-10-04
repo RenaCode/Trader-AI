@@ -75,8 +75,16 @@ async def sessions(user: dict = Depends(current_user)):
 
 
 @router.delete("/sessions/{session_id}", dependencies=[Depends(require_csrf)])
-async def revoke_session(session_id: int, request: Request,
+async def revoke_session(session_id: int, body: RevokeBody, request: Request,
                          user: dict = Depends(current_user)):
+    """Uniewaznienie jednej sesji - Z HASLEM, jak `revoke_others`.
+
+    Przeglad 2026-10-04 (T-12 d): bez hasla przejeta sesja mogla w kolko
+    wylogowywac wlasciciela, a on nie mial jak jej uniewaznic, bo `revoke_others`
+    i tak wymagalo hasla. 403 na zle haslo - powod przy `revoke_others`.
+    """
+    await potwierdz_haslo(user, body.password, request, akcja="account.session_revoked",
+                          status=403, komunikat="Hasło jest nieprawidłowe")
     if session_id == user["session_id"]:
         raise HTTPException(400, "Bieżącej sesji nie unieważniaj tutaj — użyj wylogowania")
     row = await fetch_one("SELECT 1 FROM app.session WHERE id = %s AND user_id = %s",

@@ -45,6 +45,7 @@ const KS_LIMIT = 100;
 function ZwolnijKillSwitch({ engine, zdarzenie, onZwolniony }) {
   const [note, setNote] = useState('');
   const [haslo, setHaslo] = useState('');
+  const [kod, setKod] = useState('');
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState(null);
 
@@ -70,17 +71,27 @@ function ZwolnijKillSwitch({ engine, zdarzenie, onZwolniony }) {
                  autoComplete="current-password"
                  onChange={(e) => { setHaslo(e.target.value); setErr(null); }} />
         </label>
+        {/* Konto z weryfikacja dwuetapowa: serwer wymaga kodu (przeglad
+            2026-10-04). Bez TOTP pole jest ignorowane. */}
+        <label className="field" style={{ marginBottom: 8 }}>
+          <span className="field-label">
+            Kod weryfikacji dwuetapowej (albo kod zapasowy) — jeśli jest włączona
+          </span>
+          <input className="input-field" value={kod} maxLength={64}
+                 inputMode="numeric" autoComplete="one-time-code"
+                 onChange={(e) => { setKod(e.target.value); setErr(null); }} />
+        </label>
         <button className="btn" disabled={busy || note.trim().length < 10 || !haslo}
                 onClick={async () => {
                   setBusy(true); setErr(null);
                   try {
                     await post(`/api/engines/${engine}/risk/killswitch/${zdarzenie.id}/release`,
-                               { note: note.trim(), haslo });
-                    setNote(''); setHaslo('');
+                               { note: note.trim(), haslo, kod: kod.trim() || null });
+                    setNote(''); setHaslo(''); setKod('');
                     onZwolniony?.();
                   } catch (e) {
                     setErr(e.message || 'Nie udało się zwolnić');
-                    setHaslo('');
+                    setHaslo(''); setKod('');
                   } finally { setBusy(false); }
                 }}>
           {busy ? 'Zwalniam…' : 'Zwolnij kill-switch'}

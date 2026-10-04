@@ -138,6 +138,49 @@ def test_rownolegle_bledne_hasla_ZAKLADAJA_blokade(baza):
         "seria błędnych haseł wysłana naraz nie zablokowała konta")
 
 
+def test_DWADZIESCIA_rownoleglych_hasel_to_NAJWYZEJ_MAX_FAILED_weryfikacji(baza, monkeypatch):
+    """Przegląd 2026-10-04 (T-12 a): blokada sprawdzana PRZED podbiciem
+    licznika przepuszczała N równoległych prób przez Argon2. Rezerwacja próby
+    przed weryfikacją: dwadzieścia naraz to co najwyżej pięć sprawdzeń hasła,
+    reszta dostaje 429 bez weryfikacji."""
+    b = baza()
+    sprawdzone = []
+
+    async def licz(hash_, haslo):
+        sprawdzone.append(haslo)
+        await asyncio.sleep(0)
+        return False, None
+
+    monkeypatch.setattr(modul, "sprawdz_haslo", licz)
+    wyniki = asyncio.run(_naraz(*(
+        modul.login(modul.LoginBody(login="wlasciciel", password=f"zle-{i}"),
+                    zadanie(), OdpowiedzBezCiasteczek())
+        for i in range(20))))
+
+    assert len(sprawdzone) <= modul.MAX_FAILED, len(sprawdzone)
+    assert wyniki.count(401) == len(sprawdzone)
+    assert wyniki.count(429) == 20 - len(sprawdzone)
+    assert b.konto["locked_until"] is not None
+
+
+def test_rownolegle_kody_na_JEDNYM_bilecie_najwyzej_MAX_MFA(baza, monkeypatch):
+    b = baza()
+    sprawdzone = []
+    prawdziwa = modul.verify_totp
+
+    def licz(*a, **kw):
+        sprawdzone.append(a)
+        return prawdziwa(*a, **kw)
+
+    monkeypatch.setattr(modul, "verify_totp", licz)
+    from tests.test_licznik_prob_mfa import zly_kod
+    wyniki = asyncio.run(_naraz(*(_mfa(zly_kod()) for _ in range(10))))
+
+    assert len(sprawdzone) <= modul.MAX_MFA_NA_BILET, len(sprawdzone)
+    assert b.bilet["revoked_at"] is not None
+    assert set(wyniki) <= {401, 429}
+
+
 def test_poprawne_haslo_po_blednych_dalej_dziala(baza):
     """Kanarek: atomowy licznik nie może zamurować drogi właścicielowi."""
     b = baza()

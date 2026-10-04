@@ -138,8 +138,49 @@ async def potwierdz_haslo(user: dict, haslo: str, request: Request, *,
     raise HTTPException(status_code=status, detail=komunikat)
 
 
+async def totp_wlaczone(user_id: int) -> bool:
+    return bool(await fetch_one(
+        "SELECT 1 AS jest FROM app.totp_secret"
+        " WHERE user_id = %s AND confirmed_at IS NOT NULL", (user_id,)))
+
+
+async def potwierdz_kod_totp(user: dict, kod: str | None, request: Request, *,
+                             akcja: str, status: int, komunikat: str) -> None:
+    """Kod drugiego skladnika w zalogowanej sesji - jak przy logowaniu.
+
+    TOTP ze zuzyciem kroku (warunkowo i atomowo, zeby przechwycony kod nie
+    dzialal drugi raz) albo jednorazowy kod zapasowy. Pomylka idzie do tego
+    samego licznika co haslo (`_odnotuj_bledne_ponowne`). Wspolne dla
+    wylaczenia TOTP i zwolnienia kill-switcha (przeglad 2026-10-04, T-12 c).
+    Wolajacy sprawdza, ze TOTP jest wlaczone; tu brak sekretu = odmowa.
+    """
+    from ..security import SecretBox
+
+    kod = (kod or "").strip()
+    totp = await fetch_one(
+        "SELECT secret_enc, last_step FROM app.totp_secret"
+        " WHERE user_id = %s AND confirmed_at IS NOT NULL", (user["id"],))
+    zuzyty = None
+    if totp and kod:
+        step = verify_totp(SecretBox().decrypt(bytes(totp["secret_enc"])), kod,
+                           last_step=totp["last_step"])
+        if step is not None:
+            zuzyty = await fetch_one(
+                "UPDATE app.totp_secret SET last_step = %s WHERE user_id = %s"
+                " AND (last_step IS NULL OR last_step < %s) RETURNING user_id",
+                (step, user["id"], step))
+        if not zuzyty:
+            zuzyty = await fetch_one(
+                "UPDATE app.backup_code SET used_at = now()"
+                " WHERE user_id = %s AND code_hash = %s AND used_at IS NULL RETURNING id",
+                (user["id"], backup_code_hash(kod)))
+    if not zuzyty:
+        await _odnotuj_bledne_ponowne(user, request, akcja)
+        raise HTTPException(status_code=status, detail=komunikat)
+
+
 async def _odnotuj_bledne_ponowne(user: dict, request: Request, akcja: str) -> None:
-    """Licznik W BAZIE (`x + 1`), jak w `_odnotuj_bledny_kod` - z tego samego powodu."""
+    """Licznik W BAZIE (`x + 1`), jak w `SQL_REZERWACJA_KONTA` - z tego samego powodu."""
     stan = await fetch_one(
         "UPDATE app.user SET failed_logins = failed_logins + 1,"
         " locked_until = CASE WHEN failed_logins + 1 >= %s THEN now() + %s"
@@ -184,38 +225,67 @@ async def _zeruj_licznik_prob(user_id: int) -> None:
     )
 
 
-async def _odnotuj_bledny_kod(session_id: int, user_id: int) -> None:
-    """Dwie niezalezne bramki po kazdym bledym kodzie drugiego skladnika.
+# REZERWACJA PROBY PRZED WERYFIKACJA (przeglad 2026-10-04, T-12 a).
+#
+# Do tej poprawki blokada byla sprawdzana PRZED podbiciem licznika: odczyt
+# `locked_until`, potem Argon2 (setki ms), dopiero potem `failed_logins + 1`.
+# N rownoleglych zadan przechodzilo odczyt razem i dawalo N prob hasla albo
+# kodu zamiast 5 (3 na bilet). Teraz proba jest REZERWOWANA jedna instrukcja,
+# zanim cokolwiek zostanie sprawdzone: podbicie licznika zachodzi tylko na
+# koncie niezablokowanym, a ta, ktora dobija do progu, zaklada blokade - kazda
+# nastepna dostaje pusty wynik, czyli odmowe, bez weryfikacji. Udana weryfikacja
+# zwraca rezerwacje (`_zwroc_rezerwacje`) albo zeruje licznik przy pelnym
+# zalogowaniu (`_zeruj_licznik_prob`).
+SQL_REZERWACJA_KONTA = (
+    "UPDATE app.user SET failed_logins = failed_logins + 1,"
+    " locked_until = CASE WHEN failed_logins + 1 >= %s THEN now() + %s"
+    "                     ELSE locked_until END"
+    " WHERE id = %s AND (locked_until IS NULL OR locked_until <= now())"
+    " RETURNING failed_logins")
 
-    Zadna z nich sama nie wystarcza. Blokada konta zatrzymuje ciag prob dopiero
-    po piatej i dotyczy wszystkich biletow razem; uniewaznienie biletu zamyka
-    to konkretne podejscie po trzeciej probie, takze wtedy, gdy do blokady
-    jeszcze daleko.
 
-    Oba liczniki podbijaja sie W BAZIE (`x + 1`), a nie przez odczyt i zapis
-    w Pythonie. Zgadywanie kodu to z definicji wiele rownoleglych zadan;
-    read-modify-write gubilby czesc z nich i licznik pokazywalby mniej prob,
-    niz bylo - czyli bramka rozluznialaby sie dokladnie pod tym obciazeniem,
-    na ktore zostala postawiona.
-    """
-    # Bilet. Po przekroczeniu progu ma `revoked_at`, wiec kolejne zadania
-    # odpadaja juz na `s.revoked_at IS NULL` w zapytaniu wyszukujacym bilet.
+async def _zarezerwuj_probe(user_id: int) -> int | None:
+    """Liczba prob PO rezerwacji albo None, gdy konto jest zablokowane."""
+    r = await fetch_one(SQL_REZERWACJA_KONTA, (MAX_FAILED, LOCKOUT, user_id))
+    return None if not r else int(r["failed_logins"])
+
+
+async def _blokada_konta(user_id: int) -> HTTPException:
+    """Odpowiedz 429 z czasem ze stanu bazy - rezerwacja odmowila, wiec blokada
+    jest, nawet jesli wiersz przeczytany wczesniej jej nie mial."""
+    now = datetime.now(timezone.utc)
+    r = await fetch_one("SELECT locked_until FROM app.user WHERE id = %s", (user_id,))
+    return _odpowiedz_blokady((r or {}).get("locked_until") or now + LOCKOUT, now)
+
+
+async def _zwroc_rezerwacje(user_id: int, prob: int) -> None:
+    """Poprawne haslo przy koncie z drugim skladnikiem: proba nie byla bledna,
+    ale licznika NIE zerujemy (patrz `_zeruj_licznik_prob`). Cofamy tylko te
+    jedna rezerwacje, a blokade - wylacznie wtedy, gdy zalozyla ja WLASNIE ona
+    (wtedy wczesniejsza byla pusta albo wygasla, bo rezerwacja przechodzi
+    tylko na koncie niezablokowanym)."""
     await execute(
+        "UPDATE app.user SET failed_logins = greatest(failed_logins - 1, 0),"
+        " locked_until = CASE WHEN %s THEN NULL ELSE locked_until END"
+        " WHERE id = %s", (prob >= MAX_FAILED, user_id))
+
+
+async def _zarezerwuj_probe_kodu(session_id: int) -> bool:
+    """Rezerwacja proby kodu na BILECIE. False = bilet wyczerpany/uniewazniony.
+
+    Dwie niezalezne bramki przy kazdym kodzie drugiego skladnika - bilet
+    (`MAX_MFA_NA_BILET`) i konto (`_zarezerwuj_probe`, wspolny licznik
+    z haslem). Zadna z nich sama nie wystarcza: blokada konta zatrzymuje ciag
+    prob dopiero po piatej i dotyczy wszystkich biletow razem; uniewaznienie
+    biletu zamyka to konkretne podejscie po trzeciej probie. Oba liczniki
+    podbijaja sie W BAZIE (`x + 1`) i PRZED weryfikacja kodu.
+    """
+    r = await fetch_one(
         "UPDATE app.session SET mfa_failed = mfa_failed + 1,"
         " revoked_at = CASE WHEN mfa_failed + 1 >= %s THEN now() ELSE revoked_at END"
-        " WHERE id = %s",
-        (MAX_MFA_NA_BILET, session_id),
-    )
-    # Konto. Ten sam licznik i ta sama blokada co przy hasle - inaczej
-    # wystarczyloby brac nowy bilet co trzy proby i nic by nie rejestrowalo,
-    # ze ktos zgaduje.
-    await execute(
-        "UPDATE app.user SET failed_logins = failed_logins + 1,"
-        " locked_until = CASE WHEN failed_logins + 1 >= %s THEN now() + %s"
-        "                     ELSE locked_until END"
-        " WHERE id = %s",
-        (MAX_FAILED, LOCKOUT, user_id),
-    )
+        " WHERE id = %s AND revoked_at IS NULL RETURNING mfa_failed",
+        (MAX_MFA_NA_BILET, session_id))
+    return bool(r)
 
 
 @router.get("/me")
@@ -258,20 +328,16 @@ async def login(body: LoginBody, request: Request, response: Response):
         await audit("auth.login_failed_unknown", request=request)
         raise generic
 
+    # Licznik podbijany W BAZIE i PRZED weryfikacja - patrz SQL_REZERWACJA_KONTA.
+    # Do 2026-10-02 stal tu odczyt z `row` i zapis policzonej w Pythonie
+    # wartosci; do 2026-10-04 podbicie szlo po Argon2, wiec rownolegle zadania
+    # mijaly odczyt blokady razem.
+    prob = await _zarezerwuj_probe(row["id"])
+    if prob is None:
+        raise await _blokada_konta(row["id"])
+
     ok, rehash = await sprawdz_haslo(row["password_hash"], body.password)
     if not ok:
-        # Licznik podbijany W BAZIE, tak jak w `_odnotuj_bledny_kod`. Do
-        # 2026-10-02 stal tu odczyt z `row` i zapis policzonej w Pythonie
-        # wartosci: N rownoleglych zgadniec czytalo ten sam stan i kazde
-        # zapisywalo `failed_logins = 1`. Blokada po pieciu probach nie
-        # zapadala nigdy pod tym obciazeniem, przed ktorym ma chronic.
-        await execute(
-            "UPDATE app.user SET failed_logins = failed_logins + 1,"
-            " locked_until = CASE WHEN failed_logins + 1 >= %s THEN now() + %s"
-            "                     ELSE locked_until END"
-            " WHERE id = %s",
-            (MAX_FAILED, LOCKOUT, row["id"]),
-        )
         await audit("auth.login_failed", user_id=row["id"], request=request)
         raise generic
 
@@ -292,6 +358,8 @@ async def login(body: LoginBody, request: Request, response: Response):
         #
         # LICZNIK PROB ZOSTAJE NIETKNIETY - zeruje go dopiero `/mfa`. Patrz
         # `_zeruj_licznik_prob`: kasowanie go tutaj otwieralo droge na wylot.
+        # Cofamy wylacznie rezerwacje tej, udanej, proby hasla.
+        await _zwroc_rezerwacje(row["id"], prob)
         challenge, challenge_hash = new_session_token()
         await execute(
             "INSERT INTO app.session (user_id, token_hash, expires_at, mfa_satisfied)"
@@ -397,6 +465,14 @@ async def mfa(body: MfaBody, request: Request, response: Response):
         raise HTTPException(status_code=429,
                             detail=f"Konto zablokowane po nieudanych probach. Sprobuj za {left} s.")
 
+    # REZERWACJA PROBY NA BILECIE I NA KONCIE, ZANIM KOD ZOSTANIE SPRAWDZONY
+    # (przeglad 2026-10-04) - inaczej N rownoleglych kodow na jednym bilecie
+    # to N prob zamiast MAX_MFA_NA_BILET.
+    if not await _zarezerwuj_probe_kodu(pending["id"]):
+        raise HTTPException(status_code=401, detail="Bilet wygasl - zaloguj sie ponownie")
+    if await _zarezerwuj_probe(pending["user_id"]) is None:
+        raise await _blokada_konta(pending["user_id"])
+
     secret = SecretBox().decrypt(bytes(pending["secret_enc"]))
     code = body.code.strip().replace(" ", "").replace("-", "")
 
@@ -437,8 +513,8 @@ async def mfa(body: MfaBody, request: Request, response: Response):
             used_backup = True
 
     if not accepted:
+        # Proba juz policzona (rezerwacja wyzej) - zostaje sam slad w audycie.
         await audit("auth.mfa_failed", user_id=pending["user_id"], request=request)
-        await _odnotuj_bledny_kod(pending["id"], pending["user_id"])
         raise HTTPException(status_code=401, detail="Nieprawidlowy kod")
 
     # Bilet zuzyty. Sesja powstaje NOWA - to jest zabezpieczenie przed session fixation.
@@ -568,34 +644,13 @@ async def totp_confirm(body: TotpConfirmBody, request: Request,
 @router.post("/totp/disable", dependencies=[Depends(require_csrf)])
 async def totp_disable(body: TotpDisableBody, request: Request,
                        user: dict = Depends(current_user)):
-    from ..security import SecretBox
-
     await potwierdz_haslo(user, body.current_password, request, akcja="auth.totp_disable",
                           status=401, komunikat="Haslo jest nieprawidlowe")
 
-    # Kod jak przy logowaniu: TOTP ze zuzyciem kroku (warunkowo i atomowo,
-    # zeby przechwycony kod nie dzialal drugi raz) albo kod zapasowy.
-    totp = await fetch_one(
-        "SELECT secret_enc, last_step FROM app.totp_secret"
-        " WHERE user_id = %s AND confirmed_at IS NOT NULL", (user["id"],))
-    if not totp:
+    if not await totp_wlaczone(user["id"]):
         raise HTTPException(status_code=409, detail="Drugi skladnik nie jest wlaczony")
-    step = verify_totp(SecretBox().decrypt(bytes(totp["secret_enc"])), body.code,
-                       last_step=totp["last_step"])
-    zuzyty = None
-    if step is not None:
-        zuzyty = await fetch_one(
-            "UPDATE app.totp_secret SET last_step = %s WHERE user_id = %s"
-            " AND (last_step IS NULL OR last_step < %s) RETURNING user_id",
-            (step, user["id"], step))
-    if not zuzyty:
-        zuzyty = await fetch_one(
-            "UPDATE app.backup_code SET used_at = now()"
-            " WHERE user_id = %s AND code_hash = %s AND used_at IS NULL RETURNING id",
-            (user["id"], backup_code_hash(body.code)))
-    if not zuzyty:
-        await _odnotuj_bledne_ponowne(user, request, "auth.totp_disable.code")
-        raise HTTPException(status_code=401, detail="Nieprawidlowy kod")
+    await potwierdz_kod_totp(user, body.code, request, akcja="auth.totp_disable.code",
+                             status=401, komunikat="Nieprawidlowy kod")
 
     await execute("DELETE FROM app.totp_secret WHERE user_id = %s", (user["id"],))
     await execute("DELETE FROM app.backup_code WHERE user_id = %s", (user["id"],))

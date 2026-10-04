@@ -74,12 +74,25 @@ class Atrapa:
     async def powiadom(self, user_id, kod, tytul, tresc="", **kw):
         self.alarmy.append((user_id, kod, tytul, tresc, kw))
 
+    async def totp_wlaczone(self, user_id):
+        return self.totp
+
+    async def potwierdz_kod_totp(self, user, kod, request, *, akcja, status, komunikat):
+        self.kody.append((kod, akcja, status))
+        if kod != self.dobry_kod:
+            raise HTTPException(status, komunikat)
+
 
 def _podstaw(monkeypatch, atrapa):
+    atrapa.totp = getattr(atrapa, "totp", False)
+    atrapa.dobry_kod = getattr(atrapa, "dobry_kod", "123456")
+    atrapa.kody = []
     for nazwa, f in (("fetch_one", atrapa.fetch_one), ("fetch_all", atrapa.fetch_all),
                      ("execute", atrapa.execute),
                      ("audit", atrapa.audit), ("potwierdz_haslo", atrapa.potwierdz_haslo),
-                     ("powiadom_o_bezpieczenstwie", atrapa.powiadom)):
+                     ("powiadom_o_bezpieczenstwie", atrapa.powiadom),
+                     ("totp_wlaczone", atrapa.totp_wlaczone),
+                     ("potwierdz_kod_totp", atrapa.potwierdz_kod_totp)):
         monkeypatch.setattr(risk, nazwa, f)
 
 
@@ -93,9 +106,9 @@ AKTYWNE = {"id": 501, "engine": "crypto", "reason": "max_drawdown", "released_at
 
 
 def zwolnij(monkeypatch, atrapa, engine="crypto", haslo="tajne",
-            note="obsunięcie wyjaśnione, dane świec poprawione"):
+            note="obsunięcie wyjaśnione, dane świec poprawione", kod=None):
     _podstaw(monkeypatch, atrapa)
-    body = risk.ZwolnienieBody(note=note, haslo=haslo)
+    body = risk.ZwolnienieBody(note=note, haslo=haslo, kod=kod)
     return asyncio.run(risk.zwolnij_killswitch(engine, 501, body, request=None,
                                                user=UZYTKOWNIK))
 
@@ -181,6 +194,32 @@ def test_odmowa_zwolnienia_nie_wysyla_alarmu_o_zwolnieniu(monkeypatch):
     with pytest.raises(HTTPException):
         zwolnij(monkeypatch, a)
     assert a.alarmy == []
+
+
+@pytest.mark.parametrize("kod", [None, "000000"])
+def test_konto_z_TOTP_bez_kodu_albo_ze_zlym_403_i_nic_nie_zwalnia(monkeypatch, kod):
+    """T-12 c: zwolnienie ryzykuje pieniądze - samo hasło nie wystarcza na
+    koncie z drugim składnikiem."""
+    a = Atrapa(zdarzenie=AKTYWNE)
+    a.totp = True
+    with pytest.raises(HTTPException) as e:
+        zwolnij(monkeypatch, a, kod=kod)
+    assert e.value.status_code == 403
+    assert a.kody == [(kod, "risk.killswitch_released.kod", 403)]
+    assert not a.zwolnione and not a.alarmy
+
+
+def test_konto_z_TOTP_dobry_kod_zwalnia(monkeypatch):
+    a = Atrapa(zdarzenie=AKTYWNE)
+    a.totp = True
+    assert zwolnij(monkeypatch, a, kod="123456")["ok"]
+    assert a.zwolnione
+
+
+def test_konto_bez_TOTP_wystarcza_haslo(monkeypatch):
+    a = Atrapa(zdarzenie=AKTYWNE)
+    assert zwolnij(monkeypatch, a)["ok"]
+    assert a.kody == []
 
 
 def test_haslo_sprawdzane_ZANIM_odpowiedz_zdradzi_zdarzenie(monkeypatch):
@@ -287,5 +326,6 @@ def test_interfejs_zatrzymuje_bez_hasla_a_zwalnia_z_haslem():
     assert "`/api/engines/${engine}/risk/killswitch`" in wlacz_ui
     assert 'type="password"' not in wlacz_ui and "haslo" not in wlacz_ui
     assert "/release`" in zwolnij_ui
-    assert 'type="password"' in zwolnij_ui and "{ note: note.trim(), haslo }" in zwolnij_ui
+    assert 'type="password"' in zwolnij_ui
+    assert "{ note: note.trim(), haslo, kod: kod.trim() || null }" in zwolnij_ui
     assert "triggered_by" in zrodlo, "historia ma mówić, kto zatrzymał ręcznie"

@@ -156,9 +156,12 @@ function SessionsSection() {
   }, []);
   useEffect(() => { load(); }, [load]);
 
+  // Pojedyncze uniewaznienie tez wymaga hasla (przeglad 2026-10-04) - inaczej
+  // przejeta sesja moglaby w kolko wylogowywac wlasciciela. To samo pole hasla
+  // co przy "Wyloguj inne urzadzenia".
   const revoke = async (id) => {
     setState(null);
-    try { await del(`/api/account/sessions/${id}`); await load(); }
+    try { await del(`/api/account/sessions/${id}`, { password }); setPassword(''); await load(); }
     catch (e) { setState({ ok: false, message: e?.message || 'Nie udało się unieważnić sesji' }); }
   };
 
@@ -192,6 +195,7 @@ function SessionsSection() {
                 {s.current
                   ? <span className="badge ok">bieżąca</span>
                   : <button className="btn-ghost" style={{ padding: '5px 12px', fontSize: '0.75rem' }}
+                            disabled={!password} title={password ? '' : 'Wpisz hasło poniżej'}
                             onClick={() => revoke(s.id)}>Unieważnij</button>}
               </div>
               <div className="row-meta">
@@ -218,7 +222,8 @@ function SessionsSection() {
 
       <div className="row-body" style={{ marginTop: 14 }}>
         Jeśli podejrzewasz, że ktoś ma dostęp do konta, wyloguj wszystkie inne urządzenia.
-        Wymaga hasła — przejęte ciasteczko sesji nie wystarczy, żeby tego użyć.
+        Wymaga hasła — przejęte ciasteczko sesji nie wystarczy, żeby tego użyć. To samo
+        hasło odblokowuje przycisk „Unieważnij” przy pojedynczej sesji.
       </div>
       <div style={{ display: 'flex', gap: 10, marginTop: 8, flexWrap: 'wrap' }}>
         <input className="input-field" type="password" placeholder="Twoje hasło"

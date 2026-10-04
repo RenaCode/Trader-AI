@@ -99,6 +99,8 @@ class Baza:
             return dict(self.totp) if self.totp else None
         if q.startswith("SELECT confirmed_at FROM app.totp_secret"):
             return None
+        if q.startswith("SELECT 1 AS jest FROM app.totp_secret"):
+            return {"jest": 1} if self.totp else None
         if q.startswith("SELECT secret_enc FROM app.totp_secret"):
             return {"secret_enc": self.totp["secret_enc"]} if self.totp else None
         if "FROM app.audit_log" in q:

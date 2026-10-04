@@ -68,7 +68,7 @@ async function request(path, { method = 'GET', body } = {}) {
 export const get = (path) => request(path);
 export const post = (path, body) => request(path, { method: 'POST', body });
 export const put = (path, body) => request(path, { method: 'PUT', body });
-export const del = (path) => request(path, { method: 'DELETE' });
+export const del = (path, body) => request(path, { method: 'DELETE', body });
 
 /* Hook do odczytu. Zwraca trzy rozlaczne stany: `loading`, `error` i `data` -
    karty musza je rozrozniac, bo awaria API wygladala dotad identycznie jak

@@ -155,6 +155,31 @@ class BazaLogowania:
         if "FROM app.audit_log" in plaski:
             return {"?column?": 1}   # urządzenie znane — bez powiadomienia
 
+        # REZERWACJA PRÓBY (przegląd 2026-10-04): podbicie tylko na koncie
+        # niezablokowanym, zwraca wiersz albo nic - jak warunkowy UPDATE.
+        if plaski.startswith("UPDATE app.user SET failed_logins = failed_logins + 1"):
+            assert "RETURNING failed_logins" in plaski, plaski
+            prog, okno = params[0], params[1]
+            if "locked_until <= now()" in plaski and self.konto["locked_until"] \
+                    and self.konto["locked_until"] > teraz():
+                return None
+            self.konto["failed_logins"] += 1
+            if self.konto["failed_logins"] >= prog:
+                self.konto["locked_until"] = teraz() + okno
+            return {"failed_logins": self.konto["failed_logins"]}
+
+        if plaski.startswith("UPDATE app.session SET mfa_failed = mfa_failed + 1"):
+            assert "revoked_at IS NULL" in plaski and "RETURNING" in plaski, plaski
+            if self.bilet["revoked_at"] is not None:
+                return None
+            self.bilet["mfa_failed"] += 1
+            if self.bilet["mfa_failed"] >= params[0]:
+                self.bilet["revoked_at"] = teraz()
+            return {"mfa_failed": self.bilet["mfa_failed"]}
+
+        if plaski.startswith("SELECT locked_until FROM app.user WHERE id"):
+            return {"locked_until": self.konto["locked_until"]}
+
         raise AssertionError("zapytanie bez podłożonej odpowiedzi:\n" + plaski)
 
     def _przytnij(self, sql: str, wiersz: dict) -> dict:
@@ -207,6 +232,13 @@ class BazaLogowania:
             self.konto["failed_logins"] += 1
             if self.konto["failed_logins"] >= prog:
                 self.konto["locked_until"] = teraz() + okno
+            return
+
+        if plaski.startswith("UPDATE app.user SET failed_logins = greatest(failed_logins - 1, 0)"):
+            zalozyla, _ = p
+            self.konto["failed_logins"] = max(self.konto["failed_logins"] - 1, 0)
+            if zalozyla:
+                self.konto["locked_until"] = None
             return
 
         if "UPDATE app.user SET failed_logins = %s, locked_until = %s" in plaski:

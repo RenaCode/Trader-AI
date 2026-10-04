@@ -8,7 +8,7 @@ from ..auth import audit, current_user, require_csrf, wymagaj_wlasciciela
 from ..db import execute, fetch_all, fetch_one
 from ..notifications import powiadom_o_bezpieczenstwie
 from ..typy import Silnik, Tryb
-from .auth import potwierdz_haslo
+from .auth import potwierdz_haslo, potwierdz_kod_totp, totp_wlaczone
 
 
 router = APIRouter(prefix="/api/engines/{engine}/risk", tags=["risk"])
@@ -235,6 +235,11 @@ class ZwolnienieBody(BaseModel):
     # zatrzymal strate. `potwierdz_haslo` liczy pomylki razem z logowaniem
     # i blokuje konto po MAX_FAILED.
     haslo: str = Field(min_length=1, max_length=1024)
+    # KOD DRUGIEGO SKLADNIKA, gdy konto ma TOTP (przeglad 2026-10-04, T-12 c).
+    # Zwolnienie jest kierunkiem, ktory ryzykuje pieniadze - samo haslo
+    # (uzyte ponownie, wyludzone) nie moze go otwierac na koncie, ktore ma
+    # drugi skladnik. 6 cyfr TOTP albo kod zapasowy.
+    kod: str | None = Field(default=None, max_length=64)
 
 
 @router.post("/killswitch/{event_id}/release",
@@ -262,6 +267,11 @@ async def zwolnij_killswitch(engine: Silnik, event_id: int, body: ZwolnienieBody
     """
     await potwierdz_haslo(user, body.haslo, request, akcja="risk.killswitch_released",
                           status=403, komunikat="Hasło jest nieprawidłowe")
+    if await totp_wlaczone(user["id"]):
+        await potwierdz_kod_totp(user, body.kod, request,
+                                 akcja="risk.killswitch_released.kod", status=403,
+                                 komunikat="Kod weryfikacji dwuetapowej jest wymagany "
+                                           "albo nieprawidłowy")
 
     z = await fetch_one(
         "SELECT id, engine::text AS engine, reason, released_at"
