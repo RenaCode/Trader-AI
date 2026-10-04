@@ -728,8 +728,16 @@ strefaCzasowa: "Europe/Warsaw"
 bramkaPowiadomien:
   url: http://bramka.bramka.svc.cluster.local/v1/wyslij
 
+# Zrzut bazy przed kazda synchronizacja z nowymi migracjami (hook PreSync,
+# templates/kopia-przed-migracja.yaml). Wlaczone decyzja wlasciciela
+# 2026-10-04. Zrzut ~360 MB (04.10.2026), wiec 5 kompletow to ~2 GB na
+# /opt/trader-backups obok 14 nocnych.
 kopiaPrzedMigracja:
-  enabled: false
+  enabled: true
+  zostaw: 5
+  # Dolna granica wolnego miejsca przed zrzutem; faktyczny prog to wieksza
+  # z tej liczby i trzykrotnosci ostatniego zrzutu.
+  minWolneMiB: 2048
 
 backup:
   enabled: true

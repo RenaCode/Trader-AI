@@ -18,10 +18,24 @@
 # zadanie konczy sie po kilku sekundach. Hook chodzi przy KAZDEJ synchronizacji.
 #
 # FAIL-CLOSED: nieudany zrzut zatrzymuje synchronizacje (Argo CD nie wdroi
-# migracji bez kopii). Retencje plikow `trader-*` robi `trader-backup`.
+# migracji bez kopii). Tak samo brak miejsca: baza lezy na TYM SAMYM dysku
+# (local-path), wiec zrzut, ktory zapelnilby wolumen, zatrzymalby baze -
+# zadanie sprawdza wolne miejsce PRZED zrzutem (`kopiaPrzedMigracja.
+# minWolneMiB`, co najmniej trzykrotnosc ostatniego zrzutu).
 #
-# DOMYSLNIE WYLACZONE: wlaczenie zmienia zachowanie wdrozen (hook blokujacy
-# sync) i wymaga decyzji wlasciciela - `kopiaPrzedMigracja.enabled: true`.
+# RETENCJA PO LICZBIE, NIE PO DNIACH: zostaje `kopiaPrzedMigracja.zostaw`
+# ostatnich kompletow (zrzut + wersje + instrukcja). Migracje przychodza
+# seriami (kilka w dobe, potem tydzien nic), wiec retencja dniowa albo
+# kasowalaby kopie sprzed ostatniej zmiany, albo trzymala ich dziesiatki.
+# Nocny `trader-backup` tych plikow nie rusza.
+#
+# TIMESCALEDB: zrzut jest zwyklym `pg_dump --format=custom`, ale odtwarza sie
+# go wylacznie do bazy z TA SAMA wersja rozszerzenia i miedzy
+# `timescaledb_pre_restore()` a `timescaledb_post_restore()` - dlatego obok
+# leza `.wersje` i `.odtwarzanie.txt`. Role sa w nocnej kopii (`.role.sql`);
+# przy odtwarzaniu na tym samym klastrze juz istnieja.
+#
+# WLACZONE 2026-10-04 decyzja wlasciciela (`kopiaPrzedMigracja.enabled`).
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -86,6 +100,10 @@ spec:
             - name: PGPASSWORD
               valueFrom:
                 secretKeyRef: { name: {{ .Values.secretName }}, key: POSTGRES_PASSWORD }
+            - name: ZOSTAW
+              value: {{ required "kopiaPrzedMigracja.zostaw" .Values.kopiaPrzedMigracja.zostaw | quote }}
+            - name: MIN_WOLNE_MIB
+              value: {{ required "kopiaPrzedMigracja.minWolneMiB" .Values.kopiaPrzedMigracja.minWolneMiB | quote }}
           command:
             - sh
             - -c
@@ -96,11 +114,59 @@ spec:
                 exit 0
               fi
               echo "==> nowe migracje: $(tr '\n' ' ' < /wspolne/oczekujace)"
-              PLIK="/backup/trader-przedmigracja-$(date -u +%Y%m%dT%H%M%SZ).dump"
-              pg_dump -h {{ include "trader.fullname" . }}-db -U {{ .Values.db.username }} \
-                      -d {{ .Values.db.database }} --format=custom --compress=9 --file="$PLIK"
+              DB="-h {{ include "trader.fullname" . }}-db -U {{ .Values.db.username }} -d {{ .Values.db.database }}"
+
+              # MIEJSCE PRZED ZRZUTEM - baza jest na tym samym dysku.
+              OSTATNI="$(ls -1t /backup/trader-*.dump 2>/dev/null | head -1 || true)"
+              OSTATNI_MIB=0
+              [ -z "$OSTATNI" ] || OSTATNI_MIB=$(( $(stat -c %s "$OSTATNI") / 1048576 ))
+              POTRZEBA_MIB=$(( OSTATNI_MIB * 3 ))
+              [ "$POTRZEBA_MIB" -ge "$MIN_WOLNE_MIB" ] || POTRZEBA_MIB="$MIN_WOLNE_MIB"
+              WOLNE_MIB=$(( $(df -Pk /backup | awk 'NR==2 {print $4}') / 1024 ))
+              if [ "$WOLNE_MIB" -lt "$POTRZEBA_MIB" ]; then
+                echo "!! wolne ${WOLNE_MIB} MiB < ${POTRZEBA_MIB} MiB - zrzut moglby zapelnic dysk bazy; synchronizacja ZATRZYMANA"
+                exit 1
+              fi
+              echo "==> wolne ${WOLNE_MIB} MiB (potrzeba ${POTRZEBA_MIB} MiB)"
+
+              ZNACZNIK="$(date -u +%Y%m%dT%H%M%SZ)"
+              BAZA="/backup/trader-przedmigracja-$ZNACZNIK"
+              PLIK="$BAZA.dump"
+              WERSJA_TS="$(psql $DB -tAc "SELECT extversion FROM pg_extension WHERE extname = 'timescaledb'")"
+              WERSJA_PG="$(psql $DB -tAc "SHOW server_version")"
+              [ -n "$WERSJA_TS" ] || { echo "!! baza nie ma rozszerzenia timescaledb"; exit 1; }
+              printf 'timescaledb=%s\npostgresql=%s\nobraz=%s\nmigracje=%s\n' \
+                     "$WERSJA_TS" "$WERSJA_PG" "{{ include "trader.obrazBazy" . }}" \
+                     "$(tr '\n' ' ' < /wspolne/oczekujace)" > "$BAZA.wersje"
+
+              # Nieudany albo obciety zrzut ma NIE zostawac na dysku jako kopia.
+              trap 'rm -f "$PLIK" "$BAZA.wersje"' EXIT
+              pg_dump $DB --format=custom --compress=9 --file="$PLIK"
               pg_restore --list "$PLIK" > /dev/null
+              trap - EXIT
+
+              cat > "$BAZA.odtwarzanie.txt" <<KONIEC
+              KOPIA PRZED MIGRACJA $ZNACZNIK (przed: $(tr '\n' ' ' < /wspolne/oczekujace))
+              Cofniecie zlej migracji = odtworzenie CALEJ bazy z tego zrzutu,
+              na tym samym klastrze (role juz istnieja). Silnik i workery
+              zatrzymane (replicas 0), potem:
+                dropdb {{ .Values.db.database }}; createdb -O {{ .Values.db.username }} {{ .Values.db.database }}
+                psql -d {{ .Values.db.database }} -c "CREATE EXTENSION timescaledb VERSION '$WERSJA_TS';"
+                psql -d {{ .Values.db.database }} -c "SELECT timescaledb_pre_restore();"
+                pg_restore -d {{ .Values.db.database }} --no-owner $(basename "$PLIK")
+                psql -d {{ .Values.db.database }} -c "SELECT timescaledb_post_restore();"
+              i wdrozenie obrazu SPRZED migracji (inaczej migrator zastosuje ja znowu).
+              Pelna procedura z rolami: trader-*.odtwarzanie.txt z nocnej kopii.
+              KONIEC
               echo "==> kopia przed migracja: $PLIK ($(stat -c %s "$PLIK") B), czytelna"
+
+              # RETENCJA: ostatnie $ZOSTAW kompletow, starsze razem z plikami obok.
+              ls -1t /backup/trader-przedmigracja-*.dump | tail -n +$(( ZOSTAW + 1 )) \
+                | while read -r STARY; do
+                    echo "==> retencja: usuwam ${STARY%.dump}.*"
+                    rm -f "${STARY%.dump}".*
+                  done
+              echo "==> kopie przed migracja na dysku: $(ls -1 /backup/trader-przedmigracja-*.dump | wc -l)"
           resources:
             limits:   { cpu: 1000m, memory: 512Mi }
             requests: { cpu: 100m,  memory: 128Mi }

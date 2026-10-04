@@ -278,7 +278,10 @@ spec:
                   # Retencja obejmuje CALY komplet, nie sam zrzut - inaczej pliki
                   # rol, wersji i instrukcji zostawalyby na dysku bez konca,
                   # a przy okazji przezywalyby zrzut, ktorego dotycza.
-                  find /backup -type f -name 'trader-*' -mtime "+${RETENCJA_DNI}" -delete
+                  # Kopie PRZED MIGRACJA maja wlasna retencje po liczbie
+                  # (kopia-przed-migracja.yaml) - tu ich nie ruszamy.
+                  find /backup -type f -name 'trader-*' ! -name 'trader-przedmigracja-*' \
+                       -mtime "+${RETENCJA_DNI}" -delete
                   echo "==> kopie na dysku: $(ls -1 /backup/trader-*.dump | wc -l)"
               # ZASOBY - do 2026-09-22 ten kontener nie mial ich wcale, jako
               # jedyny w chartcie. Wezel ma 7,8 GB i dzieli je z trzema innymi

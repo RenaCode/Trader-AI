@@ -40,6 +40,9 @@ z osobnymi modelami, osobnym ryzykiem i osobnymi zakładkami w UI.
 - [x] 3085 testów jednostkowych (reguły ryzyka, portfel, koszty, TOTP, kryptografia),
       zmierzone 03.10.2026 — polecenie i sposób sprawdzenia w sekcji [Testy](#testy)
 - [x] Ustawienia, powiadomienia (w aplikacji / WhatsApp / webhook), profil konta
+- [x] **Alarmy krytyczne poza panel** — każdy alarm `critical` idzie też przez
+      bramkę RenaCode (WhatsApp, zapasowo mail), z tłumieniem powtórek
+      (`services/api/bramka.py`); ręczny kill-switch w zakładce Ryzyko
 - [x] Prowizja w mierze, a nie tylko w krzywej kapitału — odsetek dodatnich
       okien i mediana Sharpe były liczone **przed kosztami** (patrz `docs/03`)
 - [x] Konto demo Bybit **EU** zweryfikowane; cennik odczytany z giełdy
@@ -328,6 +331,29 @@ inaczej niż ręcznym SQL-em — a powiadomienie odsyłało do zakładki, która
 pokazywała komunikat „odblokowanie wymaga ręcznego potwierdzenia" i nie dawała
 czym potwierdzić.
 
+### Ręczny kill-switch
+
+Zakładka Ryzyko → „Zatrzymaj handel…" (powód + hasło). To ta sama ścieżka co
+automat: wiersz w `risk.killswitch_event` (`limit_name = 'reczny'`,
+`triggered_by` = konto), który silnik czyta w każdym cyklu, więc wejścia stają,
+a wyjścia działają. Tryb (`demo`/`live`) bierze serwer z pulsu silnika.
+Automat wznowienia go nie zwalnia — tylko człowiek, tym samym formularzem co
+po limicie. Alarm `killswitch.triggered` idzie do dzwonka i przez bramkę;
+dozór traktuje go jako pierwsze zgłoszenie i przypomina w swoim rytmie.
+
+### Alarmy przez bramkę RenaCode
+
+`notify()` przekazuje każde powiadomienie `critical` do
+`bramka.bramka.svc.cluster.local` z kluczem `BRAMKA_KLUCZ` z `trader-secret`
+(w bramce: `BRAMKA_KLUCZ_TRADER`). Ślad w `notify.delivery` (`kind =
+'bramka'`). Ten sam alarm najwyżej co 1 h, 2 h, 4 h, potem co 6 h; wszystkich
+najwyżej 10 na godzinę; reszta tylko w panelu. Wiadomość próbna (bez wpisu
+w dzwonku):
+
+```bash
+kubectl exec deploy/trader-api -- python services/api/bramka.py --test
+```
+
 ## Dozór stanu nauki
 
 Po każdym nocnym treningu uruchamia się `services/engine/dozor.py`. Odzywa się
@@ -384,6 +410,17 @@ kubectl create secret generic trader-secret \
   --from-literal=SECRETS_KEY='...' \
   --from-literal=ANTHROPIC_API_KEY='...'
 ```
+
+`BRAMKA_KLUCZ` (alarmy przez bramkę) kopiuje się z `bramka/bramka-klucze`
+(`BRAMKA_KLUCZ_TRADER`) — procedura w README chartu bramki (renacode-infra).
+`trader-secret` trafia co noc do zaszyfrowanej kopii (`backup/kopia.sh`
+w renacode-infra): bez `SECRETS_KEY` odtworzona baza ma nieczytelne 2FA
+i klucze giełd.
+
+Każda synchronizacja z nowymi migracjami robi najpierw zrzut bazy (hook
+PreSync `kopia-przed-migracja`, 5 ostatnich w `/opt/trader-backups/
+trader-przedmigracja-*`); nieudany zrzut albo brak miejsca zatrzymuje
+synchronizację.
 
 TLS: cert-manager (`letsencrypt-prod`) + Traefik, tak jak reszta usług na VPS.
 Kontener nginx serwuje czysty HTTP — certyfikat żyje wyłącznie na krawędzi.
