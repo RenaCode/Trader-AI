@@ -118,9 +118,11 @@ def swiat(monkeypatch):
         def record_violations(self, violations, did):
             pass
 
-    def decyzja(cur, engine, mode, iid, now, action, qty, *reszta, bar_start):
+    def decyzja(cur, engine, mode, iid, now, action, qty, *reszta, bar_start,
+                strategia=None):
         s.decyzje.append({"iid": iid, "action": action, "qty": qty,
-                          "verdict": reszta[4].verdict, "powod_holdu": reszta[11]})
+                          "verdict": reszta[4].verdict, "powod_holdu": reszta[11],
+                          "strategia": strategia})
         return len(s.decyzje)
 
     def ocena(features, regime, weights, h):

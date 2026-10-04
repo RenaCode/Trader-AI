@@ -441,7 +441,17 @@ workers:
     # Tryb demo wybrany swiadomie: konto jest odseparowane, a bez niego poslizg
     # i ulamek wypelnienia pozostawalyby ZALOZENIEM. Blad o cztery punkty bazowe
     # przesuwa wynik o tyle, ile cala zmierzona przewaga.
-    command: ["sh", "-c", "sleep 90; python services/engine/loop.py --bar 4h --sprawdz && exec python services/engine/loop.py --bar 4h --interval 300 --kind spot_eu --limit --egzekucja gielda --mode demo"]
+    #
+    # --strategia momentum (od 2026-10-04, decyzja wlasciciela "A"): akcje
+    # wybiera zamrozona regula R4 "momentum + filtr trendu" (H-3), a nie
+    # ensemble - 15% kapitalu, 5% na pozycje, wejscia tylko na zamknieciu doby
+    # UTC, model nieczytany. To NIE jest strategia z przewaga (H-1 i H-3: STOP),
+    # tylko pomiar egzekucji wzgledem modelu pesymistycznego (docs/hipotezy.md,
+    # E-1; raport: `python services/engine/poslizg.py --strategia
+    # momentum_filtr_trendu`). Przez wiekszosc miesiecy ma byc pod kreska.
+    # Petla odmawia startu z ta strategia poza `--mode demo`. Powrot do
+    # ensemble = usuniecie flagi.
+    command: ["sh", "-c", "sleep 90; python services/engine/loop.py --bar 4h --sprawdz && exec python services/engine/loop.py --bar 4h --interval 300 --kind spot_eu --limit --egzekucja gielda --mode demo --strategia momentum"]
     resources:
       limits:   { cpu: 1000m, memory: 512Mi }
       requests: { cpu: 100m,  memory: 128Mi }

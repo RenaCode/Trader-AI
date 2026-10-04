@@ -423,6 +423,12 @@ class RiskKernel:
 
         return sum(per.values(), Decimal(0)), per
 
+    def ekspozycja(self) -> Decimal:
+        """Laczna ekspozycja z `_open_exposure` - ta sama, ktora ocenia
+        `max_total_exposure`. Dla wlasnego sufitu strategii momentum
+        (`strategia_momentum.miesci_sie`), zeby nie liczyc jej druga kopia."""
+        return self._open_exposure()[0]
+
     def _orders_last_hour(self) -> int:
         """Ile zlecen poszlo w ostatniej godzinie - RAZEM Z BIEZACYM CYKLEM.
 

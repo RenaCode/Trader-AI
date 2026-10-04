@@ -40,7 +40,9 @@ POWODY = {"slaby_wynik", "niska_pewnosc", "short_niewykonalny",
           # 0075: wejście zablokowane średnim spreadem z 7 dni (F-1.5)
           "szeroki_spread",
           # 0080: wejscie po ponad 20 min od zamkniecia swiecy (audyt F-4.4).
-          "decyzja_przeterminowana"}
+          "decyzja_przeterminowana",
+          # 0091: strategia momentum (`strategia_momentum.POWODY_HOLDU`).
+          "filtr_trendu", "poza_skladem", "poza_decyzja_dobowa"}
 
 
 def _migracja_definiujaca_check() -> Path:
@@ -109,11 +111,33 @@ def test_kazda_galaz_konczaca_sie_holdem_ustawia_powod():
         f"przepisany w 0080) nadal pokrywa wszystkie powody")
 
 
+def _akcje_momentum(akcja):
+    """Wszystkie galezie `strategia_momentum.akcja` - kazda para (akcja, powod)."""
+    from datetime import datetime, timezone
+
+    from services.engine.strategia_momentum import Cel
+    t = datetime(2026, 10, 4, tzinfo=timezone.utc)
+    wyniki = []
+    for filtr in (True, False):
+        cel = Cel(t, True, filtr, ("A",) if filtr else (), {"A": 0.1, "B": 0.0})
+        for poz in (None, {"side": "long"}):
+            for sym in ("A", "B"):
+                for decyzyjna in (True, False):
+                    wyniki.append(akcja(cel, poz, sym, decyzyjna))
+    for a, p in wyniki:
+        assert (a == "hold") == (p is not None), (a, p)
+    return wyniki
+
+
 def test_powody_w_kodzie_migracji_i_opisach_to_ten_sam_zbior():
     """Trzy miejsca, jedna lista. Rozjazd kończy się odrzuceniem INSERT-a przez bazę."""
     from services.engine.loop import OPIS_POWODU_HOLDU
+    from services.engine.strategia_momentum import POWODY_HOLDU, akcja
 
-    w_kodzie = set()
+    # Powody strategii momentum ustawia czysta funkcja `akcja` w jej module,
+    # nie przypisanie w loop.py - zbior bierzemy stamtad.
+    w_kodzie = set(POWODY_HOLDU) | {"trzyma_pozycje"}
+    assert {p for _, p in _akcje_momentum(akcja) if p} <= w_kodzie
     for blok in _bloki(_drzewo_petli()):
         for p in _przypisania(blok, "powod_holdu"):
             if isinstance(p.value, ast.Constant) and isinstance(p.value.value, str):

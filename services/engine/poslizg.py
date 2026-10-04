@@ -956,6 +956,184 @@ def opis_selekcji(z: dict) -> list[str]:
     return linie
 
 
+# ------------------------------------- realizacja wobec modelu pesymistycznego
+
+# CO ZAKLADAL MODEL, POD KTORYM LICZONO H-1 I H-3 (docs/hipotezy.md). Przebieg
+# demo strategii `momentum_filtr_trendu` (E-1) istnieje po to, zeby te liczby
+# zestawic z gielda. IMPORTOWANE tam, gdzie sa stalymi kodu; wypelnialnosc to
+# WYNIK symulacji H-3 (wariant F, 5 przesuniec: 77,0-79,6%), wiec stoi tu jako
+# liczba z rejestru, nie z kodu.
+def model_pesymistyczny(kind: str = "spot_eu") -> dict:
+    from services.engine.koszty import koszty
+    from services.engine.r4_momentum import PARAMETRY_R4
+    k = koszty(kind)
+    return {"opoznienie_min": PARAMETRY_R4["opoznienie_min"],
+            "wypelnialnosc_wejsc": (0.770, 0.796),
+            "prowizja_wejscia": k.maker, "prowizja_wyjscia": k.taker,
+            "poslizg_wyjscia": POSLIZG_TAKER}
+
+
+def koniec_swiecy_decyzji(decyzja, bar_minutes: int = 240):
+    """Zamkniecie swiecy, ktorej dotyczy decyzja. CZYSTA FUNKCJA.
+
+    Decyzja dla swiecy B zapada w oknie [B + dlugosc, B + 2 dlugosci)
+    (`loop.decided_for_bar`), wiec zamkniecie to `decided_at` zaokraglone
+    w dol do siatki swiec - bez kolumny `bar_start`, ktorej dziennik nie ma.
+    """
+    from datetime import datetime, timezone
+    krok = bar_minutes * 60
+    return datetime.fromtimestamp(int(decyzja.timestamp()) // krok * krok,
+                                  tz=timezone.utc)
+
+
+def _plany_wejsc(zlecenia: list[dict]) -> list[dict]:
+    """Zlecenia WEJSC, jeden wiersz na plan (najwczesniejsza wysylka, najlepszy
+    status). Wiecej niz jeden wiersz `exec.order` na plan liczylby jedno
+    wejscie kilka razy - w opoznieniu i w wypelnialnosci."""
+    ranga = {**{x: 3 for x in STATUS_WYPELNIONE}, **{x: 2 for x in STATUS_CZESCIOWE},
+             **{x: 1 for x in STATUS_NIEROZSTRZYGNIETE}}
+    plany: dict = {}
+    for z in zlecenia:
+        if (z.get("rodzaj_planu") or "wejscie") != "wejscie":
+            continue
+        klucz = z.get("planned_order_id") or id(z)
+        dot = plany.get(klucz)
+        if dot is None:
+            plany[klucz] = dict(z)
+            continue
+        if ranga.get((z.get("status") or "").lower(), 0) > \
+                ranga.get((dot.get("status") or "").lower(), 0):
+            dot["status"] = z.get("status")
+        if z.get("submitted_at") and (dot.get("submitted_at") is None
+                                      or z["submitted_at"] < dot["submitted_at"]):
+            dot["submitted_at"] = z["submitted_at"]
+    return list(plany.values())
+
+
+def opoznienie_wysylki(zlecenia: list[dict], bar_minutes: int = 240) -> dict:
+    """Minuty od zamkniecia swiecy decyzyjnej do wyslania wejscia. CZYSTA.
+
+    Model pesymistyczny przyjal 20 min i ta liczba nie byla dotad zmierzona
+    (H-1, "czego wynik nie rozstrzyga"). Tu jest jej pomiar.
+    """
+    minuty = sorted(
+        (z["submitted_at"] - koniec_swiecy_decyzji(z["decided_at"], bar_minutes))
+        .total_seconds() / 60
+        for z in _plany_wejsc(zlecenia)
+        if z.get("submitted_at") is not None and z.get("decided_at") is not None)
+    if not minuty:
+        return {"n": 0, "mediana": None, "p90": None, "max": None}
+    return {"n": len(minuty), "mediana": statistics.median(minuty),
+            "p90": minuty[min(len(minuty) - 1, int(0.9 * len(minuty)))],
+            "max": minuty[-1]}
+
+
+def stawka_prowizji(w: dict) -> float | None:
+    """Prowizja wypelnienia jako ulamek notionalu, w walucie kwotowania.
+
+    Bybit spot pobiera prowizje kupna w walucie BAZOWEJ (BTC przy BTCUSDC),
+    sprzedazy w kwotowanej - `fee_ccy` mowi ktora. Waluta, ktora nie jest
+    sufiksem symbolu, jest bazowa i przeliczamy ja po cenie wypelnienia.
+    """
+    cena, ilosc, fee = (_dec(w.get("cena_wykonania")), _dec(w.get("ilosc")),
+                        _dec(w.get("prowizja")))
+    if cena is None or ilosc is None or fee is None or cena <= 0 or ilosc <= 0:
+        return None
+    waluta = (w.get("waluta_prowizji") or "").strip().upper()
+    symbol = (w.get("symbol") or "").upper()
+    kwota = fee if (not waluta or symbol.endswith(waluta)) else fee * cena
+    return float(kwota / (cena * ilosc))
+
+
+def prowizje(wiersze: list[dict]) -> dict:
+    """Zrealizowana stawka prowizji osobno dla wejsc i wyjsc. CZYSTA."""
+    out = {}
+    for rodzaj in ("wejscie", "wyjscie"):
+        xs = [x for x in (stawka_prowizji(w) for w in wiersze
+                          if (w.get("rodzaj_planu") or "wejscie") == rodzaj)
+              if x is not None]
+        out[rodzaj] = {"n": len(xs),
+                       "srednia": statistics.fmean(xs) if xs else None}
+    return out
+
+
+def poslizg_od_decyzji(wiersze: list[dict], rodzaj: str) -> dict:
+    """Wypelnienie wzgledem ceny decyzji (zamkniecia swiecy), ze znakiem
+    "dodatni = na nasza niekorzysc". CZYSTA FUNKCJA.
+
+    Dla WYJSC to jest wprost to, co modeluje H-3: wyjscie takerem po cenie
+    z chwili wysylki minus `POSLIZG_TAKER` - czyli oczekiwany koszt wzgledem
+    decyzji to 4 pb plus dryf, ktory w sredniej znika. Typ zlecenia nie
+    rozstrzyga tu niczego: wyjscie agresywne (T6) idzie limitem GTC przez
+    spread i placi takera, a `statystyki` zaliczylyby je do makera.
+    """
+    xs = []
+    for w in wiersze:
+        if (w.get("rodzaj_planu") or "wejscie") != rodzaj:
+            continue
+        cel, wyk = _dec(w.get("cena_decyzji")), _dec(w.get("cena_wykonania"))
+        if cel is None or wyk is None or cel <= 0:
+            continue
+        roznica = float((wyk - cel) / cel)
+        xs.append(roznica if (w.get("strona") or "").lower() == "buy" else -roznica)
+    return {"n": len(xs), "srednia": statistics.fmean(xs) if xs else None,
+            "przedzial": przedzial_sredniej(xs) if len(xs) >= 2 else None}
+
+
+def wobec_modelu(wiersze: list[dict], zlecenia: list[dict],
+                 bar_minutes: int = 240, kind: str = "spot_eu") -> dict:
+    """Realizacja z gieldy obok zalozen modelu pesymistycznego. CZYSTA."""
+    return {"model": model_pesymistyczny(kind),
+            "wypelnialnosc_wejsc": wypelnialnosc(_plany_wejsc(zlecenia)),
+            "opoznienie": opoznienie_wysylki(zlecenia, bar_minutes),
+            "prowizje": prowizje(wiersze),
+            "wyjscia": poslizg_od_decyzji(wiersze, "wyjscie"),
+            "wejscia": poslizg_od_decyzji(wiersze, "wejscie")}
+
+
+def opis_wobec_modelu(m: dict) -> list[str]:
+    """Wiersze raportu. Kazdy z `n`; brak pomiaru jest napisany slowami."""
+    mod = m["model"]
+    lo, hi = mod["wypelnialnosc_wejsc"]
+    w = m["wypelnialnosc_wejsc"]
+    o = m["opoznienie"]
+    linie = ["realizacja wobec modelu pesymistycznego (H-1/H-3; strategia "
+             "demo E-1):"]
+    linie.append(
+        "  wypełnialność wejść: "
+        + ("NIE ZMIERZONO (brak rozstrzygniętych wejść)" if w["udzial"] is None else
+           f"{w['udzial']:.1%} z {w['rozstrzygnietych']} planów")
+        + f" — model {lo:.1%}–{hi:.1%}")
+    linie.append(
+        "  opóźnienie wysyłki wejścia od zamknięcia świecy: "
+        + ("NIE ZMIERZONO" if not o["n"] else
+           f"n={o['n']}, mediana {o['mediana']:.1f} min, p90 {o['p90']:.1f}, "
+           f"max {o['max']:.1f}")
+        + f" — model {mod['opoznienie_min']} min")
+    for rodzaj, zal in (("wejscie", mod["prowizja_wejscia"]),
+                        ("wyjscie", mod["prowizja_wyjscia"])):
+        p = m["prowizje"][rodzaj]
+        linie.append(
+            f"  prowizja {'wejścia' if rodzaj == 'wejscie' else 'wyjścia'}: "
+            + ("NIE ZMIERZONO" if not p["n"] else
+               f"n={p['n']}, średnio {_bp(p['srednia'], znak=False)}")
+            + f" — model {_bp(zal, znak=False)}")
+    t = m["wyjscia"]
+    linie.append(
+        "  wyjście względem ceny decyzji: "
+        + ("NIE ZMIERZONO" if not t["n"] else
+           f"n={t['n']}, średnio {_bp(t['srednia'])} {_ci(t['przedzial'])}")
+        + f" — model {_bp(mod['poslizg_wyjscia'])} (taker) plus dryf 20 min")
+    e = m["wejscia"]
+    linie.append(
+        "  wypełnione wejście względem ceny decyzji: "
+        + ("NIE ZMIERZONO" if not e["n"] else
+           f"n={e['n']}, średnio {_bp(e['srednia'])} {_ci(e['przedzial'])}")
+        + " — model: limit pół spreadu pod ceną z chwili wysyłki, wypełnienie "
+          "tylko przy ruchu przeciw nam (selekcja: patrz zwrot naprzód)")
+    return linie
+
+
 # -------------------------------------------------------------- warstwa danych
 
 # Zapytanie zakotwiczone na `exec.fill`, NIE na `exec.order`. Jeden plan ma
@@ -983,8 +1161,11 @@ SELECT o.order_type                     AS rodzaj_zlecenia,
                                         AS mid_wysylki,
        f.price                          AS cena_wykonania,
        f.qty                            AS ilosc,
+       f.fee                            AS prowizja,
+       f.fee_ccy                        AS waluta_prowizji,
        f.event_time                     AS czas,
-       i.symbol                         AS symbol
+       i.symbol                         AS symbol,
+       p.trigger->>'rodzaj'             AS rodzaj_planu
   FROM exec.fill f
   JOIN exec.order o           ON o.id = f.order_id
   JOIN ref.instrument i       ON i.id = o.instrument_id
@@ -998,6 +1179,7 @@ SELECT o.order_type                     AS rodzaj_zlecenia,
    AND o.mode::text = %(mode)s
    AND (%(h)s::int IS NULL
         OR f.event_time > now() - make_interval(hours => %(h)s::int))
+   AND (%(strategia)s::text IS NULL OR d.strategia = %(strategia)s)
  ORDER BY f.event_time
 """
 
@@ -1016,23 +1198,33 @@ SELECT o.status AS status,
        -- Wyjscie i jego tryb (`gielda_exec.zloz_plan`, od 2026-10-03). Pole
        -- jest na KAZDYM wyjsciu - `false` tez - wiec brak klucza znaczy
        -- "wejscie albo zlecenie sprzed zmiany", nie "wyjscie pasywne".
-       o.raw->>'wyjscie_agresywne'   AS wyjscie_agresywne
+       o.raw->>'wyjscie_agresywne'   AS wyjscie_agresywne,
+       -- Do opoznienia wysylki i wypelnialnosci WEJSC (`wobec_modelu`).
+       o.planned_order_id            AS planned_order_id,
+       o.submitted_at                AS submitted_at,
+       d.decided_at                  AS decided_at,
+       p.trigger->>'rodzaj'          AS rodzaj_planu
   FROM exec.order o
+  LEFT JOIN journal.planned_order p ON p.id = o.planned_order_id
+  LEFT JOIN journal.decision d      ON d.id = o.decision_id
  WHERE o.engine::text = %(engine)s
    AND o.mode::text = %(mode)s
    AND o.raw->>'execution' = 'gielda'
    AND (%(h)s::int IS NULL
         OR o.submitted_at > now() - make_interval(hours => %(h)s::int))
+   AND (%(strategia)s::text IS NULL OR d.strategia = %(strategia)s)
  ORDER BY o.submitted_at
 """
 
 
 async def pobierz_zlecenia(fetch_all, *, engine: str = "crypto",
                            mode: str = "demo",
-                           okno_h: int | None = None) -> list[dict]:
+                           okno_h: int | None = None,
+                           strategia: str | None = None) -> list[dict]:
     """Cienka warstwa: statusy ZLOZONYCH zlecen. Bez rachunku."""
     return list(await fetch_all(ZAPYTANIE_ZLECENIA,
-                                {"engine": engine, "mode": mode, "h": okno_h}))
+                                {"engine": engine, "mode": mode, "h": okno_h,
+                                 "strategia": strategia}))
 
 
 # Wejscia gieldowe (jeden wiersz `exec.order` na plan) z cena po 24 i 48 h:
@@ -1064,20 +1256,24 @@ SELECT o.status                                AS status,
    AND d.action IN ('enter_long', 'enter_short')
    AND (%(h)s::int IS NULL
         OR o.submitted_at > now() - make_interval(hours => %(h)s::int))
+   AND (%(strategia)s::text IS NULL OR d.strategia = %(strategia)s)
  ORDER BY o.submitted_at
 """
 
 
 async def pobierz_zwrot_naprzod(fetch_all, *, engine: str = "crypto",
                                 mode: str = "demo",
-                                okno_h: int | None = None) -> list[dict]:
+                                okno_h: int | None = None,
+                                strategia: str | None = None) -> list[dict]:
     """Cienka warstwa: wejscia gieldowe z cena po 24 i 48 h. Bez rachunku."""
     return list(await fetch_all(ZAPYTANIE_ZWROT_NAPRZOD,
-                                {"engine": engine, "mode": mode, "h": okno_h}))
+                                {"engine": engine, "mode": mode, "h": okno_h,
+                                 "strategia": strategia}))
 
 
 async def pobierz(fetch_all, *, engine: str = "crypto", mode: str = "demo",
-                  okno_h: int | None = None) -> list[dict]:
+                  okno_h: int | None = None,
+                  strategia: str | None = None) -> list[dict]:
     """Cienka warstwa: wypełnienia z bazy. Bez rachunku — ten jest wyżej.
 
     OKNO DOMYSLNIE PUSTE, czyli od poczatku. Kazde inne domyslne okno wyrzucaloby
@@ -1085,7 +1281,8 @@ async def pobierz(fetch_all, *, engine: str = "crypto", mode: str = "demo",
     jest oszczednosc, tylko utrata pomiaru.
     """
     return list(await fetch_all(ZAPYTANIE,
-                                {"engine": engine, "mode": mode, "h": okno_h}))
+                                {"engine": engine, "mode": mode, "h": okno_h,
+                                 "strategia": strategia}))
 
 
 async def main() -> int:
@@ -1096,6 +1293,11 @@ async def main() -> int:
     ap.add_argument("--mode", default="demo")
     ap.add_argument("--okno-h", type=int, default=None, dest="okno_h",
                     help="okno w godzinach; domyslnie od poczatku")
+    # Filtr po `journal.decision.strategia` (0091). Z nim raport dostaje sekcje
+    # "wobec modelu pesymistycznego" - po to chodzi strategia momentum na demo.
+    ap.add_argument("--strategia", default=None,
+                    choices=("ensemble", "momentum_filtr_trendu"),
+                    help="tylko zlecenia decyzji tej strategii (domyślnie wszystkie)")
     args = ap.parse_args()
 
     if not os.environ.get("DATABASE_URL"):
@@ -1105,11 +1307,13 @@ async def main() -> int:
 
     await open_pool()
     try:
-        wiersze = await pobierz(fetch_all, engine=args.engine, mode=args.mode,
-                                okno_h=args.okno_h)
-        zlecenia = await pobierz_zlecenia(fetch_all, engine=args.engine,
-                                          mode=args.mode, okno_h=args.okno_h)
+        filtr = {"engine": args.engine, "mode": args.mode, "okno_h": args.okno_h,
+                 "strategia": args.strategia}
+        wiersze = await pobierz(fetch_all, **filtr)
+        zlecenia = await pobierz_zlecenia(fetch_all, **filtr)
         okno = "od poczatku" if args.okno_h is None else f"{args.okno_h} h"
+        if args.strategia:
+            okno += f", strategia {args.strategia}"
         print(f"poślizg ({args.engine}/{args.mode}, {okno}), "
               f"wypełnień w rejestrze: {len(wiersze)}, "
               f"złożonych zleceń: {len(zlecenia)}")
@@ -1117,9 +1321,10 @@ async def main() -> int:
                                  "wyjscia_takerem": udzial_wyjsc_takerem(zlecenia)}
         for linia in opis(pom):
             print(f"  {linia}")
-        wejscia = await pobierz_zwrot_naprzod(fetch_all, engine=args.engine,
-                                              mode=args.mode, okno_h=args.okno_h)
+        wejscia = await pobierz_zwrot_naprzod(fetch_all, **filtr)
         for linia in opis_selekcji(zwrot_naprzod(wejscia)):
+            print(f"  {linia}")
+        for linia in opis_wobec_modelu(wobec_modelu(wiersze, zlecenia)):
             print(f"  {linia}")
     finally:
         await close_pool()

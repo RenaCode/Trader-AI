@@ -37,7 +37,7 @@ import psycopg
 from psycopg.rows import dict_row
 
 from services.engine.horizons import DEFAULT_BAR, HORIZONS, Horizon, get as get_horizon
-from services.engine import stan_kapitalu
+from services.engine import stan_kapitalu, strategia_momentum
 from services.engine.risk import RiskKernel
 from services.engine.sesja import StanSesji, stan_sesji
 from services.ingest.features import wklady_newsow
@@ -185,7 +185,19 @@ OPIS_POWODU_HOLDU = {
     "decyzja_przeterminowana": "Nie wchodzimy: od zamknięcia świecy minęło "
                                "ponad 20 minut — sygnał opisuje rynek, którego "
                                "już nie ma (opóźniony potok danych).",
+    # Strategia `momentum` (services/engine/strategia_momentum.py, migracja 0091).
+    "filtr_trendu": "Nie wchodzimy: BTC pod EMA 50 d — filtr trendu każe "
+                    "trzymać gotówkę.",
+    "poza_skladem": "Nie wchodzimy: instrument poza trzema najsilniejszymi "
+                    "po momentum 30 d.",
+    "poza_decyzja_dobowa": "Nie wchodzimy: instrument jest w składzie, ale "
+                           "wejście zapada tylko na zamknięciu doby UTC.",
 }
+
+# STRATEGIA -> wartosc `journal.decision.strategia` (CHECK w migracji 0091).
+# `model` to ensemble z aktywnej wersji modelu (albo zalozenia poczatkowe),
+# `momentum` - zamrozona regula R4 na demo (`strategia_momentum`).
+STRATEGIE = {"model": "ensemble", "momentum": strategia_momentum.NAZWA}
 
 
 def ensure_signal_defs(cur, engine: str) -> dict[str, int]:
@@ -829,7 +841,8 @@ def record_decision(cur, engine: str, mode: str, instrument_id: int, as_of: date
                     powod_holdu: str | None = None,
                     prog_wejscia: float | None = None,
                     prog_wyjscia: float | None = None,
-                    bar_start: datetime | None = None) -> int | None:
+                    bar_start: datetime | None = None,
+                    strategia: str | None = None) -> int | None:
     # PROGI ZAPISUJEMY PRZY DECYZJI, a nie zostawiamy ich w wersji modelu.
     #
     # Wersja modelu zyje krocej niz decyzja: purge_demo.py kasuje cala tabele
@@ -841,21 +854,25 @@ def record_decision(cur, engine: str, mode: str, instrument_id: int, as_of: date
     # bo do tej pory petla nie uzywala zadnego modelu, wiec nie bylo czego
     # zapisac. NULL znaczy "zalozenia poczatkowe, brak zwalidowanego modelu"
     # i jest to stan poprawny, nie brak danych.
+    # `strategia` mowi, KTORA REGULA podjela decyzje (0091): przy `momentum`
+    # model_version_id jest NULL, a mimo to decyzja nie jest "zalozeniami
+    # poczatkowymi" - i bez tej kolumny jedno od drugiego nie daloby sie
+    # odroznic. Pomiar egzekucji (`poslizg.py --strategia`) filtruje po niej.
     cur.execute(
         """
         INSERT INTO journal.decision (engine, mode, instrument_id, decided_at, action,
             target_qty, target_price, confidence, regime, feature_snapshot,
             risk_verdict, risk_reason, rationale, rationale_model, latency_ms,
             model_version_id, pokrycie_sygnalow, powod_holdu,
-            prog_wejscia, prog_wyjscia)
-        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'reguły',%s,%s,%s,%s,%s,%s)
+            prog_wejscia, prog_wyjscia, strategia)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'reguły',%s,%s,%s,%s,%s,%s,%s)
         ON CONFLICT (engine, instrument_id, decided_at) DO NOTHING
         RETURNING id
         """,
         (engine, mode, instrument_id, as_of, action, qty, price, confidence, regime,
          json.dumps({k: round(v, 6) for k, v in features.items()}),
          verdict.verdict, verdict.reason, rationale, latency_ms, model_version_id,
-         pokrycie_sygnalow, powod_holdu, prog_wejscia, prog_wyjscia))
+         pokrycie_sygnalow, powod_holdu, prog_wejscia, prog_wyjscia, strategia))
     row = cur.fetchone()
     if not row:
         return None
@@ -1807,8 +1824,11 @@ async def sprawdz(conn, engine: str = "crypto", h: Horizon | None = None) -> int
 
     # WARUNEK Z `uniwersum.py`, nie przepisany tutaj. Kontrola ma ogladac TEN
     # SAM zbior, ktory obstawia petla — inaczej „sprawdz" sprawdzaloby co innego.
-    cur.execute(sql_uniwersum_decyzyjnego() + " LIMIT 3", (engine,))
-    for inst in cur.fetchall():
+    # CALE uniwersum, nie LIMIT 3: kontrola strategii momentum nizej liczy
+    # ranking przekrojowy. Kontrole per instrument nadal na pierwszych trzech.
+    cur.execute(sql_uniwersum_decyzyjnego(), (engine,))
+    uniwersum = cur.fetchall()
+    for inst in uniwersum[:3]:
         iid, sym = inst["id"], inst["symbol"]
         probuj(f"{sym}: decyzja w tej świecy?",
                lambda i=iid: decided_for_bar(cur, engine, "demo", i, bar_start, h))
@@ -1850,6 +1870,21 @@ async def sprawdz(conn, engine: str = "crypto", h: Horizon | None = None) -> int
                    # swieca nie miala cech (do 2026-10-02 byla pomijana).
                    lambda ff=f, r=regime: evaluate(
                        ff, r, ((model or {}).get("weights") or {}).get(r), h))
+
+    # STRATEGIA MOMENTUM: ten sam odczyt co `run_once --strategia momentum`,
+    # na CALYM uniwersum (ranking jest przekrojowy). Zawsze, a nie tylko przy
+    # tej strategii: zapytanie jest tanie, a blad w nim ma zatrzymac start
+    # przed przelaczeniem w charcie, a nie po nim.
+    if h.bar_minutes == 240:
+        cel = probuj(f"strategia {strategia_momentum.OPIS}: cel dobowy",
+                     lambda: strategia_momentum.cel_z_bazy(cur, uniwersum,
+                                                           bar_start, h))
+        if cel is not None:
+            print(f"         {cel.chwila:%Y-%m-%d} UTC: "
+                  + (f"odłożona — {cel.powod}" if not cel.kompletny else
+                     f"filtr BTC {'TAK' if cel.filtr else 'NIE'}, skład: "
+                     f"{', '.join(cel.sklad) or 'gotówka'}"
+                     + (f" ({cel.powod})" if cel.powod else "")))
 
     # KONTROLA STRUKTURALNA: czy wszystkie cechy horyzontu siedza na siatce swiec.
     # Cechy liczone na wlasnej siatce (funding, news) potrafily wyladowac na
@@ -2042,7 +2077,13 @@ def nowe_stats(**flagi) -> dict:
              # w dzienniku decyzji powstaje tylko przy zamiarze wejscia, a tego
              # w oknie proby zwykle nie ma. None: bramka otwarta albo zamknieta
              # z innego powodu niz kill-switch.
-             "wstrzymanie_killswitch_id": None}
+             "wstrzymanie_killswitch_id": None,
+             # Ktora regula wybierala akcje (`STRATEGIE`). None: cykl skonczyl
+             # sie na bramce przed wyborem akcji.
+             "strategia": None,
+             # Decyzje strategii momentum ODLOZONE, bo swieca BTC konczaca dobe
+             # nie ma jeszcze wszystkich swiec 1h (`strategia_momentum.cel_z_bazy`).
+             "odlozone_momentum": 0}
     stats.update(flagi)
     return stats
 
@@ -2078,15 +2119,28 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
                    gielda=None, kategoria: str = "spot",
                    wymagaj_modelu: bool = False,
                    sesja: StanSesji | None = None,
-                   likwiduj: bool = False) -> dict:
+                   likwiduj: bool = False,
+                   strategia: str = "model") -> dict:
     """Jeden przebieg silnika.
 
     `gielda` PRZELACZA ZRODLO PRAWDY O WYPELNIENIU, a nie sposob decydowania.
     Bez niej plan rozstrzyga swieca (rachunek papierowy); z nia - odpowiedz
     gieldy. Decyzje, limity i dziennik sa w obu przypadkach te same, bo to nie
     egzekucja ma o nich stanowic.
+
+    `strategia` PRZELACZA WYLACZNIE WYBOR AKCJI I WIELKOSC WEJSCIA: `model`
+    to ensemble z aktywnej wersji modelu, `momentum` to zamrozona regula R4
+    (`strategia_momentum`). Bramki, kill-switch, risk kernel, egzekucja i puls
+    sa wspolne - pomiar egzekucji ma dotyczyc tej samej sciezki, ktora handluje.
     """
+    if strategia not in STRATEGIE:
+        raise ValueError(f"nieznana strategia {strategia!r} (znane: {sorted(STRATEGIE)})")
+    momentum = strategia == "momentum"
     h = h or get_horizon(DEFAULT_BAR)
+    if momentum and h.bar_minutes != 240:
+        # Parametry H-3 sa zmierzone na swiecach 4h i decyzji na ich zamknieciu
+        # o polnocy UTC; inny horyzont bylby inna regula.
+        raise ValueError(f"strategia momentum wymaga świecy 4h (dostała {h.bar})")
     # `None`, a nie pusty slownik: "likwidacja nie ruszyla w tym cyklu" to inny
     # stan niz "ruszyla i nie miala o czym mowic". Patrz `nowe_stats`.
     likwidacja_stat: dict | None = None
@@ -2263,6 +2317,13 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
         # ze gdyby kiedys poszla, bylaby zleceniem pustym, a nie zgadnietym.
         baza = Decimal(0)
 
+    # Budzet wejscia strategii momentum: 15% / 3 kapitalu (wariant P z H-3).
+    # Z TEGO SAMEGO `kapital` co `baza`; przy braku pomiaru zero, a wejscia
+    # i tak sa wstrzymane powodem dopisanym wyzej.
+    baza_momentum = (strategia_momentum.budzet_pozycji(kapital)
+                     if momentum and kapital is not None and kapital > 0
+                     and baza > 0 else Decimal(0))
+
     wejscia_wstrzymane = bool(powody_wstrzymania)
     powod_wstrzymania = " | ".join(powody_wstrzymania)
     # Werdykt zapisywany do dziennika musi mowic PRAWDE o tym, co zatrzymalo
@@ -2323,8 +2384,20 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
 
     now = datetime.now(timezone.utc)
     bar_start = current_bar(now, h)
-    model = active_model(cur, engine, h)
-    if verbose:
+    # STRATEGIA MOMENTUM NIE CZYTA MODELU - ani aktywnej wersji, ani kandydata.
+    # Atrapa z `None` w miejscu wag i progow, zeby nic nizej nie siegnelo po
+    # ensemble przypadkiem: kazde takie siegniecie wywroci cykl, a nie po cichu
+    # domiesza wagi modelu do reguly.
+    model = (active_model(cur, engine, h) if not momentum else
+             {"version": None, "model_version_id": None, "bramki": None,
+              "weights": None, "min_conf": None})
+    if momentum and verbose:
+        print(f"  strategia: {strategia_momentum.OPIS} (zamrożone parametry H-3: "
+              f"{dict(strategia_momentum.PARAMETRY)}, budżet "
+              f"{strategia_momentum.UDZIAL_LACZNY:.0%} kapitału, "
+              f"{strategia_momentum.UDZIAL_POZYCJI:.0%} na pozycję = "
+              f"{baza_momentum} przy kapitale {kapital}; model nieużywany)")
+    elif verbose:
         print(f"  wagi: {'wersja modelu ' + str(model['version']) if model['version'] else 'założenia początkowe (brak zwalidowanego modelu)'}")
         print(f"  progi wejścia: {model['bramki'].opis()}")
     # KOMUNIKAT BEZ `verbose`, bo mowi o rozjezdzie wersji, nie o przebiegu.
@@ -2334,7 +2407,7 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
     # prog przepuszcza 7,0% sygnalow w `range` i 34,0% w `high_vol` przy
     # zamiarze 12%, wiec silnik handluje wtedy inna czestotliwoscia niz
     # zaprojektowana - i musi to powiedziec, a nie zrobic po cichu.
-    if model["bramki"].powod == "wersja_modelu_bez_progow_per_rezim":
+    if not momentum and model["bramki"].powod == "wersja_modelu_bez_progow_per_rezim":
         print(f"  UWAGA: wersja modelu {model['version']} NIE MA progów per reżim "
               f"(wytrenowana przed 2026-09-27). Obowiązuje jeden próg "
               f"{model['enter']:.4f} dla wszystkich reżimów — zamierzone 12% "
@@ -2376,7 +2449,14 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
 
     # IDENTYFIKATORY CECH DOPIERO TERAJ, bo cechy przekrojowe sa filtrowane
     # odciskiem uniwersum - a uniwersum znamy dopiero po tym zapytaniu.
-    feature_ids = horizon_feature_ids(cur, h, [i["symbol"] for i in instrumenty])
+    feature_ids = (horizon_feature_ids(cur, h, [i["symbol"] for i in instrumenty])
+                   if not momentum else [])
+    stats["strategia"] = strategia
+    # CEL STRATEGII MOMENTUM - liczony RAZ na cykl i tylko wtedy, gdy jest
+    # co decydowac (pierwszy instrument bez decyzji w tej swiecy). Patrz
+    # `strategia_momentum.cel_z_bazy`.
+    cel: strategia_momentum.Cel | None = None
+    decyzyjna = momentum and strategia_momentum.swieca_decyzyjna(bar_start, h)
 
     # PRZEBIEG PIERWSZY: ocena wszystkich instrumentow, bez podejmowania akcji.
     #
@@ -2391,8 +2471,27 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
         if decided_for_bar(cur, engine, mode, iid, bar_start, h):
             stats["poza_swieca"] += 1
             continue
-        features, obce = latest_features(cur, iid, now, h, feature_ids, bar_start)
-        if len(features) < MIN_CECH:
+        if momentum:
+            # REGULA ZAMIAST CECH: momentum nie czyta `feat.*` ani reżimu.
+            # Niedomknieta swieca BTC = decyzja ODLOZONA do nastepnego cyklu
+            # w oknie swiecy (jak `MIN_POKRYCIE`), bez wiersza w dzienniku.
+            if cel is None:
+                # Na domkniecie swiecy BTC czekamy tylko w oknie wejscia
+                # swiecy decyzyjnej - potem czekanie wiezi wyjscia.
+                cel = strategia_momentum.cel_z_bazy(
+                    cur, instrumenty, bar_start, h,
+                    czekaj=decyzyjna and not decyzja_przeterminowana(now, bar_start, h))
+                if not cel.kompletny:
+                    print(f"  strategia {strategia_momentum.OPIS}: decyzja "
+                          f"odłożona — {cel.powod}")
+                elif cel.powod:
+                    print(f"  UWAGA strategia {strategia_momentum.OPIS}: {cel.powod}")
+            if not cel.kompletny:
+                stats["odlozone_momentum"] += 1
+                continue
+        features, obce = (latest_features(cur, iid, now, h, feature_ids, bar_start)
+                          if not momentum else ({}, {}))
+        if not momentum and len(features) < MIN_CECH:
             # SLAD ZANIM `continue`. Bez tego wiersza instrument znikal
             # z przebiegu bezglosnie i z bazy nie dalo sie odroznic "pominiety
             # z braku cech" od "silnik w ogole nie chodzil".
@@ -2474,6 +2573,19 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
             if verbose:
                 print(f"  {symbol:10s} pominięty — BRAK CENY "
                       f"(świeca {h.bar} {bar_start:%m-%d %H:%M} i minutówka)")
+            continue
+        if momentum:
+            # Cena ta sama co dla ensemble (zamkniecie swiecy decyzyjnej), cechy
+            # zastepuje sklad celu - to on trafia do `feature_snapshot`.
+            stats["rozwazone"] += 1
+            oceny.append({"iid": iid, "symbol": symbol, "kind": inst["kind"],
+                          "quote_ccy": inst["quote_ccy"],
+                          "features": cel.snapshot(symbol), "price": price,
+                          "regime": None, "regime_conf": None,
+                          "score": cel.sygnaly.get(symbol, 0.0),
+                          "confidence": 1.0, "contributions": [],
+                          "pokrycie": None,
+                          "position": open_position(cur, engine, mode, iid)})
             continue
         stats["rozwazone"] += 1
         regime, regime_conf = classify_regime(features, atr_percentile_80(cur, iid, now, h))
@@ -2565,9 +2677,18 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
         # PROGI TEGO REZIMU. `None` przy wejsciu znaczy "reżim bez skalibrowanego
         # progu" i jest odpowiedzia inna niz jakakolwiek liczba - patrz
         # `services/engine/bramki.py`. Prog WYJSCIA jest zawsze liczba.
-        prog_wejscia_rezimu = model["bramki"].wejscie(regime)
-        prog_wyjscia_rezimu = model["bramki"].wyjscie(regime)
-        if position:
+        if momentum:
+            # Regula bez progow: NULL w dzienniku, bo progu nie bylo.
+            prog_wejscia_rezimu = prog_wyjscia_rezimu = None
+        else:
+            prog_wejscia_rezimu = model["bramki"].wejscie(regime)
+            prog_wyjscia_rezimu = model["bramki"].wyjscie(regime)
+        if momentum:
+            # Cala regula w `strategia_momentum.akcja` (czysta funkcja, tam
+            # testy galezi). Powody holdu z jej zbioru stoja w CHECK 0091.
+            action, powod_holdu = strategia_momentum.akcja(cel, position, symbol,
+                                                           decyzyjna)
+        elif position:
             same_way = (position["side"] == "long" and score > 0) or \
                        (position["side"] == "short" and score < 0)
             if not same_way or abs(score) < prog_wyjscia_rezimu:
@@ -2621,7 +2742,13 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
         qty = Decimal(0)
         notional = Decimal(0)
         if action in ("enter_long", "enter_short"):
-            notional, qty = wielkosc_pozycji(baza, score, price)
+            if momentum:
+                # ROWNE WAGI PRZY WEJSCIU (H-3): 5% kapitalu niezaleznie od
+                # sily sygnalu - stad udzial 1,0 zamiast `score`. Bez kapitalu
+                # `baza` jest juz zerem, a wejscia wstrzymane (wyzej).
+                notional, qty = wielkosc_pozycji(baza_momentum, 1.0, price)
+            else:
+                notional, qty = wielkosc_pozycji(baza, score, price)
 
         if action.startswith("enter") and wejscia_wstrzymane:
             # Kill-switch, przekroczony limit konta albo niepelny pomiar
@@ -2641,7 +2768,20 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
             powod_holdu = "decyzja_przeterminowana"
             stats["decyzja_przeterminowana"] += 1
         elif action.startswith("enter"):
-            verdict = risk.check(iid, notional, qty)
+            if momentum and not strategia_momentum.miesci_sie(
+                    kapital, risk.ekspozycja(), notional):
+                # WLASNY SUFIT STRATEGII (15%), na tej samej ekspozycji co
+                # `max_total_exposure` (pozycje po cenie rynkowej + zlecenia
+                # i plany wejsc). Limit konta moze kiedys urosnac; budzet
+                # pomiaru nie. Odmowa jak z risk kernela: `block` z powodem.
+                verdict = RiskVerdict(
+                    verdict="block",
+                    reason=f"Budżet strategii {strategia_momentum.OPIS}: ekspozycja "
+                           f"po wejściu przekroczyłaby "
+                           f"{strategia_momentum.UDZIAL_LACZNY:.0%} kapitału "
+                           f"({strategia_momentum.sufit(kapital):.0f})")
+            else:
+                verdict = risk.check(iid, notional, qty)
         else:
             verdict = type("V", (), {"verdict": "allow", "reason": None, "qty": qty,
                                      "violations": [], "usage": []})()
@@ -2649,6 +2789,10 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
         top = sorted(contributions, key=lambda c: -abs(c["contribution"]))[:2]
         top_txt = ", ".join(f"{c['label'].lower()} ({c['contribution']:+.3f})" for c in top)
         rationale = (
+            strategia_momentum.uzasadnienie(cel, symbol)
+            + (f" Ryzyko: {verdict.reason}." if verdict.reason else "")
+            + (f" {OPIS_POWODU_HOLDU[powod_holdu]}" if powod_holdu else "")
+        ) if momentum else (
             f"Reżim: {regime}. Wynik złożony {score:+.3f} przy pewności {confidence:.0%}. "
             f"Największy wkład: {top_txt}."
             # Niepelny komplet mowimy WPROST w uzasadnieniu, bo wynik go juz nie
@@ -2683,7 +2827,8 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
                               # bo progu nie bylo, a 0,25 udawaloby, ze byl.
                               powod_holdu, prog_wejscia_rezimu,
                               prog_wyjscia_rezimu,
-                              bar_start=bar_start)
+                              bar_start=bar_start,
+                              strategia=STRATEGIE[strategia])
 
         risk.record_usage(verdict.usage)
         risk.record_violations(verdict.violations, did)
@@ -2723,8 +2868,10 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
             stats["zablokowane"] += 1
 
         if verbose:
-            print(f"  {symbol:10s} {regime:11s} wynik={score:+.3f} pewność={confidence:.0%} "
-                  f"-> {action:12s} [{verdict.verdict}]")
+            print(f"  {symbol:10s} {regime or '-':11s} wynik={score:+.3f} pewność={confidence:.0%} "
+                  f"-> {action:12s} [{verdict.verdict}]"
+                  + (f" kwota {notional}" if action.startswith("enter") else "")
+                  + (f" ({powod_holdu})" if momentum and powod_holdu else ""))
         conn.commit()
 
     # WYSYLKA NA KONIEC PRZEBIEGU, PO ZATWIERDZENIU WSZYSTKICH DECYZJI.
@@ -2989,7 +3136,22 @@ async def main() -> int:
                          "ZLECENIEM RYNKOWYM (koszt: stawka taker plus "
                          "NIEZMIERZONY poślizg); bez tej flagi kill-switch "
                          "tylko wstrzymuje wejścia")
+    # STRATEGIA - KTORA REGULA WYBIERA AKCJE. Domysl `model` zostaje, zeby
+    # przelaczenie bylo linia w `values.yaml`, a nie skutkiem wdrozenia obrazu
+    # (ta sama zasada co przy `--egzekucja gielda`). `momentum` = decyzja
+    # wlasciciela "A" z 2026-10-04: zamrozona regula R4 na demo, pomiar
+    # egzekucji (docs/hipotezy.md, E-1).
+    ap.add_argument("--strategia", default="model", choices=sorted(STRATEGIE),
+                    help="model: ensemble z aktywnej wersji modelu; momentum: "
+                         "momentum + filtr trendu (zamrożone parametry H-3, "
+                         "15%% kapitału)")
     args = ap.parse_args()
+    if args.strategia == "momentum" and args.mode != "demo":
+        # Regula bez przewagi (H-3 STOP) chodzi WYLACZNIE po to, zeby zmierzyc
+        # egzekucje. Na koncie z prawdziwymi pieniedzmi nie ma czego tu mierzyc
+        # za te cene - i to ma byc odmowa startu, nie ostrzezenie w logu.
+        sys.exit("--strategia momentum tylko z --mode demo (pomiar egzekucji, "
+                 "nie strategia z przewagą)")
 
     url = os.environ.get("DATABASE_URL")
     if not url:
@@ -3017,6 +3179,15 @@ async def main() -> int:
 
     from services.engine.koszty import runda
     print(f"Silnik {args.engine}, świeca {h.bar} — jedna decyzja na świecę.")
+    if args.strategia == "momentum":
+        print(f"STRATEGIA: {strategia_momentum.OPIS} ({strategia_momentum.NAZWA}) — "
+              f"parametry zamrożone z H-3 {dict(strategia_momentum.PARAMETRY)}, "
+              f"budżet {strategia_momentum.UDZIAL_LACZNY:.0%} kapitału "
+              f"({strategia_momentum.UDZIAL_POZYCJI:.0%} na pozycję), wejścia tylko "
+              f"na zamknięciu doby UTC. Model NIEUŻYWANY. Pomiar egzekucji, "
+              f"nie strategia z przewagą (H-1, H-3: STOP).")
+    else:
+        print("STRATEGIA: ensemble z aktywnej wersji modelu.")
     print(f"Rachunek papierowy: {args.kind}, zlecenia "
           f"{'z limitem' if args.limit else 'rynkowe'}, "
           f"koszt rundy {runda(args.kind, args.limit) * 100:.3f}%")
@@ -3101,7 +3272,8 @@ async def main() -> int:
                                    kind_kosztow=args.kind, limit=args.limit,
                                    verbose=not args.quiet, h=h, gielda=gielda,
                                    wymagaj_modelu=args.wymagaj_modelu,
-                                   sesja=sesja, likwiduj=args.likwiduj)
+                                   sesja=sesja, likwiduj=args.likwiduj,
+                                   strategia=args.strategia)
             # CYKL ZABLOKOWANY BRAMKA MA WLASNA LINIE, NIE SAME ZERA.
             #
             # "rozwazone 0, wejscia 0, wyjscia 0..." przez cala noc wyglada
@@ -3122,6 +3294,8 @@ async def main() -> int:
                 # POMINIECIA W JEDNEJ LINII PODSUMOWANIA, a nie tylko w komunikatach
                 # `--verbose` wewnatrz przebiegu: przy `--quiet` (tak chodzi produkcja)
                 # tamtych nie ma wcale, a ta linia jest zawsze.
+                if s.get("odlozone_momentum"):
+                    plany += f", ODŁOŻONE (świeca BTC niedomknięta) {s['odlozone_momentum']}"
                 if s.get("pominiete_bez_cech") or s.get("pominiete_bez_ceny"):
                     plany += (f", POMINIĘTE: bez cech {s['pominiete_bez_cech']}, "
                               f"bez ceny {s['pominiete_bez_ceny']}")
