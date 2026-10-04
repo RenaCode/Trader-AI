@@ -14,9 +14,11 @@ i wchodzi dopiero ręcznym przebiegiem z `--zatwierdz-promocje`, po wpisie tutaj
 | id | data | hipoteza | kryterium | wynik | decyzja |
 |---|---|---|---|---|---|
 | H-B2 | 2026-10-03 | Odniesienie B2 (momentum przekrojowe z filtrem trendu) jest baseline'em, który ensemble musi pobić | definicja, nie test | — | obowiązuje od pierwszego przebiegu |
-| H-1 | 2026-10-03 | Ensemble 4h ma przewagę pod uczciwym modelem wypełnień (STOP/GO 1) | zwrot/rundę po dopłacie > 0 w ≥ 3/5 przesunięć **i** bije B2 przy tej samej ekspozycji w ≥ 60% okien | zwrot/rundę −11,2 pb (0/5 przesunięć > 0), bije B2 w 61% okien | **STOP** — kalibracja wag ensemble zamknięta, dalej tylko R4 |
+| H-1 | 2026-10-03 | Ensemble 4h ma przewagę pod uczciwym modelem wypełnień (STOP/GO 1) | zwrot/rundę po dopłacie > 0 w ≥ 3/5 przesunięć **i** bije B2 przy tej samej ekspozycji w ≥ 60% okien | zwrot/rundę −11,2 pb (0/5 przesunięć > 0), bije B2 w 61% okien | **STOP** — kalibracja wag ensemble zamknięta, dalej tylko R4 · zamknięte decyzją A (2026-10-04) |
 | H-2 | 2026-10-03 | Zmiana METODY z audytu T4 (stała siatka okien + status z minimum 5 przesunięć, progi wejścia na wagach IC, horyzont IC przy `Horizon`): wpływ na werdykt toru 4h | opisowe — bez decyzji GO; wynik nie zmienia H-1 | patrz niżej | H-1 STOP obowiązuje |
-| H-3 | 2026-10-04 | Tor R4: momentum przekrojowe 30 d na decyzji dobowej z filtrem BTC > EMA 50 d, top 3 long-only, pod pesymistycznym modelem wejść (STOP/GO 2) | wszystkie cztery naraz: K1 okna dodatnie ≥ 65% **i** bije B1 przy tej samej ekspozycji w ≥ 65% okien; K2 DSR ≥ 0,95 na 5/5 przesunięć; K3 percentyl permutacyjny ≥ 70 na 5/5 przesunięć; K4 bije B2 przy tej samej ekspozycji w ≥ 55% okien | K1 NIE (okna dodatnie 46%, bije B1 35%), K2 TAK (DSR 0,950–0,980, N = 2), K3 TAK (percentyl 100), K4 NIE (bije B2 44%); oba warianty ekspozycji | **STOP** — R4 nie wchodzi na demo; żaden tor nie spełnia kryteriów, decyzja właściciela (sekcja 12) |
+| H-3 | 2026-10-04 | Tor R4: momentum przekrojowe 30 d na decyzji dobowej z filtrem BTC > EMA 50 d, top 3 long-only, pod pesymistycznym modelem wejść (STOP/GO 2) | wszystkie cztery naraz: K1 okna dodatnie ≥ 65% **i** bije B1 przy tej samej ekspozycji w ≥ 65% okien; K2 DSR ≥ 0,95 na 5/5 przesunięć; K3 percentyl permutacyjny ≥ 70 na 5/5 przesunięć; K4 bije B2 przy tej samej ekspozycji w ≥ 55% okien | K1 NIE (okna dodatnie 46%, bije B1 35%), K2 TAK (DSR 0,950–0,980, N = 2), K3 TAK (percentyl 100), K4 NIE (bije B2 44%); oba warianty ekspozycji | **STOP** — R4 nie wchodzi na demo; żaden tor nie spełnia kryteriów, decyzja właściciela (sekcja 12) · zamknięte decyzją A (2026-10-04); reguła R4 na demo wyłącznie jako pomiar egzekucji E-1 |
+| A | 2026-10-04 | Decyzja właściciela po STOP/GO 2 (sekcja 12): zamknięcie poszukiwania przewagi | — (decyzja, nie test) | H-1 STOP, H-3 STOP | **zamknięte z wnioskiem „brak przewagi spełniającej kryteria”**; tor badawczy (ensemble 4h, R4) zamknięty |
+| E-1 | 2026-10-04 | **Pomiar egzekucji, NIE hipoteza przewagi.** Reguła R4 „momentum + filtr trendu” z parametrami zamrożonymi z H-3 na koncie demo, 15% kapitału | opisowe, bez GO: realizacja na giełdzie wobec modelu pesymistycznego (wypełnialność wejść, opóźnienie wysyłki, prowizje, wyjście względem ceny decyzji) | w toku od wdrożenia | wynik finansowy NIE jest wynikiem; nic z tego przebiegu nie podlega promocji |
 
 ---
 
@@ -435,3 +437,82 @@ przekracza 0,6.
 
 Odtworzenie: `scripts/eksperyment.py --panel panele_crypto_4h_20261003.json.gz --r4
 --hipoteza H-3 --days 1400 --kind spot_eu [--logi katalog/]`.
+
+## Decyzja A i E-1: reguła R4 na demo jako pomiar egzekucji (2026-10-04)
+
+**Decyzja A (właściciel, 2026-10-04).** Po H-1 (STOP) i H-3 (STOP) żaden tor nie
+spełnia kryteriów STOP/GO 2. Z dwóch wyjść z sekcji 12 właściciel wybrał
+zamknięcie poszukiwania przewagi z wnioskiem **„brak przewagi spełniającej
+kryteria”**. H-1 i H-3 są zamknięte; ich wyniki i kryteria zostają bez zmian.
+Kalibracja ensemble i warianty R4 nie są kontynuowane. Każda nowa praca nad
+przewagą to nowa hipoteza z nowym numerem i kryterium zapisanym przed pomiarem.
+
+**E-1 nie jest hipotezą przewagi.** Na koncie demo silnik crypto handluje prostą,
+jawnie nazwaną regułą „momentum + filtr trendu” (`momentum_filtr_trendu`), żeby
+zmierzyć **egzekucję**, czyli wypełnialność, poślizg, opóźnienie i prowizje,
+względem modelu pesymistycznego, pod którym liczono H-1 i H-3. Według H-3 reguła
+zarabia w mniejszości okien (46%), więc **przez większość miesięcy będzie pod
+kreską. To jest stan oczekiwany, nie awaria.** Zwrot rachunku demo w tym
+przebiegu nie jest wynikiem i nie wolno go czytać jako potwierdzenia ani
+obalenia H-3: 6 tygodni demo to ułamek jednego okna 30 d przy profilu „kilka
+dobrych miesięcy w roku”.
+
+Parametry są **zamrożone**: dokładnie te zmierzone w H-3 (`899ec9f`, wynik
+`5952e87`), wariant ekspozycji P. Każda zmiana poniższych wartości to nowa
+hipoteza, a nie poprawka. Test `tests/test_strategia_momentum.py` przypina te
+liczby.
+
+| parametr | wartość | źródło |
+|---|---|---|
+| sygnał | zwrot T−30 d … T−1 d z zamknięć świec 4h (`market.candle` 1h → `time_bucket` 4h, jak `train.load_panel`) | H-3 |
+| wybór | top 3 po sygnale, long-only, remis alfabetycznie | H-3 |
+| filtr | zamknięcie dobowe BTC > EMA 50 zamknięć dobowych (historia 400 dni; różnica EMA wobec pełnego panelu < 1e-6) | H-3 / H-B2 |
+| decyzja | skład liczony na zamknięciu doby UTC; **wejścia tylko na świecy 20:00–24:00**, niewypełnione wejście przepada do następnej doby | H-3 |
+| wyjście | pozycja spoza składu albo przy wyłączonym filtrze wychodzi na **każdej** świecy 4h, aż wyjdzie | H-3 („wyjście zawsze wypełnione”) |
+| budżet | 15% kapitału łącznie, 5% na pozycję, równe wagi przy wejściu, bez dorównywania | H-3, wariant P |
+| sufit | własny sufit strategii 15% (pozycje po cenie rynkowej + zlecenia i plany wejść), niezależnie od `risk.limit_def` | E-1 |
+
+**Kod.** `services/engine/strategia_momentum.py` (reguła, budżet, odczyt z bazy;
+funkcje z `r4_momentum`, nie kopie), `loop.py --strategia momentum`
+(`charts/trader/values.yaml`, `workers.engine`). Bramki konta, kill-switch,
+risk kernel, blokada szerokiego spreadu, `decyzja_przeterminowana` i egzekucja
+(PostOnly, wyjście takerem po odmowie, T6) są te same co dla ensemble.
+Strategia nie czyta modelu: `journal.decision.model_version_id` = NULL,
+`journal.decision.strategia` = `momentum_filtr_trendu` (migracja 0091). Pętla
+odmawia startu z tą strategią poza `--mode demo`.
+
+**Czego to nie zmienia.** Wersja produkcyjna modelu (v39) i wersje `candidate`
+z treningu tygodniowego zostają bez zmian; nic nie jest promowane. Tor equity
+zostaje wstrzymany. Likwidacja po kill-switchu zostaje wyłączona. Konfiguracja
+konta nie-demo bez zmian.
+
+**Znane odstępstwa od symulacji H-3** (nie korygowane, bo to właśnie mierzymy
+albo to są zabezpieczenia produkcji):
+
+- cena limitu i życie zlecenia są produkcyjne (`gielda_exec`: cena makera z arkusza
+  tuż przed wysyłką), nie „cena 20 min po decyzji − ½ spreadu, godzina”;
+- wejście w instrument ze średnim spreadem z 7 dni > 15 pb jest blokowane (F-1.5),
+  więc pozycji może być mniej niż trzy (R4 trzymało wtedy pełny skład);
+- wyjście z rotacji zwalnia ekspozycję dopiero po wypełnieniu, więc wejście z tej
+  samej decyzji może odbić się od sufitu 15% i przepaść do następnej doby;
+- pozycje otwarte przez ensemble przed przełączeniem są traktowane jak każde inne:
+  spoza składu wychodzą, w składzie zostają (z wielkością nadaną przez ensemble).
+
+**Pomiar.** `python services/engine/poslizg.py --strategia momentum_filtr_trendu`
+(w podzie silnika) wypisuje dotychczasowy raport poślizgu i wypełnialności,
+zawężony do decyzji tej strategii, i sekcję „realizacja wobec modelu
+pesymistycznego”:
+
+| miara | model (H-1/H-3) | skąd na giełdzie |
+|---|---|---|
+| wypełnialność wejść (plany, nie wiersze `exec.order`) | 77,0–79,6% (H-3 F); H-1: 76% | `exec.order.status` |
+| opóźnienie wysyłki wejścia od zamknięcia świecy | 20 min (przyjęte, niezmierzone) | `exec.order.submitted_at` − zamknięcie świecy decyzji |
+| prowizja wejścia / wyjścia | 10 pb maker / 25 pb taker (`spot_eu`) | `exec.fill.fee` (prowizja kupna w walucie bazowej przeliczona po cenie) |
+| wyjście względem ceny decyzji | +4 pb (`POSLIZG_TAKER`) plus dryf 20 min | `exec.fill.price` vs `journal.decision.target_price` |
+| wypełnione wejście względem ceny decyzji, selekcja negatywna | limit ½ spreadu pod ceną wysyłki; koszt niewypełnienia 30 pb/rundę | `exec.fill`, zwrot naprzód 24/48 h niewypełnionych |
+
+Zapytania filtrują po `journal.decision.strategia`, więc zlecenia ensemble sprzed
+przełączenia nie mieszają się z próbą. Przebieg nie ma kryterium GO. Kończy go
+decyzja właściciela; po zebraniu próby (rząd 30 rozstrzygniętych wejść) liczby
+z raportu trafiają tutaj jako wynik E-1.
+
