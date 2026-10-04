@@ -62,6 +62,11 @@ spec:
           labels: {{- include "trader.etykietyZadania" . | nindent 12 }}
         spec:
           restartPolicy: Never
+          # Obrazy tradera w GHCR sa prywatne - bez sekretu Job ruszalby tylko
+          # wtedy, gdy obraz akurat lezy w cache wezla.
+          {{- with $.Values.imagePullSecrets }}
+          imagePullSecrets: {{- toYaml . | nindent 12 }}
+          {{- end }}
           # Bez tokenu API klastra i bez roota - patrz `trader.podBezUprawnien`
           # w _helpers.tpl. Zadanie nie rozmawia z API Kubernetesa.
           automountServiceAccountToken: false
