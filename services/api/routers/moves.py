@@ -6,16 +6,11 @@ z bazy, a nie zgadniete.
 """
 from __future__ import annotations
 
-from typing import Literal
-
 from fastapi import APIRouter, HTTPException, Query
 
 from ..db import fetch_all, fetch_one
+from ..typy import Silnik, Tryb
 
-# Patrz overview.py: wartosc zamknieta tutaj, zeby nieznany silnik konczyl sie
-# odmowa 422, a nie bledem rzutowania enuma w Postgresie (500).
-Silnik = Literal["crypto", "equity"]
-Tryb = Literal["demo", "live"]
 
 router = APIRouter(prefix="/api/engines/{engine}", tags=["moves"])
 

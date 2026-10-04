@@ -148,8 +148,11 @@ async def _send_webhook(config: dict, payload: dict) -> None:
         if r.status_code >= 400:
             raise RuntimeError(f"webhook zwrocil {r.status_code}")
     except Exception as e:                                    # noqa: BLE001
-        print(f"[webhook] {config.get('url', '?')[:80]}: {type(e).__name__}: {e}",
-              flush=True)
+        # SAM HOST, NIE CALY ADRES (przeglad 2026-10-04, T-13): webhooki typu
+        # Slack/Discord niosa token w sciezce, a log poda czyta kazdy, kto ma
+        # `kubectl logs`. Wyjatki `adres_webhooka` tez mowia tylko o hoscie.
+        host = urlsplit(config.get("url") or "").hostname or "?"
+        print(f"[webhook] {host}: {type(e).__name__}: {e}", flush=True)
         raise RuntimeError(WEBHOOK_BLAD) from None
 
 

@@ -159,9 +159,9 @@ def test_przeplyw_wymaga_POWODU_i_zostawia_slad():
     się zmiana kapitału."""
     from services.api.routers.kapital import PrzeplywBody
 
-    PrzeplywBody(amount=Decimal("1000"), note="wpłata startowa")
+    PrzeplywBody(amount=Decimal("1000"), note="wpłata startowa", haslo="x")
     with pytest.raises(Exception):
-        PrzeplywBody(amount=Decimal("1000"), note="ok")
+        PrzeplywBody(amount=Decimal("1000"), note="ok", haslo="x")
 
     zrodlo = Path("services/api/routers/kapital.py").read_text(encoding="utf-8")
     assert "kapital.przeplyw" in zrodlo, "brak wpisu w dzienniku audytu"

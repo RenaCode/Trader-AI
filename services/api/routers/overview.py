@@ -1,20 +1,12 @@
 """Zakladka STAN: krzywa kapitalu, pozycje, ekspozycja, heartbeat silnika."""
 from __future__ import annotations
 
-from typing import Literal
-
 from fastapi import APIRouter, Query
 
 from services.engine.horizons import DEFAULT_BAR
 from ..db import fetch_all, fetch_one
+from ..typy import Silnik, Tryb
 
-# Silnik i tryb to w bazie enumy (`ref.engine`, `ref.trade_mode`). psycopg
-# wysyla `str` jako `unknown`, wiec literal rzutuje dopiero Postgres - przy
-# nieznanej wartosci konczylo sie to InvalidTextRepresentation, czyli 500
-# ("Internal Server Error") na zwykla literowke w adresie. Domkniecie listy
-# TUTAJ sprawia, ze FastAPI odmawia 422 ZANIM powstanie jakiekolwiek zapytanie.
-Silnik = Literal["crypto", "equity"]
-Tryb = Literal["demo", "live"]
 
 router = APIRouter(prefix="/api/engines/{engine}", tags=["overview"])
 

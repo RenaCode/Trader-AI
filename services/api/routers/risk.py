@@ -1,20 +1,15 @@
 """Zakladka RYZYKO: limity, ich wykorzystanie, naruszenia, kill-switch."""
 from __future__ import annotations
 
-from typing import Literal
-
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from ..auth import audit, current_user, require_csrf, wymagaj_wlasciciela
 from ..db import execute, fetch_all, fetch_one
 from ..notifications import powiadom_o_bezpieczenstwie
+from ..typy import Silnik, Tryb
 from .auth import potwierdz_haslo
 
-# Patrz overview.py: wartosc zamknieta tutaj, zeby nieznany silnik konczyl sie
-# odmowa 422, a nie bledem rzutowania enuma w Postgresie (500).
-Silnik = Literal["crypto", "equity"]
-Tryb = Literal["demo", "live"]
 
 router = APIRouter(prefix="/api/engines/{engine}/risk", tags=["risk"])
 

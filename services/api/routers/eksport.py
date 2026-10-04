@@ -42,6 +42,7 @@ from fastapi.responses import StreamingResponse
 
 from ..auth import audit, wymagaj_wlasciciela
 from ..db import fetch_all
+from ..typy import Silnik, Tryb
 
 router = APIRouter(prefix="/api/engines/{engine}/eksport", tags=["eksport"])
 
@@ -112,9 +113,9 @@ def _czas(v: datetime | None) -> str:
 
 
 @router.get("/wypelnienia")
-async def wypelnienia(engine: str, request: Request,
-                  user: dict = Depends(wymagaj_wlasciciela),
-                  mode: str = Query("demo"),
+async def wypelnienia(engine: Silnik, request: Request,
+                      user: dict = Depends(wymagaj_wlasciciela),
+                      mode: Tryb = Query("demo"),
                       od: datetime | None = None, do: datetime | None = None,
                       wariant: str = Query("csv", pattern="^(csv|excel)$")):
     """Pojedyncze wypełnienia — surowy materiał do rozliczeń."""
@@ -145,9 +146,9 @@ async def wypelnienia(engine: str, request: Request,
 
 
 @router.get("/pozycje")
-async def pozycje(engine: str, request: Request,
+async def pozycje(engine: Silnik, request: Request,
                   user: dict = Depends(wymagaj_wlasciciela),
-                  mode: str = Query("demo"),
+                  mode: Tryb = Query("demo"),
                   od: datetime | None = None, do: datetime | None = None,
                   wariant: str = Query("csv", pattern="^(csv|excel)$")):
     """Zamknięte pozycje — wynik po kosztach, gotowy do przeczytania."""

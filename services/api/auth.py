@@ -17,7 +17,8 @@ from .db import fetch_one, execute
 from .security import (SESSION_COOKIE, SESSION_IDLE, SESSION_TOUCH_EVERY,
                        session_token_hash)
 
-CSRF_COOKIE = "trader_csrf"
+# `__Host-` jak SESSION_COOKIE (security.py); front czyta te nazwe w utils/api.js.
+CSRF_COOKIE = "__Host-trader_csrf"
 CSRF_HEADER = "x-csrf-token"
 
 

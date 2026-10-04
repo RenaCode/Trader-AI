@@ -6,16 +6,12 @@ jest domyslnie sygnalem przeuczenia, nie alfy.
 """
 from __future__ import annotations
 
-from typing import Literal
-
 from fastapi import APIRouter, Query
 
 from services.engine.horizons import DEFAULT_BAR
 from ..db import fetch_all, fetch_one
+from ..typy import Silnik
 
-# Patrz overview.py: wartosc zamknieta tutaj, zeby nieznany silnik konczyl sie
-# odmowa 422, a nie bledem rzutowania enuma w Postgresie (500).
-Silnik = Literal["crypto", "equity"]
 
 router = APIRouter(prefix="/api/engines/{engine}/learning", tags=["learning"])
 

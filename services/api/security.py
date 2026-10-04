@@ -26,7 +26,11 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 _hasher = PasswordHasher(time_cost=3, memory_cost=64 * 1024, parallelism=4)
 
 SESSION_TTL = timedelta(hours=12)
-SESSION_COOKIE = "trader_session"
+# PREFIKS `__Host-` (przeglad 2026-10-04, T-13). Przegladarka przyjmuje takie
+# ciasteczko tylko z `Secure`, `Path=/` i BEZ `Domain` - wiec inna aplikacja
+# z `*.renacode.com` nie podlozy sesji ani tokenu CSRF dla trader.renacode.com
+# (session fixation). Zmiana nazwy jednorazowo wylogowala wszystkich.
+SESSION_COOKIE = "__Host-trader_session"
 
 # Limit BEZCZYNNOSCI, osobny od `SESSION_TTL`. Do 2026-10-03 sesja zyla pelne
 # 12 godzin niezaleznie od tego, czy ktos z niej korzystal - laptop zostawiony
