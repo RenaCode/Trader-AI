@@ -24,9 +24,11 @@ from __future__ import annotations
 import argparse
 import os
 import signal
+import socket
 import subprocess
 import sys
 import time
+from urllib.parse import urlsplit
 
 
 def zapisz(nazwa: str, czas_s: float, kod: int) -> bool:
@@ -53,7 +55,41 @@ def zapisz(nazwa: str, czas_s: float, kod: int) -> bool:
         return False
 
 
+def czekaj_na_baze(limit_s: float = 60.0, odstep_s: float = 2.0,
+                   polacz=socket.create_connection) -> bool:
+    """Czeka, az port bazy przyjmie polaczenie TCP - zanim ruszy polecenie.
+
+    KUBE-ROUTER WPUSZCZA NOWY POD Z OPOZNIENIEM. Regula NetworkPolicy dla
+    swiezego poda zadania (etykieta `trader.renacode.com/component: job`)
+    pojawia sie kilka sekund po jego starcie, a do tego czasu baza odpowiada
+    `Connection refused`. 2026-10-04 02:40 UTC trener 4h polaczyl sie w
+    pierwszej sekundzie i padl; tor 1h, ruszajacy pare minut pozniej, przeszedl.
+
+    Brak `DATABASE_URL` albo hosta = nic do sprawdzania. Po `limit_s` polecenie
+    rusza i tak: jego wlasny blad bedzie czytelniejszy niz ten tutaj."""
+    url = os.environ.get("DATABASE_URL")
+    if not url:
+        return True
+    adres = urlsplit(url)
+    if not adres.hostname:
+        return True
+    port = adres.port or 5432
+    koniec = time.monotonic() + limit_s
+    while True:
+        try:
+            polacz((adres.hostname, port), timeout=3).close()
+            return True
+        except OSError as e:
+            if time.monotonic() >= koniec:
+                print(f"przebieg_zadania: baza {adres.hostname}:{port} nieosiagalna "
+                      f"po {limit_s:.0f} s ({type(e).__name__}) — uruchamiam mimo to",
+                      file=sys.stderr)
+                return False
+            time.sleep(odstep_s)
+
+
 def uruchom(nazwa: str, polecenie: list[str]) -> int:
+    czekaj_na_baze()
     start = time.monotonic()
     proc = subprocess.Popen(polecenie)
 
