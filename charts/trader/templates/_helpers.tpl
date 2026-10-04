@@ -222,6 +222,29 @@ sufiksem), wiec nie dalo sie ich wskazac w polityce inaczej niz "kazdy pod
 w przestrzeni nazw" - czyli razem z kidwatchem i dietetykiem. Klucz ten sam co
 `trader.renacode.com/component: worker` na Deploymentach workerow.
 */}}
+{{/*
+BRAMKA POWIADOMIEN RENACODE (2026-10-04) - adres i klucz wysylkowy dla
+`notify()`, ktory przekazuje tam kazdy alarm krytyczny (services/api/bramka.py).
+
+Dostaja je procesy, ktore wolaja `notify()`: API, workery (w tym oba dozorcy
+ryzyka) i CronJoby czujek, instrumentow, postmortemu i trenera. Workery
+wszystkie naraz, z tego samego powodu co `trader.llmEnv`: lista per worker
+bylaby druga lista do utrzymania. Do bramki i tak dochodza tylko ci z listy
+`networkPolicy.klienci` w chartcie bramki (renacode-infra).
+
+KLUCZ `optional: true`. Brak klucza w Sekrecie = alarmy zostaja w panelu
+(linia w logu), a nie pod w CreateContainerConfigError. Klucz to
+`BRAMKA_KLUCZ_TRADER` z `bramka/bramka-klucze`, skopiowany do Sekretu tradera
+jako `BRAMKA_KLUCZ` - nigdy do repozytorium.
+*/}}
+{{- define "trader.bramkaEnv" -}}
+- name: BRAMKA_URL
+  value: {{ required "bramkaPowiadomien.url musi byc ustawiony wprost" .Values.bramkaPowiadomien.url | quote }}
+- name: BRAMKA_KLUCZ
+  valueFrom:
+    secretKeyRef: { name: {{ .Values.secretName }}, key: BRAMKA_KLUCZ, optional: true }
+{{- end -}}
+
 {{- define "trader.etykietyZadania" -}}
 trader.renacode.com/component: job
 {{- end -}}

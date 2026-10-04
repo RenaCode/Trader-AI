@@ -10,6 +10,7 @@ const LIMIT_PL = {
   max_total_exposure: 'Maks. łączna ekspozycja',
   max_orders_per_hour: 'Maks. zleceń na godzinę',
   min_equity: 'Próg kapitału',
+  reczny: 'Ręczne zatrzymanie',
 };
 /* Jednostke opisuje SILNIK, w polu `unit`. Poprzednia stala mapowala
    `quote_ccy` na 'USD' i byla nieprawda dla rachunku krypto rozliczanego
@@ -84,6 +85,82 @@ function ZwolnijKillSwitch({ engine, zdarzenie, onZwolniony }) {
   );
 }
 
+/* RECZNY KILL-SWITCH - ta sama sciezka co automat (wiersz w
+   risk.killswitch_event), z haslem jak kazda operacja wrazliwa. Formularz jest
+   zwiniety za przyciskiem: zatrzymanie handlu nie moze byc jednym przypadkowym
+   kliknieciem, a stale otwarte pole hasla kusiloby menedzera hasel. Tryb
+   (demo/live) wybiera serwer z pulsu silnika. */
+function WlaczKillSwitch({ engine, onWlaczony }) {
+  const [otwarty, setOtwarty] = useState(false);
+  const [powod, setPowod] = useState('');
+  const [haslo, setHaslo] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+
+  const zamknij = () => { setOtwarty(false); setPowod(''); setHaslo(''); setErr(null); };
+
+  if (!otwarty) {
+    return (
+      <div className="glass-card">
+        <div className="card-title">
+          Ręczny kill-switch
+          <span className="hint">zatrzymuje otwieranie pozycji do ręcznego zwolnienia</span>
+        </div>
+        <button className="btn" onClick={() => setOtwarty(true)}>Zatrzymaj handel…</button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="notice">
+      <strong>Zatrzymanie handlu ({engine}).</strong> Silnik przestanie otwierać pozycje przy
+      najbliższym cyklu, tak jak po zadziałaniu limitu. Wróci dopiero po ręcznym zwolnieniu
+      z powodem. Alarm pójdzie do panelu i przez bramkę (WhatsApp).
+      <form style={{ marginTop: 12 }}
+            onSubmit={async (e) => {
+              e.preventDefault();
+              setBusy(true); setErr(null);
+              try {
+                await post(`/api/engines/${engine}/risk/killswitch`,
+                           { powod: powod.trim(), haslo });
+                zamknij();
+                onWlaczony?.();
+              } catch (ex) {
+                setErr(ex.message || 'Nie udało się włączyć kill-switcha');
+                setHaslo('');
+              } finally { setBusy(false); }
+            }}>
+        <label className="field" style={{ marginBottom: 8 }}>
+          <span className="field-label">Powód zatrzymania</span>
+          <input className="input-field" value={powod} maxLength={500}
+                 placeholder="np. podejrzany ruch na rachunku, sprawdzam przed dalszym handlem"
+                 onChange={(e) => { setPowod(e.target.value); setErr(null); }} />
+        </label>
+        <label className="field" style={{ marginBottom: 8 }}>
+          <span className="field-label">Hasło — potwierdzenie tożsamości</span>
+          <input className="input-field" type="password" value={haslo}
+                 autoComplete="current-password"
+                 onChange={(e) => { setHaslo(e.target.value); setErr(null); }} />
+        </label>
+        <button className="btn" type="submit"
+                disabled={busy || powod.trim().length < 10 || !haslo}>
+          {busy ? 'Zatrzymuję…' : 'Włącz kill-switch'}
+        </button>
+        <button className="btn" type="button" style={{ marginLeft: 8 }}
+                disabled={busy} onClick={zamknij}>
+          Anuluj
+        </button>
+        {powod.trim().length > 0 && powod.trim().length < 10 && (
+          <span className="hint" style={{ marginLeft: 10 }}>
+            powód musi mieć co najmniej 10 znaków
+          </span>
+        )}
+        {err && <div className="form-error" style={{ marginTop: 8, marginBottom: 0 }}>{err}</div>}
+      </form>
+    </div>
+  );
+}
+
 export default function Risk({ engine }) {
   const limits = useApi(`/api/engines/${engine}/risk/limits`, [engine], { refreshMs: 30000 });
   const viol = useApi(`/api/engines/${engine}/risk/violations?limit=30`, [engine], { refreshMs: 30000 });
@@ -113,6 +190,12 @@ export default function Risk({ engine }) {
         <ZwolnijKillSwitch key={k.id} engine={engine} zdarzenie={k}
                            onZwolniony={() => ks.reload?.()} />
       ))}
+
+      {/* Tylko przy pewnym stanie: bez odczytu historii nie wiadomo, czy
+          bezpiecznik juz trzyma silnik (API i tak odpowie 409). */}
+      {ks.data && !ks.error && active.length === 0 && (
+        <WlaczKillSwitch engine={engine} onWlaczony={() => ks.reload?.()} />
+      )}
 
       {active.length === 0 && ksUciete && (
         <div className="notice">
@@ -288,7 +371,10 @@ export default function Risk({ engine }) {
                     </span>
                   </div>
                   <div className="row-meta">
-                    <span>uruchomiony {fmtTime(k.triggered_at)}</span>
+                    <span>
+                      uruchomiony {fmtTime(k.triggered_at)}
+                      {k.triggered_by ? ` — ręcznie przez ${k.triggered_by}` : ''}
+                    </span>
                     {k.limit_name && <span className="dim">{LIMIT_PL[k.limit_name] || k.limit_name}</span>}
                     {k.released_at && (
                       <span>

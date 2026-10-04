@@ -9,6 +9,9 @@ Dwie reguly, ktorych nie da sie obejsc ustawieniami:
   - kill-switch i martwy silnik nie maja czasu wyciszenia
 Alert krytyczny, ktory nie dotarl, jest gorszy niz jego brak, bo daje zludzenie
 kontroli.
+
+Kazdy alarm krytyczny idzie dodatkowo do bramki powiadomien RenaCode
+(WhatsApp, zapasowo mail) - patrz services/api/bramka.py.
 """
 from __future__ import annotations
 
@@ -23,6 +26,7 @@ from zoneinfo import ZoneInfo
 import httpx
 import psycopg
 
+from . import bramka
 from .db import execute, fetch_all, fetch_one
 from .security import SecretBox
 
@@ -325,6 +329,16 @@ async def notify(user_id: int, event_code: str, title: str, body: str = "",
         "SELECT id, kind::text AS kind, config_enc, label FROM notify.channel"
         " WHERE user_id = %s AND enabled AND kind::text = ANY(%s)",
         (user_id, sorted(wanted)))
+
+    # ALARM KRYTYCZNY WYCHODZI POZA PANEL przez bramke RenaCode (decyzja
+    # 2026-10-04) - niezaleznie od kanalow uzytkownika, bo bramka jest kanalem
+    # systemu, a nie preferencja. PRZED petla kanalow: `SecretBox()` nizej
+    # potrafi rzucic (brak SECRETS_KEY), a alarm nie moze zalezec od klucza
+    # do konfiguracji CallMeBota. `przekaz` nie rzuca i sam tlumi powtorki -
+    # uzasadnienie w naglowku services/api/bramka.py.
+    if sev == "critical":
+        await bramka.przekaz(nid, event_code, sev, title, body, engine, dane,
+                             fetch_one=fetch_one, execute=execute)
 
     box = SecretBox()
     for ch in channels:

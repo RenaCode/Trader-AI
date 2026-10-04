@@ -80,6 +80,7 @@ spec:
                   [ "$RC" = 3 ] && exit 0
                   exit $RC
               env:
+                {{- include "trader.bramkaEnv" $ | nindent 16 }}
                 # ROLA Z PRAWEM ZAPISU DO `ref` - tu jest to uzasadnione, bo to
                 # jest proces POBIERAJACY DANE, a nie diagnostyczny. Ocena tego,
                 # co zostalo zapisane, zostaje w czujce i dalej chodzi na roli

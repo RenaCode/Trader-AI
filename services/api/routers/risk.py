@@ -8,6 +8,8 @@ from pydantic import BaseModel, Field
 
 from ..auth import audit, current_user, require_csrf, wymagaj_wlasciciela
 from ..db import execute, fetch_all, fetch_one
+from ..notifications import powiadom_o_bezpieczenstwie
+from .auth import potwierdz_haslo
 
 # Patrz overview.py: wartosc zamknieta tutaj, zeby nieznany silnik konczyl sie
 # odmowa 422, a nie bledem rzutowania enuma w Postgresie (500).
@@ -91,9 +93,11 @@ async def killswitch(engine: Silnik, limit: int = Query(10, le=100)):
     rows = await fetch_all(
         """
         SELECT k.id, k.triggered_at, k.reason, k.limit_name, k.released_at,
-               k.released_auto, k.release_note, u.login AS released_by
+               k.released_auto, k.release_note, u.login AS released_by,
+               w.login AS triggered_by
         FROM risk.killswitch_event k
         LEFT JOIN app.user u ON u.id = k.released_by
+        LEFT JOIN app.user w ON w.id = k.triggered_by
         WHERE k.engine::text = %s ORDER BY k.triggered_at DESC LIMIT %s
         """,
         (engine, limit),
@@ -108,10 +112,105 @@ async def killswitch(engine: Silnik, limit: int = Query(10, le=100)):
             # zwolnienia przemyslanego od automatycznego, a to jest pierwsza
             # rzecz, o ktora sie pyta po serii zatrzyman.
             "released_auto": r["released_auto"],
+            # KTO ZATRZYMAL: `null` = system (limit albo proba pozarowa),
+            # login = reczny kill-switch z panelu (migracja 0092).
+            "triggered_by": r["triggered_by"],
             "active": r["released_at"] is None,
         }
         for r in rows
     ]
+
+
+# Nazwa w `limit_name` dla zatrzymania z panelu. Nie ma takiego limitu
+# w `risk.limit_def`, wiec `wznowienie.wznow` zostawia je recznemu zwolnieniu
+# ("limit ... juz nie istnieje - zostaje reczne"), a proba pozarowa i likwidacja
+# widza je jak kazde prawdziwe zatrzymanie.
+LIMIT_RECZNY = "reczny"
+
+
+class RecznyKillSwitchBody(BaseModel):
+    # Powod z tego samego powodu co przy zwolnieniu: zostaje w bazie na
+    # pytanie "dlaczego system przestal handlowac".
+    powod: str = Field(min_length=10, max_length=500)
+    # Haslo jak przy kazdej operacji wrazliwej (`auth.potwierdz_haslo`):
+    # przejety cookie sesji nie wystarczy, zeby zatrzymac handel.
+    haslo: str = Field(min_length=1, max_length=1024)
+
+
+@router.post("/killswitch",
+             dependencies=[Depends(require_csrf), Depends(wymagaj_wlasciciela)])
+async def wlacz_killswitch(engine: Silnik, body: RecznyKillSwitchBody, request: Request,
+                           user: dict = Depends(current_user)):
+    """Reczny kill-switch: TA SAMA sciezka co automat (decyzja 2026-10-04).
+
+    Wiersz w `risk.killswitch_event` bez `released_at` - dokladnie to, co
+    zapisuje `RiskKernel._trigger_killswitch`. Silnik i dozorca czytaja go
+    w kazdym cyklu (`killswitch_active`), wiec handel staje przy najblizszej
+    ocenie, a wyjscia z pozycji dzialaja jak przy automacie. Zwolnienie tez
+    jak przy automacie: `POST .../killswitch/{id}/release` z powodem.
+
+    TRYB Z PULSU SILNIKA, nie z formularza. `risk.engine_heartbeat.mode`
+    zapisuje silnik przy kazdym cyklu, wiec zatrzymanie trafia w tryb, ktory
+    naprawde handluje. Formularz z wyborem trybu pozwalalby zatrzymac `live`,
+    gdy handluje `demo` - i odwrotnie - z poczuciem, ze sie udalo.
+
+    JEDNO AKTYWNE ZATRZYMANIE. Gdy bezpiecznik juz trzyma silnik, drugi wiersz
+    niczego nie zmienia, a do zwolnienia bylyby dwa. `INSERT ... WHERE NOT
+    EXISTS` rozstrzyga to w jednej instrukcji, bez okna miedzy sprawdzeniem
+    a zapisem.
+
+    ALARM przez `notify` (kod `killswitch.triggered`, krytyczny), czyli do
+    dzwonka i do bramki RenaCode. W tle - nieudana wysylka nie moze cofnac ani
+    opoznic zatrzymania. Ten sam wiersz w dzwonku sluzy dozorowi
+    (`sprawdz_ryzyko`) za pierwsze zgloszenie, wiec nie wysle drugiego
+    "Kill-switch zadzialal", tylko przypomnienia w swoim rytmie.
+    """
+    await potwierdz_haslo(user, body.haslo, request, akcja="risk.killswitch_manual",
+                          status=403, komunikat="Hasło jest nieprawidłowe")
+
+    puls = await fetch_one(
+        "SELECT mode::text AS mode FROM risk.engine_heartbeat WHERE engine::text = %s",
+        (engine,))
+    if not puls:
+        raise HTTPException(409, "Silnik nie zgłosił jeszcze pulsu — nie wiadomo, "
+                                 "w jakim trybie handluje, więc nie ma czego zatrzymać")
+    tryb = puls["mode"]
+    powod = body.powod.strip()
+    reason = f"Ręczne zatrzymanie z panelu ({user['login']}): {powod}"
+
+    z = await fetch_one(
+        "INSERT INTO risk.killswitch_event (engine, mode, reason, limit_name, triggered_by)"
+        " SELECT %s, %s, %s, %s, %s"
+        "  WHERE NOT EXISTS (SELECT 1 FROM risk.killswitch_event"
+        "                     WHERE engine::text = %s AND mode::text = %s"
+        "                       AND released_at IS NULL)"
+        " RETURNING id, triggered_at",
+        (engine, tryb, reason, LIMIT_RECZNY, user["id"], engine, tryb))
+    if not z:
+        # 409 jak przy powtornym zwolnieniu: ktos widzi inny stan niz baza.
+        raise HTTPException(409, "Kill-switch jest już aktywny — silnik nie handluje. "
+                                 "Odśwież zakładkę, żeby zobaczyć zatrzymanie.")
+
+    await audit("risk.killswitch_manual", user_id=user["id"],
+                entity="risk.killswitch_event", entity_id=str(z["id"]),
+                after={"engine": engine, "mode": tryb, "reason": reason},
+                request=request)
+
+    for u in await fetch_all('SELECT id FROM app."user" WHERE is_active'):
+        await powiadom_o_bezpieczenstwie(
+            u["id"], "killswitch.triggered",
+            f"Kill-switch włączony ręcznie ({engine})",
+            f"Handel zatrzymany z panelu ({tryb}), konto {user['login']}.\n\n"
+            f"Powód: {powod}\n\nSilnik NIE WEJDZIE w żadną pozycję do czasu "
+            f"ręcznego zwolnienia (zakładka Ryzyko).",
+            engine=engine, severity="critical",
+            data={"event_id": z["id"], "reczny": True, "kto": user["login"],
+                  "mode": tryb})
+
+    return {"ok": True, "id": z["id"], "mode": tryb,
+            "triggered_at": z["triggered_at"].isoformat(),
+            "message": "Kill-switch włączony. Silnik przestanie otwierać pozycje "
+                       "przy najbliższym cyklu decyzyjnym."}
 
 
 class ZwolnienieBody(BaseModel):

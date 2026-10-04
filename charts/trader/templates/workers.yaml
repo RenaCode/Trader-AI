@@ -247,6 +247,7 @@ spec:
             timeoutSeconds: 10
             failureThreshold: 3
           env:
+            {{- include "trader.bramkaEnv" $ | nindent 12 }}
             {{/*
             ROLA BAZODANOWA PER WORKER (migracja 0034).
 

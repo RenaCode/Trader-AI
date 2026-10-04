@@ -247,6 +247,7 @@ spec:
                   fi
                   exit $RC
               env:
+                {{- include "trader.bramkaEnv" $ | nindent 16 }}
                 # Trener chodzi rola silnika (migracja 0034): pisze do learn.*,
                 # czyta dane rynkowe i cechy, a z ryzykiem nie ma nic wspolnego.
                 # Wczesniej mial te sama role co API, wiec mogl zwolnic

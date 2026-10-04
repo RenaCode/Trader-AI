@@ -99,6 +99,7 @@ spec:
                   {{- end }}
                   exit $RC
               env:
+                {{- include "trader.bramkaEnv" $ | nindent 16 }}
                 {{- include "trader.rolaDbEnv" (dict "ctx" $ "rola" "postmortem") | nindent 16 }}
                 - name: SECRETS_KEY
                   valueFrom:

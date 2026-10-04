@@ -51,6 +51,7 @@ spec:
           imagePullPolicy: {{ .Values.api.image.pullPolicy }}
           {{- include "trader.kontenerBezUprawnien" . | nindent 10 }}
           env:
+            {{- include "trader.bramkaEnv" $ | nindent 12 }}
             {{- include "trader.appPgPasswordEnv" . | nindent 12 }}
             - name: DATABASE_URL
               value: {{ include "trader.appDatabaseUrl" . | quote }}

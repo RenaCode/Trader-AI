@@ -3003,6 +3003,17 @@ async def sprawdz_kanaly(fetch_all, notify, sucho: bool = False) -> int:
               f"sie sama, gdy ktorykolwiek silnik przejdzie na `live`")
         return 0
 
+    # BRAMKA RENACODE JEST DROGA POZA PANEL (2026-10-04): `notify()` przekazuje
+    # do niej kazdy alarm krytyczny, niezaleznie od kanalow uzytkownika
+    # (services/api/bramka.py). Skonfigurowana = klucz jest w srodowisku; czy
+    # bramka faktycznie przyjmuje, mowi `notify.delivery` (kind 'bramka').
+    from services.api.bramka import skonfigurowana
+    if skonfigurowana():
+        print("kanaly: alarmy krytyczne ida tez przez bramke RenaCode "
+              "(WhatsApp, zapasowo mail) — droga poza panel jest; slad "
+              "w notify.delivery, kind 'bramka'")
+        return 0
+
     wiersze = await fetch_all(
         "SELECT et.code AS event_code, et.default_severity AS severity,"
         "       u.id AS user_id, u.login,"

@@ -77,6 +77,9 @@ MIGRACJE_NADAN = [
     # `app.secret_llm`; proba czyta puls silnika - ogniwo 3 ze stanu bramki
     # (U-12). Obie zmiany w 0076.
     KORZEN / "db" / "migrations" / "0076_nadania_sekrety_i_puls_proby.sql",
+    # API wstawia RECZNY kill-switch z panelu (0092) - nadanie kolumnowe,
+    # tylko kolumny zadania zatrzymania.
+    KORZEN / "db" / "migrations" / "0092_bramka_i_reczny_killswitch.sql",
 ]
 
 # Role procesów z 0034 i 0052. Wypisane tutaj, a nie wyciągnięte z chartu, bo to
@@ -578,9 +581,15 @@ def test_api_zwalnia_recznie_ale_NIE_udaje_automatu(nadania):
 
 def test_api_stracilo_zbedny_zapis_na_ryzyku(nadania):
     """API jest jedyną z tych ról wystawioną na internet, więc jedyną, w której
-    zbędne uprawnienie ma czym zostać wykorzystane. Nie wstawia zatrzymań i nie
-    zmienia limitów — więc nie ma do tego prawa."""
+    zbędne uprawnienie ma czym zostać wykorzystane. Nie zmienia limitów — więc
+    nie ma do tego prawa.
+
+    Zatrzymania WSTAWIA od 0092 (ręczny kill-switch z panelu), ale tylko
+    kolumnami żądania: bez `released_*`, `triggered_at` i `proba_wynik`, więc
+    nie wstawi zdarzenia od razu zwolnionego ani z cofniętą datą."""
     assert "INSERT" not in nadania.na_tabeli("trader_app", "risk.killswitch_event")
+    assert nadania.kolumnowe("trader_app", "risk.killswitch_event", "INSERT") == {
+        "engine", "mode", "reason", "limit_name", "triggered_by"}
     assert not nadania.kolumnowe("trader_app", "risk.limit_def", "UPDATE")
     assert "UPDATE" not in nadania.na_tabeli("trader_app", "risk.limit_def")
 
@@ -772,6 +781,22 @@ def test_BAZA_silnik_nie_czyta_hasel(jako):
 
 
 @wymaga_bazy
+def test_BAZA_api_zatrzymuje_recznie_ale_nie_wstawia_zwolnionego(jako):
+    """Ręczny kill-switch z panelu (0092): żądanie TAK, gotowe zwolnienie NIE."""
+    assert jako("trader_app",
+                "INSERT INTO risk.killswitch_event (engine, mode, reason, limit_name)"
+                " VALUES ('crypto','demo','test roli','reczny') RETURNING id") is None, \
+        "API nie może włączyć ręcznego kill-switcha"
+    assert jako("trader_app",
+                "INSERT INTO risk.killswitch_event (engine, mode, reason, released_at)"
+                " VALUES ('crypto','demo','test roli', now())") == "InsufficientPrivilege"
+    assert jako("trader_app",
+                "INSERT INTO risk.killswitch_event (engine, mode, reason, triggered_at)"
+                " VALUES ('crypto','demo','test roli', now() - interval '1 day')") \
+        == "InsufficientPrivilege"
+
+
+@wymaga_bazy
 def test_BAZA_dozorca_zwalnia_ale_nie_przepisuje_powodu(jako):
     assert jako("trader_dozorca", ZWOLNIENIE) is None, \
         "dozorca nie może zwolnić — autonomiczne wznowienie przestało działać"
@@ -843,7 +868,12 @@ def test_BAZA_api_zwalnia_recznie_i_nie_udaje_automatu(jako):
     assert jako("trader_app",
                 "UPDATE risk.killswitch_event SET released_auto = true") \
         == "InsufficientPrivilege"
-    assert jako("trader_app", ZATRZYMANIE) == "InsufficientPrivilege"
+    # Od 0092 API WSTAWIA zadanie zatrzymania (reczny kill-switch z panelu) -
+    # test_BAZA_api_zatrzymuje_recznie_ale_nie_wstawia_zwolnionego - ale nie
+    # wstawi zdarzenia, ktore udaje automatyczne zwolnienie.
+    assert jako("trader_app",
+                "INSERT INTO risk.killswitch_event (engine, mode, reason, released_auto)"
+                " VALUES ('crypto','demo','test roli', true)") == "InsufficientPrivilege"
 
 
 

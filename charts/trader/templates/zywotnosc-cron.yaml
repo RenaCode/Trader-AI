@@ -356,6 +356,7 @@ spec:
                   {{- end }}
                   exit $RC
               env:
+                {{- include "trader.bramkaEnv" $ | nindent 16 }}
                 # ROLA TYLKO DO ODCZYTU (migracja 0034). Czujka odpowiada na
                 # pytanie "czy system jest w stanie, o ktorym czlowiek MUSI
                 # wiedziec". Odpowiedz na nie nigdy nie wymaga zapisu - poza

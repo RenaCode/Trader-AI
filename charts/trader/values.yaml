@@ -722,6 +722,12 @@ strefaCzasowa: "Europe/Warsaw"
 # templates/kopia-przed-migracja.yaml). Zrzut tylko, gdy obraz niesie nowe
 # migracje; nieudany zrzut ZATRZYMUJE synchronizacje. Wylaczone do decyzji
 # wlasciciela, bo zmienia zachowanie kazdego wdrozenia.
+# Bramka powiadomien RenaCode (renacode-infra, charts/bramka): alarmy krytyczne
+# poza panel - WhatsApp, zapasowo mail. Klucz w Sekrecie (`BRAMKA_KLUCZ`),
+# uzasadnienie przy `trader.bramkaEnv` w _helpers.tpl.
+bramkaPowiadomien:
+  url: http://bramka.bramka.svc.cluster.local/v1/wyslij
+
 kopiaPrzedMigracja:
   enabled: false
 
