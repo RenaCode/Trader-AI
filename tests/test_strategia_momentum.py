@@ -205,7 +205,7 @@ def test_cel_z_bazy_czeka_na_domknieta_swiece_BTC():
     assert not niedomknieta.kompletny and "3/4" in niedomknieta.powod
     po_oknie = sm.cel_z_bazy(KursorSwiec(panele, ids, n_ostatniej=3), instr, bar, H,
                              czekaj=False)
-    assert po_oknie.kompletny and "niepełnych danych" in po_oknie.powod
+    assert po_oknie.kompletny and "filtr z domkniętej doby" in po_oknie.powod
     cel = sm.cel_z_bazy(KursorSwiec(panele, ids), instr, bar, H)
     assert cel.kompletny and cel.chwila == polnoc
     # Pelna historia (420 dni) wobec 400 dni z bazy: ten sam sklad i filtr,
@@ -216,6 +216,62 @@ def test_cel_z_bazy_czeka_na_domknieta_swiece_BTC():
                                                    pelny.sygnaly)
     assert cel.btc_ema == pytest.approx(pelny.btc_ema, rel=1e-6)
     assert cel.btc_ema != pelny.btc_ema, "test nie sprawdza obcięcia historii"
+
+
+def _rynek_z_ostatnia_swieca_btc(cena_ostatniej, trend):
+    """Alty losowe, BTC z rownym trendem 420 dni i OSTATNIA swieca 4h
+    (20:00-24:00) o cenie `cena_ostatniej` - zeby jej zamkniecie samo
+    przestawialo filtr."""
+    symbole = ["ADAUSDC", "ETHUSDC", "SOLUSDC", "XRPUSDC"]
+    panele = _losowy_rynek(symbole, dni=420)
+    t0 = panele["ADAUSDC"][0]["t"]
+    btc = [{"t": t0 + timedelta(hours=4 * i), "price": 100.0 * trend ** i}
+           for i in range(420 * 6)]
+    btc[-1] = {**btc[-1], "price": cena_ostatniej}
+    panele["BTCUSDC"] = btc
+    ids = dict(enumerate(sorted(panele), start=1))
+    instr = [{"id": i, "symbol": s} for i, s in ids.items()]
+    polnoc = btc[-1]["t"] + timedelta(hours=4)
+    assert polnoc.hour == 0
+    return panele, ids, instr, polnoc - timedelta(hours=4)
+
+
+def test_NIEDOMKNIETA_swieca_BTC_po_oknie_NIE_likwiduje_skladu():
+    """Przegląd 2026-10-04: po oknie wejścia filtr liczył się z niepełnej
+    świecy BTC. Gdy zmieniał przez to znak, cel = gotówka i każda pozycja
+    wychodziła - na podstawie zamknięcia, którego jeszcze nie ma."""
+    panele, ids, instr, bar = _rynek_z_ostatnia_swieca_btc(1.0, 1.0005)
+    domknieta = sm.cel_z_bazy(KursorSwiec(panele, ids), instr, bar, H)
+    assert not domknieta.filtr, "rynek testowy: krach zamyka filtr dopiero po domknięciu"
+    cel = sm.cel_z_bazy(KursorSwiec(panele, ids, n_ostatniej=3), instr, bar, H,
+                        czekaj=False)
+    assert cel.kompletny and cel.filtr
+    assert cel.sklad == tuple(r4.ranking(cel.sygnaly, 3)) and len(cel.sklad) == 3
+    assert cel.sygnaly == domknieta.sygnaly, "momentum bez ostatniej doby - te same ceny"
+    assert cel.btc_zamkniecie != 1.0, "w dzienniku liczby z domkniętej doby"
+    assert "zmiana czeka na domknięcie" in cel.powod
+    assert sm.akcja(cel, {"side": "long"}, cel.sklad[0], False)[0] == "hold"
+    # Rotacja dalej dziala: pozycja spoza dzisiejszego skladu wychodzi.
+    poza = next(s for s in cel.sygnaly if s not in cel.sklad)
+    assert sm.akcja(cel, {"side": "long"}, poza, False) == ("exit", None)
+
+
+def test_NIEDOMKNIETA_swieca_BTC_po_oknie_nie_wlacza_filtra():
+    panele, ids, instr, bar = _rynek_z_ostatnia_swieca_btc(1e6, 0.9995)
+    assert sm.cel_z_bazy(KursorSwiec(panele, ids), instr, bar, H).filtr
+    cel = sm.cel_z_bazy(KursorSwiec(panele, ids, n_ostatniej=3), instr, bar, H,
+                        czekaj=False)
+    assert not cel.filtr and cel.sklad == ()
+    assert "zmiana czeka na domknięcie" in cel.powod
+
+
+def test_niedomknieta_swieca_bez_zmiany_filtra_daje_ten_sam_sklad():
+    panele, ids, instr, bar = _rynek_z_ostatnia_swieca_btc(1e6, 1.0005)
+    pelny = sm.cel_z_bazy(KursorSwiec(panele, ids), instr, bar, H)
+    cel = sm.cel_z_bazy(KursorSwiec(panele, ids, n_ostatniej=3), instr, bar, H,
+                        czekaj=False)
+    assert (cel.filtr, cel.sklad) == (pelny.filtr, pelny.sklad) == (True, cel.sklad)
+    assert "zmiana czeka" not in cel.powod
 
 
 # ------------------------------------------------------------ petla

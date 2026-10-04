@@ -272,8 +272,19 @@ def cel_z_bazy(cur, instrumenty: list[dict], bar_start: datetime,
 
     `czekaj=False` - po oknie wejscia (20 min po polnocy) i na swiecach w ciagu
     dnia. Wejsc i tak juz nie ma, a czekanie na swiece, ktorej potok moze nie
-    dopisac wcale, wiezilo by WYJSCIA do konca doby. Cel liczy sie wtedy z tego,
-    co jest, a `powod` mowi o tym wprost.
+    dopisac wcale, wiezilo by WYJSCIA do konca doby. Cel liczy sie wtedy bez
+    czekania, a `powod` mowi o tym wprost.
+
+    FILTR Z OSTATNIEJ DOMKNIETEJ DOBY, NIE Z NIEDOMKNIETEJ (przeglad
+    2026-10-04). Do tej poprawki `czekaj=False` liczylo filtr z tego, co jest:
+    "zamkniecie dobowe" bylo wtedy zamknieciem sprzed czterech godzin, a filtr,
+    ktory przez to zmienil znak, oddawal cel = gotowka i LIKWIDOWAL caly sklad
+    na podstawie swiecy, ktorej jeszcze nie ma. Niepelne dane dotycza wylacznie
+    filtra: momentum 30 d liczy sie BEZ ostatniej doby (`pominiete_dni`), wiec
+    jego ceny sa domkniete. Dlatego sklad zostaje z dzisiejszego rankingu,
+    a filtr (i liczby w dzienniku) z doby poprzedniej - rotacja dziala,
+    likwidacja z samego filtra czeka, az swieca sie domknie (najpozniej
+    nastepny cykl). Parametry H-3 bez zmian.
     """
     chwila = chwila_decyzji(bar_start, h)
     btc = symbol_btc(i["symbol"] for i in instrumenty)
@@ -291,8 +302,25 @@ def cel_z_bazy(cur, instrumenty: list[dict], bar_start: datetime,
                     f"{h.swiec_zrodlowych_na_swiece} świec {h.source_timeframe})")
             if czekaj:
                 return Cel(chwila, False, powod=brak)
-            cel = wyznacz_cel(panele, chwila, h.bar_minutes)
-            return replace(cel, powod="; ".join(x for x in (
-                brak + " — cel z niepełnych danych, wejścia i tak po oknie",
-                cel.powod) if x))
+            return cel_z_filtrem_poprzedniej_doby(panele, chwila, h.bar_minutes, brak)
     return wyznacz_cel(panele, chwila, h.bar_minutes)
+
+
+def cel_z_filtrem_poprzedniej_doby(panele: dict[str, list[dict]], chwila: datetime,
+                                   bar_minutes: int, brak: str) -> Cel:
+    """Sklad z rankingu na `chwila`, filtr z doby wczesniej. CZYSTA FUNKCJA.
+
+    Gdy swieca BTC konczaca dobe jest niedomknieta (`cel_z_bazy`, czekaj=False).
+    Uzasadnienie w `cel_z_bazy`."""
+    dzis = wyznacz_cel(panele, chwila, bar_minutes)
+    wczoraj = wyznacz_cel(panele, chwila - DOBA, bar_minutes)
+    sklad = tuple(ranking(dzis.sygnaly, PARAMETRY["top"])) if wczoraj.filtr else ()
+    zmiana = ("" if wczoraj.filtr == dzis.filtr else
+              f"; filtr z niepełnej świecy {'włączyłby' if dzis.filtr else 'wyłączyłby'} "
+              f"się — zmiana czeka na domknięcie")
+    return replace(dzis, filtr=wczoraj.filtr, sklad=sklad,
+                   btc_zamkniecie=wczoraj.btc_zamkniecie, btc_ema=wczoraj.btc_ema,
+                   powod="; ".join(x for x in (
+                       f"{brak} — filtr z domkniętej doby "
+                       f"{chwila - DOBA:%Y-%m-%d}{zmiana}, wejścia i tak po oknie",
+                       wczoraj.powod) if x))
