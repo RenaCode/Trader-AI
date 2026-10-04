@@ -296,10 +296,10 @@ Uczciwość wymaga wskazania też tego, co się broni:
 Wszystkie pozycje z pierwotnej listy są zamknięte. Zostają dwie rzeczy, które
 świadomie zostawiam do decyzji:
 
-1. **Odkładanie kopii zapasowej poza serwer** (§3.2). Kopia leży dziś na tej
-   samej maszynie co baza — chroni przed pomyłką w SQL i uszkodzeniem wolumenu,
-   nie chroni przed utratą serwera. To wymaga zewnętrznego zasobu i decyzji,
-   gdzie ma trafiać.
+1. ~~**Odkładanie kopii zapasowej poza serwer** (§3.2).~~ Zrobione poza tym
+   repozytorium: na hoście chodzi `renacode-kopia.timer` (renacode-infra,
+   `backup/kopia.sh`), który wysyła zaszyfrowane zrzuty poza VPS. Stan
+   z przeglądu 04.10.2026; wcześniej kopia leżała tylko na tej samej maszynie.
 2. **Testy routerów API** (§3.7). Wymagają bazy testowej, więc są innej klasy
    niż 55 testów czystej logiki, które już są.
 

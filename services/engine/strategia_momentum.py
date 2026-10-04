@@ -8,6 +8,10 @@ modelem wypelnien, H-3 (R4, ta regula) STOP - +155..+188 pb na runde po
 kosztach, ale zysk z kilku miesiecy hossy altow: okna dodatnie 46% przy progu
 65%, bije B2 w 44% okien przy progu 55%.
 
+ZASTRZEZENIE (przeglad 2026-10-04, T-11): wszechswiat H-3 to dzisiejsze pary
+USDC zastosowane wstecz (survivorship), wiec +155..+188 pb to GORNE
+oszacowanie, nie pomiar - szczegoly w docs/hipotezy.md.
+
 Na demo chodzi wiec prosta, jawnie nazwana regula z ZAMROZONYMI parametrami
 R4, po to, zeby zmierzyc EGZEKUCJE: wypelnialnosc wejsc, poslizg, opoznienie
 i prowizje wzgledem modelu pesymistycznego, pod ktorym liczono H-1 i H-3

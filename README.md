@@ -1,7 +1,7 @@
 # Trader-AI
 
 Autonomiczny system tradingowy z własnym dashboardem, uruchamiany na VPS RenaCode.
-**Dwa niezależne silniki** — krypto (Bybit EU) i giełda tradycyjna (Interactive Brokers) —
+**Dwa niezależne silniki** — krypto (Bybit EU) i giełda tradycyjna (Alpaca, akcje USA) —
 z osobnymi modelami, osobnym ryzykiem i osobnymi zakładkami w UI.
 
 > **Faza demo.** System handluje wyłącznie na kontach demonstracyjnych. Przejście na
@@ -22,7 +22,7 @@ z osobnymi modelami, osobnym ryzykiem i osobnymi zakładkami w UI.
 ## Stan projektu
 
 - [x] Research i architektura
-- [x] Schemat bazy (11 schematów, 18 migracji, hypertables + pgvector)
+- [x] Schemat bazy (11 schematów, 81 plików migracji, ostatnia 0093, hypertables + pgvector)
 - [x] API odczytu (FastAPI) i dashboard (React + Vite)
 - [x] Chart Helm, obrazy Docker, CI
 - [x] Wdrożenie na `trader.renacode.com` (TLS, Traefik, ArgoCD)
@@ -65,9 +65,14 @@ z osobnymi modelami, osobnym ryzykiem i osobnymi zakładkami w UI.
       (zapasowy). Wybiera się sam po tym, który klucz jest ustawiony
 - [ ] Analiza wiadomości włączona na produkcji; do tego czasu `news_shock`
       jest wykluczany z kalibracji jako sygnał martwy
-- [ ] Egzekucja zleceń — **zablokowana wąskim gardłem podmiotu unijnego**
-      (patrz niżej), nie brakiem klucza
-- [ ] Adapter IBKR + silnik equity
+- [x] Egzekucja zleceń na koncie **demo** (`--egzekucja gielda`, od września
+      2026): PostOnly z wyjściem takerem po odmowie, uzgodnienie z giełdą
+- [x] Silnik equity na **Alpaca** (konto paper, migracje 0046/0047) — nie IBKR
+- [x] Crypto/demo chodzi strategią **„momentum + filtr trendu"** (`--strategia
+      momentum`, od 04.10.2026, decyzja „A"): zamrożone parametry H-3, 15%
+      kapitału — **pomiar egzekucji, nie hipoteza przewagi**; equity zostaje
+      na ensemble
+- [ ] Tryb live — osobna decyzja (patrz niżej: ograniczenia podmiotu unijnego)
 
 ## Ograniczenia podmiotu unijnego
 
@@ -189,7 +194,7 @@ kasuje wszystko, co wygenerował, zostawiając realne dane rynkowe.
 | `market` | świece 1 m i snapshoty orderbooka, co 60 s | — |
 | `history` | świece 1 h i stawki finansowania, co 20 min | — |
 | `features` | cechy na obu horyzontach (`4h,1h`), co 15 min | historia |
-| `engine` | pętla decyzyjna: reżim → sygnały → risk kernel → dziennik | cechy |
+| `engine` | pętla decyzyjna; crypto: `--strategia momentum` (reguła H-3 → risk kernel → giełda demo), equity (`engine-equity`): ensemble reżim → sygnały → risk kernel | cechy |
 | `trainer` | walk-forward, raz na dobę, po nim **dozór**; **CronJob, nie worker** | cechy |
 
 Każdy z tych procesów ma **pętlę we własnym module**, a nie w komendzie powłoki.
@@ -309,17 +314,25 @@ heartbeat bije dalej.
 | 4 | dozór → powiadomienie krytyczne | próba pożarowa |
 | 5 | człowiek → zwolnienie z powodem i śladem w audycie | interfejs |
 
+Próba to CronJob `trader-proba-killswitcha` (`services/engine/proba_killswitcha.py`,
+codziennie 03:20 UTC). Ręcznie, poza harmonogramem:
+
 ```bash
 # Podnosi próg kapitału powyżej bieżącego stanu, czeka aż silnik SAM wykryje
 # przekroczenie, sprawdza wszystkie ogniwa i przywraca próg.
-ssh root@185.201.112.104 'bash -s' < scripts/proba-killswitcha.sh
+ssh renacode 'sudo kubectl create job --from=cronjob/trader-proba-killswitcha \
+  proba-reczna-$(date +%m%d) -n default'
 ```
 
-Próg wraca przez `trap EXIT`, więc także po przerwaniu i po błędzie —
-zostawiony podniesiony zatrzymałby silnik na stałe, czyli spowodowałby
-dokładnie tę awarię, przed którą kill-switch ma chronić. Skrypt odmawia
-startu, gdy jakiś kill-switch jest już aktywny: nie odróżniłby wtedy swojego
-zdarzenia od zastanego.
+Job z `--from` dziedziczy szablon poda CronJobu, w tym etykietę
+`trader.renacode.com/component: job` — bez niej NetworkPolicy nie wpuści go do
+bazy. Nie uruchamiaj próby w oknie 23:30–00:30 UTC (wejście momentum).
+
+Próg wraca w `finally` i w handlerze SIGTERM, więc także po przerwaniu i po
+błędzie — zostawiony podniesiony zatrzymałby silnik na stałe, czyli
+spowodowałby dokładnie tę awarię, przed którą kill-switch ma chronić. Próba
+odmawia startu, gdy jakiś kill-switch jest już aktywny: nie odróżniłaby wtedy
+swojego zdarzenia od zastanego.
 
 **Brak powiadomienia to NIEZALICZONA próba**, nie drobiazg. Cichy kill-switch
 jest gorszy niż jego brak, bo daje złudzenie kontroli.

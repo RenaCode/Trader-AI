@@ -403,6 +403,7 @@ Co mówi pomiar:
   lepiej od koszyka przy tej samej ekspozycji 35%, lepiej od B2 44%. To profil
   „długa opcja na trend rynku”, nie przewaga, którą da się potwierdzić na 6 tygodniach
   demo — przez większość miesięcy będzie pod kreską.
+- **Zastrzeżenie (przegląd 2026-10-04, T-11):** wszechświat H-3 to DZISIEJSZE pary USDC z Bybit EU zastosowane wstecz na 1400 dni (survivorship) — ranking top 3 nie mógł wybrać monety, która później zniknęła z obrotu. +155..+188 pb na rundę to więc GÓRNE oszacowanie, nie pomiar. Porównania względne (B1/B2, test permutacyjny) dzielą ten sam zbiór i są dotknięte mniej.
 - **Filtr trendu kosztuje w rynku bocznym.** Okna, w których BTC krąży wokół EMA 50 d
   (np. okna od 2024-08-21, 2025-08-16, 2026-03-14, 2026-07-12), dają wejście na kilka dni i wyjście ze
   stratą; ekspozycja jest wtedy mała, więc porównanie „na jednostkę ekspozycji”
