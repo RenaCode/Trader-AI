@@ -25,6 +25,12 @@ Plik czytany raz, zero polaczen z baza. Pelny wydruk trenera trafia do
 KRYTERIUM STOP/GO 1 (docs/hipotezy.md, H-1) jest tu wypisane, nie wybrane:
 zwrot na runde po doplacie > 0 w >= 3/5 przesuniec I bije B2 przy tej samej
 ekspozycji w >= 60% okien (zbiorczo).
+
+`--r4` (H-3, STOP/GO 2): zamiast trenera tor R4 z `services/engine/r4_momentum.py`
+- momentum dobowe z filtrem BTC > EMA 50 d, wejscie limitem w modelu
+pesymistycznym, wyjscie takerem - na tych samych oknach, z ta sama karta
+i odniesieniami B1-B3, dwa warianty ekspozycji (P 15%, F 100%), test
+permutacyjny (`--permutacje`, domyslnie 200). Kryteria K1-K4 z H-3.
 """
 from __future__ import annotations
 
@@ -38,7 +44,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from services.engine import panel_plik  # noqa: E402
+from services.engine import r4_momentum  # noqa: E402
 from services.engine import train as trener  # noqa: E402
+from services.engine.koszty import opis_karty  # noqa: E402
 from services.engine.horizons import HORIZONS, get as get_horizon  # noqa: E402
 from services.engine.portfolio import Egzekucja  # noqa: E402
 
@@ -120,10 +128,15 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--logi", default="", help="katalog na pelne wydruki trenera")
     ap.add_argument("--hipoteza", required=True,
                     help="numer z docs/hipotezy.md, ktory ten pomiar rozstrzyga")
+    ap.add_argument("--r4", action="store_true",
+                    help="tor R4 (H-3) zamiast trenera ensemble")
+    ap.add_argument("--permutacje", type=int, default=r4_momentum.N_PERMUTACJI)
     args = ap.parse_args(argv)
     blad = trener.sprawdz_hipoteze(args.hipoteza)
     if blad:
         sys.exit(blad)
+    if args.r4:
+        return main_r4(args)
     if (args.pesymistyczna or args.opoznienie_min) and not args.limit:
         sys.exit("--egzekucja-pesymistyczna i --opoznienie wymagaja --limit")
 
@@ -170,6 +183,45 @@ def main(argv: list[str] | None = None) -> int:
         for linia in tabela_odniesien(pelne):
             print(linia)
         print(werdykt(pelne)[1])
+    return 0
+
+
+def main_r4(args) -> int:
+    """Pomiar H-3: tabela na wariant ekspozycji, odniesienia, karta, werdykt."""
+    if args.bar != "4h" or args.kind != "spot_eu":
+        sys.exit("--r4 mierzy H-3 na siatce toru 4h i cenniku spot_eu (H-3)")
+    plik = panel_plik.wczytaj(args.panel)
+    przesuniecia = tuple(sorted({int(p) for p in args.przesuniecia.split(",") if p.strip()}))
+    print(f"Panel {args.panel}: {plik['engine']}/{plik['bar']} do "
+          f"{plik['do']:%Y-%m-%d %H:%M} UTC; tor R4 (H-3), --days {args.days}, "
+          f"przesunięcia {', '.join(f'{p:+d}' for p in przesuniecia)}, "
+          f"{args.permutacje} permutacji")
+    wynik = r4_momentum.pomiar(plik, args.days, args.kind, przesuniecia, args.permutacje)
+    if args.logi:
+        logi = Path(args.logi)
+        logi.mkdir(parents=True, exist_ok=True)
+        (logi / f"r4_d{args.days}.txt").write_text(wynik["log"], encoding="utf-8")
+    print("spread per instrument (pb): " + "  ".join(
+        f"{s} {v:.2f}" for s, v in sorted(wynik["spread_bps"].items())))
+    print(f"dopłata odniesień B1–B3 (karta rynkowa): "
+          f"{wynik['doplata_odniesienia'] * 1e4:.2f} pb na rundę")
+    for nazwa, po in wynik["warianty"].items():
+        udzial = r4_momentum.WARIANTY[nazwa]
+        print(f"\n## Wariant {nazwa} (ekspozycja przy pełnym składzie {udzial:.0%}); "
+              f"dopłata z karty {wynik['doplaty'][nazwa] * 1e4:.2f} pb na rundę; "
+              f"symulacja: maker przy wejściu, taker + poślizg "
+              f"{r4_momentum.POSLIZG_TAKER * 1e4:.0f} pb przy wyjściu\n")
+        for linia in r4_momentum.tabela(po):
+            print(linia)
+        print()
+        for linia in r4_momentum.tabela_odniesien(po, nazwa):
+            print(linia)
+        print()
+        for linia in opis_karty(wynik["karty"][nazwa]):
+            print(linia)
+        print()
+        for linia in r4_momentum.werdykt(po)[1]:
+            print(linia)
     return 0
 
 
