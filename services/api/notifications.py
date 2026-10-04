@@ -336,6 +336,14 @@ async def notify(user_id: int, event_code: str, title: str, body: str = "",
     # potrafi rzucic (brak SECRETS_KEY), a alarm nie moze zalezec od klucza
     # do konfiguracji CallMeBota. `przekaz` nie rzuca i sam tlumi powtorki -
     # uzasadnienie w naglowku services/api/bramka.py.
+    #
+    # `await`, NIE ZADANIE W TLE (rozwazone w przegladzie 2026-10-04). Wiekszosc
+    # alarmow krytycznych wysylaja czujki i CronJoby, ktore koncza sie
+    # `asyncio.run` - a ono ANULUJE zadania w tle przy wyjsciu, czyli alarm
+    # z ostatniego sprawdzenia przebiegu by przepadl. Czas wolajacego ogranicza
+    # krotki termin polaczenia (`bramka.TIMEOUT`, 3 s) i rytm nieudanych prob.
+    # Sciezki zadan HTTP, ktore nie moga czekac, wolaja
+    # `powiadom_o_bezpieczenstwie` (np. reczny kill-switch) - to jest tlo.
     if sev == "critical":
         await bramka.przekaz(nid, event_code, sev, title, body, engine, dane,
                              fetch_one=fetch_one, execute=execute)

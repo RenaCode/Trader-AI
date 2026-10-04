@@ -31,9 +31,11 @@ class Slad:
     """`fetch_one`/`execute` z licznikiem powtórek podanym z góry."""
 
     def __init__(self, ten_sam=0, od_ostatniej_min=None, w_godzinie=0,
-                 padnij_na_odczycie=False, padnij_na_zapisie=False):
+                 padnij_na_odczycie=False, padnij_na_zapisie=False,
+                 nieudanych=0, od_nieudanej_min=None):
         self.stan = {"ten_sam": ten_sam, "od_ostatniej_min": od_ostatniej_min,
-                     "w_godzinie": w_godzinie}
+                     "w_godzinie": w_godzinie, "nieudanych": nieudanych,
+                     "od_nieudanej_min": od_nieudanej_min}
         self.padnij_na_odczycie = padnij_na_odczycie
         self.padnij_na_zapisie = padnij_na_zapisie
         self.zapytania = []
@@ -103,6 +105,29 @@ def test_powtorka_przed_przerwa_jest_tlumiona_a_po_niej_idzie():
     assert bramka.ocen_powtorke(1, 61, 1) is None
     assert bramka.ocen_powtorke(3, 200, 3) is not None
     assert bramka.ocen_powtorke(3, 241, 3) is None
+
+
+def test_NIEUDANA_proba_tez_ma_rytm_krotszy_niz_wysylka():
+    """Przegląd 2026-10-04: przy martwej bramce każde `notify()` tego samego
+    alarmu próbowało od nowa i czekało na timeout. Nieudana próba ma teraz
+    własną przerwę - krótszą, bo alarm nadal nie doszedł do człowieka."""
+    assert [bramka.przerwa_po_bledzie_min(n) for n in range(7)] == \
+        [0, 10, 20, 40, 80, 160, 320]
+    assert bramka.przerwa_po_bledzie_min(9) == bramka.MAKS_PRZERWA_MIN
+    assert "NIE przeszedł" in bramka.ocen_powtorke(0, None, 0, 1, 3)
+    assert bramka.ocen_powtorke(0, None, 0, 1, 11) is None
+    assert bramka.ocen_powtorke(0, None, 0, 2, 15) is not None
+
+
+def test_nieudana_proba_tlumiona_bez_zapytania_do_bramki(z_kluczem):
+    slad = Slad(nieudanych=1, od_nieudanej_min=2)
+    k, zapytania = klient()
+    assert przekaz(slad, k) == "suppressed_cooldown"
+    assert zapytania == [] and "NIE przeszedł" in slad.dostawy[0]["blad"]
+
+
+def test_polaczenie_ma_KROTKI_termin_a_odpowiedz_dlugi():
+    assert bramka.TIMEOUT.connect == 3.0 and bramka.TIMEOUT.read == bramka.TIMEOUT_S
 
 
 def test_limit_godzinowy_tlumi_takze_NOWY_alarm():
@@ -183,8 +208,8 @@ def test_licznik_powtorek_pyta_o_TEN_alarm(z_kluczem):
     slad = Slad()
     przekaz(slad, klient()[0], title="Worker X zamilkł", engine=None)
     sql, params = slad.zapytania[0]
-    assert "d.status = 'sent'" in sql
-    assert params == ("killswitch.triggered", "Worker X zamilkł", None) * 2
+    assert "x.status = 'sent'" in sql and "x.status = 'failed'" in sql
+    assert params == ("killswitch.triggered", "Worker X zamilkł", None)
 
 
 # ------------------------------------------------- awaria nie przerywa wołającego
@@ -335,14 +360,73 @@ def test_BAZA_slad_i_licznik_powtorek_dzialaja_na_roli_wolajacego(rola):
                 (uid,)).fetchone()["id"]
             conn.execute(f"SET LOCAL ROLE {rola}")
             conn.execute(bramka.SQL_SLAD, (nid, "sent", 1, None, "sent"))
+            conn.execute(bramka.SQL_SLAD, (nid, "failed", 1, "ConnectError", "failed"))
             stan = conn.execute(bramka.SQL_POWTORKI,
-                                ("killswitch.triggered", "T", None) * 2).fetchone()
+                                ("killswitch.triggered", "T", None)).fetchone()
             assert stan["ten_sam"] == 1 and stan["w_godzinie"] == 1
             assert float(stan["od_ostatniej_min"]) == 0
+            assert stan["nieudanych"] == 1 and float(stan["od_nieudanej_min"]) == 0
             inny = conn.execute(bramka.SQL_POWTORKI,
-                                ("killswitch.triggered", "T", "crypto") * 2).fetchone()
+                                ("killswitch.triggered", "T", "crypto")).fetchone()
             assert inny["ten_sam"] == 0 and inny["od_ostatniej_min"] is None
+            assert inny["nieudanych"] == 0 and inny["w_godzinie"] == 1
             sent_at = conn.execute(
                 "SELECT sent_at FROM notify.delivery WHERE notification_id = %s",
                 (nid,)).fetchone()["sent_at"]
             assert sent_at is not None
+
+
+# ------------------------------------------------- czy bramka zna klucz (dozór)
+
+def test_url_stanu_z_url_wysylki():
+    assert bramka.url_stanu(bramka.URL_DOMYSLNY) == \
+        "http://bramka.bramka.svc.cluster.local/v1/stan"
+    assert bramka.url_stanu("http://b:8080/") == "http://b:8080/v1/stan"
+
+
+def test_stan_pyta_GET_z_kluczem_i_rzuca_na_odmowe(z_kluczem):
+    zapytania = []
+
+    def handler(req):
+        zapytania.append(req)
+        return httpx.Response(200, json={"kanal_auto": "whatsapp"})
+
+    async def _(k):
+        async with k:
+            return await bramka.stan(klient=k)
+
+    k = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    assert asyncio.run(_(k)) == {"kanal_auto": "whatsapp"}
+    assert zapytania[0].method == "GET" and zapytania[0].url.path == "/v1/stan"
+    assert zapytania[0].headers["X-Api-Key"] == KLUCZ
+    odmowa = httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda r: httpx.Response(401, json={"blad": "zly albo brak X-Api-Key"})))
+    with pytest.raises(RuntimeError, match="401"):
+        asyncio.run(_(odmowa))
+
+
+def _kanaly(monkeypatch, stan):
+    from services.engine import dozor
+    from tests.test_dozor import _stend_kanalow
+    monkeypatch.setattr(bramka, "stan", stan)
+    fetch_all, notify, wolania = _stend_kanalow(luk=2)
+    return asyncio.run(dozor.sprawdz_kanaly(fetch_all, notify)), wolania
+
+
+def test_czujka_kanalow_UFA_bramce_dopiero_gdy_ta_zna_klucz(z_kluczem, monkeypatch, capsys):
+    async def zna():
+        return {"kanal_auto": "whatsapp"}
+
+    assert _kanaly(monkeypatch, zna) == (0, [])
+    assert "przyjmuje klucz" in capsys.readouterr().out
+
+
+def test_klucz_odrzucany_przez_bramke_to_NIE_droga_poza_panel(z_kluczem, monkeypatch, capsys):
+    """Do 2026-10-04 wystarczała zmienna w środowisku - klucz z literówką
+    wyglądał tu identycznie jak działający."""
+    async def odrzuca():
+        raise RuntimeError("bramka zwróciła 401: zly albo brak X-Api-Key")
+
+    luki, wolania = _kanaly(monkeypatch, odrzuca)
+    assert luki == 2 and len(wolania) == 1
+    assert "NIE PRZYJMUJE" in capsys.readouterr().out

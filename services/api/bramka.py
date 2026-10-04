@@ -30,8 +30,15 @@ alarm tez zostawia wiersz (`suppressed_cooldown`) z powodem w `error`.
 NIEUDANA WYSYLKA NIGDY NIE PRZERYWA WOLAJACEGO. `przekaz()` nie rzuca: brak
 klucza, martwa bramka, blad zapisu sladu - wszystko konczy sie linia w logu
 i wierszem `failed`, a nie wyjatkiem w czujce albo w obsludze zadania.
-Liczone sa tylko udane wysylki, wiec alarm, ktorego bramka nie przyjela,
-pojdzie znowu przy nastepnym przebiegu.
+
+NIEUDANE PROBY TEZ MAJA RYTM (przeglad 2026-10-04). Wczesniej liczone byly
+tylko udane wysylki, wiec przy martwej bramce KAZDE wywolanie `notify()` tego
+samego alarmu probowalo od nowa i czekalo na timeout - w czujce, ktora ma
+jeszcze kilkanascie sprawdzen do zrobienia. Teraz ten sam alarm po nieudanej
+probie czeka 10, 20, 40 min... (najwyzej 6 h, `przerwa_po_bledzie_min`), a
+pierwsza ponowna proba i tak przypada na nastepny przebieg `trader-zywotnosc`
+(co 10 min). Polaczenie ma krotki termin (`TIMEOUT`, 3 s): martwa bramka
+odpowiada odmowa albo milczeniem, a na odmowe nie ma po co czekac 25 s.
 """
 from __future__ import annotations
 
@@ -47,11 +54,15 @@ URL_DOMYSLNY = "http://bramka.bramka.svc.cluster.local/v1/wyslij"
 
 # Bramka czeka na WhatsApp do 15 s (rownolegle do wszystkich odbiorcow), a gdy
 # nie doszlo do nikogo - na Mailgun. 25 s miesci oba bez trzymania czujki
-# w nieskonczonosc; CronJob i tak ma wlasny termin.
+# w nieskonczonosc; CronJob i tak ma wlasny termin. NAWIAZANIE polaczenia ma
+# osobny, krotki termin: w klastrze trwa milisekundy, wiec 3 s bez odpowiedzi
+# znaczy martwy pod albo NetworkPolicy, a nie wolna bramke.
 TIMEOUT_S = 25.0
+TIMEOUT = httpx.Timeout(TIMEOUT_S, connect=3.0)
 
 PIERWSZA_PRZERWA_MIN = 60
 MAKS_PRZERWA_MIN = 360
+PIERWSZA_PRZERWA_PO_BLEDZIE_MIN = 10
 LIMIT_NA_GODZINE = 10
 
 # WhatsApp przyjmuje dlugie wiadomosci, ale tresc dluzsza niz ekran telefonu
@@ -84,13 +95,32 @@ def wymagana_przerwa_min(wyslanych_24h: int) -> int:
     return min(PIERWSZA_PRZERWA_MIN * 2 ** (wyslanych_24h - 1), MAKS_PRZERWA_MIN)
 
 
+def przerwa_po_bledzie_min(nieudanych_24h: int) -> int:
+    """Ile minut od ostatniej NIEUDANEJ proby tego samego alarmu. CZYSTA FUNKCJA.
+
+    Krocej niz po udanej wysylce: alarm, ktory nie doszedl, nadal nie dotarl
+    do czlowieka - ma probowac znowu, tylko nie przy kazdym wywolaniu.
+    0 nieudanych = od razu; potem 10, 20, 40... i najwyzej co 360 minut.
+    """
+    if nieudanych_24h <= 0:
+        return 0
+    return min(PIERWSZA_PRZERWA_PO_BLEDZIE_MIN * 2 ** (nieudanych_24h - 1),
+               MAKS_PRZERWA_MIN)
+
+
 def ocen_powtorke(wyslanych_24h: int, od_ostatniej_min: float | None,
-                  wyslanych_w_godzinie: int) -> str | None:
+                  wyslanych_w_godzinie: int, nieudanych_24h: int = 0,
+                  od_nieudanej_min: float | None = None) -> str | None:
     """Powod stlumienia albo None (wysylamy). CZYSTA FUNKCJA."""
     przerwa = wymagana_przerwa_min(wyslanych_24h)
     if przerwa and od_ostatniej_min is not None and od_ostatniej_min < przerwa:
         return (f"ten sam alarm wysłany {od_ostatniej_min:.0f} min temu "
                 f"({wyslanych_24h}× w dobie), następny najwcześniej po {przerwa} min")
+    przerwa = przerwa_po_bledzie_min(nieudanych_24h)
+    if przerwa and od_nieudanej_min is not None and od_nieudanej_min < przerwa:
+        return (f"ten sam alarm NIE przeszedł przez bramkę {od_nieudanej_min:.0f} min "
+                f"temu ({nieudanych_24h}× w dobie), następna próba najwcześniej po "
+                f"{przerwa} min")
     if wyslanych_w_godzinie >= LIMIT_NA_GODZINE:
         return (f"limit {LIMIT_NA_GODZINE} alarmów na godzinę wyczerpany "
                 f"— reszta jest w panelu")
@@ -121,7 +151,7 @@ async def wyslij(temat: str, tresc: str, *, priorytet: str = "alarm",
         cialo["rodzaj"] = rodzaj[:40]
     naglowki = {"X-Api-Key": k}
     if klient is None:
-        async with httpx.AsyncClient(timeout=TIMEOUT_S) as c:
+        async with httpx.AsyncClient(timeout=TIMEOUT) as c:
             r = await c.post(url, json=cialo, headers=naglowki)
     else:
         r = await klient.post(url, json=cialo, headers=naglowki)
@@ -137,17 +167,57 @@ async def wyslij(temat: str, tresc: str, *, priorytet: str = "alarm",
     return odp
 
 
+# `ten` = ten sam alarm (kod + tytul + silnik). Limit godzinowy liczy tylko
+# wyslane - to on chroni telefon, a nieudana proba na telefon nie doszla.
+def url_stanu(url_wysylki: str) -> str:
+    """`.../v1/wyslij` -> `.../v1/stan`. CZYSTA FUNKCJA."""
+    baza = url_wysylki.rstrip("/")
+    if baza.endswith("/v1/wyslij"):
+        baza = baza[: -len("/v1/wyslij")]
+    return f"{baza}/v1/stan"
+
+
+async def stan(*, klient: httpx.AsyncClient | None = None) -> dict:
+    """`GET /v1/stan` z kluczem tradera: czy bramka ZNA ten klucz i ktory kanal
+    jest aktywny. Rzuca, gdy klucza brak albo bramka go odrzuca (401/403).
+
+    Bez wysylania wiadomosci - dla czujki `dozor --co kanaly`, ktorej pytanie
+    brzmi "czy alarm ma jak wyjsc", a nie "wyslij cos, zeby sprawdzic"."""
+    k = klucz()
+    if not k:
+        raise RuntimeError("brak BRAMKA_KLUCZ w środowisku")
+    url = url_stanu(os.environ.get("BRAMKA_URL", "").strip() or URL_DOMYSLNY)
+    if klient is None:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(10.0, connect=3.0)) as c:
+            r = await c.get(url, headers={"X-Api-Key": k})
+    else:
+        r = await klient.get(url, headers={"X-Api-Key": k})
+    try:
+        odp = r.json()
+    except ValueError:
+        odp = {}
+    if r.status_code != 200:
+        raise RuntimeError(f"bramka zwróciła {r.status_code}: "
+                           f"{odp.get('blad') or r.text[:200]}")
+    return odp
+
+
 SQL_POWTORKI = (
-    "SELECT count(*) FILTER (WHERE n.event_code = %s AND n.title = %s"
-    "                          AND n.engine::text IS NOT DISTINCT FROM %s) AS ten_sam,"
-    "       round(extract(epoch FROM now() - max(d.created_at) FILTER ("
-    "             WHERE n.event_code = %s AND n.title = %s"
-    "               AND n.engine::text IS NOT DISTINCT FROM %s)) / 60) AS od_ostatniej_min,"
-    "       count(*) FILTER (WHERE d.created_at > now() - interval '1 hour') AS w_godzinie"
-    "  FROM notify.delivery d"
-    "  JOIN notify.notification n ON n.id = d.notification_id"
-    " WHERE d.kind = 'bramka' AND d.status = 'sent'"
-    "   AND d.created_at > now() - interval '24 hours'")
+    "SELECT count(*) FILTER (WHERE x.ten AND x.status = 'sent') AS ten_sam,"
+    "       round(extract(epoch FROM now() - max(x.created_at) FILTER ("
+    "             WHERE x.ten AND x.status = 'sent')) / 60) AS od_ostatniej_min,"
+    "       count(*) FILTER (WHERE x.status = 'sent'"
+    "                          AND x.created_at > now() - interval '1 hour') AS w_godzinie,"
+    "       count(*) FILTER (WHERE x.ten AND x.status = 'failed') AS nieudanych,"
+    "       round(extract(epoch FROM now() - max(x.created_at) FILTER ("
+    "             WHERE x.ten AND x.status = 'failed')) / 60) AS od_nieudanej_min"
+    "  FROM (SELECT d.status::text AS status, d.created_at,"
+    "               (n.event_code = %s AND n.title = %s"
+    "                AND n.engine::text IS NOT DISTINCT FROM %s) AS ten"
+    "          FROM notify.delivery d"
+    "          JOIN notify.notification n ON n.id = d.notification_id"
+    "         WHERE d.kind = 'bramka' AND d.status IN ('sent', 'failed')"
+    "           AND d.created_at > now() - interval '24 hours') x")
 
 SQL_SLAD = (
     "INSERT INTO notify.delivery"
@@ -178,12 +248,14 @@ async def przekaz(nid: int, event_code: str, severity: str, title: str, body: st
                 _brak_klucza_zgloszony = True
             return "brak-klucza"
 
-        stan = await fetch_one(SQL_POWTORKI, (event_code, title, engine,
-                                              event_code, title, engine)) or {}
+        stan = await fetch_one(SQL_POWTORKI, (event_code, title, engine)) or {}
         od = stan.get("od_ostatniej_min")
+        od_bledu = stan.get("od_nieudanej_min")
         powod = ocen_powtorke(int(stan.get("ten_sam") or 0),
                               None if od is None else float(od),
-                              int(stan.get("w_godzinie") or 0))
+                              int(stan.get("w_godzinie") or 0),
+                              int(stan.get("nieudanych") or 0),
+                              None if od_bledu is None else float(od_bledu))
         if powod:
             print(f"[bramka] {event_code} #{nid} stłumiony: {powod}", flush=True)
             await _slad(execute, nid, "suppressed_cooldown", 0, powod)

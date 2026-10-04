@@ -2994,6 +2994,30 @@ async def sprawdz_kanaly(fetch_all, notify, sucho: bool = False) -> int:
     wiec pierwszy silnik przelaczony na `live` wlacza te czujke sam, bez niczyjej
     pamieci. To ta sama zasada, ktora w tym pliku odroznia stan od zdarzenia.
     """
+    # BRAMKA RENACODE JEST DROGA POZA PANEL (2026-10-04): `notify()` przekazuje
+    # do niej kazdy alarm krytyczny, niezaleznie od kanalow uzytkownika
+    # (services/api/bramka.py).
+    #
+    # ZMIENNA W SRODOWISKU TO NIE DROGA (przeglad 2026-10-04). Do tej poprawki
+    # "skonfigurowana" znaczylo "BRAMKA_KLUCZ jest ustawiony" - klucz
+    # odrzucany przez bramke (literowka, rotacja tylko po jednej stronie)
+    # wygladal tu identycznie jak dzialajacy. Teraz `GET /v1/stan` z tym
+    # kluczem: 200 = bramka go zna. Przed wyciszeniem demo, zeby linia w logu
+    # mowila prawde takze wtedy, gdy czujka nie ma prawa alarmowac.
+    from services.api import bramka
+    droga_bramka = False
+    if bramka.skonfigurowana():
+        try:
+            stan = await bramka.stan()
+            droga_bramka = True
+            print(f"kanaly: bramka RenaCode przyjmuje klucz tradera (kanal teraz: "
+                  f"{stan.get('kanal_auto', '?')}) — alarmy krytyczne maja droge "
+                  f"poza panel; slad w notify.delivery, kind 'bramka'")
+        except Exception as e:                                # noqa: BLE001
+            print(f"kanaly: BRAMKA NIE PRZYJMUJE klucza tradera albo nie odpowiada "
+                  f"({type(e).__name__}: {e}) — alarmy krytyczne zostaja w panelu, "
+                  f"jesli nie ma innego kanalu")
+
     zywe = await fetch_all(
         "SELECT DISTINCT mode::text AS mode FROM risk.engine_heartbeat")
     tryby = {w["mode"] for w in zywe}
@@ -3003,15 +3027,7 @@ async def sprawdz_kanaly(fetch_all, notify, sucho: bool = False) -> int:
               f"sie sama, gdy ktorykolwiek silnik przejdzie na `live`")
         return 0
 
-    # BRAMKA RENACODE JEST DROGA POZA PANEL (2026-10-04): `notify()` przekazuje
-    # do niej kazdy alarm krytyczny, niezaleznie od kanalow uzytkownika
-    # (services/api/bramka.py). Skonfigurowana = klucz jest w srodowisku; czy
-    # bramka faktycznie przyjmuje, mowi `notify.delivery` (kind 'bramka').
-    from services.api.bramka import skonfigurowana
-    if skonfigurowana():
-        print("kanaly: alarmy krytyczne ida tez przez bramke RenaCode "
-              "(WhatsApp, zapasowo mail) — droga poza panel jest; slad "
-              "w notify.delivery, kind 'bramka'")
+    if droga_bramka:
         return 0
 
     wiersze = await fetch_all(
