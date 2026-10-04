@@ -557,3 +557,37 @@ def test_czujka_liczy_okno_proby_ZEGAREM_BAZY_a_nie_flaga():
     assert "proba_do > now()" in sql
     assert "LEFT JOIN risk.limit_def" in sql, (
         "stare zdarzenia bez limit_name nie mogą wypaść z listy")
+
+
+# --------------------------------------------- treść zależna od reguły wznowienia
+
+def test_tresc_PO_USTANIU_mowi_ze_wznowi_sie_AUTOMATYCZNIE():
+    """Przegląd 2026-10-04 (T-4): `max_daily_loss` ma na produkcji regułę
+    `po_ustaniu`, a treść mówiła „kill-switch nie wygasa sam". Właściciel
+    czytał, że handel stoi do jego decyzji — po godzinie automat go wznawiał."""
+    a = AtrapaBazy([zdarzenie(3, wznowienie="po_ustaniu", max_wznowien=3)])
+    _, wyslane = uruchom(a)
+    tresc = wyslane[0]["tresc"]
+    assert "AUTOMATYCZNIE" in tresc and "najwyżej 3 razy na dobę" in tresc
+    assert "nie wygasa sam" not in tresc
+
+
+def test_tresc_PO_ODBUDOWIE_tez_mowi_o_automacie():
+    a = AtrapaBazy([zdarzenie(3, wznowienie="po_odbudowie", max_wznowien=2)])
+    _, wyslane = uruchom(a)
+    assert "AUTOMATYCZNIE" in wyslane[0]["tresc"]
+    assert "najwyżej 2 razy" in wyslane[0]["tresc"]
+
+
+@pytest.mark.parametrize("regula", ["reczne", None])
+def test_tresc_RECZNE_i_bez_reguly_nie_wygasa_sam(regula):
+    a = AtrapaBazy([zdarzenie(3, wznowienie=regula, max_wznowien=None)])
+    _, wyslane = uruchom(a)
+    assert "nie wygasa sam" in wyslane[0]["tresc"]
+    assert "AUTOMATYCZNIE" not in wyslane[0]["tresc"]
+
+
+def test_czujka_czyta_regule_wznowienia_z_limitu():
+    zrodlo = Path("services/engine/dozor.py").read_text(encoding="utf-8")
+    cialo = zrodlo[zrodlo.index("async def sprawdz_ryzyko"):]
+    assert "d.wznowienie, d.max_wznowien" in cialo

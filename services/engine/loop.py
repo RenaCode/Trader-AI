@@ -2927,15 +2927,30 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
         if verbose and not sesja_wysylki.wolno_decydowac:
             print(f"  wysyłka: {sesja_wysylki.opis()} — wejścia WSTRZYMANE, "
                   f"wyjścia idą dalej")
+        # KILL-SWITCH CZYTANY PONOWNIE PRZED WYSYLKA (przeglad 2026-10-04, T-2).
+        # `wejscia_wstrzymane` policzono na poczatku cyklu, a dozorca (co 60 s)
+        # albo wlasciciel z panelu moze zapisac zatrzymanie w trakcie przebiegu.
+        # Bez tego odczytu wejscia z tej swiecy szly na gielde PO wlaczeniu
+        # bezpiecznika. Zmienia sie wylacznie wysylka - decyzje w dzienniku
+        # zostaja takie, jakie zapadly; nastepny cykl i tak je zdejmie
+        # (`anuluj_wejscia`).
+        wysylka_tylko_wyjsc = wejscia_wstrzymane
+        if not wysylka_tylko_wyjsc:
+            nowy = risk.killswitch_active()
+            if nowy:
+                wysylka_tylko_wyjsc = True
+                if verbose:
+                    print(f"  wysyłka: kill-switch id={nowy['id']} zapisany W TRAKCIE "
+                          f"cyklu ({nowy['reason']}) — wysyłam tylko wyjścia")
         # WIERSZE `unknown` WAZNYCH PLANOW PRZED WYSYLKA - patrz
         # `gielda_exec.ponow_nieznane`. Zwolniony plan wraca do `zloz_oczekujace`
         # jako plan bez wiersza i idzie na gielde pod tym samym id.
         stats.update(await ponow_nieznane(
             cur, gielda, engine=engine, mode=mode, kategoria=kategoria,
-            verbose=verbose, tylko_wyjscia=wejscia_wstrzymane))
+            verbose=verbose, tylko_wyjscia=wysylka_tylko_wyjsc))
         stats.update(await zloz_oczekujace(
             cur, gielda, engine=engine, mode=mode, kategoria=kategoria, h=h,
-            verbose=verbose, tylko_wyjscia=wejscia_wstrzymane,
+            verbose=verbose, tylko_wyjscia=wysylka_tylko_wyjsc,
             sesja=sesja_wysylki))
         conn.commit()
 

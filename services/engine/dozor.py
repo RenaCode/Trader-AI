@@ -118,6 +118,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 # Uzywa ich `sprawdz_cisze_pomiaru` nizej. Import musi byc PO sys.path.insert,
 # bo ten plik bywa uruchamiany jako skrypt.
 from services.engine.risk import LIMITY_KONIECZNE, POMIAR_CO_S  # noqa: E402
+from services.engine.wznowienie import HISTEREZA, KARENCJA_MIN  # noqa: E402
 
 
 # ------------------------------------------------------------- kod wyjscia
@@ -1004,6 +1005,34 @@ def odstep_przypomnienia_ks(wiek_min: float) -> int:
             else KS_PRZYPOMNIENIE_DLUGIE_H)
 
 
+def zdanie_o_wznowieniu(regula: str | None, max_wznowien: int | None) -> str:
+    """Co stanie sie z zatrzymaniem dalej - wedlug reguly limitu. CZYSTA FUNKCJA.
+
+    PRZEGLAD 2026-10-04 (T-4). Tresc mowila zawsze „kill-switch nie wygasa sam",
+    a na produkcji `max_daily_loss` ma regule `po_ustaniu`, `max_drawdown`
+    `po_odbudowie` - oba `wznowienie.wznow` zwalnia sam po karencji. Wlasciciel
+    czytal na telefonie, ze handel stoi do jego decyzji, i nie reagowal; po
+    godzinie automat wznawial handel. Brak reguly (limit bez wiersza, reczny
+    kill-switch z panelu) = `reczne`, bo tak traktuje go automat.
+    """
+    ile = max_wznowien if max_wznowien is not None else "?"
+    prog = f"{HISTEREZA:.0%} limitu"
+    if regula == "po_ustaniu":
+        return (f"Kill-switch wznowi się AUTOMATYCZNIE, gdy miara wróci poniżej "
+                f"{prog} (po co najmniej {KARENCJA_MIN} min od zadziałania), najwyżej "
+                f"{ile} razy na dobę; każde wznowienie przyjdzie osobnym alarmem. "
+                f"Wcześniejsze zwolnienie: zakładka Ryzyko w interfejsie.")
+    if regula == "po_odbudowie":
+        return (f"Kill-switch wznowi się AUTOMATYCZNIE, gdy obsunięcie spadnie poniżej "
+                f"{prog} (po co najmniej {KARENCJA_MIN} min od zadziałania), najwyżej "
+                f"{ile} razy na dobę; każde wznowienie przyjdzie osobnym alarmem. "
+                f"Wcześniejsze zwolnienie: zakładka Ryzyko w interfejsie.")
+    return ("Silnik NIE WEJDZIE w żadną pozycję do czasu ręcznego zwolnienia — "
+            "kill-switch nie wygasa sam, bo automatyczne wznowienie po obsunięciu "
+            "to najprostsza droga do powtórzenia tej samej straty.\n\nZwolnienie: "
+            "zakładka Ryzyko w interfejsie.")
+
+
 def ocen_kill_switch(wiek_min: float,
                      od_zgloszenia_min: float | None) -> dict | None:
     """Czy o aktywnym kill-switchu wypada sie TERAZ odezwac. CZYSTA FUNKCJA.
@@ -1468,7 +1497,7 @@ async def sprawdz_ryzyko(fetch_all, notify, sucho: bool = False) -> int:
         "       round(extract(epoch from (now() - k.triggered_at))/60) AS wiek_min,"
         "       coalesce(d.proba_do > now() AND k.triggered_at >= d.updated_at,"
         "                false) AS proba_w_toku,"
-        "       d.proba_do"
+        "       d.proba_do, d.wznowienie, d.max_wznowien"
         " FROM risk.killswitch_event k"
         " LEFT JOIN risk.limit_def d"
         "   ON d.engine = k.engine AND d.mode = k.mode AND d.name = k.limit_name"
@@ -1625,11 +1654,8 @@ async def sprawdz_ryzyko(fetch_all, notify, sucho: bool = False) -> int:
             wstep = (f"To PRZYPOMNIENIE, nie nowe zdarzenie: handel stoi od "
                      f"{godzin:.0f} h. Kolejne za {werdykt['odstep_h']} h, "
                      f"dopóki kill-switch nie zostanie zwolniony.\n\n")
-        tresc = (f"{wstep}{z['reason']}\n\nSilnik NIE WEJDZIE w żadną pozycję do "
-                 f"czasu ręcznego zwolnienia — kill-switch nie wygasa sam, bo "
-                 f"automatyczne wznowienie po obsunięciu to najprostsza droga do "
-                 f"powtórzenia tej samej straty.\n\nZwolnienie: zakładka Ryzyko "
-                 f"w interfejsie.")
+        tresc = (f"{wstep}{z['reason']}\n\n"
+                 f"{zdanie_o_wznowieniu(z.get('wznowienie'), z.get('max_wznowien'))}")
         # Proba: `info`, osobny kod - 15 nieprzeczytanych "krytycznych" z osmiu
         # dni prob zaslanialo dzwonek, w ktorym prawdziwy kill-switch by utonal
         # (F-5.2). Ogniwo 4 proby szuka powiadomienia pod obydwoma kodami.

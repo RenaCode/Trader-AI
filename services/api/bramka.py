@@ -18,10 +18,22 @@ a `trader-zywotnosc` chodzi co 10 minut. Trwaly rozjazd z gielda dawal wiec
 144 alarmy na dobe - w dzwonku to szum, na telefonie to powod, zeby wyciszyc
 numer bota. Wtedy nie dochodzi juz NIC. Dwie granice:
 
-  * TEN SAM ALARM (kod + silnik + tytul) - pierwszy idzie od razu, kolejne co
-    1 h, 2 h, 4 h, potem co 6 h (`wymagana_przerwa_min`). Alarm, ktory trwa,
-    przypomina o sobie coraz rzadziej; nowy alarm (inny tytul) idzie od razu.
-  * WSZYSTKIE ALARMY - najwyzej LIMIT_NA_GODZINE wyslanych na godzine.
+  * TEN SAM ALARM (kod + silnik + tytul + `data.event_id`) - pierwszy idzie od
+    razu, kolejne co 1 h, 2 h, 4 h, potem co 6 h (`wymagana_przerwa_min`).
+    Alarm, ktory trwa, przypomina o sobie coraz rzadziej; nowy alarm (inny
+    tytul ALBO inne zdarzenie) idzie od razu.
+  * WSZYSTKIE ALARMY - najwyzej LIMIT_NA_GODZINE wyslanych na godzine. Poza
+    limitem sa zadzialanie i zwolnienie kill-switcha (BEZ_LIMITU_GODZINOWEGO).
+
+ID ZDARZENIA W KLUCZU (przeglad 2026-10-04, T-1). Kill-switch ma staly tytul
+(`Kill-switch zadzialal (crypto)`), a limit z regula `po_ustaniu` potrafi
+zadzialac, zwolnic sie i zadzialac znowu w odstepach ok. 70 min. Bez
+`event_id` trzecie zatrzymanie z rzedu wygladalo jak powtorka drugiego i bylo
+tlumione - czyli ginela dokladnie ta seria, o ktorej wlasciciel musi wiedziec.
+Alarm bez `event_id` dopasowuje tylko wiersze bez niego (`IS NOT DISTINCT
+FROM NULL`), wiec reszta alarmow tlumi sie jak dotad. Limit godzinowy chroni
+telefon przed burza ROZNYCH alarmow; kill-switch w tej burzy jest wlasnie tym
+jednym, ktory ma dojsc, wiec go nie liczymy po stronie odbioru.
 
 Licznik to `notify.delivery` z `kind = 'bramka'` (migracja 0092), wiec widza go
 wszystkie procesy - API, dozorcy, CronJoby - i przezywa restart. Stlumiony
@@ -64,6 +76,9 @@ PIERWSZA_PRZERWA_MIN = 60
 MAKS_PRZERWA_MIN = 360
 PIERWSZA_PRZERWA_PO_BLEDZIE_MIN = 10
 LIMIT_NA_GODZINE = 10
+# Kody, ktorych limit godzinowy nie tlumi - patrz naglowek (T-1). Tlumienie
+# TEGO SAMEGO zdarzenia (powtorka, rytm po bledzie) obowiazuje je nadal.
+BEZ_LIMITU_GODZINOWEGO = frozenset({"killswitch.triggered", "killswitch.released"})
 
 # WhatsApp przyjmuje dlugie wiadomosci, ale tresc dluzsza niz ekran telefonu
 # nie jest czytana. Pelna tresc jest w panelu - tu ma dojsc sedno.
@@ -110,8 +125,12 @@ def przerwa_po_bledzie_min(nieudanych_24h: int) -> int:
 
 def ocen_powtorke(wyslanych_24h: int, od_ostatniej_min: float | None,
                   wyslanych_w_godzinie: int, nieudanych_24h: int = 0,
-                  od_nieudanej_min: float | None = None) -> str | None:
-    """Powod stlumienia albo None (wysylamy). CZYSTA FUNKCJA."""
+                  od_nieudanej_min: float | None = None, *,
+                  bez_limitu_godzinowego: bool = False) -> str | None:
+    """Powod stlumienia albo None (wysylamy). CZYSTA FUNKCJA.
+
+    `bez_limitu_godzinowego` pomija WYLACZNIE limit wszystkich alarmow na
+    godzine; powtorka tego samego alarmu i rytm po bledzie zostaja."""
     przerwa = wymagana_przerwa_min(wyslanych_24h)
     if przerwa and od_ostatniej_min is not None and od_ostatniej_min < przerwa:
         return (f"ten sam alarm wysłany {od_ostatniej_min:.0f} min temu "
@@ -121,7 +140,7 @@ def ocen_powtorke(wyslanych_24h: int, od_ostatniej_min: float | None,
         return (f"ten sam alarm NIE przeszedł przez bramkę {od_nieudanej_min:.0f} min "
                 f"temu ({nieudanych_24h}× w dobie), następna próba najwcześniej po "
                 f"{przerwa} min")
-    if wyslanych_w_godzinie >= LIMIT_NA_GODZINE:
+    if not bez_limitu_godzinowego and wyslanych_w_godzinie >= LIMIT_NA_GODZINE:
         return (f"limit {LIMIT_NA_GODZINE} alarmów na godzinę wyczerpany "
                 f"— reszta jest w panelu")
     return None
@@ -167,8 +186,6 @@ async def wyslij(temat: str, tresc: str, *, priorytet: str = "alarm",
     return odp
 
 
-# `ten` = ten sam alarm (kod + tytul + silnik). Limit godzinowy liczy tylko
-# wyslane - to on chroni telefon, a nieudana proba na telefon nie doszla.
 def url_stanu(url_wysylki: str) -> str:
     """`.../v1/wyslij` -> `.../v1/stan`. CZYSTA FUNKCJA."""
     baza = url_wysylki.rstrip("/")
@@ -202,6 +219,9 @@ async def stan(*, klient: httpx.AsyncClient | None = None) -> dict:
     return odp
 
 
+# `ten` = ten sam alarm (kod + tytul + silnik + `data.event_id`). Limit
+# godzinowy liczy tylko wyslane - to on chroni telefon, a nieudana proba na
+# telefon nie doszla.
 SQL_POWTORKI = (
     "SELECT count(*) FILTER (WHERE x.ten AND x.status = 'sent') AS ten_sam,"
     "       round(extract(epoch FROM now() - max(x.created_at) FILTER ("
@@ -213,7 +233,8 @@ SQL_POWTORKI = (
     "             WHERE x.ten AND x.status = 'failed')) / 60) AS od_nieudanej_min"
     "  FROM (SELECT d.status::text AS status, d.created_at,"
     "               (n.event_code = %s AND n.title = %s"
-    "                AND n.engine::text IS NOT DISTINCT FROM %s) AS ten"
+    "                AND n.engine::text IS NOT DISTINCT FROM %s"
+    "                AND n.data->>'event_id' IS NOT DISTINCT FROM %s) AS ten"
     "          FROM notify.delivery d"
     "          JOIN notify.notification n ON n.id = d.notification_id"
     "         WHERE d.kind = 'bramka' AND d.status IN ('sent', 'failed')"
@@ -248,14 +269,18 @@ async def przekaz(nid: int, event_code: str, severity: str, title: str, body: st
                 _brak_klucza_zgloszony = True
             return "brak-klucza"
 
-        stan = await fetch_one(SQL_POWTORKI, (event_code, title, engine)) or {}
+        zdarzenie = (dane or {}).get("event_id")
+        stan = await fetch_one(SQL_POWTORKI, (
+            event_code, title, engine,
+            None if zdarzenie is None else str(zdarzenie))) or {}
         od = stan.get("od_ostatniej_min")
         od_bledu = stan.get("od_nieudanej_min")
         powod = ocen_powtorke(int(stan.get("ten_sam") or 0),
                               None if od is None else float(od),
                               int(stan.get("w_godzinie") or 0),
                               int(stan.get("nieudanych") or 0),
-                              None if od_bledu is None else float(od_bledu))
+                              None if od_bledu is None else float(od_bledu),
+                              bez_limitu_godzinowego=event_code in BEZ_LIMITU_GODZINOWEGO)
         if powod:
             print(f"[bramka] {event_code} #{nid} stłumiony: {powod}", flush=True)
             await _slad(execute, nid, "suppressed_cooldown", 0, powod)

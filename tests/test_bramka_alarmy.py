@@ -209,7 +209,38 @@ def test_licznik_powtorek_pyta_o_TEN_alarm(z_kluczem):
     przekaz(slad, klient()[0], title="Worker X zamilkł", engine=None)
     sql, params = slad.zapytania[0]
     assert "x.status = 'sent'" in sql and "x.status = 'failed'" in sql
-    assert params == ("killswitch.triggered", "Worker X zamilkł", None)
+    assert params == ("killswitch.triggered", "Worker X zamilkł", None, None)
+
+
+def test_licznik_powtorek_rozroznia_zdarzenia_po_event_id(z_kluczem):
+    """T-1: kill-switch ma stały tytuł, więc bez `event_id` w kluczu kolejne
+    zatrzymanie z serii wyglądało jak powtórka poprzedniego."""
+    slad = Slad()
+    przekaz(slad, klient()[0], dane={"event_id": 501})
+    sql, params = slad.zapytania[0]
+    assert "n.data->>'event_id' IS NOT DISTINCT FROM %s" in sql
+    assert params == ("killswitch.triggered", "Kill-switch zadziałał (crypto)",
+                      "crypto", "501")
+
+
+def test_KILLSWITCH_omija_limit_godzinowy_a_powtorke_nie(z_kluczem):
+    """T-1 (c): dziesięć `engine.down` w godzinie nie może zjeść miejsca na
+    kill-switch. Ten sam kill-switch drugi raz w 30 min nadal jest tłumiony."""
+    assert przekaz(Slad(w_godzinie=bramka.LIMIT_NA_GODZINE), klient()[0]) == "sent"
+    assert bramka.ocen_powtorke(0, None, bramka.LIMIT_NA_GODZINE,
+                                bez_limitu_godzinowego=True) is None
+    assert bramka.ocen_powtorke(1, 30, 1, bez_limitu_godzinowego=True) is not None
+    assert {"killswitch.triggered", "killswitch.released"} <= bramka.BEZ_LIMITU_GODZINOWEGO
+
+
+def test_inny_alarm_przy_wyczerpanym_limicie_nadal_tlumiony(z_kluczem):
+    slad = Slad(w_godzinie=bramka.LIMIT_NA_GODZINE)
+
+    async def _():
+        return await bramka.przekaz(42, "engine.down", "critical", "Silnik milczy", "B",
+                                    "crypto", None, fetch_one=slad.fetch_one,
+                                    execute=slad.execute, klient=klient()[0])
+    assert asyncio.run(_()) == "suppressed_cooldown"
 
 
 # ------------------------------------------------- awaria nie przerywa wołającego
@@ -362,18 +393,72 @@ def test_BAZA_slad_i_licznik_powtorek_dzialaja_na_roli_wolajacego(rola):
             conn.execute(bramka.SQL_SLAD, (nid, "sent", 1, None, "sent"))
             conn.execute(bramka.SQL_SLAD, (nid, "failed", 1, "ConnectError", "failed"))
             stan = conn.execute(bramka.SQL_POWTORKI,
-                                ("killswitch.triggered", "T", None)).fetchone()
+                                ("killswitch.triggered", "T", None, None)).fetchone()
             assert stan["ten_sam"] == 1 and stan["w_godzinie"] == 1
             assert float(stan["od_ostatniej_min"]) == 0
             assert stan["nieudanych"] == 1 and float(stan["od_nieudanej_min"]) == 0
             inny = conn.execute(bramka.SQL_POWTORKI,
-                                ("killswitch.triggered", "T", "crypto")).fetchone()
+                                ("killswitch.triggered", "T", "crypto", None)).fetchone()
             assert inny["ten_sam"] == 0 and inny["od_ostatniej_min"] is None
             assert inny["nieudanych"] == 0 and inny["w_godzinie"] == 1
             sent_at = conn.execute(
                 "SELECT sent_at FROM notify.delivery WHERE notification_id = %s",
                 (nid,)).fetchone()["sent_at"]
             assert sent_at is not None
+
+
+def _seria_na_bazie(conn, uid, alarmy):
+    """Każdy alarm `(minut_temu, event_id, tytul)` jako wysłany wiersz bramki."""
+    for minut, eid, tytul in alarmy:
+        dane = "{}" if eid is None else f'{{"event_id": {eid}}}'
+        nid = conn.execute(
+            "INSERT INTO notify.notification (user_id, event_code, severity, title,"
+            " data, engine, created_at)"
+            " VALUES (%s, 'killswitch.triggered', 'critical', %s, %s::jsonb, 'crypto',"
+            "         now() - make_interval(mins => %s)) RETURNING id",
+            (uid, tytul, dane, minut)).fetchone()["id"]
+        conn.execute(
+            "INSERT INTO notify.delivery (notification_id, kind, status, attempts,"
+            " created_at, sent_at) VALUES (%s, 'bramka', 'sent', 1,"
+            " now() - make_interval(mins => %s), now() - make_interval(mins => %s))",
+            (nid, minut, minut))
+
+
+def _ocena_na_bazie(conn, tytul, eid):
+    stan = conn.execute(bramka.SQL_POWTORKI, (
+        "killswitch.triggered", tytul, "crypto",
+        None if eid is None else str(eid))).fetchone()
+    od = stan["od_ostatniej_min"]
+    return bramka.ocen_powtorke(int(stan["ten_sam"]), None if od is None else float(od),
+                                int(stan["w_godzinie"]), bez_limitu_godzinowego=True)
+
+
+@pytest.mark.skipif(not TEST_DB_URL, reason="ustaw TEST_DB_URL na jednorazową bazę")
+def test_BAZA_trzy_killswitche_z_roznym_event_id_w_140_min_ida_wszystkie():
+    """Scenariusz T-1 na prawdziwym SQL: zadziałanie o T, T+70, T+140. Przed
+    poprawką trzecie było `suppressed_cooldown` (2 wysłane, przerwa 120 min,
+    od ostatniego 70 min). Ten sam `event_id` po 30 min — nadal tłumiony.
+    Alarm bez `event_id` — tłumienie po tytule jak dotąd."""
+    import psycopg
+    from psycopg.rows import dict_row
+    tytul = "Kill-switch zadziałał (crypto)"
+    with psycopg.connect(TEST_DB_URL, row_factory=dict_row) as conn:
+        with conn.transaction(force_rollback=True):
+            uid = conn.execute(
+                "INSERT INTO app.\"user\" (login, password_hash) VALUES ('test-serii', 'x')"
+                " RETURNING id").fetchone()["id"]
+            assert _ocena_na_bazie(conn, tytul, 901) is None
+            _seria_na_bazie(conn, uid, [(140, 901, tytul)])
+            assert _ocena_na_bazie(conn, tytul, 902) is None
+            _seria_na_bazie(conn, uid, [(70, 902, tytul)])
+            assert _ocena_na_bazie(conn, tytul, 903) is None, "trzecie zatrzymanie stłumione"
+            # Ten sam event_id 30 min po wysłaniu - powtórka, tłumiona.
+            _seria_na_bazie(conn, uid, [(30, 903, tytul)])
+            assert _ocena_na_bazie(conn, tytul, 903) is not None
+            # Bez event_id: dwa wysłane, ostatni 20 min temu -> tłumiony po tytule.
+            _seria_na_bazie(conn, uid, [(100, None, "Worker X"), (20, None, "Worker X")])
+            assert _ocena_na_bazie(conn, "Worker X", None) is not None
+            assert _ocena_na_bazie(conn, "Worker Y", None) is None
 
 
 # ------------------------------------------------- czy bramka zna klucz (dozór)

@@ -319,6 +319,28 @@ def test_bez_killswitcha_wysylka_obejmuje_wejscia(swiat):
     assert swiat.wywolania["zloz_oczekujace"][0]["tylko_wyjscia"] is False
 
 
+def test_KILLSWITCH_zapisany_W_TRAKCIE_cyklu_wstrzymuje_wysylke_wejsc(swiat, monkeypatch):
+    """T-2 (przegląd 2026-10-04): dozorca albo panel zapisuje kill-switch po
+    `check_account`, a przed wysyłką. Decyzja wejścia już zapadła (zostaje
+    w dzienniku), ale na giełdę idą wyłącznie wyjścia."""
+    swiat.wyniki = {1: 0.6, 2: 0.05}
+
+    async def stan_sesji(cur, engine, gielda):
+        # Odczyt sesji przed wysyłką = chwila między decyzją a wysyłką.
+        swiat.killswitch = {"id": 31, "reason": "ręcznie z panelu"}
+        return StanSesji(otwarta=True, zrodlo="test")
+
+    monkeypatch.setattr(loop, "stan_sesji", stan_sesji)
+    stats, cur = cykl(swiat, gielda=object(), sesja=StanSesji(otwarta=True, zrodlo="test"))
+
+    assert swiat.sprawdzone_konto == 1
+    assert [d["action"] for d in swiat.decyzje if d["iid"] == 1] == ["enter_long"]
+    assert stats["wstrzymanie_killswitch_id"] is None
+    (wysylka,) = swiat.wywolania["zloz_oczekujace"]
+    assert wysylka["tylko_wyjscia"] is True
+    assert swiat.wywolania["ponow_nieznane"][0]["tylko_wyjscia"] is True
+
+
 def test_likwidacja_po_killswitchu_tylko_za_przelacznikiem(swiat):
     swiat.killswitch = {"id": 23, "reason": "obsunięcie"}
     stats, _ = cykl(swiat, gielda=object(), likwiduj=True)

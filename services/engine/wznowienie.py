@@ -267,12 +267,23 @@ async def wznow(fetch_all, fetch_one, execute, notify, engine: str = "crypto",
             (engine, mode, nazwa))
         if (ile or {}).get("n", 0) >= lim["max_wznowien"]:
             # STAN, nie zdarzenie: licznik dobowy opada sam i dopoki nie opadnie,
-            # ta linia powtarzalaby sie co cykl. Powiadomienie nizej ma wlasne
-            # tlumienie po stronie `notify()` i nie zalezy od tego rytmu.
+            # ta linia powtarzalaby sie co cykl.
+            #
+            # POWIADOMIENIE RAZ NA ZDARZENIE (przeglad 2026-10-04, T-3). Do tej
+            # poprawki komentarz mowil, ze `notify()` to wytlumi - ale
+            # `killswitch.triggered` jest `always_on`, a `always_on` omija
+            # cooldown. Wynik: alarm krytyczny co 60 s (rytm dozorcy) przez
+            # cala dobe, do ~1440 wierszy w dzwonku. Znacznik to samo
+            # powiadomienie: `data.event_id` + `data.rodzaj = 'licznik'`.
             dz.stan(klucz, f"licznik:{ile['n']}",
                     f"  {opis}: {ile['n']} automatycznych wznowień w dobie przy "
                     f"limicie {lim['max_wznowien']} — dalej wyłącznie ręcznie")
-            if not sucho:
+            juz = None if sucho else await fetch_one(
+                "SELECT 1 AS jest FROM notify.notification"
+                " WHERE event_code = 'killswitch.triggered'"
+                "   AND data->>'event_id' = %s AND data->>'rodzaj' = 'licznik'"
+                " LIMIT 1", (str(z["id"]),))
+            if not sucho and not juz:
                 for u in await fetch_all('SELECT id FROM app."user" WHERE is_active'):
                     await notify(
                         u["id"], "killswitch.triggered",
@@ -282,7 +293,8 @@ async def wznow(fetch_all, fetch_one, execute, notify, engine: str = "crypto",
                         f"To znaczy, że przyczyna trwa, a miara ją gubi. Automatyczne "
                         f"wznowienie zostało wstrzymane — zdarzenie czeka na decyzję.",
                         engine=engine, severity="critical",
-                        data={"limit": nazwa, "wznowien_24h": ile["n"]})
+                        data={"limit": nazwa, "wznowien_24h": ile["n"],
+                              "event_id": z["id"], "rodzaj": "licznik"})
             continue
 
         ustal, dowod = warunek_ustal(nazwa, float(lim["value"]), stan)
@@ -303,15 +315,23 @@ async def wznow(fetch_all, fetch_one, execute, notify, engine: str = "crypto",
             " released_auto = true, release_note = %s"
             " WHERE id = %s AND released_at IS NULL",
             (f"Wznowienie automatyczne ({lim['wznowienie']}): {dowod}", z["id"]))
+        # `killswitch.released` / `critical` (T-4, T-6): handel wraca bez
+        # czlowieka, wiec wiadomosc idzie przez bramke na telefon. Jako
+        # `warning` lezala tylko w dzwonku, a wlasciciel po alarmie
+        # o zatrzymaniu uwazal, ze handel stoi.
+        wznowien = int((ile or {}).get("n", 0)) + 1
         for u in await fetch_all('SELECT id FROM app."user" WHERE is_active'):
             await notify(
-                u["id"], "killswitch.triggered",
-                f"Kill-switch zwolniony automatycznie ({engine})",
+                u["id"], "killswitch.released",
+                f"Kill-switch zwolniony AUTOMATYCZNIE ({engine}) — {nazwa}",
                 f"Zatrzymanie: {z['reason']}\n\nPodstawa wznowienia: {dowod}\n\n"
+                f"To {wznowien}. automatyczne wznowienie tego limitu w ciągu doby "
+                f"(najwyżej {lim['max_wznowien']}).\n\n"
                 f"Silnik wraca do handlu przy najbliższym cyklu. Zatrzymanie "
                 f"i wznowienie są w zakładce Ryzyko.",
-                engine=engine, severity="warning",
-                data={"limit": nazwa, "dowod": dowod, "event_id": z["id"]})
+                engine=engine, severity="critical",
+                data={"limit": nazwa, "dowod": dowod, "event_id": z["id"],
+                      "reczny": False, "wznowien_24h": wznowien})
 
     if sucho and zwolnione:
         print("Tryb suchy — nic nie zwolniono.")

@@ -161,6 +161,28 @@ def test_zwolnienie_z_haslem_zapisuje_kto_i_audyt(monkeypatch):
     assert [akcja for akcja, _ in a.audyt] == ["risk.killswitch_released"]
 
 
+def test_zwolnienie_wysyla_ALARM_krytyczny_kto_i_event_id(monkeypatch):
+    """T-6: zwolnienie wznawia handel, więc ma dojść do właściciela tak samo
+    jak zatrzymanie - nie tylko do `app.audit`."""
+    a = Atrapa(zdarzenie=AKTYWNE)
+    zwolnij(monkeypatch, a)
+    assert [u for u, *_ in a.alarmy] == [7, 8]
+    _, kod, tytul, tresc, kw = a.alarmy[0]
+    assert kod == "killswitch.released" and kw["severity"] == "critical"
+    assert kw["engine"] == "crypto"
+    assert kw["data"]["kto"] == "wlasciciel" and kw["data"]["event_id"] == 501
+    assert kw["data"]["reczny"] is True and kw["data"]["powod_pierwotny"] == "max_drawdown"
+    assert "ZWOLNIONY" in tytul and "obsunięcie wyjaśnione" in tresc
+    assert "max_drawdown" in tresc and "najbliższym cyklu" in tresc
+
+
+def test_odmowa_zwolnienia_nie_wysyla_alarmu_o_zwolnieniu(monkeypatch):
+    a = Atrapa(haslo_ok=False, zdarzenie=AKTYWNE)
+    with pytest.raises(HTTPException):
+        zwolnij(monkeypatch, a)
+    assert a.alarmy == []
+
+
 def test_haslo_sprawdzane_ZANIM_odpowiedz_zdradzi_zdarzenie(monkeypatch):
     """404 dla nieistniejącego zdarzenia nie może iść przed hasłem."""
     a = Atrapa(haslo_ok=False, zdarzenie=None)

@@ -291,6 +291,24 @@ async def zwolnij_killswitch(engine: Silnik, event_id: int, body: ZwolnienieBody
                 before={"reason": z["reason"], "released_at": None},
                 after={"release_note": body.note.strip()}, request=request)
 
+    # ALARM O ZWOLNIENIU (przeglad 2026-10-04, T-6). Do tej poprawki slad byl
+    # wylacznie w `app.audit`, do ktorego nikt nie zaglada - przejeta sesja
+    # z haslem zwalniala `max_drawdown` po cichu. `critical`, wiec przez bramke
+    # na telefon; w tle, jak przy zatrzymaniu, zeby martwy kanal nie wydluzal
+    # odpowiedzi.
+    ip = request.client.host if request is not None and request.client else "?"
+    notatka = body.note.strip()
+    for u in await fetch_all('SELECT id FROM app."user" WHERE is_active'):
+        await powiadom_o_bezpieczenstwie(
+            u["id"], "killswitch.released",
+            f"Kill-switch ZWOLNIONY ręcznie ({engine})",
+            f"Zwolnił: {user['login']} (IP {ip}).\n\nNotatka: {notatka}\n\n"
+            f"Pierwotny powód zatrzymania: {z['reason']}\n\n"
+            f"Silnik wraca do handlu przy najbliższym cyklu.",
+            engine=engine, severity="critical",
+            data={"event_id": event_id, "kto": user["login"], "reczny": True,
+                  "powod_pierwotny": z["reason"], "notatka": notatka})
+
     return {"ok": True, "message": "Kill-switch zwolniony. Silnik wróci do handlu "
                                    "przy najbliższym cyklu decyzyjnym."}
 
