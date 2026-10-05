@@ -518,3 +518,57 @@ def test_zaden_modul_nie_ma_definicji_ZA_STRAZNIKIEM_main():
 
     assert not winne, (
         "te definicje nie istnieją przy uruchomieniu skryptu:\n" + "\n".join(winne))
+
+
+# ROZJAZD STAWEK TO STAN, NIE ZDARZENIE (2026-10-05). Maker na api-demo.bybit.eu
+# skoczył z 0,100% na 0,250% i każdy przebieg czujki (co 10 min) kończył się
+# czerwonym Jobem bez powiadomienia. Teraz: jedno `koszty.rozjazd` na zmianę
+# stawek, kod 1 tylko w przebiegu, który je wysłał.
+
+def _zglos(juz_zgloszone: bool):
+    from services.exchanges.mozliwosci import zglos_rozjazd_stawek
+    from decimal import Decimal
+
+    wyslane, zapytania = [], []
+
+    async def fetch_all(sql, params=None):
+        zapytania.append((sql, params))
+        if "notify.notification" in sql:
+            return [{"?column?": 1}] if juz_zgloszone else []
+        if 'app."user"' in sql:
+            return [{"id": 7}]
+        return []
+
+    async def notify(uid, kod, tytul, tresc, **kw):
+        wyslane.append((uid, kod, kw))
+
+    kod = asyncio.run(zglos_rozjazd_stawek(
+        fetch_all, notify, "spot_eu",
+        {"maker": Decimal("0.0025"), "taker": Decimal("0.0025")},
+        ["maker: giełda nalicza 0.2500%, kod zakłada 0.1000%"]))
+    return kod, wyslane, zapytania
+
+
+def test_rozjazd_stawek_NOWY_idzie_powiadomieniem_i_kodem_1():
+    kod, wyslane, zapytania = _zglos(juz_zgloszone=False)
+    assert kod == 1
+    assert wyslane == [(7, "koszty.rozjazd",
+                        {"data": {"kind": "spot_eu", "maker": "0.0025",
+                                  "taker": "0.0025"}})]
+    # Tłumienie po TYCH SAMYCH stawkach: inna zmiana ma się odezwać od razu.
+    (_, p), = [z for z in zapytania if "notify.notification" in z[0]]
+    assert (p["maker"], p["taker"], p["kind"]) == ("0.0025", "0.0025", "spot_eu")
+
+
+def test_rozjazd_stawek_JUZ_ZGLOSZONY_milczy_w_kodzie_ale_nie_w_logu(capsys):
+    kod, wyslane, _ = _zglos(juz_zgloszone=True)
+    assert kod == 0 and wyslane == []
+    assert "JUŻ ZGŁOSZONY" in capsys.readouterr().out
+
+
+def test_migracja_0094_typ_zdarzenia_rozjazdu_stawek():
+    tresc = (KORZEN / "db/migrations/0094_koszty_rozjazd.sql").read_text(
+        encoding="utf-8")
+    assert "'koszty.rozjazd'" in tresc and "SET LOCAL lock_timeout" in tresc
+    assert "ON CONFLICT (code) DO NOTHING" in tresc
+    assert tresc.rstrip().endswith("COMMIT;")

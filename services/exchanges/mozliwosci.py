@@ -337,7 +337,14 @@ async def main() -> int:
                     print(f"  ROZJAZD STAWEK {r}")
                 if not rozjazdy_stawek:
                     print("  zgodny")
-                return 1 if rozjazdy_stawek else 0
+                    return 0
+                if not zmierzone:
+                    # NIE ZMIERZONO - to awaria sprawdzenia, nie stan do
+                    # zgloszenia, wiec zostaje kodem wyjscia.
+                    return 1
+                from services.api.notifications import notify
+                return await zglos_rozjazd_stawek(fetch_all, notify, args.kind,
+                                                  zmierzone, rozjazdy_stawek)
 
             wynik = await zbadaj(adapter)
             print(f"host {host} (tryb {args.mode})")
@@ -426,6 +433,57 @@ def rozjazd_stawek(zmierzone: dict, modelowane, prog=None) -> list[str]:
                 f"{Decimal(str(w_kodzie)):.4%} (różnica {roznica:.4%}) — "
                 f"rachunek papierowy i backtest liczą po nieprawdziwej stawce")
     return out
+
+
+# Co ile przypominac o rozjezdzie, ktory sie NIE ZMIENIL. Cennik poprawia sie
+# commitem, nie z minuty na minute - przypomnienie co 10 minut (rytm czujki)
+# nie przyspieszy go, a tydzien nie pozwoli o nim zapomniec.
+STAWKI_PRZYPOMNIENIE_H = 7 * 24
+
+
+async def zglos_rozjazd_stawek(fetch_all, notify, kind: str, zmierzone: dict,
+                               rozjazdy: list[str]) -> int:
+    """Jedno powiadomienie `koszty.rozjazd` na ZMIANE stawek, nie na przebieg.
+
+    DO 2026-10-05 JEDYNYM SYGNALEM BYL KOD WYJSCIA. Rozjazd jest STANEM - trwa,
+    dopoki ktos nie poprawi CENNIKA albo gielda nie wroci do starej stawki -
+    a czujka chodzi co 10 minut. Zmierzone tego dnia: maker na api-demo.bybit.eu
+    skoczyl z 0,100% na 0,250% okolo 10:10 UTC i od tej chwili KAZDY Job
+    `trader-zywotnosc` padal, ArgoCD trzymalo `trader` w Degraded, a monitoring
+    VPS slal alarm "Job zakonczony niepowodzeniem" bez slowa o przyczynie.
+    To ta sama wada, ktora `dozor.py` opisuje przy `kod_wyjscia`.
+
+    Teraz jak kazda czujka w `dozor.py`: powiadomienie, gdy zmierzone stawki
+    sa INNE niz w ostatnim zgloszeniu (albo minelo STAWKI_PRZYPOMNIENIE_H),
+    kod 1 tylko w tym przebiegu, a stan przy kazdym przebiegu w logu.
+    """
+    stawki = {k: str(v) for k, v in zmierzone.items()}
+    juz = await fetch_all(
+        "SELECT 1 FROM notify.notification WHERE event_code = 'koszty.rozjazd'"
+        "   AND data->>'kind' = %(kind)s"
+        "   AND data->>'maker' = %(maker)s AND data->>'taker' = %(taker)s"
+        "   AND created_at > now() - make_interval(hours => %(h)s)"
+        " LIMIT 1", {"kind": kind, "maker": stawki.get("maker"),
+                     "taker": stawki.get("taker"), "h": STAWKI_PRZYPOMNIENIE_H})
+    if juz:
+        # Ten sam zapis co `dozor.kod_wyjscia` - zero musi powiedziec, dlaczego
+        # jest zerem. Bez importu: `dozor` ciagnie dozorce i cala baze.
+        print(f"  {len(rozjazdy)} × rozjazd stawek: stan TRWAŁY i JUŻ ZGŁOSZONY, "
+              f"powiadomienie w tłumieniu — kod wyjścia z tego przebiegu tego "
+              f"NIE powtarza (opis stanu wyżej; to nie jest zgoda na stan)")
+        return 0
+
+    tytul = f"Cennik {kind}: giełda nalicza inne stawki niż kod"
+    tresc = ("\n".join(f"• {r}" for r in rozjazdy)
+             + "\n\nRachunek papierowy, backtest i trening liczą po stawce z "
+               "`services/engine/koszty.py` (CENNIK). Popraw cennik albo "
+               "sprawdź, czy zmiana po stronie giełdy jest trwała.")
+    odbiorcy = await fetch_all('SELECT id FROM app."user" WHERE is_active')
+    for u in odbiorcy:
+        await notify(u["id"], "koszty.rozjazd", tytul, tresc,
+                     data={"kind": kind, **stawki})
+    print(f"  powiadomiono odbiorców: {len(odbiorcy)}")
+    return 1
 
 
 if __name__ == "__main__":
