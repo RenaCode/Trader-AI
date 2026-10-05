@@ -40,6 +40,7 @@ from services.engine.horizons import DEFAULT_BAR, HORIZONS, Horizon, get as get_
 from services.engine import stan_kapitalu, strategia_momentum
 from services.engine.risk import RiskKernel
 from services.engine.sesja import StanSesji, stan_sesji
+from services.engine.zatrzymanie import Zatrzymanie
 from services.ingest.features import wklady_newsow
 from services.ingest import puls
 from services.engine.uniwersum import (odcisk, opis_wykluczen,
@@ -3262,7 +3263,12 @@ async def main() -> int:
     # Sonda zywotnosci (`puls.zyje`, templates/workers.yaml): na starcie i po
     # kazdym obrocie petli, takze nieudanym.
     puls.zyje(args.interval)
+    # LAGODNE ZATRZYMANIE (P-T4): SIGTERM konczy petle na granicy cyklu, a nie
+    # w srodku transakcji - patrz services/engine/zatrzymanie.py.
+    zatrzymanie = Zatrzymanie().zarejestruj()
     while True:
+        if zatrzymanie.ustawione:
+            return 0
         t0 = datetime.now(timezone.utc)
         try:
             with psycopg.connect(url, row_factory=dict_row) as conn:
@@ -3356,7 +3362,8 @@ async def main() -> int:
             # wywolanie z `--once` (reczne sprawdzenie, Job, skrypt) widzialo
             # sukces tam, gdzie cykl sie wywrocil.
             return 1 if pod_rzad else 0
-        await asyncio.sleep(args.interval)
+        if await zatrzymanie.czekaj(args.interval):
+            return 0
 
 
 if __name__ == "__main__":

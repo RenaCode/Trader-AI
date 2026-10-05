@@ -1,0 +1,14 @@
+{{/*
+P-T4 (T-10). Baza, silnik i dozorca maja pierwszenstwo przed reszta tradera
+i przed innymi aplikacjami na wezle: przy braku pamieci scheduler wywlaszcza
+nizszy priorytet zamiast zostawiac rdzen w Pending. Nie jest domyslna klasa.
+*/}}
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: trader-rdzen
+  labels: {{- include "trader.labels" . | nindent 4 }}
+value: 100000
+globalDefault: false
+preemptionPolicy: PreemptLowerPriority
+description: "Trader: baza, silnik i dozorca (P-T4)"

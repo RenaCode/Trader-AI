@@ -78,6 +78,13 @@ spec:
       {{- include "trader.podBezUprawnien" $ | nindent 6 }}
       # Zaden worker nie rozmawia z API Kubernetesa (audyt Fable U-8).
       automountServiceAccountToken: false
+      # LAGODNE ZATRZYMANIE (P-T4). Silnik i dozorca koncza sie na SIGTERM
+      # miedzy cyklami (services/engine/zatrzymanie.py); termin musi byc dluzszy
+      # niz najdluzszy cykl, inaczej SIGKILL i tak przetnie transakcje.
+      terminationGracePeriodSeconds: {{ $w.terminationGracePeriodSeconds | default 60 }}
+      {{- if $w.priorityClass }}
+      priorityClassName: trader-rdzen
+      {{- end }}
       {{/*
       BRAMKA MIGRACJI.
 

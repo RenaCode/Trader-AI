@@ -102,6 +102,7 @@ from psycopg.rows import dict_row
 from services.engine.risk import RiskKernel
 from services.ingest import puls
 from services.engine.wznowienie import wznow
+from services.engine.zatrzymanie import Zatrzymanie
 
 # Pętla co minutę. CronJob dałby najmniej 10 minut (częściej zasypywałoby
 # klaster podami) i tyle samo wynosiłoby wtedy opóźnienie reakcji. Ten proces
@@ -214,9 +215,14 @@ async def petla(engine: str, mode: str, raz: bool = False) -> int:
     poprzedni: str | None = None
     pod_rzad = 0
     puls.zyje(INTERWAL_S, PODLOGA_ZYWOTNOSCI_S)
+    # LAGODNE ZATRZYMANIE (P-T4): SIGTERM konczy petle miedzy cyklami, a nie
+    # w srodku transakcji - patrz services/engine/zatrzymanie.py.
+    zatrzymanie = Zatrzymanie().zarejestruj()
     try:
         with psycopg.connect(url, row_factory=dict_row) as conn:
             while True:
+                if zatrzymanie.ustawione:
+                    return 0
                 started = datetime.now(timezone.utc)
                 blad: str | None = None
                 try:
@@ -291,7 +297,8 @@ async def petla(engine: str, mode: str, raz: bool = False) -> int:
                     return 1 if blad else 0
                 # Obrot petli, takze nieudany - sonda zywotnosci (`puls.zyje`).
                 puls.zyje(INTERWAL_S, PODLOGA_ZYWOTNOSCI_S)
-                await asyncio.sleep(INTERWAL_S)
+                if await zatrzymanie.czekaj(INTERWAL_S):
+                    return 0
     finally:
         await close_pool()
 

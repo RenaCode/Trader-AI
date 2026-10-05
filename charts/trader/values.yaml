@@ -131,9 +131,12 @@ db:
       user: trader_postmortem
       secretKey: POSTMORTEM_DB_PASSWORD
   appUsername: trader_app
+  # P-T4 (T-10): request 512Mi przy zmierzonych 846Mi (04.10) robil z bazy
+  # pierwszego kandydata do OOM przy presji pamieci wezla. 1280Mi = pomiar
+  # + zapas na trenera i nocny zrzut; limit bez zmian.
   resources:
     limits:   { cpu: 2000m, memory: 3Gi }
-    requests: { cpu: 250m,  memory: 512Mi }
+    requests: { cpu: 250m,  memory: 1280Mi }
   persistence:
     size: 20Gi
     storageClass: local-path
@@ -409,6 +412,9 @@ workers:
   # Petla decyzyjna. Odpala sie po cechach, wiec ma wlasny, przesuniety cykl.
   engine:
     enabled: true
+    # P-T4: cykl w toku musi sie domknac przed SIGKILL-em.
+    terminationGracePeriodSeconds: 150
+    priorityClass: true
     # Przed wejsciem w petle silnik wykonuje KONTROLE: te same zapytania co
     # produkcja, bez zapisu. Blad w nazwie kolumny wywracal petle przy kazdym
     # przebiegu, a jedynym sladem byl wpis w logu, ktorego nikt nie czytal.
@@ -538,6 +544,9 @@ workers:
   # (razem z brakiem dozorcy dla `engine='equity'`) jest osobna decyzja.
   engine-equity:
     enabled: true
+    # P-T4: cykl w toku musi sie domknac przed SIGKILL-em.
+    terminationGracePeriodSeconds: 150
+    priorityClass: true
     command: ["sh", "-c", "sleep 90; python services/engine/loop.py --engine equity --bar 1h --sprawdz && exec python services/engine/loop.py --engine equity --bar 1h --interval 300 --kind stock --limit --wymagaj-modelu --egzekucja gielda --mode demo"]
     resources:
       limits:   { cpu: 1000m, memory: 512Mi }
@@ -588,6 +597,9 @@ workers:
   # ten sam stan i moglyby zwolnic to samo zdarzenie dwukrotnie.
   dozorca:
     enabled: true
+    # P-T4: cykl w toku musi sie domknac przed SIGKILL-em.
+    terminationGracePeriodSeconds: 90
+    priorityClass: true
     # JEDYNY worker, ktory NIE chodzi rola silnika (migracja 0034). Nadzorca
     # zwalniajacy kill-switcha poswiadczeniami nadzorowanego nie jest nadzorca -
     # jest ta sama awaria o jeden poziom wyzej.
@@ -634,6 +646,9 @@ workers:
   # dobranie mu WIEKSZYCH limitow byloby zapasem bez pomiaru.
   dozorca-equity:
     enabled: true
+    # P-T4: cykl w toku musi sie domknac przed SIGKILL-em.
+    terminationGracePeriodSeconds: 90
+    priorityClass: true
     # Ta sama waska rola co dozorca krypto (migracja 0034). Nadania nie zaleza
     # od silnika - nie ma tu RLS ani wierszy per tor - wiec `trader_dozorca`
     # wystarcza dla equity bez ani jednego nowego GRANT-u. Sprawdzone na bazie
