@@ -106,6 +106,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
+import re
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -3499,13 +3500,33 @@ MIN_PRZEBIEGOW_ODSTEPU = 3
 # zaczynaloby sie alarmem o zadaniach, ktore jeszcze nie mialy kiedy pojsc.
 BRAK_WIERSZY_PO_DNIACH = 8
 
+# PRZEBIEG PLANOWY A RECZNY (poprawka B, 2026-10-05).
+#
+# 2026-10-04 planowy trener 4h padl na `connection refused`, ktos powtorzyl go
+# recznie (`kubectl create job --from=cronjob/...`) i ten przebieg przeszedl.
+# Czujka patrzyla wylacznie na OSTATNI wiersz, wiec zielone powtorzenie zakrylo
+# padniety harmonogram - a to harmonogram bedzie chodzil w nastepnym tygodniu,
+# nie czlowiek.
+#
+# Rozroznienie z kolumny `pod` (0074, `HOSTNAME` poda), bez nowej kolumny:
+# kontroler CronJobow nazywa Job `<cronjob>-<minuta planowa od epoki>`,
+# a Job dokleja do nazwy poda piec losowych znakow. Job reczny ma nazwe nadana
+# przez czlowieka. Wiersz bez `pod` liczy sie jako PLANOWY - to zachowanie
+# sprzed tej zmiany, w ktorym kazdy przebieg byl oceniany jak planowy.
+POD_PLANOWY = re.compile(r"-\d{8,}-[a-z0-9]{5}$")
+
+
+def przebieg_planowy(przebieg: dict) -> bool:
+    pod = przebieg.get("pod")
+    return not pod or bool(POD_PLANOWY.search(pod))
+
 
 def ocen_zadania(historia: dict[str, list[dict]], teraz: datetime,
                  dziennik_od: datetime | None) -> list[tuple[str, str]]:
     """Ktore zadania zawiodly albo zamilkly. CZYSTA FUNKCJA.
 
     `historia`: nazwa -> przebiegi od najnowszego (`id`, `finished_at`,
-    `exit_code`). `dziennik_od`: najstarszy wiersz `risk.job_run` w ogole.
+    `exit_code`, `pod` - patrz `przebieg_planowy`). `dziennik_od`: najstarszy wiersz `risk.job_run` w ogole.
     Zwraca (klucz, opis); klucz niesie id przebiegu, wiec nowy nieudany
     przebieg jest nowym znaleziskiem, a ten sam - przypomnieniem.
     """
@@ -3524,6 +3545,18 @@ def ocen_zadania(historia: dict[str, list[dict]], teraz: datetime,
                           f"{nazwa}: ostatni przebieg "
                           f"{ostatni['finished_at']:%m-%d %H:%M} zakończony "
                           f"kodem {ostatni['exit_code']}"))
+            continue
+        # Ostatni przeszedl, ale byl reczny: rozstrzyga ostatni PLANOWY.
+        planowy = next((p for p in przebiegi if przebieg_planowy(p)), None)
+        if planowy is not None and planowy["exit_code"] != 0 \
+                and not przebieg_planowy(ostatni):
+            braki.append((f"{nazwa}:planowy:{planowy['id']}",
+                          f"{nazwa}: ostatni PLANOWY przebieg "
+                          f"{planowy['finished_at']:%m-%d %H:%M} zakończony kodem "
+                          f"{planowy['exit_code']}. Ręczne powtórzenie "
+                          f"{ostatni['pod']} ({ostatni['finished_at']:%m-%d %H:%M}) "
+                          f"przeszło, ale harmonogram nadal zawodzi — następny "
+                          f"planowy przebieg może paść z tego samego powodu"))
             continue
         if len(przebiegi) < MIN_PRZEBIEGOW_ODSTEPU:
             continue
@@ -3549,7 +3582,7 @@ async def sprawdz_zadania(fetch_all, notify, sucho: bool = False, *,
               "żadnego, czujka nie ma czego oceniać")
         return 0
     wiersze = await fetch_all(
-        "SELECT id, nazwa, finished_at, exit_code FROM ("
+        "SELECT id, nazwa, finished_at, exit_code, pod FROM ("
         "  SELECT j.*, row_number() OVER (PARTITION BY nazwa"
         "                                 ORDER BY finished_at DESC) AS nr"
         "    FROM risk.job_run j WHERE nazwa = ANY(%s)) x"
