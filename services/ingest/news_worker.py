@@ -918,7 +918,8 @@ def _mozna_jeszcze(a: dict, etap: str) -> bool:
 
 
 def zapisz_analize(cur, article_id: int, model: str, data: dict, usage: dict,
-                   price: float, published, instruments: dict[str, int]) -> None:
+                   price: float, published,
+                   instruments: dict[str, tuple[int, ...]]) -> None:
     """Zapis wyniku analizy i powiazan z instrumentami.
 
     Wydzielone, bo korzystaja z tego DWIE sciezki: analiza swiezo pobranego
@@ -941,14 +942,62 @@ def zapisz_analize(cur, article_id: int, model: str, data: dict, usage: dict,
          data["reasoning"], json.dumps(data), usage["input"], usage["output"],
          price, published),
     )
-    for sym in data.get("instruments", []):
-        iid = instruments.get(sym.upper())
-        if iid:
-            cur.execute(
-                "INSERT INTO news.article_instrument (article_id, instrument_id, relevance)"
-                " VALUES (%s,%s,%s) ON CONFLICT DO NOTHING",
-                (article_id, iid, max(0.0, min(1.0, data["confidence"]))),
-            )
+    # Symbol z LLM -> WSZYSTKIE instrumenty o tym samym aktywie bazowym
+    # (`mapa_instrumentow`). Zbior, bo dwa symbole tego samego aktywa w jednej
+    # odpowiedzi (ETHUSDT i ETHUSDC) daja te same powiazania.
+    powiazane = sorted({iid for sym in data.get("instruments", [])
+                        for iid in instruments.get(str(sym).upper(), ())})
+    for iid in powiazane:
+        cur.execute(
+            "INSERT INTO news.article_instrument (article_id, instrument_id, relevance)"
+            " VALUES (%s,%s,%s) ON CONFLICT DO NOTHING",
+            (article_id, iid, max(0.0, min(1.0, data["confidence"]))),
+        )
+
+
+# Kolumny dla `mapa_instrumentow`. Stala, bo test na prawdziwej bazie wola TO
+# SAMO zapytanie - atrapa oddajaca `base_ccy` przeszlaby takze wtedy, gdyby
+# SELECT go nie pobieral.
+SQL_INSTRUMENTY = ("SELECT id, symbol, engine::text AS engine, base_ccy, quote_ccy"
+                   " FROM ref.instrument WHERE active")
+
+
+def aktywo_bazowe(wiersz: dict) -> str:
+    """'ETH' dla ETHUSDT i ETHUSDC. `base_ccy` bywa puste (pary z 0018 i akcje
+    z 0047 go nie maja), wiec wtedy symbol bez waluty kwotowania; akcja, ktorej
+    symbol nie konczy sie na walucie (AAPL / USD), jest swoim aktywem."""
+    if wiersz.get("base_ccy"):
+        return wiersz["base_ccy"].upper()
+    symbol = wiersz["symbol"].upper()
+    quote = (wiersz.get("quote_ccy") or "").upper()
+    if quote and symbol.endswith(quote) and len(symbol) > len(quote):
+        return symbol[:-len(quote)]
+    return symbol
+
+
+def mapa_instrumentow(wiersze: list[dict]) -> dict[str, tuple[int, ...]]:
+    """Symbol -> id wszystkich aktywnych instrumentow o tym samym aktywie
+    bazowym w tym samym silniku (poprawka C, 2026-10-05).
+
+    DLACZEGO. Prompt analizy wymienia wszystkie aktywne symbole, a LLM wskazuje
+    zwykle pare najbardziej znana - ETHUSDT. Uniwersum decyzyjne stoi od 0023 na
+    parach USDC (bybit.eu nie ma par USDT), wiec do 05.10 news o ETH zasilal
+    ceche `news` pary, ktora nie handlujemy, a ETHUSDC dostawal go tylko wtedy,
+    gdy model akurat wymienil oba symbole. Wiadomosc dotyczy aktywa, nie pary.
+
+    TYLKO DO PRZODU. Powiazania sprzed tej zmiany zostaja, jakie byly:
+    `news.article_instrument` nie ma `ingested_at`, wiec dopisane wstecz
+    weszlyby do cech swiec, w ktorych tej wiedzy jeszcze nie bylo
+    (docs/hipotezy.md, uwaga do H-4).
+    """
+    grupy: dict[tuple[str, str], list[int]] = {}
+    for w in wiersze:
+        grupy.setdefault((w["engine"], aktywo_bazowe(w)), []).append(w["id"])
+    mapa: dict[str, set[int]] = {}
+    for w in wiersze:
+        mapa.setdefault(w["symbol"].upper(), set()).update(
+            grupy[(w["engine"], aktywo_bazowe(w))])
+    return {s: tuple(sorted(ids)) for s, ids in mapa.items()}
 
 
 # Okno, w ktorym artykul moze jeszcze wejsc do jakiejkolwiek swiecy.
@@ -964,7 +1013,8 @@ def zapisz_analize(cur, article_id: int, model: str, data: dict, usage: dict,
 OKNO_ZALEGLOSCI_H = 24
 
 
-async def nadrob_zaleglosci(conn, cur, ai: Dostawca, instruments: dict[str, int],
+async def nadrob_zaleglosci(conn, cur, ai: Dostawca,
+                            instruments: dict[str, tuple[int, ...]],
                             symbols: list[str], budzet: Budzet, stats: dict,
                             verbose: bool) -> None:
     """Analiza artykulow zapisanych wczesniej, ktore analizy nie dostaly.
@@ -1203,8 +1253,8 @@ async def run_cycle(conn, ai: Dostawca | None, http: httpx.AsyncClient,
               f"po północy UTC.")
         analizuj = False
 
-    cur.execute("SELECT id, symbol FROM ref.instrument WHERE active")
-    instruments = {r["symbol"]: r["id"] for r in cur.fetchall()}
+    cur.execute(SQL_INSTRUMENTY)
+    instruments = mapa_instrumentow(cur.fetchall())
     symbols = sorted(instruments)
 
     # KANALY OGRANICZONE DO SILNIKOW, KTORE ISTNIEJA.

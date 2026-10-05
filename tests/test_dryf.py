@@ -567,3 +567,58 @@ def test_kod_liczacy_dryf_mowi_czym_ta_liczba_NIE_jest():
               / "services/engine/train.py").read_text(encoding="utf-8")
     blok = zrodlo.split("psi = abs(float(new[")[0][-1400:]
     assert "NIE JEST TO PSI" in blok
+
+
+# --- log trenera: które cechy (poprawka D, 2026-10-05) ----------------------
+class _KursorDryfu:
+    """Kursor `dryf_cech`: definicje cech, potem para (stare, nowe) na cechę.
+
+    Wiersze mają DOKŁADNIE kolumny z SELECT-ów w `dryf_cech` — atrapa oddająca
+    więcej pozwoliłaby czytać pole, którego produkcja nie pobiera.
+    """
+
+    def __init__(self, cechy: dict[str, tuple[float, float, float, float]]):
+        self.defs = [{"id": i, "name": n} for i, n in enumerate(cechy, 1)]
+        self.staty = {i: s for i, s in enumerate(cechy.values(), 1)}
+        self._wynik = None
+
+    def execute(self, sql, params=None):
+        if "FROM feat.feature_def" in sql:
+            self._wynik = self.defs
+        elif "sd_old" in sql:
+            m_old, sd_old, _, _ = self.staty[params[0]]
+            self._wynik = {"sd_old": sd_old, "m_old": m_old}
+        elif "sd_new" in sql:
+            _, _, m_new, sd_new = self.staty[params[0]]
+            self._wynik = {"sd_new": sd_new, "m_new": m_new}
+        elif sql.startswith("INSERT INTO learn.drift_metric"):
+            self._wynik = None
+        else:
+            raise AssertionError(sql)
+
+    def fetchall(self):
+        return self._wynik
+
+    def fetchone(self):
+        return self._wynik
+
+
+def test_log_trenera_wymienia_trzy_cechy_o_najwyzszym_dryfie(capsys):
+    """Produkcja 05.10 meldowała „dryf 2,49" i nic więcej — skąd ta liczba,
+    trzeba było wyciągać z `learn.drift_metric` ręcznie."""
+    from services.engine.horizons import get as get_horizon
+    from services.engine.train import DRYF_CECH_W_LOGU, dryf_cech
+
+    # (średnia stara, odchylenie stare, średnia nowa, odchylenie nowe)
+    cechy = {"ret_long": (0.0, 1.0, 2.0, 1.0),      # 2,0
+             "rsi_14": (0.0, 1.0, 0.0, 1.0),        # 0,0
+             "atr_pct": (0.0, 1.0, 1.0, 1.2),       # 1,2
+             "vol_z": (0.0, 1.0, 0.5, 1.4),         # 0,9
+             "funding": (0.0, 1.0, 0.7, 1.0)}       # 0,7
+    max_psi = dryf_cech(_KursorDryfu(cechy), [{"id": 1}], get_horizon("4h"),
+                        "odcisk", datetime(2026, 10, 5, tzinfo=timezone.utc), 7)
+    assert max_psi == pytest.approx(2.0)
+    linia = next(w for w in capsys.readouterr().out.splitlines()
+                 if "najwyższy dryf" in w)
+    assert DRYF_CECH_W_LOGU == 3
+    assert linia.split(": ", 1)[1] == "ret_long: 2.00, atr_pct: 1.20, vol_z: 0.90"

@@ -133,7 +133,7 @@ class BazaZUnikalnymAdresem:
 
     # ------------------------------------------------------------------ zapytania
     def _wykonaj(self, sql, params):
-        if sql.startswith("SELECT id, symbol FROM ref.instrument"):
+        if sql.startswith("SELECT id, symbol, engine::text AS engine, base_ccy, quote_ccy"):
             return []
         if sql.startswith("SELECT id, name, url, engine"):
             return self.kanaly

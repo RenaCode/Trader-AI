@@ -26,7 +26,7 @@ import yaml
 
 from services.engine import przebieg_zadania as pz
 from services.engine.dozor import (
-    BRAK_WIERSZY_PO_DNIACH, ocen_zadania, sprawdz_zadania)
+    BRAK_WIERSZY_PO_DNIACH, ocen_zadania, przebieg_planowy, sprawdz_zadania)
 
 KORZEN = Path(__file__).resolve().parents[1]
 TERAZ = datetime(2026, 10, 3, 14, 0, tzinfo=timezone.utc)
@@ -114,6 +114,54 @@ def test_brak_wierszy_tuz_po_wdrozeniu_to_jeszcze_nie_alarm():
     assert ocen_zadania(h, TERAZ, None) == []
     stary = TERAZ - timedelta(days=BRAK_WIERSZY_PO_DNIACH + 1)
     assert [k for k, _ in ocen_zadania(h, TERAZ, stary)] == ["backup:brak"]
+
+
+# ------------------------------------------ planowy a ręczny (poprawka B)
+PLANOWY = "trader-trainer-29849700-x7k2q"     # Job z CronJoba: minuta planowa
+RECZNY = "trader-trainer-reczny-0410-b8m4z"    # `kubectl create job --from=...`
+
+
+def test_nazwa_poda_odroznia_przebieg_planowy_od_recznego():
+    assert przebieg_planowy({"pod": PLANOWY})
+    assert przebieg_planowy({"pod": "trader-backup-29849040-abcde"})
+    assert not przebieg_planowy({"pod": RECZNY})
+    assert not przebieg_planowy({"pod": "trader-trainer-recznie-1-abcde"})
+    # Bez nazwy poda - zachowanie sprzed zmiany: każdy przebieg jak planowy.
+    assert przebieg_planowy({"pod": None}) and przebieg_planowy({})
+
+
+def test_padniety_PLANOWY_zakryty_udanym_RECZNYM_ZGLASZA():
+    """04.10: planowy trener padł na `connection refused`, ręczne powtórzenie
+    przeszło i czujka patrząca na ostatni wiersz zamilkła. Harmonogram, który
+    padł, pójdzie znowu za tydzień — człowiek nie."""
+    h = {"trainer": [{**_p(8, 2), "pod": RECZNY},
+                     {**_p(7, 5, kod=1), "pod": PLANOWY}]}
+    braki = ocen_zadania(h, TERAZ, DZIENNIK_STARY)
+    assert [k for k, _ in braki] == ["trainer:planowy:7"]
+    opis = braki[0][1]
+    assert "PLANOWY" in opis and "kodem 1" in opis
+    assert "Ręczne powtórzenie" in opis and RECZNY in opis and "przeszło" in opis
+
+
+def test_udany_planowy_po_padnietym_to_cisza():
+    """Kanarek do poprzedniego: czujka, która zgłasza każdy dawny błąd,
+    też przeszłaby tamten test."""
+    h = {"trainer": [{**_p(9, 1), "pod": PLANOWY},
+                     {**_p(8, 2), "pod": RECZNY},
+                     {**_p(7, 5, kod=1), "pod": PLANOWY}]}
+    assert ocen_zadania(h, TERAZ, DZIENNIK_STARY) == []
+
+
+def test_reczny_po_udanym_planowym_to_cisza():
+    h = {"trainer": [{**_p(8, 2), "pod": RECZNY},
+                     {**_p(7, 5), "pod": PLANOWY}]}
+    assert ocen_zadania(h, TERAZ, DZIENNIK_STARY) == []
+
+
+def test_padniety_reczny_zglasza_jak_dotad():
+    h = {"trainer": [{**_p(8, 2, kod=2), "pod": RECZNY},
+                     {**_p(7, 5), "pod": PLANOWY}]}
+    assert [k for k, _ in ocen_zadania(h, TERAZ, DZIENNIK_STARY)] == ["trainer:8"]
 
 
 # ----------------------------------------------------------- przebieg
@@ -259,3 +307,28 @@ def test_opakowanie_i_czujka_na_postgresie(monkeypatch):
             await api_db.close_pool()
 
     assert asyncio.run(przebieg()) == 0
+
+
+@pytest.mark.skipif(not DB, reason="ustaw TEST_DB_URL na jednorazowa baze")
+def test_planowy_padl_reczny_przeszedl_NA_POSTGRESIE(monkeypatch):
+    """Ten sam przypadek co wyżej, ale przez prawdziwy SELECT: atrapa oddająca
+    `pod` przeszłaby także wtedy, gdyby zapytanie tej kolumny nie pobierało."""
+    nazwa = f"test-planowy-{os.getpid()}"
+    monkeypatch.setenv("DATABASE_URL", DB)
+    monkeypatch.setenv("HOSTNAME", f"trader-{nazwa}-29849700-x7k2q")
+    assert pz.zapisz(nazwa, 3.0, 1)
+    monkeypatch.setenv("HOSTNAME", f"trader-{nazwa}-reczny-b8m4z")
+    assert pz.zapisz(nazwa, 3.0, 0)
+    from services.api import db as api_db
+
+    async def przebieg():
+        await api_db.open_pool()
+        try:
+            async def notify(*a, **kw):
+                raise AssertionError("tryb suchy nie wysyła")
+            return await sprawdz_zadania(api_db.fetch_all, notify, sucho=True,
+                                         zadania=[nazwa])
+        finally:
+            await api_db.close_pool()
+
+    assert asyncio.run(przebieg()) == 1

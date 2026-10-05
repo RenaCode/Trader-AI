@@ -30,11 +30,24 @@ from services.engine.train import (
 
 # ----------------------------------------------------------- werdykt bramki
 
-def test_w_demo_nowa_wersja_wchodzi_sama():
-    """Rachunek papierowy: pomyłka kosztuje jeden dzień, więc czekanie na
-    człowieka opóźniałoby naukę bez powodu."""
-    assert status_nowej_wersji("learning", "demo")[0] == "active"
-    assert status_nowej_wersji("validated", "demo")[0] == "active"
+def test_w_demo_nowa_wersja_NIE_wchodzi_sama():
+    """Poprawka F (2026-10-05): koniec auto-promocji `learning` -> `active`.
+
+    Do tej daty demo promowało samo każdą wersję nie-`degraded`. Wynik treningu
+    nie mierzy, czy nowa wersja jest lepsza od poprzedniej (H-4 dopiero zakłada
+    ten pomiar), więc automat co tydzień podmieniał model na niezmierzony.
+    """
+    for status in ("learning", "validated"):
+        docelowy, powod = status_nowej_wersji(status, "demo")
+        assert docelowy == "candidate", status
+        assert "demo" in powod and "--zatwierdz-promocje" in powod
+
+
+def test_jawna_zgoda_czlowieka_promuje_w_demo():
+    """Kanarek do poprzedniego: bramka, która nie przepuszcza NICZEGO, też
+    przeszłaby tamten test."""
+    assert status_nowej_wersji("learning", "demo", zgoda=True)[0] == "active"
+    assert status_nowej_wersji("validated", "demo", zgoda=True)[0] == "active"
 
 
 def test_w_live_nowa_wersja_NIE_wchodzi_sama():

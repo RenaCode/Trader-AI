@@ -83,6 +83,7 @@ from services.engine.signals import (
     wlaczone_eksperymenty,
 )
 from services.engine.wersja import sha_kodu
+from services.engine.dozor import podsumuj_dryf_cech
 
 # Prog wejscia NIE jest stala. Jest percentylem rozkladu |wyniku| policzonego
 # na oknie TRENINGOWYM - a wiec dobieranym pod zadana CZESTOTLIWOSC handlu,
@@ -189,6 +190,11 @@ KOD_TOR_NIEGOTOWY = 3
 # w probie pozarowej.
 DRYF_OKNO_NOWE_DNI = 30
 DRYF_OKNO_STARE_DNI = 90
+
+# Ile cech o najwyzszym dryfie wypisuje log przebiegu (`dryf_cech`). Mniej niz
+# w tresci alarmu (`dozor.DRYF_CECH_W_TRESCI`): log ma wskazac, gdzie patrzec,
+# a pelna rozpiska jest w `learn.drift_metric`.
+DRYF_CECH_W_LOGU = 3
 
 # Klucze z `portfolio.metrics`, z ktorych sklada sie rozklad sredniej ekspozycji.
 # Kolejnosc jest kolejnoscia czynnikow w iloczynie.
@@ -2007,11 +2013,15 @@ def status_nowej_wersji(status: str, tryb: str, zgoda: bool = False,
     Czysta funkcja, tak jak `dozor.zmiany`: caly werdykt bramki da sie
     sprawdzic bez bazy i bez przebiegu treningu.
 
-    Bramka jest ROZNA W ZALEZNOSCI OD TRYBU, bo cena bledu jest rozna. W demo
-    zla wersja kosztuje jeden dzien papierowego wyniku i wiedze, ze byla zla -
-    zatrzymywanie jej czlowiekiem opoznialoby nauke bez powodu. W live ta sama
-    podmiana zmienia strategie, na ktorej skalibrowano ochrone kapitalu, i robi
-    to o 4:40 nad ranem.
+    BEZ ZGODY NIE WCHODZI NIC, W ZADNYM TRYBIE (2026-10-05, poprawka F).
+    Do tej daty demo promowalo samo kazda wersje nie-`degraded`, z argumentem,
+    ze zla wersja kosztuje tam jeden dzien papierowego wyniku. Diagnoza z 05.10
+    pokazala, ze ten argument nie trzyma: wynik treningu nie ma pomiaru "czy
+    nowa wersja jest lepsza od poprzedniej" (H-4 w docs/hipotezy.md dopiero go
+    zaklada), a status `learning` z walk-forwardu na 3,8 roku przy 0,5% nowych
+    danych nie mowi o tym nic. Automatyczna promocja zamieniala wiec co tydzien
+    model produkcyjny na niezmierzony - i robila to o 4:40 nad ranem, tak samo
+    jak w live.
 
     Zgoda jest JAWNA I JEDNORAZOWA (flaga przebiegu), a nie ustawieniem
     w bazie: ustawienie raz wlaczone zostaje wlaczone na zawsze i po pol roku
@@ -2027,12 +2037,10 @@ def status_nowej_wersji(status: str, tryb: str, zgoda: bool = False,
     if zmiana and not zgoda:
         return "candidate", (f"zmiana struktury modelu ({zmiana}) — wymaga wpisu "
                              f"w docs/hipotezy.md i `--zatwierdz-promocje`")
-    if tryb == "live" and not zgoda:
-        return "candidate", ("tryb live — nowa wersja czeka na zatwierdzenie "
-                             "człowieka (`--zatwierdz-promocje`)")
-    if tryb == "live":
-        return "active", "tryb live, promocja zatwierdzona jawnie"
-    return "active", "tryb demo — promocja automatyczna"
+    if not zgoda:
+        return "candidate", (f"tryb {tryb} — nowa wersja czeka na zatwierdzenie "
+                             f"człowieka (`--zatwierdz-promocje`)")
+    return "active", f"tryb {tryb}, promocja zatwierdzona jawnie"
 
 
 def zapisz_promocje(cur, model_id: int, mv_id: int, docelowy: str) -> None:
@@ -3451,6 +3459,7 @@ def dryf_cech(cur, instruments: list[dict], h: Horizon, fp: str, now: datetime,
     #    bez niego dryf liczyl sie po cechach par, ktorych to uniwersum
     #    w ogole nie handluje.
     max_psi = 0.0
+    dryfy: list[dict] = []
     id_instrumentow = [i["id"] for i in instruments]
     granica_nowe = now - timedelta(days=DRYF_OKNO_NOWE_DNI)
     granica_stare = granica_nowe - timedelta(days=DRYF_OKNO_STARE_DNI)
@@ -3508,10 +3517,20 @@ def dryf_cech(cur, instruments: list[dict], h: Horizon, fp: str, now: datetime,
         psi = abs(float(new["m_new"]) - float(old["m_old"])) / float(old["sd_old"]) \
             + abs(float(new["sd_new"]) / float(old["sd_old"]) - 1)
         max_psi = max(max_psi, psi)
+        dryfy.append({"feature": fd["name"], "psi": psi})
         cur.execute(
             "INSERT INTO learn.drift_metric (model_version_id, feature_def_id, event_time, psi)"
             " VALUES (%s,%s, now(), %s) ON CONFLICT DO NOTHING",
             (mv_id, fd["id"], round(psi, 4)))
+    # KTORE CECHY, a nie samo maksimum (poprawka D, 2026-10-05). Produkcja
+    # meldowala "dryf 2,49" i nic poza tym - kto chcial wiedziec, skad ta liczba,
+    # musial pytac `learn.drift_metric` recznie. Ta sama regula co w tresci
+    # alarmu dozoru (`podsumuj_dryf_cech`), zeby log i powiadomienie nie
+    # wymienialy roznych cech.
+    if dryfy:
+        dryfy.sort(key=lambda w: w["psi"], reverse=True)
+        print("  najwyższy dryf: "
+              + ", ".join(podsumuj_dryf_cech(dryfy, limit=DRYF_CECH_W_LOGU)))
     return max_psi
 
 
@@ -4482,7 +4501,8 @@ def main() -> int:
                          "podana, o pochodzeniu decyduje --spread-obca-ksiega, "
                          "bo pomiar nie ma jak tego stwierdzic za czlowieka. "
                          "Nie wpisywac liczby 'na oko'")
-    # ZGODA CZLOWIEKA NA PODMIANE STRATEGII W TRYBIE LIVE.
+    # ZGODA CZLOWIEKA NA PODMIANE MODELU - od 2026-10-05 w kazdym trybie,
+    # takze w demo (`status_nowej_wersji`, poprawka F).
     #
     # Flaga przebiegu, nie ustawienie w bazie i nie wpis w chart: zadanie
     # cykliczne jej NIE MA i miec nie moze, bo caly sens bramki polega na tym,
@@ -4490,9 +4510,9 @@ def main() -> int:
     # uruchamiajac trening recznie, raz.
     ap.add_argument("--zatwierdz-promocje", action="store_true",
                     dest="zgoda_na_promocje",
-                    help="pozwol promowac nowa wersje modelu takze wtedy, gdy "
-                         "silnik handluje na zywo; bez tego wersja zostaje "
-                         "kandydatem, a produkcja handluje dalej poprzednia")
+                    help="pozwol promowac nowa wersje modelu (w demo i na zywo); "
+                         "bez tego wersja zostaje kandydatem, a produkcja "
+                         "handluje dalej poprzednia")
     ap.add_argument("--instrumenty", default="",
                     help="lista symboli po przecinku - NADPISUJE uniwersum decyzyjne "
                          "z bazy, takze o instrumenty jeszcze niehandlowalne. "

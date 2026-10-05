@@ -60,6 +60,9 @@ import yaml
 KORZEN = Path(os.environ.get("TRADER_KORZEN") or Path(__file__).resolve().parents[1])
 SZABLONY = KORZEN / "charts" / "trader" / "templates"
 WORKERS = SZABLONY / "workers.yaml"
+# Od 2026-10-05 (poprawka A) treść bramki mieszka w helperze, wspólnym
+# z trenerem; workers.yaml ją wstawia.
+HELPER = SZABLONY / "_bramka_migracji.tpl"
 MIGRACJE = KORZEN / "db" / "migrations"
 
 BRAMKA = "czekaj-na-migracje"
@@ -94,7 +97,12 @@ def _blok_bramki(tekst: str) -> str:
                   tekst, re.M | re.S)
     assert m, ("workers.yaml nie ma sekcji initContainers — worker startuje "
                "natychmiast, równolegle z migracją, na starym schemacie")
-    return m.group(2)
+    blok = m.group(2)
+    # Helper wstawiony w sekcję liczy się jak jej treść - poza nią (definicja
+    # bez `include`) nie wstawia do poda niczego.
+    if 'include "trader.bramkaMigracji"' in blok:
+        blok += HELPER.read_text(encoding="utf-8")
+    return blok
 
 
 def test_szablon_ma_bramke_i_jest_ona_w_petli_workerow():

@@ -10,6 +10,8 @@ Od 2026-10-03 (audyt Fable T8) `train.py --sucho`, `train.py --panel` i
 przebieg bez numeru kończy się odmową. Wersja modelu ze zmianą struktury
 `params` względem aktywnej (`train.zmiana_struktury`) zostaje `candidate`
 i wchodzi dopiero ręcznym przebiegiem z `--zatwierdz-promocje`, po wpisie tutaj.
+Od 2026-10-05 (poprawka F) to samo dotyczy **każdej** nowej wersji, także w demo:
+automatycznej promocji `learning` → `active` już nie ma.
 
 | id | data | hipoteza | kryterium | wynik | decyzja |
 |---|---|---|---|---|---|
@@ -19,6 +21,7 @@ i wchodzi dopiero ręcznym przebiegiem z `--zatwierdz-promocje`, po wpisie tutaj
 | H-3 | 2026-10-04 | Tor R4: momentum przekrojowe 30 d na decyzji dobowej z filtrem BTC > EMA 50 d, top 3 long-only, pod pesymistycznym modelem wejść (STOP/GO 2) | wszystkie cztery naraz: K1 okna dodatnie ≥ 65% **i** bije B1 przy tej samej ekspozycji w ≥ 65% okien; K2 DSR ≥ 0,95 na 5/5 przesunięć; K3 percentyl permutacyjny ≥ 70 na 5/5 przesunięć; K4 bije B2 przy tej samej ekspozycji w ≥ 55% okien | K1 NIE (okna dodatnie 46%, bije B1 35%), K2 TAK (DSR 0,950–0,980, N = 2), K3 TAK (percentyl 100), K4 NIE (bije B2 44%); oba warianty ekspozycji | **STOP** — R4 nie wchodzi na demo; żaden tor nie spełnia kryteriów, decyzja właściciela (sekcja 12) · zamknięte decyzją A (2026-10-04); reguła R4 na demo wyłącznie jako pomiar egzekucji E-1 |
 | A | 2026-10-04 | Decyzja właściciela po STOP/GO 2 (sekcja 12): zamknięcie poszukiwania przewagi | — (decyzja, nie test) | H-1 STOP, H-3 STOP | **zamknięte z wnioskiem „brak przewagi spełniającej kryteria”**; tor badawczy (ensemble 4h, R4) zamknięty |
 | E-1 | 2026-10-04 | **Pomiar egzekucji, NIE hipoteza przewagi.** Reguła R4 „momentum + filtr trendu” z parametrami zamrożonymi z H-3 na koncie demo, 15% kapitału | opisowe, bez GO: realizacja na giełdzie wobec modelu pesymistycznego (wypełnialność wejść, opóźnienie wysyłki, prowizje, wyjście względem ceny decyzji) | w toku od wdrożenia | wynik finansowy NIE jest wynikiem; nic z tego przebiegu nie podlega promocji |
+| H-4 | 2026-10-05 | Cotygodniowy trening poprawia model: wersja v_k jest lepsza od v_k−1 **w przód**, na tygodniu zamkniętym po zapisaniu obu | test znaków po oknach: v_k lepsza w ≥ 10 z pierwszych 12 tygodni z różnicą ≠ 0 (p ≈ 0,019); n = liczba okien kalendarzowych, nie transakcji | w toku — szkielet pomiaru, miara okna niezaimplementowana | — |
 
 ---
 
@@ -517,3 +520,75 @@ przełączenia nie mieszają się z próbą. Przebieg nie ma kryterium GO. Końc
 decyzja właściciela; po zebraniu próby (rząd 30 rozstrzygniętych wejść) liczby
 z raportu trafiają tutaj jako wynik E-1.
 
+---
+
+## H-4: test w przód „czy trening się uczy” (zapisane 2026-10-05, przed pomiarem)
+
+**Skąd.** Diagnoza z 05.10: trener co tydzień (`40 4 * * 0`) liczy walk-forward
+na ~3,8 roku, do którego przybywa 0,5% nowych danych, więc kolejne przebiegi
+mierzą prawie to samo. Okna walk-forward nakładają się w 29/30 dni, a zmiana
+miary 02-03.10 wyzerowała porównania przebiegów (n = 1). Status `learning`
+nie odpowiada więc na pytanie, czy nowa wersja jest lepsza od poprzedniej.
+Wynik treningu nie steruje handlem (Decyzja A, silnik `--strategia momentum`),
+więc H-4 jest pomiarem, a nie bramką promocji: nic z niego nie promuje się
+samo (poprawka F).
+
+**Hipoteza.** Wersja v_k modelu `crypto_signal_weighting_4h` daje lepszy wynik
+od v_k−1 na tygodniu, którego żadna z nich nie widziała.
+
+**Pary i okna** (`services/engine/w_przod.py`, `pary_okien`):
+
+- okno = pełny tydzień kalendarzowy, poniedziałek 00:00 UTC → poniedziałek 00:00 UTC;
+  pierwsze okno: **2026-10-12** (05.10 hipoteza zapisana w trakcie tygodnia, więc
+  ten tydzień odpada);
+- v_k = wersja najnowsza zapisana (`created_at`) przed początkiem okna,
+  v_k−1 = wersja najnowsza przed początkiem okna poprzedniego. Obie są więc
+  zamrożone przed oknem, a v_k jest oceniana dopiero w tygodniu po zapisaniu;
+- tydzień bez nowej wersji (trener padł) nie daje pary; dwie wersje przed jednym
+  oknem (planowa i ręczne powtórzenie) dają jedną parę;
+- okna są rozłączne z konstrukcji, więc **n = liczba okien**.
+
+**Miara okna.** Zwrot portfela reguły ensemble z `params` danej wersji (wagi,
+progi per reżim) na tym tygodniu, po kosztach `spot_eu` w modelu pesymistycznym
+(jak H-1), przy tej samej ekspozycji dla obu wersji, na uniwersum decyzyjnym
+z chwili początku okna, wyłącznie danymi sprzed każdej decyzji.
+Różnica d = miara(v_k) − miara(v_k−1). d = 0 (obie bez transakcji albo
+identyczne decyzje) to remis: nie jest próbą, jest raportowany.
+
+**Kryterium (zapisane przed pomiarem).** Werdykt zapada po **pierwszych 12
+oknach z d ≠ 0** i tylko z nich (bez dokładania okien, zatrzymanie warunkowe
+to nie test):
+
+- **UCZY SIĘ**: v_k lepsza w ≥ 10 z 12 (jednostronny test znaków, p ≈ 0,019);
+- **NIE WYKAZANO**: w każdym innym wypadku. Wtedy cotygodniowy trening nie ma
+  dowodu, że cokolwiek poprawia, a dalsze decyzje (rzadszy trening, krótszy
+  panel, zatrzymanie) należą do właściciela i są nowymi hipotezami.
+
+Zmiana kodu miary, cech albo kryterium w trakcie zbierania okien przerywa serię:
+dalszy pomiar to nowa hipoteza z nowym numerem. Najwcześniejszy termin werdyktu
+to 12 tygodni po 2026-10-12, czyli **2027-01-04**.
+
+**Stan na 2026-10-05: SZKIELET.** `services/engine/w_przod.py` liczy pary i okna
+z `learn.model_version` oraz werdykt z listy różnic (testy:
+`tests/test_w_przod.py`). **Brakuje miary okna** (`miara_okna` rzuca
+`NotImplementedError`, nie zwraca zera). Co dalej: panel z bazy obcięty do
+[od, do) z historią do rozgrzania sygnałów, `train.precompute_panels`
+i `train.simulate_portfolio` z `params` wersji i kartą `spot_eu`, wynik
+każdej pary zapisany w bazie razem z `git_sha` kodu miary, żeby seria nie
+mieszała dwóch definicji. Okna da się policzyć wstecz po dopisaniu miary,
+bo wersje i świece zostają w bazie; okno, które nie istniało przed jego
+początkiem, nadal jest testem w przód.
+
+**Uwaga do miary: wiadomości (poprawka C, 2026-10-05).** Od wdrożenia tej zmiany
+symbol z analizy LLM wiąże artykuł z **wszystkimi** aktywnymi instrumentami tego
+samego aktywa bazowego w tym samym silniku (ETHUSDT → ETHUSDT i ETHUSDC;
+`news_worker.mapa_instrumentow`). Wcześniej tylko z symbolem wypisanym dosłownie,
+a model zwykle wybierał parę USDT, którą nie handlujemy (uniwersum decyzyjne stoi
+na USDC od 0023). **Zmiana działa tylko do przodu, bez uzupełniania wstecz:**
+`news.article_instrument` nie ma `ingested_at`, więc powiązanie dopisane dziś
+do starego artykułu weszłoby do cech świec, w których tej wiedzy jeszcze nie
+było, czyli przeciek przyszłości. Skutek dla pomiaru: cechy wiadomości par USDC
+zmieniają rozkład od daty wdrożenia. Panel walk-forward obejmujący tę datę łączy
+dwa reżimy tej cechy, a czujka dryfu może się na niej odezwać. W H-4 obie wersje
+każdej pary są oceniane na tym samym oknie i tych samych cechach, więc zmiana
+wchodzi do obu ramion jednakowo.
