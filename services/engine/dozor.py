@@ -3634,7 +3634,8 @@ async def sprawdz_zadania(fetch_all, notify, sucho: bool = False, *,
         poprzednie = await fetch_all(
             "SELECT count(DISTINCT date_trunc('minute', created_at)) AS n,"
             "       max(created_at) AS ostatnie FROM notify.notification"
-            " WHERE event_code = 'job.nieudany' AND data->>'klucz' = %s", (klucz,))
+            " WHERE event_code IN ('job.nieudany', 'notify.alarm_nieprzyjety')"
+            "   AND data->>'klucz' = %s", (klucz,))
         n = (poprzednie[0]["n"] or 0) if poprzednie else 0
         ostatnie = poprzednie[0]["ostatnie"] if poprzednie else None
         if n and ostatnie is not None and teraz - ostatnie < odstep_powtorki_zadania(n):
@@ -3654,15 +3655,33 @@ async def sprawdz_zadania(fetch_all, notify, sucho: bool = False, *,
                             f"`risk.job_run`.",
                             severity="warning", data={"klucz": klucz, "zadanie": nazwa}):
                 wyslane += 1
+        if not wyslane and odbiorcy:
+            # `notify()` NIKOMU NIE ZAPISAL `job.nieudany` (2026-10-05: preferencja
+            # wylaczona albo jej cooldown - jedyne drogi do `None`). Bez wiersza
+            # nastepny przebieg nie wie, ze probowal: kod 1 co 10 minut, a do
+            # czlowieka nie dochodzi nic. Druga droga, `always_on` (migracja
+            # 0094), mowi wprost, ze to blad kanalu - i zostawia wiersz z tym
+            # samym kluczem, wiec powtorki licza sie dalej tym samym rytmem.
+            print(f"  BŁĄD KANAŁU: żaden z {len(odbiorcy)} odbiorców nie przyjął "
+                  f"`job.nieudany` dla {klucz} — wysyłam `notify.alarm_nieprzyjety`")
+            for u in odbiorcy:
+                if await notify(u["id"], "notify.alarm_nieprzyjety",
+                                f"Alarm o zadaniu {nazwa} nie został przyjęty",
+                                f"{opis}.\n\nPowiadomienie `job.nieudany` nie zostało "
+                                f"zapisane dla żadnego odbiorcy (wyłączona preferencja "
+                                f"albo jej cooldown). Sprawdź preferencje powiadomień "
+                                f"„Zadanie cykliczne nie powiodło się”.",
+                                severity="warning",
+                                data={"klucz": klucz, "zadanie": nazwa}):
+                    wyslane += 1
         if wyslane:
             nowe += 1
         else:
-            # Nikt nie przyjal (brak aktywnych odbiorcow albo `job.nieudany`
-            # wylaczone w preferencjach) - wiec nie powstaje wiersz, po ktorym
-            # nastepny przebieg poznalby, ze juz zglaszalismy. Kod 1 wracalby
-            # co 10 minut o tym samym. Stan zostaje w logu, kod go nie powtarza.
-            print(f"  {klucz}: żaden z {len(odbiorcy)} odbiorców nie przyjął "
-                  f"powiadomienia `job.nieudany` (preferencja wyłączona?)")
+            # Brak aktywnych odbiorcow (albo i druga droga nic nie zapisala) -
+            # nie ma komu powiedziec, a kod 1 co 10 minut niczego nie zmieni.
+            # Stan zostaje w logu przy kazdym przebiegu.
+            print(f"  BŁĄD KANAŁU: {klucz} — nie zapisano żadnego powiadomienia "
+                  f"(aktywnych odbiorców: {len(odbiorcy)})")
             trwale += 1
     return kod_wyjscia(nowe, trwale, "zadanie cykliczne zawiodło")
 

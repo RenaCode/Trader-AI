@@ -215,7 +215,10 @@ def _uruchom(atrapa, przyjmuje=True, **kw):
 
     async def notify(uid, kod, tytul, tresc, **reszta):
         wyslane.append({"kod": kod, **reszta})
-        return None if przyjmuje is False else len(wyslane)
+        if przyjmuje is False or (przyjmuje == "tylko_awaryjny"
+                                  and kod != "notify.alarm_nieprzyjety"):
+            return None
+        return len(wyslane)
 
     kod = asyncio.run(sprawdz_zadania(atrapa.fetch_all, notify, teraz=TERAZ,
                                       zadania=["postmortem", "kurs"], **kw))
@@ -255,7 +258,22 @@ def test_nikt_nie_przyjal_powiadomienia_kod_NIE_wraca_co_przebieg(capsys):
                {"nazwa": "kurs", **_p(5, 1)}]
     assert _uruchom(Atrapa(wiersze), przyjmuje=False)[0] == 0
     assert _uruchom(Atrapa(wiersze, odbiorcy=()))[0] == 0
-    assert "nie przyjął" in capsys.readouterr().out
+    assert "BŁĄD KANAŁU" in capsys.readouterr().out
+
+
+def test_nieprzyjety_job_nieudany_idzie_DRUGA_DROGA_i_raz():
+    """Produkcja 05.10: `notify()` wracał None dla `job.nieudany`, alarm nie
+    docierał do nikogo, a kod 1 wracał co 10 minut. Teraz idzie
+    `notify.alarm_nieprzyjety` (always_on) z tym samym kluczem - raz."""
+    wiersze = [{"nazwa": "postmortem", **_p(9, 6, kod=1)},
+               {"nazwa": "kurs", **_p(5, 1)}]
+    kod, wyslane = _uruchom(Atrapa(wiersze), przyjmuje="tylko_awaryjny")
+    assert kod == 1
+    assert [(w["kod"], w["data"]["klucz"]) for w in wyslane] == [
+        ("job.nieudany", "postmortem:9"), ("notify.alarm_nieprzyjety", "postmortem:9")]
+    # Wiersz drugiej drogi niesie klucz, więc następny przebieg go widzi.
+    assert _uruchom(Atrapa(wiersze, zgloszone={"postmortem:9"}),
+                    przyjmuje="tylko_awaryjny") == (0, [])
 
 
 # ----------------------------------------------------------- wpięcie w chart
@@ -407,4 +425,4 @@ def test_zapytanie_o_poprzednie_zgloszenia_NA_POSTGRESIE(monkeypatch, capsys):
             await api_db.close_pool()
 
     assert asyncio.run(przebieg()) == 0
-    assert "nie przyjął" in capsys.readouterr().out
+    assert "BŁĄD KANAŁU" in capsys.readouterr().out
