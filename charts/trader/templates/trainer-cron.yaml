@@ -67,6 +67,18 @@ spec:
           # w _helpers.tpl. Zadanie nie rozmawia z API Kubernetesa.
           automountServiceAccountToken: false
           {{- include "trader.podBezUprawnien" . | nindent 10 }}
+          # BRAMKA MIGRACJI, TA SAMA CO PRZY WORKERACH (poprawka A, 2026-10-05).
+          #
+          # `przebieg_zadania.py` czeka na port bazy najwyzej 60 s, a przy
+          # starszym schemacie odmawia od razu, kodem 3. Dla zadania, ktore
+          # chodzi RAZ W TYGODNIU, kazda z tych dwoch rzeczy kosztuje caly
+          # tydzien bez nowej wersji: 2026-10-04 tor 4h padl na `connection
+          # refused` (opoznienie kube-routera), a wdrozenie z migracja w trakcie
+          # niedzielnego okna konczyloby sie odmowa zamiast poczekaniem.
+          # Kontener startowy czeka do 600 s - na baze I na migracje - i dopiero
+          # po tym limicie pada glosno; rola ta sama co trenera (silnik).
+          initContainers:
+            {{- include "trader.bramkaMigracji" (dict "ctx" $ "rola" "silnik") | nindent 12 }}
           containers:
             - name: trainer
               image: "{{ .Values.api.image.repository }}:{{ .Values.api.image.tag }}"

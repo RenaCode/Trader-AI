@@ -14,6 +14,8 @@ Test czyta szablony jako tekst - bez `helm` - tak jak test_chart_kontekst_bezpie
 from __future__ import annotations
 
 import re
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -80,3 +82,42 @@ def test_obraz_bazy_przypiety_po_digescie():
         assert 'include "trader.obrazBazy"' in t
         assert ".Values.db.image.repository }}:{{ .Values.db.image.tag }}\"" not in t, (
             f"{plik}: obraz bazy z samego tagu, obok helpera")
+
+
+# ------------------------------------------- trener za bramką migracji (A)
+def test_trener_ma_bramke_migracji_ta_sama_rola_co_kontener():
+    """Poprawka A (2026-10-05): trener chodzi raz w tygodniu, więc odmowa przy
+    starszym schemacie albo `connection refused` w pierwszej sekundzie poda
+    kosztuje tydzień bez nowej wersji (04.10 tor 4h). Bramka czeka do 600 s.
+
+    Ta sama wąska rola, co kontener roboczy: bramka z inną rolą mierzyłaby
+    uprawnienia kogoś innego niż ten, kto za chwilę wystartuje.
+    """
+    t = _tekst("trainer-cron.yaml")
+    m = re.search(r"^(\s*)initContainers:\n(.*?)^\1containers:", t, re.M | re.S)
+    assert m, "trener bez kontenera startowego - rusza na starym schemacie"
+    assert 'include "trader.bramkaMigracji" (dict "ctx" $ "rola" "silnik")' in m.group(2)
+    assert t.count('include "trader.rolaDbEnv" (dict "ctx" $ "rola" "silnik")') == 1, (
+        "kontener trenera nie chodzi rolą silnika - bramka pyta inną rolą")
+
+
+helm = pytest.mark.skipif(shutil.which("helm") is None, reason="helm niedostępny")
+
+
+@helm
+def test_RENDER_trener_bramka_z_haslem_WYLACZNIE_wlasnej_roli():
+    wynik = subprocess.run(["helm", "template", str(KORZEN / "charts/trader"),
+                            "-s", "templates/trainer-cron.yaml"],
+                           capture_output=True, text=True)
+    assert wynik.returncode == 0, wynik.stderr
+    spec = yaml.safe_load(wynik.stdout)["spec"]["jobTemplate"]["spec"]["template"]["spec"]
+    bramka, = spec["initContainers"]
+    trener = spec["containers"][0]
+    assert bramka["name"] == "czekaj-na-migracje"
+    assert bramka["image"] == trener["image"]
+    env = {e["name"]: e for e in bramka["env"]}
+    assert set(env) == {"PGPASSWORD", "DATABASE_URL", "PYTHONUNBUFFERED"}
+    roboczy = {e["name"]: e for e in trener["env"]}
+    assert env["DATABASE_URL"] == roboczy["DATABASE_URL"]
+    assert env["PGPASSWORD"] == roboczy["PGPASSWORD"]
+    assert "Migracje nie dogonily" in bramka["command"][-1]
