@@ -96,7 +96,13 @@ CENNIK = {
     # zaden sygnal nie pokrywal wlasnych kosztow. Przy 0,580% zlecenia rynkowe
     # na tym podmiocie nie maja sensu w ogole - zostaje wylacznie egzekucja
     # z limitem, gdzie stawka maker jest identyczna jak globalnie (0,100%).
-    "spot_eu": Koszty(maker=0.0010, taker=0.0025, krotka_pozycja=False,
+    #
+    # SPROSTOWANIE (2026-10-05): MAKER TEZ 0,250%. Ten sam endpoint, wszystkie
+    # 135 par (USDC, USDT i EUR jednakowo): maker 0,250%, taker 0,250%. Wykryla
+    # to `mozliwosci.py --stawki` w `trader-zywotnosc`. Ostatni akapit wyzej juz
+    # nie obowiazuje: limit nie daje rabatu prowizji, a runda kosztuje 0,500%
+    # zamiast 0,200% - wiecej niz cala zmierzona przewaga (docs/08, Brama 0).
+    "spot_eu": Koszty(maker=0.0025, taker=0.0025, krotka_pozycja=False,
                       prowizja_w_bazowej=True),
     "perp": Koszty(maker=0.0002, taker=0.00055, krotka_pozycja=True,
                    finansowanie=True),

@@ -246,7 +246,8 @@ def test_spot_bez_pozycji_krotkiej_NIE_dostaje_tego_skladnika():
 
 
 def test_wariant_produkcyjny_jest_drozszy_niz_zaden_koszt():
-    """Konfiguracja z wdrożenia (spot_eu + limit) musi kosztować dokładnie 0,200%."""
-    assert runda("spot_eu", True) == pytest.approx(0.0020)
-    # A ten sam podmiot zleceniem rynkowym — 0,580%, czyli prawie trzykrotnie.
+    """Konfiguracja z wdrożenia (spot_eu + limit) musi kosztować dokładnie
+    0,500% (od 2026-10-05: maker 0,250% na obu nogach; wcześniej 0,200%)."""
+    assert runda("spot_eu", True) == pytest.approx(0.0050)
+    # A ten sam podmiot zleceniem rynkowym — 0,580%: roznica to juz tylko poslizg takera.
     assert runda("spot_eu", False) == pytest.approx(0.0058)

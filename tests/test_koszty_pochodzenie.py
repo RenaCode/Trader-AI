@@ -163,7 +163,8 @@ def test_karta_limitu_NAZYWA_wyjscie_takerem_i_liczy_je_ze_STAWEK_toru():
     """Wyjście po dwóch odrzuceniach PostOnly idzie GTC po drugiej stronie
     spreadu (audyt F-4.3) i płaci takera na jednej nodze. Bez udziału z
     produkcji składnik jest NIEZMIERZONY, nie zerem; z udziałem - udział razy
-    (taker - maker) tego toru. Na spot_eu taker 0,25% wobec makera 0,10%."""
+    (taker - maker) tego toru. Na spot_eu od 2026-10-05 obie stawki to 0,25%,
+    więc składnik jest ZMIERZONYM zerem; różnicę stawek sprawdza tor perp."""
     bez = next(s for s in karta_rundy("spot_eu", maker=True).skladniki
                if s.nazwa == "wyjscie takerem")
     assert bez.wartosc is None and bez.zrodlo == NIEZMIERZONE
@@ -172,8 +173,13 @@ def test_karta_limitu_NAZYWA_wyjscie_takerem_i_liczy_je_ze_STAWEK_toru():
                                     wyjscia_takerem=0.2).skladniki
              if s.nazwa == "wyjscie takerem")
     assert z.zrodlo == POMIAR
-    assert z.wartosc == pytest.approx(0.2 * (0.0025 - 0.0010))
+    assert z.wartosc == pytest.approx(0.2 * (0.0025 - 0.0025))
     assert z.w_symulacji is False
+
+    perp = next(s for s in karta_rundy("perp", maker=True,
+                                       wyjscia_takerem=0.2).skladniki
+                if s.nazwa == "wyjscie takerem")
+    assert perp.wartosc == pytest.approx(0.2 * (0.00055 - 0.0002))
 
     # Egzekucja RYNKOWA placi takera na obu nogach juz w `prowizja`.
     assert "wyjscie takerem" not in {

@@ -22,7 +22,7 @@ def test_model_to_liczby_z_H3_i_cennika():
     m = p.model_pesymistyczny("spot_eu")
     assert m["opoznienie_min"] == 20
     assert m["wypelnialnosc_wejsc"] == (0.770, 0.796)
-    assert (m["prowizja_wejscia"], m["prowizja_wyjscia"]) == (0.0010, 0.0025)
+    assert (m["prowizja_wejscia"], m["prowizja_wyjscia"]) == (0.0025, 0.0025)
     assert m["poslizg_wyjscia"] == 0.0004
 
 

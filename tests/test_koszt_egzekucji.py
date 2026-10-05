@@ -63,8 +63,12 @@ def test_petla_nie_ma_wlasnej_stalej_prowizji():
         "loop.py znowu ma własny poślizg zamiast czytać z koszty.py"
 
 
-def test_cennik_unijny_jest_drozszy_od_globalnego_na_takerze():
+def test_cennik_unijny_jest_drozszy_od_globalnego_na_obu_stronach():
     """Kanarek na sens całej zmiany: gdyby stawki były równe, test wyżej
-    przechodziłby także dla złego cennika."""
+    przechodziłby także dla złego cennika.
+
+    Od 2026-10-05 podmiot unijny nalicza 0,250% także makerowi - limit nie
+    daje już rabatu prowizji względem zlecenia rynkowego."""
     assert koszty("spot_eu").taker > koszty("spot").taker
-    assert koszty("spot_eu").maker == koszty("spot").maker
+    assert koszty("spot_eu").maker > koszty("spot").maker
+    assert koszty("spot_eu").maker == koszty("spot_eu").taker
