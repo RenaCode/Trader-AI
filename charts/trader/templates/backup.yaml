@@ -135,6 +135,8 @@ spec:
                   zapisz_przebieg() {
                     RC=$?
                     trap - EXIT
+                    # Niedokonczony zrzut nie moze zostac obok kompletnych (P-T4).
+                    rm -f "${PLIK:-/nonexistent}.tmp"
                     psql -h {{ include "trader.fullname" . }}-db \
                          -U {{ .Values.db.username }} -d {{ .Values.db.database }} -q \
                          -c "INSERT INTO risk.job_run (nazwa, started_at, exit_code, pod) VALUES ('backup', now() - make_interval(secs => $(( $(date +%s) - START_PRZEBIEGU ))), $RC, '${HOSTNAME:-}')" \
@@ -200,12 +202,15 @@ spec:
                   echo "==> zrzut do $PLIK"
                   pg_dump -h {{ include "trader.fullname" . }}-db \
                           -U {{ .Values.db.username }} -d {{ .Values.db.database }} \
-                          --format=custom --compress=9 --file="$PLIK"
+                          --format=custom --compress=9 --file="$PLIK.tmp"
 
                   # Zrzut, którego nie da się odtworzyć, jest gorszy niż jego brak,
                   # bo daje fałszywe poczucie zabezpieczenia. pg_restore --list
                   # czyta spis treści archiwum i zawodzi na pliku obciętym.
-                  pg_restore --list "$PLIK" > /dev/null
+                  # Dopiero sprawdzone archiwum dostaje docelową nazwę (P-T4,
+                  # T-16): przerwany zrzut nie wygląda już jak kopia.
+                  pg_restore --list "$PLIK.tmp" > /dev/null
+                  mv "$PLIK.tmp" "$PLIK"
                   echo "==> weryfikacja archiwum ok, rozmiar: $(du -h "$PLIK" | cut -f1)"
 
                   # KOLEJNOSC ODTWARZANIA, ZAPISANA OBOK ZRZUTU. Kopia bez
