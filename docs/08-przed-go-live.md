@@ -123,6 +123,14 @@ dla rynku o 0,1% wolumenu.** Jeden odczyt arkusza z hosta unijnego zamyka sprawe
 
 - [x] **Zmierzyc spread na bybit.eu, nie na ksiedze globalnej** — ZROBIONE
       2026-09-24, ale wynik NIE jest jeszcze rozstrzygnieciem; patrz nizej.
+- [ ] **Stawka maker z gieldy, nie stala w kodzie** — wykryte 2026-10-05 przez
+      `trader-zywotnosc` (od 10:30 UTC konczy sie kodem 1): dla co najmniej jednej
+      pary gielda nalicza maker 0,25%, a kod zaklada 0,10% (`ROZJAZD STAWEK maker`,
+      roznica 0,15% = 15 pb na strone). Rachunek papierowy i backtest licza wiec koszt
+      za nisko — przy przewadze 13,76 pb na runde to wiecej niz caly zapas. Przed live:
+      cennik per para z `/v5/account/fee-rate` zamiast stalej, przeliczenie Bramy 0
+      i walk-forward po prawdziwej stawce. Do tego czasu zywotnosc zostaje czerwona
+      celowo — to prawdziwe znalezisko, nie szum.
 
 ### Spread na ksiedze unijnej — pierwszy odczyt (2026-09-24)
 
