@@ -166,7 +166,7 @@ class AtrapaNewsow:
     def _wykonaj(self, sql, params):
         if sql.startswith("SELECT COALESCE(sum(cost_usd)"):
             return {"s": 0.0}
-        if sql.startswith("SELECT id, symbol FROM ref.instrument"):
+        if sql.startswith("SELECT id, symbol, engine::text AS engine, base_ccy, quote_ccy"):
             return []
         if sql.startswith("SELECT id, name, url, engine"):
             return [{"id": 1, "name": "Kanał testowy", "url": "https://przyklad.test/rss",
