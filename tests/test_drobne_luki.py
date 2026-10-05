@@ -323,7 +323,8 @@ def test_czujka_ma_prawo_czytac_klucze_gieldy():
 class _AdapterZeStawkami(_AdapterAtrapa):
     """Host, który stawki wystawia — z podłożoną odpowiedzią `/v5/account/fee-rate`."""
 
-    maker = "0.001"
+    # Odczyt z api-demo.bybit.eu 2026-10-05: wszystkie pary 0,250% / 0,250%.
+    maker = "0.0025"
     taker = "0.0025"
 
     async def _get(self, sciezka, params=None):
@@ -359,8 +360,8 @@ def test_sprawdzenie_cennika_liczy_wedlug_podanego_kind():
     assert symbol == "BTCUSDT" and zmierzone["taker"] == Decimal("0.0025")
     assert rozjazdy == []
 
-    (opis,) = _sprawdz_cennik(a, "BTCUSDT", kind="spot")[2]
-    assert "taker" in opis
+    opisy = _sprawdz_cennik(a, "BTCUSDT", kind="spot")[2]
+    assert any(o.startswith("taker") for o in opisy)
 
 
 def test_odmowa_hosta_nie_jest_zgodnoscia_ani_tracebackiem():

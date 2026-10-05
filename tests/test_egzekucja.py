@@ -513,14 +513,16 @@ def test_rozjazd_stawek_lapie_zmiane_cennika_gieldy():
     from services.exchanges.mozliwosci import rozjazd_stawek
 
     k = koszty("spot_eu")
-    # Zmierzone na produkcji 2026-09-07: maker 0.0010, taker 0.0025.
-    assert rozjazd_stawek({"maker": Decimal("0.001"),
+    # Zmierzone na produkcji 2026-10-05: maker 0.0025, taker 0.0025.
+    assert rozjazd_stawek({"maker": Decimal("0.0025"),
                            "taker": Decimal("0.0025")}, k) == []
 
-    (opis,) = rozjazd_stawek({"maker": Decimal("0.002"),
+    # Dokladnie zmiana, ktora zaszla miedzy 2026-09-07 a 2026-10-05 - tylko
+    # w druga strone: kod zaklada 0,25%, gielda wraca do 0,10%.
+    (opis,) = rozjazd_stawek({"maker": Decimal("0.001"),
                               "taker": Decimal("0.0025")}, k)
     assert "maker" in opis
-    assert "0.2000%" in opis and "0.1000%" in opis   # obie liczby, nie sama roznica
+    assert "0.2500%" in opis and "0.1000%" in opis   # obie liczby, nie sama roznica
 
 
 def test_brak_odczytu_stawek_to_NIE_jest_zgodnosc():
@@ -540,8 +542,8 @@ def test_prog_rozjazdu_ignoruje_zaokraglenia_ale_nie_zmiane_stawki():
     from services.exchanges.mozliwosci import rozjazd_stawek
 
     k = koszty("spot_eu")
-    ledwie = {"maker": Decimal("0.00105"), "taker": Decimal("0.0025")}
-    wyraznie = {"maker": Decimal("0.0013"), "taker": Decimal("0.0025")}
+    ledwie = {"maker": Decimal("0.00255"), "taker": Decimal("0.0025")}
+    wyraznie = {"maker": Decimal("0.0028"), "taker": Decimal("0.0025")}
     assert rozjazd_stawek(ledwie, k) == []
     assert len(rozjazd_stawek(wyraznie, k)) == 1
 

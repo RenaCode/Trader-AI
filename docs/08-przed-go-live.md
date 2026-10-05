@@ -131,6 +131,13 @@ dla rynku o 0,1% wolumenu.** Jeden odczyt arkusza z hosta unijnego zamyka sprawe
       cennik per para z `/v5/account/fee-rate` zamiast stalej, przeliczenie Bramy 0
       i walk-forward po prawdziwej stawce. Do tego czasu zywotnosc zostaje czerwona
       celowo — to prawdziwe znalezisko, nie szum.
+      **2026-10-05, czesciowo:** odczyt wszystkich 135 par spot na api-demo.bybit.eu
+      dal JEDNAKOWO maker 0,25% i taker 0,25% (USDC 108, EUR 18, USDT 4 — to zmiana
+      stawki, nie roznica miedzy parami). `CENNIK["spot_eu"].maker` = 0,0025, wiec
+      runda z limitem kosztuje 0,500% zamiast 0,200%, a zywotnosc wraca do zieleni.
+      OTWARTE: przeliczenie Bramy 0 i walk-forward po nowej stawce oraz cennik
+      z gieldy zamiast stalej (stala znowu rozjedzie sie po cichu przy nastepnej
+      zmianie — czujka to wykryje, ale dopiero po fakcie).
 
 ### Spread na ksiedze unijnej — pierwszy odczyt (2026-09-24)
 
