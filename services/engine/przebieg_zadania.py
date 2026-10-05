@@ -44,17 +44,26 @@ from urllib.parse import urlsplit
 
 MIGRACJE = Path(__file__).resolve().parents[2] / "db" / "migrations"
 KOD_STARY_SCHEMAT = 3
+# Znacznik przebiegu POZA szablonem CronJoba w `risk.job_run.pod`. Czyta go
+# `dozor.przebieg_planowy` - importem stad, nie kopia napisu.
+PRZEDROSTEK_RECZNY = "reczny:"
 
 
-def zapisz(nazwa: str, czas_s: float, kod: int) -> bool:
+def zapisz(nazwa: str, czas_s: float, kod: int, *, reczny: bool = False) -> bool:
     """Jeden wiersz w `risk.job_run`. Czas startu liczony zegarem BAZY
     (`now() - czas trwania`), tak jak `finished_at` - dwa zegary rozjechalyby
-    sie i przebieg moglby skonczyc sie przed swoim poczatkiem."""
+    sie i przebieg moglby skonczyc sie przed swoim poczatkiem.
+
+    `reczny`: przebieg POZA szablonem CronJoba - `pod` dostaje przedrostek
+    `dozor.PRZEDROSTEK_RECZNY`, wiec czujka nie bierze go za planowy."""
     url = os.environ.get("DATABASE_URL")
     if not url:
         print(f"przebieg_zadania: DATABASE_URL nie ustawiony — wynik {nazwa} "
               f"(kod {kod}) NIE ZAPISANY", file=sys.stderr)
         return False
+    pod = os.environ.get("HOSTNAME")
+    if reczny:
+        pod = PRZEDROSTEK_RECZNY + (pod or "?")
     try:
         import psycopg
 
@@ -62,7 +71,7 @@ def zapisz(nazwa: str, czas_s: float, kod: int) -> bool:
             c.execute(
                 "INSERT INTO risk.job_run (nazwa, started_at, exit_code, pod)"
                 " VALUES (%s, now() - make_interval(secs => %s), %s, %s)",
-                (nazwa, round(czas_s, 3), kod, os.environ.get("HOSTNAME")))
+                (nazwa, round(czas_s, 3), kod, pod))
         return True
     except Exception as e:                                    # noqa: BLE001
         print(f"przebieg_zadania: wynik {nazwa} (kod {kod}) NIE ZAPISANY — "
@@ -129,13 +138,14 @@ def sprawdz_schemat(katalog: Path = MIGRACJE) -> str | None:
     return None
 
 
-def uruchom(nazwa: str, polecenie: list[str], *, mimo_starego: bool = False) -> int:
+def uruchom(nazwa: str, polecenie: list[str], *, mimo_starego: bool = False,
+           reczny: bool = False) -> int:
     czekaj_na_baze()
     rozjazd = sprawdz_schemat()
     if rozjazd and not mimo_starego:
         print(f"przebieg_zadania: {nazwa} NIE URUCHOMIONE — {rozjazd} (migracja "
               f"nie przeszla albo jeszcze trwa)", file=sys.stderr)
-        zapisz(nazwa, 0.0, KOD_STARY_SCHEMAT)
+        zapisz(nazwa, 0.0, KOD_STARY_SCHEMAT, reczny=reczny)
         return KOD_STARY_SCHEMAT
     if rozjazd:
         print(f"przebieg_zadania: UWAGA {rozjazd} — {nazwa} idzie mimo to "
@@ -152,7 +162,7 @@ def uruchom(nazwa: str, polecenie: list[str], *, mimo_starego: bool = False) -> 
     # Zabity sygnalem: Popen oddaje -N, powloka i Kubernetes mowia 128+N.
     if kod < 0:
         kod = 128 - kod
-    zapisz(nazwa, time.monotonic() - start, kod)
+    zapisz(nazwa, time.monotonic() - start, kod, reczny=reczny)
     return kod
 
 
@@ -168,6 +178,12 @@ def main(argv: list[str] | None = None) -> int:
                     help="poczekaj najwyzej S sekund na port bazy i zakoncz")
     ap.add_argument("--mimo-starego-schematu", action="store_true", dest="mimo_starego",
                     help="przy starszym schemacie bazy tylko ostrzez (czujka)")
+    # Przebieg uruchomiony POZA szablonem CronJoba (np. `kubectl exec` w innym
+    # podzie). `kubectl create job --from=cronjob/...` TEGO NIE POTRZEBUJE - to
+    # ten sam szablon, wiec liczy sie jak planowy (dozor.przebieg_planowy).
+    ap.add_argument("--reczny", action="store_true",
+                    help="przebieg poza szablonem CronJoba - czujka nie bierze "
+                         "go za planowy")
     ap.add_argument("polecenie", nargs=argparse.REMAINDER,
                     help="polecenie po `--`")
     args = ap.parse_args(argv)
@@ -178,7 +194,8 @@ def main(argv: list[str] | None = None) -> int:
     polecenie = args.polecenie[1:] if args.polecenie[:1] == ["--"] else args.polecenie
     if not polecenie:
         ap.error("brak polecenia po `--`")
-    return uruchom(args.nazwa, polecenie, mimo_starego=args.mimo_starego)
+    return uruchom(args.nazwa, polecenie, mimo_starego=args.mimo_starego,
+                   reczny=args.reczny)
 
 
 if __name__ == "__main__":

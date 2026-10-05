@@ -106,7 +106,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
-import re
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -3500,25 +3499,43 @@ MIN_PRZEBIEGOW_ODSTEPU = 3
 # zaczynaloby sie alarmem o zadaniach, ktore jeszcze nie mialy kiedy pojsc.
 BRAK_WIERSZY_PO_DNIACH = 8
 
-# PRZEBIEG PLANOWY A RECZNY (poprawka B, 2026-10-05).
+# PRZEBIEG PLANOWY A RECZNY (poprawka B, 2026-10-05; zawezona tego samego dnia).
 #
 # 2026-10-04 planowy trener 4h padl na `connection refused`, ktos powtorzyl go
-# recznie (`kubectl create job --from=cronjob/...`) i ten przebieg przeszedl.
-# Czujka patrzyla wylacznie na OSTATNI wiersz, wiec zielone powtorzenie zakrylo
-# padniety harmonogram - a to harmonogram bedzie chodzil w nastepnym tygodniu,
-# nie czlowiek.
+# recznie i ten przebieg przeszedl. Czujka patrzyla wylacznie na OSTATNI wiersz,
+# wiec zielone powtorzenie moglo zakryc padniety harmonogram.
 #
-# Rozroznienie z kolumny `pod` (0074, `HOSTNAME` poda), bez nowej kolumny:
-# kontroler CronJobow nazywa Job `<cronjob>-<minuta planowa od epoki>`,
-# a Job dokleja do nazwy poda piec losowych znakow. Job reczny ma nazwe nadana
-# przez czlowieka. Wiersz bez `pod` liczy sie jako PLANOWY - to zachowanie
-# sprzed tej zmiany, w ktorym kazdy przebieg byl oceniany jak planowy.
-POD_PLANOWY = re.compile(r"-\d{8,}-[a-z0-9]{5}$")
+# PIERWSZA WERSJA ROZROZNIALA PO NAZWIE PODA (`<cronjob>-<minuta>-<5 znakow>`)
+# i byla bledna: `kubectl create job --from=cronjob/...` to TEN SAM szablon
+# poda (te same polecenie, obraz, rola, kontener startowy z poprawki A), tylko
+# z nazwa nadana przez czlowieka. Udane takie powtorzenie dowodzi, ze szablon
+# dziala - a czujka uznala je za "reczne" i od wdrozenia (08:30 UTC 05.10)
+# trzymala `trader-zywotnosc` na czerwono o jednym, znanym zdarzeniu z 04.10.
+#
+# Dzis RECZNY jest wylacznie przebieg uruchomiony POZA szablonem CronJoba, a o tym
+# wie tylko ten, kto go uruchamia: `przebieg_zadania.py --reczny` zapisuje
+# `pod` z przedrostkiem `reczny:` (bez migracji - `pod` to wolny tekst).
+# Wszystko inne, takze wiersz bez `pod`, jest planowe.
+from services.engine.przebieg_zadania import PRZEDROSTEK_RECZNY  # noqa: E402
 
 
 def przebieg_planowy(przebieg: dict) -> bool:
-    pod = przebieg.get("pod")
-    return not pod or bool(POD_PLANOWY.search(pod))
+    return not (przebieg.get("pod") or "").startswith(PRZEDROSTEK_RECZNY)
+
+
+# POWTORKA ALARMU O ZADANIU Z ROSNACYM ODSTEPEM - liczona od AWARII (klucz niesie
+# id padnietego przebiegu), nie od objawu. Stala doba dawala przy tygodniowym
+# treningu siedem identycznych alarmow o jednym zdarzeniu; doba, dwie, cztery,
+# potem raz w tygodniu - tyle, ile realnie jest do zauwazenia.
+ZADANIE_POWTORKA_H = 24
+ZADANIE_POWTORKA_MAX_H = 168
+
+
+def odstep_powtorki_zadania(zgloszen: int) -> timedelta:
+    """Po ilu godzinach od ostatniego zgloszenia wolno zglosic ten sam klucz
+    po raz `zgloszen + 1`. CZYSTA FUNKCJA."""
+    h = ZADANIE_POWTORKA_H * 2 ** max(0, zgloszen - 1)
+    return timedelta(hours=min(h, ZADANIE_POWTORKA_MAX_H))
 
 
 def ocen_zadania(historia: dict[str, list[dict]], teraz: datetime,
@@ -3613,23 +3630,59 @@ async def sprawdz_zadania(fetch_all, notify, sucho: bool = False, *,
     nowe, trwale = 0, 0
     odbiorcy = None
     for klucz, opis in braki:
-        juz = await fetch_all(
-            "SELECT 1 FROM notify.notification"
-            " WHERE event_code = 'job.nieudany' AND data->>'klucz' = %s"
-            "   AND created_at > now() - interval '24 hours' LIMIT 1", (klucz,))
-        if juz:
+        # Jedno zgloszenie = jedna minuta (wszyscy odbiorcy w tym samym przebiegu).
+        poprzednie = await fetch_all(
+            "SELECT count(DISTINCT date_trunc('minute', created_at)) AS n,"
+            "       max(created_at) AS ostatnie FROM notify.notification"
+            " WHERE event_code IN ('job.nieudany', 'notify.alarm_nieprzyjety')"
+            "   AND data->>'klucz' = %s", (klucz,))
+        n = (poprzednie[0]["n"] or 0) if poprzednie else 0
+        ostatnie = poprzednie[0]["ostatnie"] if poprzednie else None
+        if n and ostatnie is not None and teraz - ostatnie < odstep_powtorki_zadania(n):
+            nastepne = ostatnie + odstep_powtorki_zadania(n)
+            print(f"  {klucz}: zgłoszone {n}×, ostatnio {ostatnie:%m-%d %H:%M} UTC; "
+                  f"następne przypomnienie najwcześniej {nastepne:%m-%d %H:%M} UTC")
             trwale += 1
             continue
-        nowe += 1
         if odbiorcy is None:
             odbiorcy = await fetch_all('SELECT id FROM app."user" WHERE is_active')
         nazwa = klucz.split(":", 1)[0]
+        wyslane = 0
         for u in odbiorcy:
-            await notify(u["id"], "job.nieudany", f"Zadanie {nazwa} zawiodło",
-                         f"{opis}.\n\nLog: `kubectl -n default get jobs | grep "
-                         f"{nazwa}` i `kubectl logs job/<nazwa>`. Wiersze: "
-                         f"`risk.job_run`.",
-                         severity="warning", data={"klucz": klucz, "zadanie": nazwa})
+            if await notify(u["id"], "job.nieudany", f"Zadanie {nazwa} zawiodło",
+                            f"{opis}.\n\nLog: `kubectl -n default get jobs | grep "
+                            f"{nazwa}` i `kubectl logs job/<nazwa>`. Wiersze: "
+                            f"`risk.job_run`.",
+                            severity="warning", data={"klucz": klucz, "zadanie": nazwa}):
+                wyslane += 1
+        if not wyslane and odbiorcy:
+            # `notify()` NIKOMU NIE ZAPISAL `job.nieudany` (2026-10-05: preferencja
+            # wylaczona albo jej cooldown - jedyne drogi do `None`). Bez wiersza
+            # nastepny przebieg nie wie, ze probowal: kod 1 co 10 minut, a do
+            # czlowieka nie dochodzi nic. Druga droga, `always_on` (migracja
+            # 0094), mowi wprost, ze to blad kanalu - i zostawia wiersz z tym
+            # samym kluczem, wiec powtorki licza sie dalej tym samym rytmem.
+            print(f"  BŁĄD KANAŁU: żaden z {len(odbiorcy)} odbiorców nie przyjął "
+                  f"`job.nieudany` dla {klucz} — wysyłam `notify.alarm_nieprzyjety`")
+            for u in odbiorcy:
+                if await notify(u["id"], "notify.alarm_nieprzyjety",
+                                f"Alarm o zadaniu {nazwa} nie został przyjęty",
+                                f"{opis}.\n\nPowiadomienie `job.nieudany` nie zostało "
+                                f"zapisane dla żadnego odbiorcy (wyłączona preferencja "
+                                f"albo jej cooldown). Sprawdź preferencje powiadomień "
+                                f"„Zadanie cykliczne nie powiodło się”.",
+                                severity="warning",
+                                data={"klucz": klucz, "zadanie": nazwa}):
+                    wyslane += 1
+        if wyslane:
+            nowe += 1
+        else:
+            # Brak aktywnych odbiorcow (albo i druga droga nic nie zapisala) -
+            # nie ma komu powiedziec, a kod 1 co 10 minut niczego nie zmieni.
+            # Stan zostaje w logu przy kazdym przebiegu.
+            print(f"  BŁĄD KANAŁU: {klucz} — nie zapisano żadnego powiadomienia "
+                  f"(aktywnych odbiorców: {len(odbiorcy)})")
+            trwale += 1
     return kod_wyjscia(nowe, trwale, "zadanie cykliczne zawiodło")
 
 

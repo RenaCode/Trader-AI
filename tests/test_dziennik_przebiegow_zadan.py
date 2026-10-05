@@ -26,7 +26,8 @@ import yaml
 
 from services.engine import przebieg_zadania as pz
 from services.engine.dozor import (
-    BRAK_WIERSZY_PO_DNIACH, ocen_zadania, przebieg_planowy, sprawdz_zadania)
+    BRAK_WIERSZY_PO_DNIACH, ocen_zadania, odstep_powtorki_zadania, przebieg_planowy,
+    sprawdz_zadania)
 
 KORZEN = Path(__file__).resolve().parents[1]
 TERAZ = datetime(2026, 10, 3, 14, 0, tzinfo=timezone.utc)
@@ -35,7 +36,7 @@ TERAZ = datetime(2026, 10, 3, 14, 0, tzinfo=timezone.utc)
 # ----------------------------------------------------------- opakowanie
 def test_opakowanie_oddaje_kod_polecenia_i_zapisuje_go(monkeypatch):
     zapisane = []
-    monkeypatch.setattr(pz, "zapisz", lambda n, t, k: zapisane.append((n, k)) or True)
+    monkeypatch.setattr(pz, "zapisz", lambda n, t, k, **_: zapisane.append((n, k)) or True)
     kod = pz.main(["--nazwa", "kurs", "--", sys.executable, "-c",
                    "import sys; sys.exit(3)"])
     assert kod == 3
@@ -118,22 +119,27 @@ def test_brak_wierszy_tuz_po_wdrozeniu_to_jeszcze_nie_alarm():
 
 # ------------------------------------------ planowy a ręczny (poprawka B)
 PLANOWY = "trader-trainer-29849700-x7k2q"     # Job z CronJoba: minuta planowa
-RECZNY = "trader-trainer-reczny-0410-b8m4z"    # `kubectl create job --from=...`
+Z_SZABLONU = "trener-reczny-0410-b8m4z"       # `kubectl create job --from=cronjob/...`
+RECZNY = "reczny:trader-api-7d9f8-b8m4z"      # `przebieg_zadania.py --reczny`
 
 
-def test_nazwa_poda_odroznia_przebieg_planowy_od_recznego():
+def test_przebieg_z_szablonu_CronJoba_jest_planowy_niezaleznie_od_nazwy():
+    """Produkcja 05.10 08:30 UTC: pierwsza wersja B uznała Job z `--from=cronjob`
+    za ręczny i trzymała żywotność na czerwono. To ten sam szablon poda."""
     assert przebieg_planowy({"pod": PLANOWY})
-    assert przebieg_planowy({"pod": "trader-backup-29849040-abcde"})
-    assert not przebieg_planowy({"pod": RECZNY})
-    assert not przebieg_planowy({"pod": "trader-trainer-recznie-1-abcde"})
-    # Bez nazwy poda - zachowanie sprzed zmiany: każdy przebieg jak planowy.
+    assert przebieg_planowy({"pod": Z_SZABLONU})
     assert przebieg_planowy({"pod": None}) and przebieg_planowy({})
+    assert not przebieg_planowy({"pod": RECZNY})
+
+
+def test_stan_z_04_10_powtorzenie_z_szablonu_czysci_alarm():
+    h = {"trainer": [{**_p(8, 2), "pod": Z_SZABLONU},
+                     {**_p(7, 5, kod=1), "pod": PLANOWY}]}
+    assert ocen_zadania(h, TERAZ, DZIENNIK_STARY) == []
 
 
 def test_padniety_PLANOWY_zakryty_udanym_RECZNYM_ZGLASZA():
-    """04.10: planowy trener padł na `connection refused`, ręczne powtórzenie
-    przeszło i czujka patrząca na ostatni wiersz zamilkła. Harmonogram, który
-    padł, pójdzie znowu za tydzień — człowiek nie."""
+    """Przebieg POZA szablonem (`--reczny`) nie dowodzi, że harmonogram działa."""
     h = {"trainer": [{**_p(8, 2), "pod": RECZNY},
                      {**_p(7, 5, kod=1), "pod": PLANOWY}]}
     braki = ocen_zadania(h, TERAZ, DZIENNIK_STARY)
@@ -164,11 +170,31 @@ def test_padniety_reczny_zglasza_jak_dotad():
     assert [k for k, _ in ocen_zadania(h, TERAZ, DZIENNIK_STARY)] == ["trainer:8"]
 
 
+def test_opakowanie_z_flaga_reczny_znakuje_pod(monkeypatch):
+    zapisane = []
+    monkeypatch.setattr(pz, "zapisz",
+                        lambda n, t, k, reczny=False: zapisane.append((n, k, reczny)) or True)
+    assert pz.main(["--nazwa", "trainer", "--reczny", "--", sys.executable, "-c",
+                    "pass"]) == 0
+    assert pz.main(["--nazwa", "trainer", "--", sys.executable, "-c", "pass"]) == 0
+    assert zapisane == [("trainer", 0, True), ("trainer", 0, False)]
+
+
+def test_odstep_powtorki_rosnie_do_tygodnia():
+    assert [odstep_powtorki_zadania(n).total_seconds() / 3600 for n in (1, 2, 3, 4, 5, 9)] \
+        == [24, 48, 96, 168, 168, 168]
+
+
 # ----------------------------------------------------------- przebieg
 class Atrapa:
-    def __init__(self, wiersze, zgloszone=()):
+    """`zgloszone`: klucz -> (ile zgłoszeń, ile godzin temu ostatnie); zbiór
+    kluczy znaczy jedno zgłoszenie godzinę temu."""
+
+    def __init__(self, wiersze, zgloszone=(), odbiorcy=({"id": 1},)):
         self.wiersze = wiersze
-        self.zgloszone = set(zgloszone)
+        self.zgloszone = (dict(zgloszone) if isinstance(zgloszone, dict)
+                          else {k: (1, 1) for k in zgloszone})
+        self.odbiorcy = list(odbiorcy)
 
     async def fetch_all(self, sql, params=None):
         if "row_number()" in sql:
@@ -176,17 +202,23 @@ class Atrapa:
         if "min(finished_at)" in sql:
             return [{"od": DZIENNIK_STARY}]
         if "notify.notification" in sql:
-            return [{"x": 1}] if params[0] in self.zgloszone else []
+            n, h = self.zgloszone.get(params[0], (0, None))
+            return [{"n": n, "ostatnie": None if h is None
+                     else TERAZ - timedelta(hours=h)}]
         if 'app."user"' in sql:
-            return [{"id": 1}]
+            return self.odbiorcy
         raise AssertionError(sql)
 
 
-def _uruchom(atrapa, **kw):
+def _uruchom(atrapa, przyjmuje=True, **kw):
     wyslane = []
 
     async def notify(uid, kod, tytul, tresc, **reszta):
         wyslane.append({"kod": kod, **reszta})
+        if przyjmuje is False or (przyjmuje == "tylko_awaryjny"
+                                  and kod != "notify.alarm_nieprzyjety"):
+            return None
+        return len(wyslane)
 
     kod = asyncio.run(sprawdz_zadania(atrapa.fetch_all, notify, teraz=TERAZ,
                                       zadania=["postmortem", "kurs"], **kw))
@@ -204,6 +236,44 @@ def test_nieudane_zadanie_powiadamia_raz():
 
     kod, wyslane = _uruchom(Atrapa(wiersze, zgloszone={"postmortem:9"}))
     assert (kod, wyslane) == (0, [])
+
+
+def test_powtorka_alarmu_z_rosnacym_odstepem():
+    """Doba po pierwszym, dwie po drugim: jedno zdarzenie, coraz rzadziej."""
+    wiersze = [{"nazwa": "postmortem", **_p(9, 6, kod=1)},
+               {"nazwa": "kurs", **_p(5, 1)}]
+    # po 1. zgłoszeniu: 23 h -> cisza, 25 h -> przypomnienie
+    assert _uruchom(Atrapa(wiersze, zgloszone={"postmortem:9": (1, 23)})) == (0, [])
+    kod, wyslane = _uruchom(Atrapa(wiersze, zgloszone={"postmortem:9": (1, 25)}))
+    assert kod == 1 and len(wyslane) == 1
+    # po 2. zgłoszeniu doba to za mało, dwie wystarczą
+    assert _uruchom(Atrapa(wiersze, zgloszone={"postmortem:9": (2, 25)})) == (0, [])
+    assert _uruchom(Atrapa(wiersze, zgloszone={"postmortem:9": (2, 49)}))[0] == 1
+
+
+def test_nikt_nie_przyjal_powiadomienia_kod_NIE_wraca_co_przebieg(capsys):
+    """Bez wiersza w `notify.notification` następny przebieg nie wie, że już
+    próbowaliśmy - stary kod dawał wtedy kod 1 co 10 minut o tym samym."""
+    wiersze = [{"nazwa": "postmortem", **_p(9, 6, kod=1)},
+               {"nazwa": "kurs", **_p(5, 1)}]
+    assert _uruchom(Atrapa(wiersze), przyjmuje=False)[0] == 0
+    assert _uruchom(Atrapa(wiersze, odbiorcy=()))[0] == 0
+    assert "BŁĄD KANAŁU" in capsys.readouterr().out
+
+
+def test_nieprzyjety_job_nieudany_idzie_DRUGA_DROGA_i_raz():
+    """Produkcja 05.10: `notify()` wracał None dla `job.nieudany`, alarm nie
+    docierał do nikogo, a kod 1 wracał co 10 minut. Teraz idzie
+    `notify.alarm_nieprzyjety` (always_on) z tym samym kluczem - raz."""
+    wiersze = [{"nazwa": "postmortem", **_p(9, 6, kod=1)},
+               {"nazwa": "kurs", **_p(5, 1)}]
+    kod, wyslane = _uruchom(Atrapa(wiersze), przyjmuje="tylko_awaryjny")
+    assert kod == 1
+    assert [(w["kod"], w["data"]["klucz"]) for w in wyslane] == [
+        ("job.nieudany", "postmortem:9"), ("notify.alarm_nieprzyjety", "postmortem:9")]
+    # Wiersz drugiej drogi niesie klucz, więc następny przebieg go widzi.
+    assert _uruchom(Atrapa(wiersze, zgloszone={"postmortem:9"}),
+                    przyjmuje="tylko_awaryjny") == (0, [])
 
 
 # ----------------------------------------------------------- wpięcie w chart
@@ -317,8 +387,8 @@ def test_planowy_padl_reczny_przeszedl_NA_POSTGRESIE(monkeypatch):
     monkeypatch.setenv("DATABASE_URL", DB)
     monkeypatch.setenv("HOSTNAME", f"trader-{nazwa}-29849700-x7k2q")
     assert pz.zapisz(nazwa, 3.0, 1)
-    monkeypatch.setenv("HOSTNAME", f"trader-{nazwa}-reczny-b8m4z")
-    assert pz.zapisz(nazwa, 3.0, 0)
+    monkeypatch.setenv("HOSTNAME", "trader-api-7d9f8-b8m4z")
+    assert pz.zapisz(nazwa, 3.0, 0, reczny=True)
     from services.api import db as api_db
 
     async def przebieg():
@@ -332,3 +402,27 @@ def test_planowy_padl_reczny_przeszedl_NA_POSTGRESIE(monkeypatch):
             await api_db.close_pool()
 
     assert asyncio.run(przebieg()) == 1
+
+
+@pytest.mark.skipif(not DB, reason="ustaw TEST_DB_URL na jednorazowa baze")
+def test_zapytanie_o_poprzednie_zgloszenia_NA_POSTGRESIE(monkeypatch, capsys):
+    """Atrapa oddaje `n` i `ostatnie` sama - tu idzie prawdziwe zapytanie
+    (count po minutach, max) i prawdziwa lista odbiorców; notify jest atrapą,
+    która nikogo nie przyjmuje, więc nic nie trafia do bazy."""
+    nazwa = f"test-powtorka-{os.getpid()}"
+    monkeypatch.setenv("DATABASE_URL", DB)
+    monkeypatch.setenv("HOSTNAME", f"trader-{nazwa}-29849700-x7k2q")
+    assert pz.zapisz(nazwa, 3.0, 1)
+    from services.api import db as api_db
+
+    async def przebieg():
+        await api_db.open_pool()
+        try:
+            async def notify(*a, **kw):
+                return None
+            return await sprawdz_zadania(api_db.fetch_all, notify, zadania=[nazwa])
+        finally:
+            await api_db.close_pool()
+
+    assert asyncio.run(przebieg()) == 0
+    assert "BŁĄD KANAŁU" in capsys.readouterr().out

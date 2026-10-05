@@ -20,7 +20,7 @@ def _bramka(monkeypatch, rozjazd):
     zapisane, uruchomione = [], []
     monkeypatch.setattr(pz, "czekaj_na_baze", lambda: True)
     monkeypatch.setattr(pz, "sprawdz_schemat", lambda: rozjazd)
-    monkeypatch.setattr(pz, "zapisz", lambda n, t, k: zapisane.append((n, k)) or True)
+    monkeypatch.setattr(pz, "zapisz", lambda n, t, k, **_: zapisane.append((n, k)) or True)
 
     class Proc:
         def __init__(self, polecenie):
