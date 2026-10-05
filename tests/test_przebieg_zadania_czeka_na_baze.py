@@ -55,6 +55,6 @@ def test_uruchom_czeka_przed_poleceniem(monkeypatch):
             return 0
 
     monkeypatch.setattr(pz.subprocess, "Popen", Proc)
-    monkeypatch.setattr(pz, "zapisz", lambda *a: True)
+    monkeypatch.setattr(pz, "zapisz", lambda *a, **_: True)
     assert pz.uruchom("trainer", ["true"]) == 0
     assert kolejnosc == ["baza", "polecenie"]
