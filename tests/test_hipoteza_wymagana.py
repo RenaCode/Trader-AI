@@ -155,8 +155,11 @@ def test_trener_chodzi_raz_w_tygodniu_w_niedziele():
     assert m and m.group(1) == "40 4 * * 0"
 
 
-def test_tor_equity_zostaje_wstrzymany():
+def test_tor_equity_trenuje_sie():
+    """R9 (wstrzymanie 2026-10-03) zdjete decyzja wlasciciela 2026-10-06:
+    demo ma trenowac algorytm przed live, a bez toru equity silnik equity
+    nie ma ani stanu nauki, ani kandydata."""
     values = (KORZEN / "charts/trader/values.yaml").read_text(encoding="utf-8")
     blok = values[values.index("\ntrainerCron:"):]
     blok = blok[blok.index("  equity:"):]
-    assert re.match(r"  equity:\n    enabled: false\n", blok)
+    assert re.match(r"  equity:\n    enabled: true\n", blok)

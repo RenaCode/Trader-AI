@@ -155,6 +155,16 @@ H4H = Horizon(
 HORIZONS = {h.bar: h for h in (H5M, H1H, H4H)}
 DEFAULT_BAR = "4h"
 
+# Swieca, ktora silnik FAKTYCZNIE handluje (loop.py --bar w values.yaml).
+# Equity trenuje i handluje tylko na 1h (sesja 6,5 h nie daje sensownych
+# okien 4h), wiec panel szukajacy stanu equity na DEFAULT_BAR nie znajdowal
+# niczego i pokazywal "Brak stanu" nawet po udanym treningu.
+BAR_SILNIKA = {"crypto": DEFAULT_BAR, "equity": "1h"}
+
+
+def bar_silnika(engine: str) -> str:
+    return BAR_SILNIKA.get(str(engine), DEFAULT_BAR)
+
 
 def get(bar: str) -> Horizon:
     if bar not in HORIZONS:

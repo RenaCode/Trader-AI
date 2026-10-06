@@ -26,7 +26,11 @@ from services.ingest import market_worker
 from tests.test_worker_rynku_lista_i_licznik import (Gielda, Koniec, Polaczenie,
                                                     instrument)
 
-OTWARCIE = datetime(2026, 10, 2, 13, 30, tzinfo=timezone.utc)
+# Sesja WCZORAJ, nie stala data: adapter bez `start` pyta o `OKNO_NAJNOWSZYCH`
+# wstecz od `now()`, wiec stala 2026-10-02 wypadla z okna 2026-10-06 i test
+# zaczal padac sam z siebie.
+OTWARCIE = (datetime.now(timezone.utc) - timedelta(days=1)).replace(
+    hour=13, minute=30, second=0, microsecond=0)
 # 300 minut sesji: 13:30 .. 18:29 - więcej niż `limit=200` workera.
 SWIECE_DNIA = [OTWARCIE + timedelta(minutes=i) for i in range(300)]
 

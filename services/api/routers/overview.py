@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Query
 
-from services.engine.horizons import DEFAULT_BAR
+from services.engine.horizons import bar_silnika
 from ..db import fetch_all, fetch_one
 from ..typy import Silnik, Tryb
 
@@ -52,7 +52,7 @@ async def overview(engine: Silnik, mode: Tryb = Query("demo")):
         # na silnik, a dashboard pokazuje ten, ktorym silnik handluje.
         "SELECT status, reason, updated_at FROM learn.learning_state"
         " WHERE engine::text = %s AND bar = %s",
-        (engine, DEFAULT_BAR),
+        (engine, bar_silnika(engine)),
     )
 
     # BRAK PUNKTU TO `null`, NIE ZERO.

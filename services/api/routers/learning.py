@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Query
 
-from services.engine.horizons import DEFAULT_BAR
+from services.engine.horizons import bar_silnika
 from ..db import fetch_all, fetch_one
 from ..typy import Silnik
 
@@ -26,7 +26,7 @@ async def _wersja_modelu(engine: str) -> int | None:
     samego silnika. "Wszystkie wersje tego silnika" to wiec po tygodniu
     kilkanascie roznych modeli, z czego handluje jeden.
 
-    Wskazuje go `learn.learning_state` dla horyzontu domyslnego - dokladnie ten
+    Wskazuje go `learn.learning_state` dla swiecy silnika (`bar_silnika`) - ten
     sam wiersz, z ktorego `/state` bierze liczby na kafle. Kazda inna regula
     rozjechalaby wykres z kaflami nad nim, czyli dwie liczby opisujace ten sam
     model pochodzilyby z dwoch roznych.
@@ -39,7 +39,7 @@ async def _wersja_modelu(engine: str) -> int | None:
         FROM learn.learning_state ls
         WHERE ls.engine::text = %s AND ls.bar = %s
         """,
-        (engine, DEFAULT_BAR),
+        (engine, bar_silnika(engine)),
     )
     return stan["model_version_id"] if stan else None
 
@@ -61,7 +61,7 @@ async def state(engine: Silnik):
         -- ktorym silnik faktycznie handluje - pozostale sa torami porownawczymi.
         WHERE ls.engine::text = %s AND ls.bar = %s
         """,
-        (engine, DEFAULT_BAR),
+        (engine, bar_silnika(engine)),
     )
     if not row:
         # KOMPLET KLUCZY Z `null`, a nie obiekt o dwoch polach. W JS brakujacy
@@ -164,7 +164,7 @@ async def state(engine: Silnik):
 
 
 @router.get("/weights")
-async def weights(engine: Silnik, bar: str = Query("4h")):
+async def weights(engine: Silnik, bar: str | None = Query(None)):
     """Wagi sygnalow: wyliczone przez trening kontra zalozenia poczatkowe.
 
     To jest najbardziej konkretna odpowiedz na pytanie "czy algorytm sie uczy".
@@ -177,6 +177,8 @@ async def weights(engine: Silnik, bar: str = Query("4h")):
     jest to pokazac, zamiast wyswietlac pusta tabele.
     """
     from services.engine.signals import DEFAULT_WEIGHTS, SIGNALS
+
+    bar = bar or bar_silnika(engine)
 
     row = await fetch_one(
         """
@@ -258,7 +260,7 @@ async def walk_forward(engine: Silnik, limit: int = Query(40, le=200)):
     handluje - pod naglowkiem opisanym metrykami z 4h.
 
     Wybor jest wiec DOKLADNIE TEN SAM co w /state: wiersz `learn.learning_state`
-    dla horyzontu domyslnego wskazuje wersje modelu z ostatniego przebiegu, a my
+    dla swiecy silnika wskazuje wersje modelu z ostatniego przebiegu, a my
     bierzemy okna tego przebiegu. Druga regula ("aktywna wersja", "najnowszy
     model") rozjechalaby sie z liczbami na kaflach nad tym wykresem - czyli
     wykres opisywalby inny przebieg niz odsetek dodatnich okien obok niego.
