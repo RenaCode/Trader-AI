@@ -21,7 +21,7 @@ automatycznej promocji `learning` → `active` już nie ma.
 | H-3 | 2026-10-04 | Tor R4: momentum przekrojowe 30 d na decyzji dobowej z filtrem BTC > EMA 50 d, top 3 long-only, pod pesymistycznym modelem wejść (STOP/GO 2) | wszystkie cztery naraz: K1 okna dodatnie ≥ 65% **i** bije B1 przy tej samej ekspozycji w ≥ 65% okien; K2 DSR ≥ 0,95 na 5/5 przesunięć; K3 percentyl permutacyjny ≥ 70 na 5/5 przesunięć; K4 bije B2 przy tej samej ekspozycji w ≥ 55% okien | K1 NIE (okna dodatnie 46%, bije B1 35%), K2 TAK (DSR 0,950–0,980, N = 2), K3 TAK (percentyl 100), K4 NIE (bije B2 44%); oba warianty ekspozycji | **STOP** — R4 nie wchodzi na demo; żaden tor nie spełnia kryteriów, decyzja właściciela (sekcja 12) · zamknięte decyzją A (2026-10-04); reguła R4 na demo wyłącznie jako pomiar egzekucji E-1 |
 | A | 2026-10-04 | Decyzja właściciela po STOP/GO 2 (sekcja 12): zamknięcie poszukiwania przewagi | — (decyzja, nie test) | H-1 STOP, H-3 STOP | **zamknięte z wnioskiem „brak przewagi spełniającej kryteria”**; tor badawczy (ensemble 4h, R4) zamknięty |
 | E-1 | 2026-10-04 | **Pomiar egzekucji, NIE hipoteza przewagi.** Reguła R4 „momentum + filtr trendu” z parametrami zamrożonymi z H-3 na koncie demo, 15% kapitału | opisowe, bez GO: realizacja na giełdzie wobec modelu pesymistycznego (wypełnialność wejść, opóźnienie wysyłki, prowizje, wyjście względem ceny decyzji) | w toku od wdrożenia | wynik finansowy NIE jest wynikiem; nic z tego przebiegu nie podlega promocji |
-| H-4 | 2026-10-05 | Cotygodniowy trening poprawia model: wersja v_k jest lepsza od v_k−1 **w przód**, na tygodniu zamkniętym po zapisaniu obu | test znaków po oknach: v_k lepsza w ≥ 10 z pierwszych 12 tygodni z różnicą ≠ 0 (p ≈ 0,019); n = liczba okien kalendarzowych, nie transakcji | w toku — szkielet pomiaru, miara okna niezaimplementowana | — |
+| H-4 | 2026-10-05 | Cotygodniowy trening poprawia model: wersja v_k jest lepsza od v_k−1 **w przód**, na tygodniu zamkniętym po zapisaniu obu | test znaków po oknach: v_k lepsza w ≥ 10 z pierwszych 12 tygodni z różnicą ≠ 0 (p ≈ 0,019); n = liczba okien kalendarzowych, nie transakcji | w toku — miara okna `H-4/m1` zapisana 2026-10-07 przed pierwszym oknem; pierwsza para liczona po 2026-10-19 | — |
 
 ---
 
@@ -568,16 +568,60 @@ Zmiana kodu miary, cech albo kryterium w trakcie zbierania okien przerywa serię
 dalszy pomiar to nowa hipoteza z nowym numerem. Najwcześniejszy termin werdyktu
 to 12 tygodni po 2026-10-12, czyli **2027-01-04**.
 
-**Stan na 2026-10-05: SZKIELET.** `services/engine/w_przod.py` liczy pary i okna
-z `learn.model_version` oraz werdykt z listy różnic (testy:
-`tests/test_w_przod.py`). **Brakuje miary okna** (`miara_okna` rzuca
-`NotImplementedError`, nie zwraca zera). Co dalej: panel z bazy obcięty do
-[od, do) z historią do rozgrzania sygnałów, `train.precompute_panels`
-i `train.simulate_portfolio` z `params` wersji i kartą `spot_eu`, wynik
-każdej pary zapisany w bazie razem z `git_sha` kodu miary, żeby seria nie
-mieszała dwóch definicji. Okna da się policzyć wstecz po dopisaniu miary,
-bo wersje i świece zostają w bazie; okno, które nie istniało przed jego
-początkiem, nadal jest testem w przód.
+**Stan na 2026-10-05: SZKIELET** (pary, okna, werdykt; miara okna rzucała
+`NotImplementedError`).
+
+**Miara okna — doprecyzowanie zapisane 2026-10-07, PRZED pierwszym oknem**
+(okno 2026-10-12 zamyka się 2026-10-19; żadna para nie była jeszcze policzona).
+Etykieta definicji: `H-4/m1` (`w_przod.DEFINICJA_MIARY`). Wszystko poniżej jest
+wspólne dla obu wersji pary; różnią się wyłącznie `params`.
+
+- **dane**: panel z bazy `train.load_panel` (cechy bitemporalne, odcisk uniwersum
+  jak u trenera) za [od − `train_days`, do) — 180 dni rozgrzewki dla 4h, 90 dla 1h;
+  handel wyłącznie na świecach z [od, do). Próg ATR reżimu (`train.atr_threshold`)
+  z rozgrzewki, czyli z danych sprzed okna; pętla liczy go kroczącą historią
+  `train_days`, tu jest jeden na tydzień, ten sam dla obu wersji;
+- **uniwersum**: `train._uniwersum` (to, na którym wersje trenowano, z bramkami
+  equity → kod 3) w chwili liczenia, nie w chwili `od` — `ref.instrument` nie
+  trzyma historii `tradeable`. Zadanie liczy okno w niedzielę po jego zamknięciu,
+  więc rozjazd to najwyżej tydzień; odcisk uniwersum idzie do zapisu;
+- **koszty i wykonanie**: karta `spot_eu` (equity: `stock`) i spread per instrument
+  z `train._koszty`, liczone na `train_days` PRZED oknem; `Egzekucja(limit=True,
+  opoznienie_min=20, pesymistyczna=True)` na świecach 1h, jak H-1; wynik po
+  `wynik_po_doplacie`; limity konta `DEFAULT_LIMITS`, kapitał `START_EQUITY`;
+- **wersja**: wagi per reżim, progi per reżim (`bramki_z_modelu`) i
+  `min_confidence` z `params`. Wersja bez `weights` (przebieg padł przed zapisem
+  wyniku) nie jest wersją: nie wchodzi do `pary_okien` i nie zasłania ostatniej
+  prawdziwej wersji przed oknem;
+- **„przy tej samej ekspozycji”** — w znaczeniu, jakie to słowo ma w całym
+  rejestrze (porównania z B1/B2, `baseline.bije`): miara = r − f × B1, gdzie r to
+  zwrot konta w oknie po dopłacie (% kapitału), f — `ekspozycja_przenoszona`,
+  B1 — koszyk kup-i-trzymaj tego okna po dopłacie z karty rynkowej. Goły zwrot
+  tygodnia byłby w praktyce kierunkiem rynku razy ekspozycja: wersja częściej
+  w rynku wygrywałaby każdy tydzień wzrostów i przegrywała każdy tydzień spadków,
+  a test znaków mierzyłby pogodę. Przy równej ekspozycji d = r_k − r_k−1.
+  Dwie wersje bez transakcji albo z identycznymi decyzjami dają d = 0 dokładnie
+  (remis). Zwrot, ekspozycja i B1 obu wersji są w zapisie, więc goły zwrot da się
+  odczytać — ale werdykt liczy się wyłącznie z d powyżej;
+- **założenia początkowe** (`DEFAULT_WEIGHTS`, progi początkowe) liczone tą samą
+  miarą i zapisywane **informacyjnie**; nie wchodzą do kryterium.
+
+**Zapis i zamrożenie.** Każda para trafia do `learn.w_przod_okno` (migracja 0095)
+z `definicja_miary`, `git_sha` i szczegółami obu wersji; okno policzone raz nie
+jest liczone ponownie (rewizja świec ani wdrożenie nie zmienia wyniku, który już
+wszedł do serii). Werdykt bierze wyłącznie okna z bieżącą etykietą definicji —
+nowa etykieta to nowa seria i nowa hipoteza. Tydzień bez danych w panelu nie jest
+remisem: nic nie jest zapisywane, skrypt kończy się kodem 3.
+
+**Uruchamianie.** `trainer-cron.yaml`, po trenerze i dozorze:
+`python services/engine/w_przod.py --engine crypto --bar 4h --kind spot_eu`
+oraz `--engine equity --bar 1h --kind stock` — **seria pomocnicza poza
+kryterium H-4** (kryterium zapisano dla `crypto_signal_weighting_4h`; przypisanie
+go innemu torowi po fakcie byłoby nową hipotezą). Kod 3 (brak danych w oknie,
+bramka uniwersum equity) trafia do podsumowania TORY NIEURUCHOMIONE i nie zapala
+Joba; kod 0 także przed 2026-10-19 (nie ma czego liczyć); każdy inny kod zapala
+Joba. Podgląd na oknach sprzed 2026-10-12: `--sucho --od RRRR-MM-DD` — nic nie
+zapisuje i nie jest testem w przód.
 
 **Uwaga do miary: wiadomości (poprawka C, 2026-10-05).** Od wdrożenia tej zmiany
 symbol z analizy LLM wiąże artykuł z **wszystkimi** aktywnymi instrumentami tego

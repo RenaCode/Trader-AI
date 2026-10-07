@@ -236,6 +236,37 @@ spec:
                   # awarii wlasnym kodem wyjscia nalezy do dozor.py, nie do
                   # tego szablonu.
                   python services/engine/dozor.py --co dryf --bar {{ .Values.trainerCron.bar | quote }} || true
+                  # TEST W PRZOD H-4 - PO TRENERZE I PO DOZORZE, nigdy przed nimi.
+                  #
+                  # Liczy WYLACZNIE okna juz zamkniete (tydzien pon-pon UTC) dla
+                  # wersji zapisanych PRZED ich poczatkiem, wiec wersja z tego
+                  # przebiegu nie wchodzi do zadnej pary policzonej dzisiaj -
+                  # kolejnosc chroni tylko log: wynik treningu i alarm dozoru sa
+                  # wazniejsze i maja stac pierwsze.
+                  #
+                  # KODY JAK U TRENERA, NIE `|| true`. Kod 3 (`KOD_NIEGOTOWE`:
+                  # para byla, okna nie dalo sie policzyc - brak danych, bramka
+                  # uniwersum equity) idzie do podsumowania TORY NIEURUCHOMIONE
+                  # i NIE zapala Joba: to stan, ktory wracalby co tydzien.
+                  # Przed 2026-10-12 (i w kazdym tygodniu bez pary) skrypt konczy
+                  # sie zerem - nie bylo czego liczyc. Kazdy inny kod to awaria
+                  # kodu miary i zapala Joba: `|| true` polknalby traceback,
+                  # a seria, ktora po cichu przestaje przybywac, jest gorsza od
+                  # czerwonego Joba - werdykt H-4 stoi na liczbie okien.
+                  python services/engine/w_przod.py --engine crypto --bar {{ .Values.trainerCron.bar | quote }} --kind {{ .Values.trainerCron.kind | default "spot_eu" | quote }}
+                  W=$?
+                  if [ "$W" = 3 ]; then NIEGOTOWE="${NIEGOTOWE}w_przod/crypto/{{ .Values.trainerCron.bar }} "
+                  elif [ "$W" != 0 ]; then RC=$W
+                  fi
+                  {{- if .Values.trainerCron.equity.enabled }}
+                  # Equity: seria pomocnicza, poza kryterium H-4 (zapisanym dla
+                  # crypto 4h) - ta sama miara, osobny model, osobny wynik.
+                  python services/engine/w_przod.py --engine equity --bar {{ (first .Values.trainerCron.equity.horyzonty) | quote }} --kind {{ .Values.trainerCron.equity.kind | default "stock" | quote }}
+                  W=$?
+                  if [ "$W" = 3 ]; then NIEGOTOWE="${NIEGOTOWE}w_przod/equity/{{ first .Values.trainerCron.equity.horyzonty }} "
+                  elif [ "$W" != 0 ]; then RC=$W
+                  fi
+                  {{- end }}
                   # PODSUMOWANIE TOROW NIEURUCHOMIONYCH - GLOSNE MIEJSCE, KTORE
                   # NIE JEST KODEM WYJSCIA.
                   #
