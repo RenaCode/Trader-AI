@@ -14,6 +14,19 @@ PRZEGENEROWANY RAZ, w T4 (progi na wagach IC, audyt Fable F-2.1): warianty
 wynik byl identyczny ze zrzutem z b08a2b5); `argmax` i `bazowe` bez zmian.
 Doszedl wariant `ic_siatka` - siatka zakotwiczona i piec przesuniec.
 
+PRZEGENEROWANY DRUGI RAZ, 2026-10-07 (H-5, H-6, H-7 w docs/hipotezy.md),
+SWIADOMIE, bo test pilnowal starej decyzji: na `spot_eu` (bez shortow) progi
+i wagi IC liczyly sie dwustronnie. Sprawdzone dwuetapowo przed zapisem:
+  1. z H-6 wylaczonym (`strona_uczenia` -> None) KAZDY wariant dawal ten sam
+     JSON i ten sam wydruk co zrzut z T4, poza nowymi kluczami
+     (`strona`, `trzymanie_swiec`, `horyzont_etykiety_swiec`) i nowymi liniami
+     logu (uczenie/horyzont etykiety, czas trzymania) - czyli H-5 (flaga
+     w CLI) i H-7 (pomiar w logu) nie zmieniaja wyniku;
+  2. z H-6 wlaczonym zmieniaja sie wszystkie warianty (wszystkie sa na
+     `spot_eu`) - to jest zamierzona zmiana strategii, nie regresja.
+Doszedl wariant `ic_stock` (rynek z shortami): pilnuje, ze tam uczenie
+zostaje dwustronne i `params` nie dostaja klucza `strona`.
+
 Zmiana wyniku zamierzona (nowa miara, poprawka) oznacza swiadome
 przegenerowanie zrzutu:
 
@@ -56,6 +69,8 @@ WARIANTY = {
                        progi_per_rezim=False),
     "ic_pesymistyczna": dict(egzekucja=Egzekucja(limit=True, opoznienie_min=20,
                                                  pesymistyczna=True), wybor="ic"),
+    # Rynek Z SHORTAMI (H-6): uczenie dwustronne jak przed 2026-10-07.
+    "ic_stock": dict(egzekucja=Egzekucja(limit=True), wybor="ic", kind="stock"),
     # Siatka produkcji (T4): kotwica w kalendarzu i piec przesuniec. `days`
     # o 2 krotsze niz plik - zapas na przesuniecie -2.
     "ic_siatka": dict(egzekucja=Egzekucja(limit=True), wybor="ic", days=DNI - 2,
@@ -67,9 +82,10 @@ def przebieg(plik: dict, wariant: str) -> dict:
     a = dict(WARIANTY[wariant])
     trials = a.pop("trials", 2)
     dni = a.pop("days", DNI)
+    kind = a.pop("kind", "spot_eu")
     wydruk = io.StringIO()
     with contextlib.redirect_stdout(wydruk):
-        wynik = tr.train(None, "crypto", dni, trials, H4, "spot_eu", sucho=True,
+        wynik = tr.train(None, "crypto", dni, trials, H4, kind, sucho=True,
                          panel=plik, **a)
     # Przez JSON: krotki -> listy, tak jak w zrzucie.
     return {"json": json.loads(json.dumps(wynik)), "stdout": wydruk.getvalue()}

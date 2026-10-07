@@ -177,19 +177,27 @@ def test_4h_zachowuje_dawne_3_swiece():
     assert get_horizon("4h").ic_horizon_bars == 3
 
 
-def test_trener_podaje_ic_weights_horyzont_z_Horizon(monkeypatch):
+@pytest.mark.parametrize("horyzont_etykiety", [None, 6], ids=["z_Horizon", "z_flagi"])
+def test_trener_podaje_ic_weights_horyzont_z_Horizon(monkeypatch, horyzont_etykiety):
+    """Od 2026-10-07 (H-6, H-7) szpieg przyjmuje tez `tylko_dluga` - swiadomie:
+    trener podaje ja dla rynku bez shortow - i sprawdza, ze `--horyzont-etykiety`
+    dochodzi do `ic_weights` zamiast `Horizon.ic_horizon_bars`."""
     widziane = []
+    strony = []
     prawdziwe = tr.ic_weights
 
-    def szpieg(panels, cache, martwe, horyzont_swiec=3):
+    def szpieg(panels, cache, martwe, horyzont_swiec=3, tylko_dluga=False):
         widziane.append(horyzont_swiec)
-        return prawdziwe(panels, cache, martwe, horyzont_swiec)
+        strony.append(tylko_dluga)
+        return prawdziwe(panels, cache, martwe, horyzont_swiec, tylko_dluga=tylko_dluga)
 
     monkeypatch.setattr(tr, "ic_weights", szpieg)
     with contextlib.redirect_stdout(io.StringIO()):
         tr.train(None, "crypto", DNI, 2, H4, "spot_eu", Egzekucja(limit=True),
-                 sucho=True, wybor="ic", panel=plik_syntetyczny())
-    assert widziane and set(widziane) == {H4.ic_horizon_bars}
+                 sucho=True, wybor="ic", panel=plik_syntetyczny(),
+                 horyzont_etykiety=horyzont_etykiety)
+    assert widziane and set(widziane) == {horyzont_etykiety or H4.ic_horizon_bars}
+    assert set(strony) == {True}, "spot_eu nie ma shortow - wagi IC tylko dla longa"
 
 
 def test_horyzont_IC_inny_niz_3_trafia_do_params():

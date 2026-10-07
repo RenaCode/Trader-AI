@@ -124,6 +124,11 @@ def bramki_z_prob(proby: dict[str, list[float]], pctl: float,
                   per_rezim: bool = True) -> Bramki:
     """Progi z rozkladow `abs(score)` zebranych OSOBNO dla kazdego rezimu.
 
+    Na rynku bez shortow (od 2026-10-07, H-6) wolajacy podaje zamiast
+    `abs(score)` wylacznie wyniki dodatnie (`train.proby_wynikow`,
+    `tylko_dluga=True`) - arytmetyka percentyla jest tu ta sama, zmienia sie
+    populacja.
+
     `per_rezim=False` odtwarza arytmetyke sprzed 2026-09-27: jeden percentyl ze
     zlaczonej proby, ten sam dla wszystkich rezimow. Wariant istnieje po to,
     zeby dalo sie zmierzyc ROZNICE na tych samych oknach - a nie po to, zeby

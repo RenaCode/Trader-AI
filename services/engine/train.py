@@ -66,7 +66,7 @@ from services.engine.portfolio import (
     wynik_po_doplacie,
 )
 from services.engine.koszty import (
-    NIEZMIERZONE, Karta, karta_rundy, koszt_niewypelnienia, opis_karty,
+    NIEZMIERZONE, Karta, karta_rundy, koszt_niewypelnienia, koszty, opis_karty,
     zwroty_po_doplacie,
 )
 from services.engine.spread import Pomiar, opis_pomiaru, zmierz_spread
@@ -103,6 +103,32 @@ ENTER_PCTL = 0.88
 # decyzyjna. Zdefiniowany tu osobno oznaczalby, ze trener kalibruje wagi przy
 # innym progu, niz produkcja potem stosuje.
 MIN_CONF = MIN_CONFIDENCE
+
+
+# UCZENIE TYLKO STRONY, KTORA DA SIE ZAGRAC (2026-10-07, H-6).
+#
+# Na spocie krotkich nie ma (`koszty(kind).krotka_pozycja is False`): symulacja
+# odrzuca kazde wejscie ze score < 0 (`portfolio.simulate_portfolio`,
+# `pominiete_shorty`), petla tak samo (`loop.py`, `enter_short`). Do tej daty
+# trening uczyl sie jednak OBU stron:
+#   * prog wejscia byl percentylem |score|, wiec w rezimie, w ktorym duze
+#     wyniki sa ujemne (trend_down), prog stal wysoko z powodu shortow, ktorych
+#     nikt nie zagra - a dlugie wejscia, ktore go mijaly, to garstka skrajnych
+#     odbic, czyli kupowanie spadkow;
+#   * wagi IC nagradzaly sygnal za trafne przewidywanie SPADKOW tak samo jak
+#     wzrostow, choc na spocie przewidziany spadek daje co najwyzej "nie
+#     wchodz".
+# Dla rynku bez shortow obie rzeczy licza sie teraz z obserwacji, na ktorych
+# decyzja long jest mozliwa (`proby_wynikow`, `ic_weights`). Rynek z shortami
+# (perp, stock) - bez zmian, dwustronnie. Klucz `strona` w `params` tylko poza
+# wartoscia domyslna, wiec tor equity (`stock`) zachowuje swoje `params`.
+STRONA_DLUGA = "dluga"
+
+
+def strona_uczenia(kind: str) -> str | None:
+    """"dluga", gdy rynek nie pozwala na shorty, inaczej None (obie strony).
+    CZYSTA FUNKCJA - ta sama flaga, ktora czyta symulacja i petla."""
+    return None if koszty(kind).krotka_pozycja else STRONA_DLUGA
 
 # Minimum informatywnych okien, ponizej ktorego NIE WOLNO orzec "zwalidowane".
 # Bez tego jedno dodatnie okno przy 40 pominietych dawalo 100% skutecznosci
@@ -1698,8 +1724,17 @@ def proby_wynikow(panels: dict[str, list[dict]],
                   weights: dict[str, dict[str, float]],
                   atr_thresholds: dict[str, float | None], h: Horizon,
                   cache: dict[str, list[tuple]] | None = None,
+                  tylko_dluga: bool = False,
                   ) -> dict[str, list[float]]:
     """`abs(wynik)` z okna, POGRUPOWANE PO REZIMIE, ze wszystkich instrumentow.
+
+    `tylko_dluga=True` (rynek bez shortow, `strona_uczenia`) - zamiast
+    `abs(wynik)` WYLACZNIE wyniki dodatnie, czyli populacja, z ktorej moze
+    powstac wejscie long. Percentyl 0,88 znaczy wtedy "12% najsilniejszych
+    sytuacji LONG", a nie "12% najsilniejszych sytuacji, z ktorych polowe
+    i tak odrzucimy". Przy rozkladzie symetrycznym czestotliwosc wejsc jest
+    zblizona (12% z polowy proby wobec ok. 6% z calej), roznica pojawia sie
+    tam, gdzie rozklad jest skosny - czyli tam, gdzie wada byla.
 
     Liczone wylacznie na oknie TRENINGOWYM. Policzone na testowym byloby
     zagladaniem w przyszlosc - prog znalby rozklad, ktorego w tamtym momencie
@@ -1731,7 +1766,13 @@ def proby_wynikow(panels: dict[str, list[dict]],
                 sc, conf, _ = evaluate(row["f"], regime, weights.get(regime), h)
             # Prog pewnosci odsiewa TAK SAMO jak w produkcji - inaczej percentyl
             # liczylby sie na populacji szerszej niz ta, ktora go potem mija.
-            if conf >= MIN_CONF:
+            if conf < MIN_CONF:
+                continue
+            if tylko_dluga:
+                # Zero tez odpada: przy score == 0 nie ma wejscia w zadna strone.
+                if sc > 0:
+                    proby.setdefault(regime, []).append(sc)
+            else:
                 proby.setdefault(regime, []).append(abs(sc))
     return proby
 
@@ -1740,14 +1781,16 @@ def bramki_okna(panels: dict[str, list[dict]],
                 weights: dict[str, dict[str, float]],
                 atr_thresholds: dict[str, float | None], h: Horizon,
                 cache: dict[str, list[tuple]] | None = None,
-                per_rezim: bool = True) -> Bramki:
+                per_rezim: bool = True, tylko_dluga: bool = False) -> Bramki:
     """Progi wejscia i wyjscia dla CALEGO okna, po jednym na rezim.
 
     `per_rezim=False` liczy jeden prog ze zlaczonej proby, czyli arytmetyke
     sprzed 2026-09-27 - do pomiaru roznicy na tych samych oknach (`--progi`).
     Uzasadnienie zmiany i polityka malej proby: `services/engine/bramki.py`.
+    `tylko_dluga` - prog z rozkladu score > 0 (`proby_wynikow`, H-6).
     """
-    return bramki_z_prob(proby_wynikow(panels, weights, atr_thresholds, h, cache),
+    return bramki_z_prob(proby_wynikow(panels, weights, atr_thresholds, h, cache,
+                                       tylko_dluga=tylko_dluga),
                          ENTER_PCTL, per_rezim=per_rezim)
 
 
@@ -1799,8 +1842,13 @@ def _bez_martwych(wagi: dict[str, dict[str, float]],
 
 
 def ic_weights(panels: dict[str, list[dict]], cache: dict[str, list[tuple]],
-               martwe: set[str], horyzont_swiec: int = 3) -> dict[str, dict[str, float]]:
+               martwe: set[str], horyzont_swiec: int = 3,
+               tylko_dluga: bool = False) -> dict[str, dict[str, float]]:
     """Wagi WYLICZONE ze zdolnosci predykcyjnej sygnalow, nie wylosowane.
+
+    `tylko_dluga` (rynek bez shortow, `strona_uczenia`, H-6) - IC liczone
+    wylacznie na obserwacjach, na ktorych decyzja long jest mozliwa. Wariant
+    i uzasadnienie wyboru - komentarz w ciele funkcji.
 
     `horyzont_swiec` - zwrot, z ktorym korelujemy wynik sygnalu. Trener podaje
     `h.ic_horizon_bars` (12 godzin na kazdym horyzoncie, audyt Fable F-2.6);
@@ -1831,6 +1879,44 @@ def ic_weights(panels: dict[str, list[dict]], cache: dict[str, list[tuple]],
     NADAL OUT-OF-SAMPLE: IC liczy sie wylacznie z okna treningowego, a wynik
     ocenia sie na testowym, ktorego ta funkcja nigdy nie oglada.
     """
+    wagi = _wagi_z_ic(panels, cache, martwe, horyzont_swiec)
+    if not tylko_dluga:
+        return wagi
+
+    # KTORE OBSERWACJE "DOPUSZCZAJA DECYZJE LONG" - WARIANT NAJPROSTSZY, KTORY
+    # NIE JEST BLEDNY (H-6).
+    #
+    # Na spocie long mozna otworzyc na kazdej swiecy, wiec "wszystkie
+    # obserwacje" niczego nie zmienia - roznica jest w tym, KTORA czesc
+    # rozkladu wyniku decyduje. Long powstaje tylko z gornego ogona wyniku
+    # (score > prog > 0), a korelacja rangowa po calej probie mierzy w polowie
+    # dolny ogon: jak dobrze sygnal przewiduje spadki, ktorych nie zagramy.
+    # Odrzucone warianty:
+    #   * per sygnal "wynik sygnalu > 0" - zly dla sygnalow o ujemnym IC: po
+    #     odwroceniu wagi to ich UJEMNE wyniki pchaja w strone long, wiec
+    #     zmierzylibysmy niewlasciwa polowe;
+    #   * punkt staly (wagi -> podzbior -> wagi -> ...) - nie musi zbiegac,
+    #     a liczba iteracji bylaby kolejnym stopniem swobody.
+    # Wybrany: JEDEN krok. Wagi dwustronne (dotychczasowe) wyznaczaja
+    # obserwacje, na ktorych wynik laczny jest dodatni i pewnosc przechodzi
+    # MIN_CONF - czyli te, ktore maja szanse dac wejscie long - i na nich IC
+    # liczy sie jeszcze raz. Deterministyczne, z okna TRENINGOWEGO, bez
+    # nowego parametru. Znane przyblizenie: po drugim kroku podzbior "score > 0"
+    # wyznaczony nowymi wagami nie jest identyczny z tym, na ktorym je
+    # policzono; to mierzy ocena OOS, a nie zalozenie.
+    def long_mozliwy(regime: str, sygnaly: dict) -> bool:
+        sc, conf, _ = combine(sygnaly, regime, wagi.get(regime),
+                              with_contributions=False)
+        return sc > 0 and conf >= MIN_CONF
+
+    return _wagi_z_ic(panels, cache, martwe, horyzont_swiec, filtr=long_mozliwy)
+
+
+def _wagi_z_ic(panels: dict[str, list[dict]], cache: dict[str, list[tuple]],
+               martwe: set[str], horyzont_swiec: int,
+               filtr=None) -> dict[str, dict[str, float]]:
+    """Rdzen `ic_weights`: IC per rezim i sygnal na obserwacjach, ktore
+    przechodza `filtr(rezim, sygnaly)` (None = wszystkie)."""
     # {rezim: {sygnal: ([wyniki], [zwroty])}}
     zebrane: dict[str, dict[str, tuple[list, list]]] = {}
     for sym, rows in panels.items():
@@ -1838,6 +1924,8 @@ def ic_weights(panels: dict[str, list[dict]], cache: dict[str, list[tuple]],
         for i, (regime, sygnaly) in enumerate(cache[sym]):
             j = i + 1 + horyzont_swiec
             if j >= len(ceny) or ceny[i + 1] == 0:
+                continue
+            if filtr is not None and not filtr(regime, sygnaly):
                 continue
             zwrot = ceny[j] / ceny[i + 1] - 1
             for name, out in sygnaly.items():
@@ -2432,7 +2520,8 @@ def _przekroj(cur, plik: dict | None, instruments: list[dict], h: Horizon,
 
 
 def params_przebiegu(h: Horizon, trials_per_window: int, wybor: str, kind: str,
-                     progi_per_rezim: bool, egzekucja: Egzekucja) -> dict:
+                     progi_per_rezim: bool, egzekucja: Egzekucja,
+                     strona: str | None = None) -> dict:
     """`params` wersji modelu - MIANOWNIK N deflacji (patrz `n_konfiguracji`)."""
     eksperymenty = sorted(wlaczone_eksperymenty())
     # `kind` I `limit` MUSZA TU BYC, BO `params` JEST MIANOWNIKIEM N - patrz
@@ -2460,12 +2549,23 @@ def params_przebiegu(h: Horizon, trials_per_window: int, wybor: str, kind: str,
         params_przebiegu["progi_na_wagach"] = "ic"
     # Horyzont zwrotu w IC (F-2.6) - klucz tylko poza wartoscia sprzed zmiany
     # (3 swiece), czyli dzis wylacznie dla 1h (12 swiec) i 5m.
+    # Od 2026-10-07 (H-7) ta sama liczba przychodzi tez z `--horyzont-etykiety`:
+    # inny horyzont na 4h dopisuje klucz, inny na 1h zmienia jego wartosc -
+    # w obu wypadkach `zmiana_struktury` to widzi i wersja zostaje `candidate`.
     if h.ic_horizon_bars != 3:
         params_przebiegu["ic_horizon_bars"] = h.ic_horizon_bars
+    # MODEL WYPELNIEN W PARAMS (H-5). Od 2026-10-07 przebieg produkcyjny moze
+    # liczyc sie modelem pesymistycznym (`_sprawdz_argumenty`), wiec te dwa
+    # klucze rozrozniaja konfiguracje w liczniku N i zglaszaja zmiane
+    # struktury wobec wersji liczonej modelem sprzed T1.
     if egzekucja.pesymistyczna:
         params_przebiegu["egzekucja_pesymistyczna"] = True
     if egzekucja.opoznienie_min:
         params_przebiegu["opoznienie_min"] = egzekucja.opoznienie_min
+    # STRONA UCZENIA (H-6) - klucz tylko dla rynku bez shortow; ten sam
+    # zestaw wag przy progu z |score| i z score > 0 to dwie rozne strategie.
+    if strona:
+        params_przebiegu["strona"] = strona
     return params_przebiegu
 
 
@@ -2750,6 +2850,8 @@ class Kontekst:
     doplata_odniesienia: float
     karta: Karta
     progi_per_rezim: bool
+    # Rynek bez shortow: progi i wagi IC z obserwacji long (`strona_uczenia`, H-6).
+    tylko_dluga: bool = False
 
 
 @dataclass(frozen=True)
@@ -2803,7 +2905,8 @@ def przygotuj_okno(kt: Kontekst, okno: Okno, z_bramkami: bool = True) -> DaneOkn
     # a tym, co go przekracza.
     bazowe = _bez_martwych(DEFAULT_WEIGHTS, martwe)
     gates = (bramki_okna({s: train_slices[s] for s in aktywne}, bazowe,
-                         thresholds, h, cache_tr, per_rezim=progi_per_rezim)
+                         thresholds, h, cache_tr, per_rezim=progi_per_rezim,
+                         tylko_dluga=kt.tylko_dluga)
              if z_bramkami else None)
     return DaneOkna(train_slices, test_slices, thresholds, cache_tr, cache_te,
                     martwe, bazowe, gates)
@@ -2852,7 +2955,8 @@ def _zapis_hipotez(cur, sucho: bool, model_id: int | None):
 def kandydat_wag(train_slices: dict[str, list[dict]], cache_tr: dict, martwe: set[str],
                  wybor: str, *, bazowe: dict[str, dict[str, float]], ocen,
                  zapisz_hipoteze, rng: random.Random, trials_per_window: int,
-                 horyzont_swiec: int = 3) -> tuple[dict[str, dict[str, float]], int]:
+                 horyzont_swiec: int = 3,
+                 tylko_dluga: bool = False) -> tuple[dict[str, dict[str, float]], int]:
     """Wagi na jedno okno, dobrane WYLACZNIE na oknie treningowym.
 
     Zwraca (wagi, 1 gdy wygraly wagi z IC, inaczej 0). `ocen(w, wycinki, cache)`
@@ -2874,7 +2978,8 @@ def kandydat_wag(train_slices: dict[str, list[dict]], cache_tr: dict, martwe: se
         best_w = bazowe
         zapisz_hipoteze(bazowe)
     elif wybor == "ic":
-        best_w = ic_weights(train_slices, cache_tr, martwe, horyzont_swiec)
+        best_w = ic_weights(train_slices, cache_tr, martwe, horyzont_swiec,
+                            tylko_dluga=tylko_dluga)
         zapisz_hipoteze(best_w)
         wybrane_ic += 1
     else:
@@ -2901,7 +3006,8 @@ def kandydat_wag(train_slices: dict[str, list[dict]], cache_tr: dict, martwe: se
 
         # Kandydat WYLICZONY, nie wylosowany: wagi proporcjonalne do zdolnosci
         # predykcyjnej sygnalow na tym oknie. Patrz komentarz przy ic_weights().
-        ic_w = ic_weights(train_slices, cache_tr, martwe, horyzont_swiec)
+        ic_w = ic_weights(train_slices, cache_tr, martwe, horyzont_swiec,
+                          tylko_dluga=tylko_dluga)
         ic_score = ocen(ic_w, train_slices, cache_tr)["sharpe"]
         zapisz_hipoteze(ic_w)
         if ic_score > best_score:
@@ -3151,6 +3257,9 @@ class Przebieg:
         self.zwroty_okien_transakcje: list[list[float]] = []
         self.worst_dd = 0.0
         self.predictions: list[tuple[float, bool]] = []
+        # CZAS TRZYMANIA (swiece, czy domkniete koncem okna) - ta sama proba co
+        # `wszystkie_zwroty`. Material na `opis_trzymania` (H-7).
+        self.trzymanie: list[tuple[int, bool]] = []
 
     def dodaj_wypelnienia(self, m: Metryki) -> None:
         z = self
@@ -3227,6 +3336,8 @@ class Przebieg:
             # doliczeniu kosztu. Bez tego „przed" i „po" byloby liczone dwiema
             # roznymi miarami i roznica nie znaczylaby nic.
             z.zwroty_okien_transakcje.append(zwroty_okna)
+            z.trzymanie.extend((t["swiec"], bool(t.get("koniec_okna")))
+                               for t in oos_brutto.trades if t.get("swiec") is not None)
         # Kalibracja: deklarowana PRZED wejsciem pewnosc kontra faktyczny wynik.
         # Wczesniejsza wersja budowala "prognoze" z wielkosci samego zwrotu
         # (abs(t) * 50 + 0.5), czyli z rzeczy znanej dopiero po fakcie - wykres
@@ -3952,9 +4063,51 @@ def zapisz_wynik(cur, conn, sucho: bool, engine: str, h: Horizon,
     return reason
 
 
+def trzymanie_transakcji(trzymanie: list[tuple[int, bool]]) -> dict | None:
+    """Rozklad czasu trzymania w swiecach. CZYSTA FUNKCJA (H-7).
+
+    Dwie populacje, bo zadna sama nie jest uczciwa: wyjscia SYGNALEM to
+    prawdziwy czas trzymania, ale bez pozycji domknietych koncem okna mediana
+    jest zanizona (odpadaja wlasnie najdluzsze); wszystkie razem zawieraja
+    trzymania UCIETE na granicy okna, wiec ich mediana to dolne oszacowanie.
+    Prawda lezy miedzy nimi - stad obie liczby i liczba ucietych."""
+    if not trzymanie:
+        return None
+    wszystkie = sorted(n for n, _ in trzymanie)
+    sygnalem = sorted(n for n, koniec in trzymanie if not koniec)
+
+    def kwartyle(lista: list[int]) -> list[float] | None:
+        if not lista:
+            return None
+        if len(lista) == 1:
+            return [float(lista[0])] * 3
+        q = statistics.quantiles(lista, n=4, method="inclusive")
+        return [q[0], float(statistics.median(lista)), q[2]]
+
+    return {"n": len(wszystkie), "ucietych_koncem_okna": len(wszystkie) - len(sygnalem),
+            "sygnalem_q1_med_q3": kwartyle(sygnalem),
+            "wszystkie_q1_med_q3": kwartyle(wszystkie)}
+
+
+def opis_trzymania(t: dict | None, h: Horizon) -> list[str]:
+    """Linie logu: czas trzymania wobec horyzontu etykiety IC (H-7)."""
+    etykieta = (f"horyzont etykiety IC {h.ic_horizon_bars} świec "
+                f"({h.ic_horizon_bars * h.bar_minutes / 60:g} h)")
+    if t is None:
+        return [f"Czas trzymania (OOS): brak transakcji; {etykieta}"]
+
+    def q(x: list[float] | None) -> str:
+        return "—" if x is None else f"{x[1]:g} świec (q1 {x[0]:g}, q3 {x[2]:g})"
+    return [f"Czas trzymania (OOS, {t['n']} transakcji): mediana wyjść sygnałem "
+            f"{q(t['sygnalem_q1_med_q3'])}; ze {t['ucietych_koncem_okna']} "
+            f"domkniętymi końcem okna (dolne oszacowanie) {q(t['wszystkie_q1_med_q3'])}",
+            f"  wobec: {etykieta} — wagi uczą się zwrotu na tym horyzoncie, "
+            f"a pozycja trzyma tyle, ile wyżej"]
+
+
 def wypisz_podsumowanie(z: Przebieg, w: Status, k: Koszty, *, kind: str, wybor: str,
                         idx: int, opis_dsr: str, trials: int,
-                        reason: str) -> tuple[float | None, float | None]:
+                        reason: str, h: Horizon) -> tuple[float | None, float | None]:
     """Wydruk podsumowania przebiegu. Zwraca (wypelnialnosc, koszt niewypelnienia)."""
     status, total, positive, pct, median = w.status, w.total, w.positive, w.pct, w.median
     ci_lo, ci_hi, odn_lo, odn_hi = w.ci_lo, w.ci_hi, w.odn_lo, w.odn_hi
@@ -4055,6 +4208,8 @@ def wypisz_podsumowanie(z: Przebieg, w: Status, k: Koszty, *, kind: str, wybor: 
         print(linia)
     for linia in opis_pokrycia(transakcje_pokrycia):
         print(linia)
+    for linia in opis_trzymania(trzymanie_transakcji(z.trzymanie), h):
+        print(linia)
     if len(sharpe_grup) > 1:
         print("Sharpe/transakcję policzony OSOBNO dla grup, w tym samym przebiegu:")
         for grupa, wartosci in sorted(sharpe_grup.items()):
@@ -4109,6 +4264,9 @@ def podsumowanie_przebiegu(z: Przebieg, w: Status, k: Koszty, *, days: int, now:
         "brak_swiec_1h": brak_swiec_oos,
         "bije_b1": bije_odn["B1"], "bije_b2": bije_odn["B2"], "bije_b3": bije_odn["B3"],
         "b0_dodatnie": b0_dodatnie, "status": status,
+        # H-7: czas trzymania w swiecach (q1, mediana, q3) - patrz
+        # `trzymanie_transakcji`.
+        "trzymanie_swiec": trzymanie_transakcji(z.trzymanie),
         # {nazwa: [sredni zwrot % w oknie, srednia ekspozycja, okna z zwrotem > 0, okna]}
         "odniesienia": {n: ([statistics.fmean(z for z, _ in v),
                              statistics.fmean(e for _, e in v),
@@ -4166,7 +4324,8 @@ def bramki_na_wagach(kt: Kontekst, dane: DaneOkna,
     wiec prog na nich nie zaglada w przyszlosc.
     """
     return bramki_okna(dane.train_slices, wagi, dane.thresholds, kt.h,
-                       dane.cache_tr, per_rezim=kt.progi_per_rezim)
+                       dane.cache_tr, per_rezim=kt.progi_per_rezim,
+                       tylko_dluga=kt.tylko_dluga)
 
 
 def walk_forward(kt: Kontekst, okna: list[Okno], *, wybor: str, trials_per_window: int,
@@ -4186,7 +4345,7 @@ def walk_forward(kt: Kontekst, okna: list[Okno], *, wybor: str, trials_per_windo
             dane.train_slices, dane.cache_tr, dane.martwe, wybor, bazowe=dane.bazowe,
             ocen=_ocena_treningowa(kt, dane), zapisz_hipoteze=zapisz_hipoteze,
             rng=rng, trials_per_window=trials_per_window,
-            horyzont_swiec=kt.h.ic_horizon_bars)
+            horyzont_swiec=kt.h.ic_horizon_bars, tylko_dluga=kt.tylko_dluga)
         if dane.gates is None:
             dane = dc_replace(dane, gates=bramki_na_wagach(kt, dane, best_w))
         if glowny and idx == 0:
@@ -4270,16 +4429,24 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
           panel: dict | None = None,
           od: datetime | None = None,
           przesuniecia: tuple[int, ...] = (0,),
-          hipoteza: str | None = None) -> dict:
+          hipoteza: str | None = None,
+          horyzont_etykiety: int | None = None) -> dict:
     """Walk-forward jednego toru: orkiestrator etapow opisanych wyzej.
 
     `od` - kotwica siatki okien (`--od`, produkcja: KOTWICA_SIATKI); None to
     siatka od `now - days`, jak przed T4. `przesuniecia` - przesuniecia siatki
     w dniach, dla ktorych liczy sie werdykt (produkcja: PRZESUNIECIA_SIATKI);
     musi zawierac 0 - z niego pochodza wagi, progi i zapisy.
+    `horyzont_etykiety` - horyzont zwrotu w IC w swiecach (`--horyzont-etykiety`,
+    H-7); None = `h.ic_horizon_bars`.
     """
     if 0 not in przesuniecia:
         raise ValueError("przesuniecia siatki musza zawierac 0")
+    if horyzont_etykiety is not None:
+        if horyzont_etykiety < 1:
+            raise ValueError("horyzont etykiety musi miec co najmniej 1 swiece")
+        h = dc_replace(h, ic_horizon_bars=horyzont_etykiety)
+    strona = strona_uczenia(kind)
     # `panel` - dane z `panel_plik.wczytaj` (harness offline, `--panel`).
     # Wtedy NIC nie idzie do bazy: `conn` moze byc None, a wszystko, co
     # przebieg z bazy czyta, przychodzi z pliku. Zapisy pomijamy, bo przebieg
@@ -4300,7 +4467,7 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
     egzekucja = k.egzekucja
     fp, waluta_symbolu = _przekroj(cur, plik, instruments, h, days, tylko)
     params = params_przebiegu(h, trials_per_window, wybor, kind, progi_per_rezim,
-                              egzekucja)
+                              egzekucja, strona)
     model_id, mv_id, run_id = _zaloz_wersje(cur, conn, plik, sucho, engine, h, fp,
                                             params, now, days)
     panels, swiece_wykonania, inst_ids = _wczytaj_panele(
@@ -4309,7 +4476,10 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
 
     kt = Kontekst(h, kind, egzekucja, zakladane_pozycje, swiece_wykonania, inst_ids,
                   panels, waluta_symbolu, k.doplata, k.doplata_odniesienia, k.karta,
-                  progi_per_rezim)
+                  progi_per_rezim, tylko_dluga=strona == STRONA_DLUGA)
+    print(f"  uczenie: {'TYLKO strona długa (rynek bez shortów, H-6)' if strona else 'obie strony'}"
+          f"; horyzont etykiety IC {h.ic_horizon_bars} świec "
+          f"({h.ic_horizon_bars * h.bar_minutes / 60:g} h)")
     start = poczatek_siatki(od, now - timedelta(days=days), h.step_days)
     if od is not None:
         print(f"  siatka okien zakotwiczona: {od:%Y-%m-%d} + k×{h.step_days} dni, "
@@ -4352,7 +4522,7 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
             print(linia)
     wypelnialnosc, koszt_niewyp = wypisz_podsumowanie(
         z, w, k, kind=kind, wybor=wybor, idx=idx, opis_dsr=w.opis_dsr, trials=trials,
-        reason=reason)
+        reason=reason, h=h)
     podsumowanie = podsumowanie_przebiegu(
         z, w, k, days=days, now=now, n_selekcji=n_selekcji, sd_prob=sd_prob,
         wypelnialnosc=wypelnialnosc, koszt_niewyp=koszt_niewyp)
@@ -4373,6 +4543,8 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
             "dsr": _min_sr_max([statusy[p].dsr or 0.0 for p in statusy]),
             "dodatnie_pct": _min_sr_max([statusy[p].pct for p in statusy if statusy[p].total]),
         }
+    podsumowanie["strona"] = strona or "obie"
+    podsumowanie["horyzont_etykiety_swiec"] = h.ic_horizon_bars
     if hipoteza:
         podsumowanie["hipoteza"] = hipoteza
     print("PODSUMOWANIE_JSON " + json.dumps(podsumowanie, ensure_ascii=False))
@@ -4429,11 +4601,37 @@ def _sprawdz_argumenty(ap: argparse.ArgumentParser, args) -> tuple[datetime | No
     if (args.pesymistyczna or args.opoznienie_min) and not args.limit:
         sys.exit("--egzekucja-pesymistyczna i --opoznienie dotycza zlecen "
                  "z limitem - podaj --limit")
-    if (args.pesymistyczna or args.opoznienie_min) and not args.sucho:
-        sys.exit("--egzekucja-pesymistyczna i --opoznienie wymagaja --sucho "
-                 "(wariant pomiaru, nie produkcja)")
+    # MODEL PESYMISTYCZNY W PRZEBIEGU PRODUKCYJNYM (2026-10-07, H-5).
+    #
+    # Do tej daty obie flagi wymagaly `--sucho` ("wariant pomiaru, nie
+    # produkcja"). Powod blokady: przebieg z innym modelem wypelnien zapisuje
+    # wersje modelu, a do 2026-10-05 wersja w demo promowala sie sama - jeden
+    # przebieg porownawczy zmienialby po cichu progi, ktorymi handluje
+    # produkcja. H-1 zostawila wlaczenie w `trainerCron` decyzji wlasciciela
+    # ("w CronJobie on po akceptacji", audyt T1); decyzja zapadla 2026-10-06/07
+    # (demo trenuje algorytm przed live).
+    #
+    # INTENCJA BLOKADY ZOSTAJE, ZMIENIA SIE MECHANIZM. Ciche wejscie do produkcji
+    # zamyka dzis bramka struktury: `params_przebiegu` zapisuje
+    # `egzekucja_pesymistyczna` i `opoznienie_min`, wiec pierwsza taka wersja ma
+    # inny zestaw kluczy niz aktywna (`zmiana_struktury`) i zostaje `candidate`,
+    # a licznik N (`n_konfiguracji`) liczy ja jako osobna konfiguracje.
+    # Promocja tylko recznie, `--zatwierdz-promocje` (poprawka F).
+    #
+    # Bez `--sucho` WYLACZNIE PELNY MODEL Z H-1 (obie flagi naraz, opoznienie
+    # > 0). Polowki - sama cena z opoznieniem albo sam pol spreadu i godzina -
+    # zostaja wariantami pomiaru: zaden pomiar nie opisal ich jako modelu
+    # zblizonego do produkcji.
+    pelny_pesymistyczny = args.pesymistyczna and args.opoznienie_min > 0
+    if ((args.pesymistyczna or args.opoznienie_min) and not pelny_pesymistyczny
+            and not args.sucho):
+        sys.exit("bez --sucho model pesymistyczny tylko w calosci: "
+                 "--egzekucja-pesymistyczna RAZEM z --opoznienie N (N > 0); "
+                 "pojedyncza flaga to wariant pomiaru i wymaga --sucho")
     if args.opoznienie_min < 0:
         sys.exit("--opoznienie nie moze byc ujemne")
+    if args.horyzont_etykiety is not None and args.horyzont_etykiety < 1:
+        sys.exit("--horyzont-etykiety musi byc >= 1 swieca")
 
     # Wariant eksperymentalny NIE MOZE promowac wersji modelu ani nadpisywac
     # stanu nauki - inaczej jeden przebieg porownawczy po cichu zmienialby to,
@@ -4549,11 +4747,14 @@ def main() -> int:
                     help="model wypelnien zlecen z limitem zblizony do produkcji "
                          "(audyt Fable R1): limit z ceny 1h po opoznieniu, pol "
                          "spreadu INSTRUMENTU pod/nad cena, wypelnienie tylko "
-                         "w godzinie po wysylce. Wymaga --limit i --sucho")
+                         "w godzinie po wysylce. Wymaga --limit; bez --sucho "
+                         "tylko razem z --opoznienie N > 0 (H-5)")
     ap.add_argument("--opoznienie", type=int, default=0, dest="opoznienie_min",
                     help="minuty od zamkniecia swiecy decyzyjnej do wysylki "
                          "zlecenia (produkcja: 5-88, mediana po 02.10 do "
-                         "zmierzenia). Wymaga --limit i --sucho")
+                         "zmierzenia; trainerCron: 20, przyjete w H-1, nie zmierzone). Wymaga "
+                         "--limit; bez --sucho tylko razem z "
+                         "--egzekucja-pesymistyczna")
     ap.add_argument("--panel", default="",
                     help="plik z scripts/eksport_paneli.py - przebieg BEZ BAZY "
                          "(harness offline); wymusza --sucho")
@@ -4569,6 +4770,19 @@ def main() -> int:
                          "werdykt; status z MINIMUM. Musi zawierac 0. Wartosci "
                          "ujemne podawac jako --przesuniecia=-2,-1,0. Inne niz "
                          "domyslne wymagaja --sucho")
+    # HORYZONT ETYKIETY (H-7). Domyslnie `Horizon.ic_horizon_bars` (12 h na
+    # kazdym horyzoncie) - liczba NIE jest tu zmieniana na podstawie
+    # przypuszczenia. Log przebiegu podaje mediane czasu trzymania w tych samych
+    # swiecach (`opis_trzymania`); inna wartosc to decyzja po tym pomiarze,
+    # z wpisem w docs/hipotezy.md. Bez `--sucho` wolno, bo klucz
+    # `ic_horizon_bars` w `params` robi z takiej wersji `candidate`.
+    ap.add_argument("--horyzont-etykiety", type=int, default=None,
+                    dest="horyzont_etykiety",
+                    help="horyzont zwrotu, z ktorym koreluja sie sygnaly w wagach "
+                         "IC, w swiecach --bar. Domyslnie wartosc horyzontu "
+                         "(4h: 3, 1h: 12, czyli 12 h). Zapisywany w params "
+                         "(ic_horizon_bars) - inna wartosc niz aktywna zostawia "
+                         "wersje jako candidate")
     ap.add_argument("--hipoteza", default="",
                     help="numer hipotezy z docs/hipotezy.md (np. H-1), ktora ten "
                          "przebieg mierzy. WYMAGANY przy --sucho i --panel: "
@@ -4615,7 +4829,8 @@ def main() -> int:
               spread_bps=args.spread_bps,
               spread_nasza_ksiega=not args.spread_obca_ksiega,
               panel=plik, od=od, przesuniecia=przesuniecia,
-              hipoteza=args.hipoteza or None)
+              hipoteza=args.hipoteza or None,
+              horyzont_etykiety=args.horyzont_etykiety)
     return 0
 
 
