@@ -1080,7 +1080,7 @@ def opis_zrodla_n(n: int, trials_kumulatywnie: int) -> str:
             f"zapłacił, licząc wynik poza oknem wyboru.")
 
 
-def znacznik_miary(karta: Karta) -> dict[str, float]:
+def znacznik_miary(karta: Karta, egzekucja: Egzekucja | None = None) -> dict[str, float]:
     """Metryki okna mowiace, PRZY JAKIM KOSZCIE policzono jego miary.
 
     `doplata_pb` - doplata z karty w punktach bazowych na runde, ta sama, ktora
@@ -1095,8 +1095,24 @@ def znacznik_miary(karta: Karta) -> dict[str, float]:
     """
     spread = next((s for s in karta.skladniki if s.nazwa == "spread"), None)
     niezmierzony = spread is not None and spread.zrodlo == NIEZMIERZONE
-    return {"doplata_pb": karta.doplata_poza_symulacja * 1e4,
-            "spread_niezmierzony": 1.0 if niezmierzony else 0.0}
+    znacznik = {"doplata_pb": karta.doplata_poza_symulacja * 1e4,
+                "spread_niezmierzony": 1.0 if niezmierzony else 0.0}
+    # PROWIZJA I MODEL WYPELNIEN (2026-10-07) - `dozor.klasa_miary`.
+    #
+    # `prowizja_pb` - stawka rundy (obie nogi) z karty, w pb. `params` jej NIE
+    # niesie: ma `kind` i `limit`, a 05.10 stawka maker `spot_eu` zmienila sie
+    # z 0,10% na 0,25% przy tych samych `kind` i `limit` (cba4833). Bez tej
+    # metryki przebieg liczony runda 0,5% porownywal sie z liczonym runda 0,2%.
+    # `egzekucja_pesymistyczna` / `opoznienie_min` - model wypelnien (H-5);
+    # w `params` tylko poza wartoscia domyslna, tu ZAWSZE (0 = optymistyczny),
+    # bo brak wiersza w `learn.wf_metric` znaczy "przebieg sprzed znacznika".
+    prowizja = next((s for s in karta.skladniki if s.nazwa == "prowizja"), None)
+    if prowizja is not None and prowizja.wartosc is not None:
+        znacznik["prowizja_pb"] = prowizja.wartosc * 1e4
+    if egzekucja is not None:
+        znacznik["egzekucja_pesymistyczna"] = 1.0 if egzekucja.pesymistyczna else 0.0
+        znacznik["opoznienie_min"] = float(egzekucja.opoznienie_min or 0)
+    return znacznik
 
 
 _SQL_KROK_I_CENA = """
@@ -3098,7 +3114,7 @@ def ocen_okno(kt: Kontekst, okno: Okno, dane: DaneOkna,
     # niego doplata zero z powodu luki w `book_snapshot` (`zmierz_spread`
     # oddaje `bps=None`) byla nieodroznialna od przebiegu brutto - patrz
     # `znacznik_miary`.
-    agg.update(znacznik_miary(karta))
+    agg.update(znacznik_miary(karta, egzekucja))
     # SIODMA MIARA NA OKNO: odsetek transakcji bedacych POWROTEM w ten sam
     # instrument ponizej trzech swiec po wyjsciu z niego. NIE jest to
     # czestotliwosc handlu - patrz `portfolio.udzial_powtornych_wejsc`.

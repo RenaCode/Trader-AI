@@ -96,16 +96,17 @@ def test_znacznik_niesie_doplate_z_karty_co_do_wartosci():
     assert z["doplata_pb"] == pytest.approx(karta.doplata_poza_symulacja * 1e4)
     assert z["doplata_pb"] == pytest.approx(5.85)
     assert z["spread_niezmierzony"] == 0.0
-    assert miara_przebiegu(z) == MIARA_PO_KARCIE
+    # Od 2026-10-07 miara niesie tez stawke rundy (`dozor._opis_kosztu`).
+    assert miara_przebiegu(z) == f"{MIARA_PO_KARCIE}; prowizja 50.0 pb/rundę"
 
 
 def test_brak_pomiaru_spreadu_to_zero_ze_znacznikiem_nie_brutto():
     karta = karta_rundy("spot_eu", True, spread_bps=None)
     z = znacznik_miary(karta)
-    assert z == {"doplata_pb": 0.0, "spread_niezmierzony": 1.0}
-    assert miara_przebiegu(z) == MIARA_BEZ_SPREADU
+    assert z == {"doplata_pb": 0.0, "spread_niezmierzony": 1.0, "prowizja_pb": 50.0}
+    assert miara_przebiegu(z) == f"{MIARA_BEZ_SPREADU}; prowizja 50.0 pb/rundę"
     # Liczbowo to samo co brutto - wolno porównywać, nazwa jest inna.
-    assert klasa_miary(z) == MIARA_BRUTTO
+    assert klasa_miary(z) == f"{MIARA_BRUTTO}; prowizja 50.0 pb/rundę"
 
 
 def test_przebieg_sprzed_znacznika_dalej_brutto():

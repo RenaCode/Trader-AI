@@ -268,30 +268,57 @@ MIARA_BRUTTO = "brutto (przed dopłatą z karty)"
 MIARA_PO_KARCIE = "po dopłacie z karty kosztu"
 MIARA_BEZ_SPREADU = "karta bez pomiaru spreadu (dopłata 0 — liczbowo jak brutto)"
 
-SQL_STAN_NAUKI = """
+def _metryka_okien(nazwa: str) -> str:
+    """Podzapytanie: wartosc metryki okna `nazwa` dla wersji wiersza dziennika
+    (`learn.learning_state_log.model_version_id` -> `training_run` ->
+    `wf_window` -> `wf_metric`). NULL = przebieg sprzed tej metryki."""
+    return ("(SELECT max(m.value)\n"
+            "          FROM learn.training_run r\n"
+            "          JOIN learn.wf_window w ON w.training_run_id = r.id\n"
+            "          JOIN learn.wf_metric m ON m.wf_window_id = w.id\n"
+            "         WHERE r.model_version_id = l.model_version_id\n"
+            f"           AND m.metric = '{nazwa}')")
+
+
+# MODEL WYPELNIEN Z METRYKI OKNA, A DLA PRZEBIEGOW SPRZED NIEJ - Z `params`.
+# Klucze `egzekucja_pesymistyczna`/`opoznienie_min` sa w `params` wersji od
+# H-5 (2026-10-07, `train.params_przebiegu`), metryki okna dopiero od zmiany,
+# ktora dopisala je do `train.znacznik_miary`. Przebieg pomiedzy jednym
+# a drugim nie moze udawac optymistycznego.
+SQL_STAN_NAUKI = f"""
 SELECT l.status, l.windows_total, l.windows_positive, l.positive_ci_low,
        l.positive_ci_high, l.median_oos_sharpe, l.max_psi, l.trials_run, l.run_at,
-       (SELECT max(m.value)
-          FROM learn.training_run r
-          JOIN learn.wf_window w ON w.training_run_id = r.id
-          JOIN learn.wf_metric m ON m.wf_window_id = w.id
-         WHERE r.model_version_id = l.model_version_id
-           AND m.metric = 'doplata_pb') AS doplata_pb,
-       (SELECT max(m.value)
-          FROM learn.training_run r
-          JOIN learn.wf_window w ON w.training_run_id = r.id
-          JOIN learn.wf_metric m ON m.wf_window_id = w.id
-         WHERE r.model_version_id = l.model_version_id
-           AND m.metric = 'spread_niezmierzony') AS spread_niezmierzony
+       {_metryka_okien('doplata_pb')} AS doplata_pb,
+       {_metryka_okien('spread_niezmierzony')} AS spread_niezmierzony,
+       {_metryka_okien('prowizja_pb')} AS prowizja_pb,
+       COALESCE({_metryka_okien('egzekucja_pesymistyczna')},
+                (SELECT CASE WHEN (mv.params->>'egzekucja_pesymistyczna')::boolean
+                             THEN 1 ELSE 0 END
+                   FROM learn.model_version mv
+                  WHERE mv.id = l.model_version_id)) AS egzekucja_pesymistyczna,
+       COALESCE({_metryka_okien('opoznienie_min')},
+                (SELECT (mv.params->>'opoznienie_min')::numeric
+                   FROM learn.model_version mv
+                  WHERE mv.id = l.model_version_id)) AS opoznienie_min
 FROM learn.learning_state_log l
 WHERE l.engine = %s AND l.bar = %s
 ORDER BY l.run_at DESC LIMIT %s
 """
 
-# Ile wierszy wstecz szukamy poprzednika liczonego ta sama miara. Trener chodzi
-# raz na dobe na tor, wiec to dwa tygodnie - dosc, zeby przezyc reczne przebiegi
-# tej samej nocy, i malo, zeby nie porownywac z czyms sprzed miesiaca.
-STAN_NAUKI_WSTECZ = 14
+# Ile wierszy wstecz szukamy poprzednika liczonego ta sama miara.
+#
+# TRENER CHODZI RAZ W TYGODNIU (od ee7a403: `trainerCron.schedule`
+# "40 4 * * 0", niedziela 04:40 czasu Warszawy), nie raz na dobe - dawne
+# 14 wierszy to wiec CZTERNASCIE TYGODNI, ponad trzy miesiace. Poprzednik
+# "tej samej miary" sprzed kwartalu opisuje inny rynek i inny kod: wyjscie
+# odsetka poza JEGO przedzial nie mowi nic o ostatnim tygodniu.
+#
+# 6 wierszy: bez przebiegow recznych to szesc tygodni (poltora miesiaca,
+# poltora kroku okna 30-dniowego - nowe okno testowe zdazy dojsc), a przy
+# jednym recznym przebiegu na tydzien (tak bylo 04-05.10) nadal okolo trzech
+# tygodni, czyli co najmniej dwa planowe. Mniej (np. 3) gubiloby poprzednika
+# juz przy jednym tygodniu z dwoma recznymi powtorkami po zmianie miary.
+STAN_NAUKI_WSTECZ = 6
 
 
 # Ile musi sie zmienic doplata miedzy dwoma porownywanymi przebiegami, zeby
@@ -299,8 +326,34 @@ STAN_NAUKI_WSTECZ = 14
 PROG_ZMIANY_DOPLATY_PB = 0.5
 
 
-def miara_przebiegu(wiersz: dict) -> str:
-    """Ktora definicja miar okien stoi za wierszem dziennika stanu nauki."""
+def _opis_kosztu(wiersz: dict) -> str:
+    """Stawka prowizji i model wypelnien, przy ktorych liczono miary okien.
+
+    PROWIZJA I MODEL WYPELNIEN SA CZESCIA DEFINICJI MIARY (2026-10-07).
+    05.10 stawka maker `spot_eu` zmienila sie z 0,10% na 0,25% (cba4833), czyli
+    runda z 0,2% na 0,5%, przy TYM SAMYM `kind` i `limit` w `params`. 07.10
+    trener przeszedl na model pesymistyczny z opoznieniem 20 min (H-5). Kazda
+    z tych zmian sama przesuwa odsetek dodatnich okien i mediane Sharpe'a - a bez
+    tego rozroznienia pierwszy przebieg po nich (11.10) bylby porownany z 05.10
+    jak regres rynku.
+
+    `prowizja_pb` NULL (przebieg sprzed metryki) = stawka nieznana: taki wiersz
+    nie jest porownywalny z wierszem, ktory ja zna. Pesymistyczna i opoznienie
+    0/NULL = model optymistyczny, jak przed H-5.
+    """
+    czesci = []
+    prowizja = wiersz.get("prowizja_pb")
+    if prowizja is not None:
+        czesci.append(f"prowizja {float(prowizja):.1f} pb/rundę")
+    if wiersz.get("egzekucja_pesymistyczna"):
+        czesci.append("wypełnienia pesymistyczne")
+    opoznienie = wiersz.get("opoznienie_min")
+    if opoznienie:
+        czesci.append(f"opóźnienie {float(opoznienie):g} min")
+    return ", ".join(czesci)
+
+
+def _miara_doplaty(wiersz: dict) -> str:
     doplata = wiersz.get("doplata_pb")
     if doplata:
         return MIARA_PO_KARCIE
@@ -309,15 +362,27 @@ def miara_przebiegu(wiersz: dict) -> str:
     return MIARA_BRUTTO
 
 
+def miara_przebiegu(wiersz: dict) -> str:
+    """Ktora definicja miar okien stoi za wierszem dziennika stanu nauki:
+    rodzaj doplaty, a od 2026-10-07 takze prowizja i model wypelnien."""
+    koszt = _opis_kosztu(wiersz)
+    m = _miara_doplaty(wiersz)
+    return f"{m}; {koszt}" if koszt else m
+
+
 def klasa_miary(wiersz: dict) -> str:
     """Ktore przebiegi wolno porownywac liczbami: te o tej samej KLASIE.
 
     Karta bez pomiaru spreadu ma doplate zero, wiec jej odsetek i mediana sa
     tymi samymi liczbami co brutto - porownanie jest uczciwe. Rozni sie tylko
-    nazwa w komunikacie (`miara_przebiegu`).
+    nazwa w komunikacie (`miara_przebiegu`). Prowizja i model wypelnien
+    (`_opis_kosztu`) wchodza do klasy w calosci: inna stawka albo inny model
+    to inna miara.
     """
-    m = miara_przebiegu(wiersz)
-    return MIARA_BRUTTO if m == MIARA_BEZ_SPREADU else m
+    m = _miara_doplaty(wiersz)
+    m = MIARA_BRUTTO if m == MIARA_BEZ_SPREADU else m
+    koszt = _opis_kosztu(wiersz)
+    return f"{m}; {koszt}" if koszt else m
 
 
 def wybierz_poprzedni(wiersze: list[dict]) -> tuple[dict | None, int]:
