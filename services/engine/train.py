@@ -2064,7 +2064,11 @@ def tryb_handlu(cur, engine: str) -> str:
 # struktury), progi - wzglednie, z tolerancja.
 KLUCZE_WYNIKOWE = frozenset({"weights", "enter_threshold", "exit_threshold",
                              "enter_threshold_per_regime", "enter_threshold_windows",
-                             "min_confidence"})
+                             "min_confidence",
+                             # slad pary produkcyjnej (2026-10-07)
+                             "enter_threshold_proby",
+                             "enter_threshold_per_regime_mediana_okien",
+                             "weights_mediana_okien"})
 TOLERANCJA_PROGOW = 0.10
 
 
@@ -2547,6 +2551,11 @@ def params_przebiegu(h: Horizon, trials_per_window: int, wybor: str, kind: str,
     # i `bazowe` progi dalej licza sie na zalozeniach poczatkowych.
     if wybor == "ic":
         params_przebiegu["progi_na_wagach"] = "ic"
+    # PARA PRODUKCYJNA Z OSTATNIEGO OKNA (2026-10-07, `parametry_produkcji`).
+    # Ten sam walk-forward, ale produkcja dostaje inne wagi i inne progi niz
+    # dotad (mediany po oknach) - inna strategia na zywo, wiec nowa proba w N
+    # i `zmiana_struktury` wobec wersji sprzed zmiany.
+    params_przebiegu["para_produkcji"] = "ostatnie_okno"
     # Horyzont zwrotu w IC (F-2.6) - klucz tylko poza wartoscia sprzed zmiany
     # (3 swiece), czyli dzis wylacznie dla 1h (12 swiec) i 5m.
     # Od 2026-10-07 (H-7) ta sama liczba przychodzi tez z `--horyzont-etykiety`:
@@ -3183,6 +3192,10 @@ class Przebieg:
         # widoczne jako decyzja, nie jako cisza.
         self.okna_bez_progu: dict[str, int] = {}
         self.weight_history: list[dict] = []
+        # Rownolegla do weight_history: progi (`Bramki`) KAZDEGO okna, policzone
+        # na wagach tego okna. Ostatni element razem z `weight_history[-1]` to
+        # para, ktora dostaje produkcja (`parametry_produkcji`, 2026-10-07).
+        self.bramki_okien: list[Bramki] = []
         # Rownolegla do weight_history: ktore sygnaly byly martwe w danym oknie.
         # Bez tego zero po martwym sygnale nie da sie odroznic od zera zmierzonego.
         self.martwe_w_oknie: list[set[str]] = []
@@ -3410,6 +3423,7 @@ class Przebieg:
                 continue
             z.historia_bramek.setdefault(rezim, []).append(prog_rezimu)
         z.weight_history.append(best_w)
+        z.bramki_okien.append(gates)
         z.martwe_w_oknie.append(martwe)
 
 
@@ -3864,78 +3878,39 @@ def werdykt(z: Przebieg, *, karta: Karta, n: int, trials: int, sd_prob,
 
 @dataclass(frozen=True)
 class Produkcja:
-    """Parametry, ktore dostaje produkcja: progi per rezim i mediana wag."""
+    """Parametry, ktore dostaje produkcja: progi per rezim i wagi.
+
+    Od 2026-10-07 to PARA Z OSTATNIEGO OKNA walk-forward (patrz
+    `parametry_produkcji`). Mediany po oknach zostaja obok jako SLAD
+    (`*_mediana_okien`) - do logu i do `params`, nie do handlu.
+    """
     prod_progi: dict[str, float]
     prod_okien: dict[str, int]
     prod_enter: float
     prod_weights: dict[str, dict[str, float]]
     bez_progu_w_produkcji: list[str]
     linie: list[str]
+    # Slad zmiany z 2026-10-07: to, co produkcja dostawala do tej daty.
+    progi_mediana_okien: dict[str, float] = field(default_factory=dict)
+    wagi_mediana_okien: dict[str, dict[str, float]] = field(default_factory=dict)
+    # Ile obserwacji stoi za progiem kazdego rezimu w oknie, z ktorego pochodzi para.
+    prod_proby: dict[str, int] = field(default_factory=dict)
 
 
-def parametry_produkcji(z: Przebieg) -> Produkcja:
-    """Progi i wagi dla produkcji z historii okien. CZYSTA FUNKCJA; `linie`
-    to wydruk (rezimy bez progu, progi dla produkcji)."""
-    historia_bramek, okna_bez_progu = z.historia_bramek, z.okna_bez_progu
-    weight_history, martwe_w_oknie = z.weight_history, z.martwe_w_oknie
-    linie: list[str] = []
-    # Progi obowiazujace produkcje - mediana z okien, OSOBNO DLA KAZDEGO REZIMU.
-    # Petla decyzyjna czyta je z rejestru, zeby nie ustalac ich wlasna,
-    # rownolegla logika.
-    #
-    # REZIM, KTORY NIE DOSTAL PROGU W ZADNYM OKNIE, NIE TRAFIA DO PARAMETROW -
-    # i przez to produkcja nie bedzie w nim wchodzic. To jest wybor, nie
-    # przeoczenie: patrz `bramki.MIN_PROB_PROGU`. Zeby nie bylo cichy, idzie
-    # do `reason` stanu nauki, czyli do jedynego pola, ktore czyta czlowiek.
-    prod_progi = {rezim: round(statistics.median(lista), 6)
-                  for rezim, lista in historia_bramek.items()}
-    prod_okien = {rezim: len(lista) for rezim, lista in historia_bramek.items()}
-    # `enter_threshold` zostaje, ale MA JUZ INNE ZNACZENIE: jest progiem
-    # zapasowym WYJSCIA dla rezimow bez kalibracji i wartoscia dla starszych
-    # czytnikow (`/learning/wagi`, migracja 0040). Wejsc nim nie wolno - tego
-    # pilnuje `bramki.Bramki.wejscie`, ktore dla rezimu bez progu oddaje None.
-    wszystkie_progi = [v for lista in historia_bramek.values() for v in lista]
-    prod_enter = (round(statistics.median(wszystkie_progi), 6) if wszystkie_progi
-                  else PROG_WEJSCIA_POCZATKOWY)
-    if okna_bez_progu:
-        opis_brakow = ", ".join(f"{r}: {n}" for r, n in sorted(okna_bez_progu.items()))
-        linie.append(f"  reżimy bez progu wejścia (próba poniżej {MIN_PROB_PROGU} "
-              f"obserwacji), liczba okien — {opis_brakow}")
-    bez_progu_w_produkcji = [r for r in REGIMES
-                             if r not in prod_progi and okna_bez_progu.get(r)]
-    # PROGI OBOWIAZUJACE PRODUKCJE WYPISUJEMY WPROST, z liczba okien. Do
-    # 2026-09-27 nie bylo ich w logu wcale: jedyna liczba, ktora przebieg
-    # podawal, byla mediana progu wspolnego - czyli nie ta, ktora produkcja
-    # przykladala do wyniku w konkretnym rezimie.
-    if prod_progi:
-        opis_progow = ", ".join(
-            f"{r}={prod_progi[r]:.4f} ({prod_okien[r]} okien)"
-            for r in REGIMES if r in prod_progi)
-        linie.append(f"\nProgi wejścia dla produkcji (mediana po oknach, percentyl "
-              f"{ENTER_PCTL:.2f}): {opis_progow}")
+def _mediana_wag(weight_history: list[dict],
+                 martwe_w_oknie: list[set[str]]) -> dict[str, dict[str, float]]:
+    """Mediana wag po oknach, osobno dla sygnalu i rezimu, liczona WYLACZNIE
+    po oknach, w ktorych sygnal zyl. Od 2026-10-07 tylko SLAD - patrz
+    `parametry_produkcji`.
 
-    # WAGI DLA PRODUKCJI.
-    #
-    # Bierzemy MEDIANE wag po oknach, nie wagi z ostatniego okna. Pojedyncze
-    # okno to jedno losowanie; mediana po kilkudziesieciu jest odporna na to,
-    # ze akurat ostatnie wypadlo nietypowo. Suma po wartosciach bezwzglednych,
-    # bo wagi moga byc ujemne.
-    #
-    # MEDIANA LICZONA WYLACZNIE PO OKNACH, W KTORYCH SYGNAL ZYL.
-    #
-    # Sygnal martwy na oknie dostaje w nim wage zero - ale to zero nie jest
-    # pomiarem "waga powinna byc zerowa", tylko BRAKIEM POMIARU. Wliczanie go
-    # do mediany jest tym samym, co usrednianie brakow danych jako zer.
-    #
-    # Skutek byl konkretny i policzalny. `news_shock` bez klucza Anthropic byl
-    # martwy we wszystkich oknach; po wpieciu klucza ozywa najpierw w jednym,
-    # potem w kolejnych. Zeby MEDIANA z 39 okien przestala byc zerem, sygnal
-    # musialby zyc w 20 z nich - czyli potrzebowalby 600 dni historii newsow.
-    # Dwadziescia miesiecy, przy szesciomiesiecznej fazie demonstracyjnej.
-    #
-    # Sygnal, ktorego dane zaczely istniec dzis, nie mogl wiec wejsc do modelu
-    # NIGDY w horyzoncie tego projektu - niezaleznie od tego, ile informacji
-    # niesie.
+    MEDIANA LICZONA WYLACZNIE PO OKNACH, W KTORYCH SYGNAL ZYL.
+
+    Sygnal martwy na oknie dostaje w nim wage zero - ale to zero nie jest
+    pomiarem "waga powinna byc zerowa", tylko BRAKIEM POMIARU. Wliczanie go
+    do mediany jest tym samym, co usrednianie brakow danych jako zer
+    (`news_shock` bez klucza Anthropic: mediana z 39 okien przestalaby byc
+    zerem dopiero po 20 zywych oknach, czyli po 600 dniach historii newsow).
+    """
     prod_weights = {}
     if weight_history:
         for regime in REGIMES:
@@ -3949,8 +3924,106 @@ def parametry_produkcji(z: Przebieg) -> Produkcja:
                 per_signal[name] = statistics.median(zywe) if len(zywe) >= MIN_OKIEN_ZYWEGO else 0.0
             total_w = sum(abs(v) for v in per_signal.values()) or 1.0
             prod_weights[regime] = {k: round(v / total_w, 4) for k, v in per_signal.items()}
+    return prod_weights
+
+
+def parametry_produkcji(z: Przebieg) -> Produkcja:
+    """Progi i wagi dla produkcji z historii okien. CZYSTA FUNKCJA; `linie`
+    to wydruk (rezimy bez progu, progi dla produkcji, slad zmiany).
+
+    PRODUKCJA GRA PARA Z OSTATNIEGO OKNA (2026-10-07).
+
+    Do tej daty produkcja dostawala MEDIANE WAG po oknach (osobno
+    znormalizowana) i MEDIANE PROGOW po oknach. Kazdy prog okna jest
+    percentylem 0,88 wyniku liczonego wagami TEGO okna - a mediana wag to
+    wektor, ktorego nie mialo zadne okno. Wagi IC roznych okien stawiaja na
+    rozne sygnaly (czesto z przeciwnym znakiem), wiec ich mediana skleja kilka
+    sygnalow, ktore sie wzajemnie znosza: wynik produkcji jest wyraznie
+    mniejszy niz wynik, na ktorym liczono prog. Tej pary (mediana wag +
+    mediana progow) nie symulowal nikt. Zmierzone na produkcji 2026-10-07,
+    wersja v171, rezim `range`: prog 0,341 przy srednim |wyniku| ~0,049
+    (~7x, przy p88 oczekiwane ~2x) - 0 wejsc na 18 decyzji.
+
+    Teraz produkcja dostaje DOKLADNIE to, co walk-forward mierzyl w ostatnim
+    oknie: wagi tego okna i progi policzone na tych wagach, na jego oknie
+    treningowym. To protokol walk-forward przedluzony o jeden krok - para jest
+    ta sama, ktora symulacja OOS ostatniego okna zagrala, wiec czestotliwosc
+    wejsc jest z konstrukcji tym zamiarem (`ENTER_PCTL`, z H-6 na score > 0).
+    Cena: jedno okno to jedno losowanie (`argmax`) albo jedna estymacja IC -
+    mniej odpornosci niz w medianie. Dla `ic` to estymacja na najswiezszych
+    `train_days` dniach, czyli dokladnie ta, ktora walk-forward co tydzien
+    ocenia OOS; dla `argmax` klatwa zwyciezcy jest ta sama, ktora juz
+    mierzy kazde okno.
+
+    REZIM BEZ PROGU W OSTATNIM OKNIE NIE DOSTAJE PROGU W PRODUKCJI - nawet
+    jesli mialy go wczesniejsze okna. Ta sama zasada co dotad
+    (`bramki.MIN_PROB_PROGU`): bez kalibracji nie wchodzimy. Lista idzie do
+    `reason` przez `bez_progu_w_produkcji`.
+    """
+    historia_bramek, okna_bez_progu = z.historia_bramek, z.okna_bez_progu
+    weight_history, martwe_w_oknie = z.weight_history, z.martwe_w_oknie
+    linie: list[str] = []
+    # SLAD: mediana z okien, osobno dla kazdego rezimu - to, co produkcja
+    # dostawala do 2026-10-07. Wypisywane i zapisywane obok, zeby roznica
+    # "stary vs nowy prog" byla widoczna w logu i w `params` kazdej wersji.
+    progi_mediana = {rezim: round(statistics.median(lista), 6)
+                     for rezim, lista in historia_bramek.items()}
+    wagi_mediana = _mediana_wag(weight_history, martwe_w_oknie)
+    # Ile okien kalibrowalo dany rezim - kontekst stabilnosci progu (panel
+    # i `enter_threshold_windows`), tylko dla rezimow z progiem w produkcji.
+    okien_rezimu = {rezim: len(lista) for rezim, lista in historia_bramek.items()}
+
+    ostatnie: Bramki | None = z.bramki_okien[-1] if z.bramki_okien else None
+    prod_weights: dict[str, dict[str, float]] = {}
+    prod_progi: dict[str, float] = {}
+    prod_proby: dict[str, int] = {}
+    prod_enter = PROG_WEJSCIA_POCZATKOWY
+    if ostatnie is not None and weight_history:
+        # Wagi okna sa juz znormalizowane (suma |w| = 1, `ic_weights`,
+        # `_bez_martwych`, `random_weights`); zaokraglenie jak dotad.
+        # `combine` i tak dzieli przez sume |wag| obecnych sygnalow, wiec
+        # skala wektora nie zmienia wyniku - zmienia go wylacznie PROPORCJA,
+        # a ta jest dokladnie ta, na ktorej liczono prog.
+        prod_weights = {r: {k: round(float(v), 4) for k, v in w.items()}
+                        for r, w in weight_history[-1].items()}
+        for rezim in REGIMES:
+            prog = ostatnie.wejscie(rezim)
+            if prog is not None:
+                prod_progi[rezim] = round(prog, 6)
+                prod_proby[rezim] = int(ostatnie.prob.get(rezim, 0))
+        # `enter_threshold` - prog zapasowy WYJSCIA dla rezimow bez kalibracji
+        # i wartosc dla starszych czytnikow (`/learning/wagi`, migracja 0040).
+        # Wejsc nim nie wolno (`bramki.Bramki.wejscie`). Z tego samego okna:
+        # percentyl zlaczonej proby, z ktorego `bramki_z_prob` liczy zapas.
+        if sum(ostatnie.prob.values()) >= MIN_PROB_PROGU:
+            prod_enter = round(ostatnie.wyjscie_zapasowe / EXIT_RATIO, 6)
+    prod_okien = {r: okien_rezimu.get(r, 1) for r in prod_progi}
+
+    if okna_bez_progu:
+        opis_brakow = ", ".join(f"{r}: {n}" for r, n in sorted(okna_bez_progu.items()))
+        linie.append(f"  reżimy bez progu wejścia (próba poniżej {MIN_PROB_PROGU} "
+              f"obserwacji), liczba okien — {opis_brakow}")
+    bez_progu_w_produkcji = [r for r in REGIMES
+                             if r not in prod_progi
+                             and (okna_bez_progu.get(r) or r in progi_mediana)]
+    # PROGI OBOWIAZUJACE PRODUKCJE WYPISUJEMY WPROST, z liczba probek i ze
+    # starym progiem (mediana okien) obok - slad zmiany z 2026-10-07.
+    if prod_progi:
+        opis_progow = ", ".join(
+            f"{r}={prod_progi[r]:.4f} (n={prod_proby[r]}"
+            + (f"; mediana okien {progi_mediana[r]:.4f}" if r in progi_mediana else "")
+            + ")"
+            for r in REGIMES if r in prod_progi)
+        linie.append(f"\nProgi wejścia dla produkcji (ostatnie okno, wagi tego okna, "
+                     f"percentyl {ENTER_PCTL:.2f}): {opis_progow}")
+    wycofane = [r for r in REGIMES if r in progi_mediana and r not in prod_progi]
+    if wycofane:
+        linie.append(f"  reżimy z progiem w medianie okien, ale BEZ progu w ostatnim "
+                     f"oknie (produkcja w nich nie wchodzi): {', '.join(wycofane)}")
     return Produkcja(prod_progi, prod_okien, prod_enter, prod_weights,
-                     bez_progu_w_produkcji, linie)
+                     bez_progu_w_produkcji, linie,
+                     progi_mediana_okien=progi_mediana,
+                     wagi_mediana_okien=wagi_mediana, prod_proby=prod_proby)
 
 
 def zapisz_wynik(cur, conn, sucho: bool, engine: str, h: Horizon,
@@ -3978,7 +4051,16 @@ def zapisz_wynik(cur, conn, sucho: bool, engine: str, h: Horizon,
                          # identycznie, a nie sa tym samym pomiarem.
                          "enter_threshold_windows": prod_okien,
                          "min_confidence": MIN_CONF,
-                         "weights": prod_weights}), mv_id))
+                         "weights": prod_weights,
+                         # SLAD ZMIANY Z 2026-10-07 (`parametry_produkcji`):
+                         # liczba obserwacji za progiem w oknie, z ktorego
+                         # pochodzi para, i to, co produkcja dostalaby po
+                         # staremu (mediany po oknach). Nie czyta tego petla.
+                         "enter_threshold_proby": prod.prod_proby,
+                         "enter_threshold_per_regime_mediana_okien":
+                             prod.progi_mediana_okien,
+                         "weights_mediana_okien": prod.wagi_mediana_okien}),
+             mv_id))
 
         # BRAMKA PROMOCJI. Do 2026-09-08 w tym miejscu stalo bezwarunkowe
         # wycofanie poprzedniej wersji i promocja nowej dla kazdego wyniku poza

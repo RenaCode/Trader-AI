@@ -27,6 +27,14 @@ i wagi IC liczyly sie dwustronnie. Sprawdzone dwuetapowo przed zapisem:
 Doszedl wariant `ic_stock` (rynek z shortami): pilnuje, ze tam uczenie
 zostaje dwustronne i `params` nie dostaja klucza `strona`.
 
+PRZEGENEROWANY TRZECI RAZ, 2026-10-07 (para produkcyjna z ostatniego okna,
+`train.parametry_produkcji`): zmienia sie WYLACZNIE linia „Progi wejscia dla
+produkcji" (i dopisek o rezimie bez progu w ostatnim oknie w `ic_siatka`).
+Sprawdzone przed zapisem: `PODSUMOWANIE_JSON` kazdego wariantu przechodzi
+`_bliskie` ze zrzutem sprzed zmiany, a pozostale linie wydruku sa identyczne -
+walk-forward i miary OOS bez zmian, inna jest tylko para, ktora dostaje
+produkcja.
+
 Zmiana wyniku zamierzona (nowa miara, poprawka) oznacza swiadome
 przegenerowanie zrzutu:
 
@@ -126,8 +134,17 @@ def _bliskie(a, b, sciezka="") -> None:
         assert a == b, f"{sciezka}: {a!r} != {b!r}"
 
 
+def _liczba(m) -> str:
+    v = float(m.group())
+    # Ta sama tolerancja bezwzgledna co w `_bliskie`: DSR rzedu 1e-14 (wariant
+    # `ic_pesymistyczna`) rozni sie miedzy wersjami Pythona juz na trzeciej
+    # cyfrze znaczacej (1.21194875e-14 vs 1.2101431e-14 lokalnie na 3.14) - to
+    # zero numeryczne, nie wynik. JSON przechodzil, wydruk nie.
+    return "0" if abs(v) < 1e-12 else f"{v:.9g}"
+
+
 def _znormalizuj(tekst: str) -> list[str]:
-    return [_LICZBA.sub(lambda m: f"{float(m.group()):.9g}", w) for w in tekst.splitlines()]
+    return [_LICZBA.sub(_liczba, w) for w in tekst.splitlines()]
 
 
 @pytest.mark.parametrize("wariant", sorted(WARIANTY))
