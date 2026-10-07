@@ -888,6 +888,25 @@ trainerCron:
   # w docs/03.
   kind: "spot_eu"
   limit: true
+  # MODEL WYPELNIEN PESYMISTYCZNY W TRENINGU (2026-10-07, decyzja wlasciciela
+  # z 06-07.10: demo trenuje algorytm przed live; docs/hipotezy.md H-5).
+  #
+  # `--egzekucja-pesymistyczna --opoznienie 20`: limit z ceny 20 min po
+  # zamknieciu swiecy decyzyjnej, pol spreadu instrumentu pod/nad cena,
+  # wypelnienie tylko w godzinie po wysylce. To ten sam model, pod ktorym
+  # liczono H-1 i H-3; H-1 zostawila jego wlaczenie tutaj decyzji wlasciciela.
+  # Model sprzed T1 (limit po `close`, cala nastepna swieca 4h) dawal 100%
+  # wypelnien i +48 pb/runde, ktore w calosci siedzialy w tym zalozeniu.
+  #
+  # 20 MIN JEST PRZYJETE, NIE ZMIERZONE. E-1 mierzy opoznienie wysylki na demo
+  # (`poslizg.py --strategia momentum_filtr_trendu`); gdy mediana bedzie znana,
+  # zmiana tej liczby to nowa hipoteza, a nie poprawka.
+  #
+  # Pierwsza wersja po wlaczeniu ma w `params` klucze `egzekucja_pesymistyczna`
+  # i `opoznienie_min`, wiec `train.zmiana_struktury` zostawia ja jako
+  # `candidate` i licznik N liczy ja osobno. Promocja tylko recznie.
+  pesymistyczna: true
+  opoznienie: 20
   # DWA TORY, NIE JEDEN PRZEBIEG POWTARZANY CZESCIEJ.
   #
   # Czestszy trening tego samego horyzontu nie dodaje informacji: okna przesuwaja
@@ -934,6 +953,15 @@ trainerCron:
     horyzonty: ["1h"]
     kind: "stock"
     limit: true
+    # Ten sam model wypelnien co crypto (H-5). Swieca 1h, wiec wysylka
+    # 20 min po zamknieciu i godzina na wypelnienie; wejscie z ostatniej
+    # swiecy sesji nie ma godziny po wysylce i liczy sie jako niewypelnione
+    # (`brak_swiec_wykonania`, wypisywane osobno) - zgodnosci z tym, co robi
+    # Alpaca ze zleceniem po zamknieciu sesji, nikt nie mierzyl.
+    # Spread akcji jest odrzucany przez bramke spojnosci (nizej), wiec pol
+    # spreadu w modelu wynosi 0 - model jest dla equity LAGODNIEJSZY niz dla crypto.
+    pesymistyczna: true
+    opoznienie: 20
     # SPREAD DLA AKCJI: DANE SA, POMIARU NADAL NIE MA - I DLATEGO GO TU NIE MA.
     #
     # Sprawdzone 2026-09-27: `book_spread_bps` ISTNIEJE dla equity - 560 swiec

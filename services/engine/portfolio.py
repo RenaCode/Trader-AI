@@ -73,6 +73,11 @@ class Position:
     # Na produkcji rezimu i pokrycia rozplesc sie NIE DA (cale niskie pokrycie
     # jest w `range`), wiec odpowiedzieć moze tylko symulacja.
     pokrycie: float = 1.0
+    # INDEKS SWIECY DECYZJI WEJSCIA w panelu TEGO instrumentu - do liczby swiec
+    # trzymania (`swiec` przy transakcji, H-7). Indeks, nie czas: na gieldzie
+    # akcji noc i weekend to kilkanascie godzin bez swiec, a etykieta IC
+    # (`train.ic_weights`) liczy horyzont w swiecach panelu.
+    idx_wejscia: int = -1
 
     @property
     def finansowanie_w_zwrocie(self) -> float:
@@ -694,6 +699,11 @@ def simulate_portfolio(panels: dict[str, list[dict]],
                         - pos.finansowanie_w_zwrocie),
                 "conf": pos.conf, "pokrycie": pos.pokrycie, "symbol": sym,
                 "opened_at": pos.opened_at, "closed_at": rows[nxt_idx]["t"],
+                # SWIECE TRZYMANIA w tej samej mierze co etykieta IC (H-7):
+                # etykieta to zwrot od ceny swiecy i+1 do i+1+H, a transakcja
+                # niesie cene od swiecy po decyzji wejscia do swiecy po decyzji
+                # wyjscia - roznica indeksow decyzji.
+                "swiec": cur["idx"] - pos.idx_wejscia,
                 # STRONA I FINANSOWANIE PRZY KAZDEJ TRANSAKCJI.
                 #
                 # Bez `side` wyniku strony krotkiej nie da sie oddzielic od
@@ -868,7 +878,8 @@ def simulate_portfolio(panels: dict[str, list[dict]],
                     with_contributions=False, slad=_slad_pokrycia)
             positions[sym] = Position(side=side, qty=qty, entry=entry, conf=conf,
                                       opened_at=t,
-                                      pokrycie=_slad_pokrycia.get("pokrycie", 1.0))
+                                      pokrycie=_slad_pokrycia.get("pokrycie", 1.0),
+                                      idx_wejscia=cur["idx"])
             fees_paid += qty * entry * fee
             order_times.append(t)
 
@@ -897,6 +908,11 @@ def simulate_portfolio(panels: dict[str, list[dict]],
                                    - pos.finansowanie_w_zwrocie),
                            "conf": pos.conf, "pokrycie": pos.pokrycie,
                            "symbol": sym, "opened_at": pos.opened_at, "closed_at": last_t,
+                           # Domkniecie koncem okna UCINA trzymanie - liczba
+                           # swiec jest tu dolnym oszacowaniem, stad znacznik.
+                           # Cena wyjscia to cena swiecy `last_t` (bez +1).
+                           "swiec": (cur["idx"] - pos.idx_wejscia - 1) if cur else None,
+                           "koniec_okna": True,
                            "side": pos.side, "finansowanie": pos.finansowanie,
                            "notional": pos.qty * pos.entry})
     res.equity_curve.append((last_t, START_EQUITY + realized - fees_paid))
