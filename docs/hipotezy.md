@@ -22,6 +22,9 @@ automatycznej promocji `learning` → `active` już nie ma.
 | A | 2026-10-04 | Decyzja właściciela po STOP/GO 2 (sekcja 12): zamknięcie poszukiwania przewagi | — (decyzja, nie test) | H-1 STOP, H-3 STOP | **zamknięte z wnioskiem „brak przewagi spełniającej kryteria”**; tor badawczy (ensemble 4h, R4) zamknięty |
 | E-1 | 2026-10-04 | **Pomiar egzekucji, NIE hipoteza przewagi.** Reguła R4 „momentum + filtr trendu” z parametrami zamrożonymi z H-3 na koncie demo, 15% kapitału | opisowe, bez GO: realizacja na giełdzie wobec modelu pesymistycznego (wypełnialność wejść, opóźnienie wysyłki, prowizje, wyjście względem ceny decyzji) | w toku od wdrożenia | wynik finansowy NIE jest wynikiem; nic z tego przebiegu nie podlega promocji |
 | H-4 | 2026-10-05 | Cotygodniowy trening poprawia model: wersja v_k jest lepsza od v_k−1 **w przód**, na tygodniu zamkniętym po zapisaniu obu | test znaków po oknach: v_k lepsza w ≥ 10 z pierwszych 12 tygodni z różnicą ≠ 0 (p ≈ 0,019); n = liczba okien kalendarzowych, nie transakcji | w toku — szkielet pomiaru, miara okna niezaimplementowana | — |
+| H-5 | 2026-10-07 | Trening produkcyjny (`trainerCron`, crypto i equity) liczy się pesymistycznym modelem wypełnień z H-1 (`--egzekucja-pesymistyczna --opoznienie 20`), więc symulacja treningu wypełnia zlecenia tak jak demo | wypełnialność wejść w symulacji OOS pierwszego przebiegu 4h po wdrożeniu różni się o ≤ 10 pp od wypełnialności wejść zmierzonej na demo (E-1) w tym samym tygodniu; > 10 pp = model wypełnień do korekty (nowa hipoteza) | w toku | **zmiana struktury → `candidate`**, bez auto-promocji; bramka live bez zmian |
+| H-6 | 2026-10-07 | Na rynku bez shortów (`spot`, `spot_eu`) trening uczy się tylko strony długiej: próg p88 z rozkładu score > 0, wagi IC z obserwacji, na których long jest możliwy | wobec wariantu dwustronnego na tych samych oknach i przesunięciach: zwrot/rundę po dopłacie wyższy w ≥ 4/5 przesunięć **i** średni zwrot strony długiej w oknach z dominującym `trend_down` nie niższy; inaczej uczenie dwustronne wraca do kodu | w toku | **zmiana struktury → `candidate`**, bez auto-promocji; `stock` bez zmian |
+| H-7 | 2026-10-07 | Horyzont etykiety IC (dziś 12 h) ma odpowiadać czasowi trzymania pozycji; najpierw POMIAR mediany trzymania, liczba zmienia się dopiero po nim | krok 1: mediana trzymania (wyjścia sygnałem) z pierwszego przebiegu produkcyjnego; krok 2 tylko przy różnicy ≥ 2× wobec horyzontu etykiety: przebieg `--sucho --horyzont-etykiety M` lepszy od domyślnego w ≥ 4/5 przesunięć i z minimum DSR nie niższym | w toku — krok 1 | domyślna liczba **bez zmian**; inna wartość = zmiana struktury → `candidate` |
 
 ---
 
@@ -592,3 +595,135 @@ zmieniają rozkład od daty wdrożenia. Panel walk-forward obejmujący tę datę
 dwa reżimy tej cechy, a czujka dryfu może się na niej odezwać. W H-4 obie wersje
 każdej pary są oceniane na tym samym oknie i tych samych cechach, więc zmiana
 wchodzi do obu ramion jednakowo.
+
+---
+
+## H-5, H-6, H-7: trening na demo przed live (zapisane 2026-10-07, przed pomiarem)
+
+**Skąd.** Decyzja właściciela z 06–07.10: demo służy do **trenowania algorytmu
+przed live**. Bramka live zostaje bez zmian (70% okien OOS, DSR ≥ 0,95, 5
+przesunięć siatki). Doradca (Fable) zalecił trzy zmiany w treningu
+(`services/engine/train.py`), żeby trening uczył się strategii, którą demo
+naprawdę wykonuje. Wszystkie trzy zmieniają `params` modelu, więc pierwsza
+wersja po wdrożeniu jest **`candidate`** (`train.zmiana_struktury`), licznik N
+(`n_konfiguracji`) liczy ją jako nową konfigurację, a do produkcji wchodzi
+wyłącznie ręcznym przebiegiem z `--zatwierdz-promocje` (poprawka F). Żadna
+z nich nie jest hipotezą przewagi i nie rusza Decyzji A ani E-1: silnik crypto
+handluje dalej regułą `momentum_filtr_trendu`, a nie modelem.
+
+Testy przypinające te decyzje: `tests/test_trener_cde.py`. Zrzut
+`tests/fixtures/trener_rownowaznosc.json` został przegenerowany świadomie,
+z opisem w nagłówku `tests/test_trener_rownowaznosc.py`.
+
+**Uwaga do H-4.** H-5 i H-6 zmieniają trening, a nie miarę H-4. Pierwsza para
+v_k / v_k−1 po wdrożeniu porówna jednak wersję nową ze starą, czyli dwie różne
+konfiguracje. Czy ta para wchodzi do serii H-4, rozstrzyga właściciel przed
+pierwszym oknem (2026-10-12).
+
+### H-5: pesymistyczne wypełnienia w przebiegu produkcyjnym
+
+- **Co się zmienia.** `_sprawdz_argumenty` nie wymaga już `--sucho` przy
+  `--egzekucja-pesymistyczna --opoznienie N`, ale **tylko dla pełnego modelu**
+  (obie flagi, N > 0). Pojedyncza flaga zostaje wariantem pomiaru z `--sucho`.
+  W `charts/trader/values.yaml` dochodzą `trainerCron.pesymistyczna: true`
+  i `opoznienie: 20`, a te same klucze w `trainerCron.equity`. Szablon
+  przekazuje obie flagi do każdego wywołania `train.py` (4h, 1h, equity 1h).
+- **Dlaczego blokada istniała i co z niej zostaje.** Flagi były „wariantem
+  pomiaru, nie produkcją”: do 05.10 wersja w demo promowała się sama, więc
+  przebieg z innym modelem wypełnień zmieniałby po cichu progi, którymi handluje
+  produkcja. H-1 zostawiła włączenie w `trainerCron` decyzji właściciela. Ta
+  intencja (żadnej cichej zmiany produkcji) zostaje, zmienia się mechanizm:
+  `params` zapisują `egzekucja_pesymistyczna` i `opoznienie_min`, nowa
+  konfiguracja jest `candidate` i osobną próbą w N.
+- **20 min jest przyjęte, nie zmierzone** (H-1, E-1). Gdy E-1 da medianę
+  opóźnienia wysyłki, zmiana tej liczby będzie nową hipotezą.
+- **Czego się spodziewamy i co nie jest porażką.** Pod tym modelem H-1 dała DSR
+  ≈ 0 i 0/5 przesunięć z dodatnim zwrotem na rundę. Status `learning` albo
+  `degraded` po włączeniu nie jest porażką H-5: trening przestaje liczyć
+  przewagę, która siedziała w założeniu o wypełnieniach.
+- **Kryterium (przed pomiarem).** H-5 jest poprawką zgodności symulacja–produkcja,
+  więc mierzymy zgodność. Porównujemy wypełnialność wejść w symulacji OOS
+  pierwszego przebiegu toru 4h po wdrożeniu (log: „Wypełnialność zleceń
+  z limitem…”) z wypełnialnością wejść na demo z raportu E-1 (`poslizg.py
+  --strategia momentum_filtr_trendu`) w tym samym tygodniu. **Sukces**: różnica
+  ≤ 10 pp. **Porażka**: różnica > 10 pp. Wtedy model wypełnień trzeba poprawić
+  w nowej hipotezie, a kandydaci liczeni tym modelem nie są zatwierdzani.
+  Zastrzeżenie znane z góry: symulacja liczy wejścia ensemble na każdej
+  świecy 4h, a E-1 wejścia reguły R4 raz na dobę. Porównujemy mechanikę
+  wypełnień, nie tę samą próbę.
+- **Equity.** Spread akcji odrzuca bramka spójności (`spread.py`), więc pół
+  spreadu w modelu wynosi 0 i model jest dla equity łagodniejszy niż dla
+  crypto. Wejście z ostatniej świecy sesji nie ma godziny po wysyłce i liczy się
+  jako niewypełnione (`brak_swiec_wykonania`). Kryterium H-5 dotyczy tylko
+  crypto, bo dla equity nie ma pomiaru na koncie.
+
+### H-6: uczenie tylko strony długiej na rynku bez shortów
+
+- **Wada.** Na `spot` i `spot_eu` symulacja (`portfolio.py`, `pominiete_shorty`)
+  i pętla (`loop.py`, `enter_short`) odrzucają shorty. Trening liczył jednak
+  progi i wagi dwustronnie: p88 z `|score|` i IC po całej próbie. W `trend_down`
+  duże wyniki są ujemne, więc próg stał wysoko przez shorty, których nikt nie
+  zagra, a longi, które go mijały, to skrajne odbicia, czyli kupowanie spadków.
+  Wagi IC nagradzały też trafne przewidywanie spadków, które na spocie daje
+  najwyżej „nie wchodź”.
+- **Co się zmienia** (tylko gdy `not koszty(kind).krotka_pozycja`, funkcja
+  `train.strona_uczenia`):
+  1. Próg wejścia per reżim to p88 z rozkładu **score > 0** (z `conf ≥
+     MIN_CONF`, jak dotąd), a nie z `|score|` (`proby_wynikow(tylko_dluga=True)`).
+     Percentyl znaczy wtedy „12% najsilniejszych sytuacji long”. Przy rozkładzie
+     symetrycznym częstotliwość wejść jest zbliżona. Różnica pojawia się przy
+     rozkładzie skośnym, czyli tam, gdzie była wada. Pomiar z 27.09 (`opis_stron`)
+     dał w `range` p88 strony długiej 0,62 przy progu wspólnym 0,35, więc w `range`
+     próg wzrośnie i longów będzie mniej.
+  2. Wagi IC liczą się w jednym kroku. Wagi dwustronne wyznaczają obserwacje,
+     na których wynik łączny jest > 0, a pewność przechodzi `MIN_CONF`. Na tych
+     obserwacjach IC liczy się ponownie (`ic_weights(tylko_dluga=True)`).
+     Uzasadnienie wariantu i odrzucone alternatywy są w komentarzu funkcji.
+  3. `params["strona"] = "dluga"`. Na rynku z shortami (`stock`, `perp`)
+     wszystko zostaje dwustronne i tego klucza nie ma.
+- **Kryterium (przed pomiarem).** Wariant H-6 porównujemy z dwustronnym (kod
+  sprzed zmiany) na tym samym panelu, tych samych oknach i przesunięciach
+  (−2…+2), z tym samym modelem wypełnień H-5, `spot_eu` i `--wybor ic`.
+  **Sukces**, gdy spełnione są oba warunki: (a) zwrot na rundę po dopłacie jest
+  wyższy w ≥ 4/5 przesunięć; (b) w tabeli „STRONA DŁUGA KONTRA KRÓTKA” średni
+  zwrot strony długiej w oknach z dominującym `trend_down` nie jest niższy niż
+  w wariancie dwustronnym. Przy n < 12 transakcji w którymś wariancie warunek (b)
+  jest nierozstrzygnięty i decyduje (a). **Porażka**: uczenie dwustronne wraca
+  do kodu, a kandydaci H-6 nie są zatwierdzani.
+- **Czego to nie rozstrzyga.** Panel z 03.10 był już oglądany (H-1, H-2), więc
+  wynik na nim nie jest testem przewagi. Pokazuje tylko, czy poprawka zgodności
+  nie pogarsza strategii. O przewadze rozstrzyga bramka live, która się nie zmienia.
+
+### H-7: horyzont etykiety a czas trzymania
+
+- **Wada (przypuszczenie do zmierzenia).** Wagi IC uczą się zwrotu na
+  `ic_horizon_bars` = 12 h (4h: 3 świece, 1h: 12). Pozycja wychodzi na sygnale,
+  bez horyzontu (`portfolio.py`: wyjście przy zmianie znaku albo spadku poniżej
+  `EXIT_RATIO` progu). Jeśli typowe trzymanie jest wyraźnie krótsze albo dłuższe
+  niż 12 h, wagi uczą się innego zwrotu niż ten, który realizuje pozycja.
+- **Co się zmienia w kodzie.**
+  1. Każda transakcja symulacji niesie `swiec`, czyli liczbę świec panelu od
+     wejścia do wyjścia, w tej samej mierze co etykieta. Liczymy indeksy, nie
+     czas, bo w equity są noce i weekendy. Domknięcia końcem okna mają znacznik
+     `koniec_okna`.
+  2. Log przebiegu wypisuje obok horyzontu etykiety medianę i kwartyle
+     trzymania w dwóch wersjach. Dla wyjść sygnałem mediana jest zaniżona, bo
+     odpadają najdłuższe pozycje. Dla wszystkich transakcji, razem z uciętymi,
+     to dolne oszacowanie. `PODSUMOWANIE_JSON` ma `trzymanie_swiec`
+     i `horyzont_etykiety_swiec`.
+  3. Parametr `--horyzont-etykiety N` (domyślnie wartość horyzontu) zapisuje się
+     w `params` jako `ic_horizon_bars`. Inna wartość daje `candidate`.
+  **Domyślna liczba się nie zmienia.** Bez bazy nie da się tego zmierzyć na
+  danych rynkowych, bo panel syntetyczny testów nie jest rynkiem.
+- **Kryterium (przed pomiarem).** Krok 1: M to mediana trzymania wyjść sygnałem
+  z pierwszego przebiegu produkcyjnego toru 4h po wdrożeniu. Krok 2 robimy tylko
+  wtedy, gdy M ≤ ½ albo M ≥ 2× horyzontu etykiety (4h: M ≤ 1,5 albo M ≥ 6 świec).
+  Wtedy uruchamiamy `--sucho --hipoteza H-7 --horyzont-etykiety round(M)` na tym
+  samym panelu i tych samych przesunięciach co przebieg domyślny. **Sukces**:
+  zwrot na rundę po dopłacie lepszy w ≥ 4/5 przesunięć **i** minimum DSR
+  z przesunięć nie niższe. Dopiero wtedy `--horyzont-etykiety` trafia do
+  `trainerCron` (zmiana struktury, `candidate`). Przy **porażce** albo M w
+  przedziale liczba zostaje bez zmian.
+- **Jedna iteracja.** Czas trzymania zależy od wag, a wagi od horyzontu etykiety,
+  więc po zmianie M się przesunie. Kolejna korekta to nowa hipoteza i kolejna
+  próba do N, a nie dostrajanie w pętli.
