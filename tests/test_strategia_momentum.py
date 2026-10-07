@@ -453,14 +453,20 @@ def test_momentum_ODMAWIA_startu_poza_demo(monkeypatch):
         asyncio.run(loop.main())
 
 
-def test_chart_wlacza_momentum_TYLKO_w_silniku_crypto_demo():
+def test_chart_NIE_wlacza_momentum_po_decyzji_z_2026_10_07():
+    """Do 2026-10-07 ten test pilnował, że `--strategia momentum` jest
+    WYŁĄCZNIE w `workers.engine` (crypto, demo). Decyzja właściciela z 07.10:
+    E-1 zamknięty, demo gra modelem-kandydatem (`--model-status candidate`,
+    tests/test_model_kandydat.py), więc reguły R4 nie ma w żadnym workerze.
+    Kod reguły zostaje — powrót to podmiana flagi, a wtedy obowiązuje znowu
+    to samo, co pilnował stary test: tylko silnik crypto, tylko demo."""
     import yaml
 
     from tests.atrapa_bazy import KORZEN
     workers = yaml.safe_load((KORZEN / "charts/trader/values.yaml").read_text())["workers"]
     z_momentum = {n for n, w in workers.items()
                   if "--strategia momentum" in " ".join(w.get("command", []))}
-    assert z_momentum == {"engine"}
-    komenda = " ".join(workers["engine"]["command"])
-    assert "--mode demo" in komenda and "--mode live" not in komenda
-    assert "--likwiduj-po-killswitchu" not in komenda
+    assert z_momentum == set()
+    # Zostaje z poprzedniej wersji testu: silnik demo crypto nie likwiduje
+    # pozycji zleceniem rynkowym po kill-switchu.
+    assert "--likwiduj-po-killswitchu" not in " ".join(workers["engine"]["command"])

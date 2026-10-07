@@ -139,8 +139,12 @@ def test_kanarek_znajduje_silnik_z_flaga_strategii():
     assert "services/engine/loop.py" in skrypty
     assert "services/engine/przebieg_zadania.py" in skrypty
     assert "services/engine/train.py" in skrypty, "wywolanie za `przebieg_zadania --`"
-    assert any(s == "services/engine/loop.py" and "--strategia" in a
-               for s, a in WYWOLANIA), "flaga z incydentu 04.10"
+    # Do 2026-10-07 kanarek szukal `--strategia` (flaga z incydentu 04.10).
+    # Decyzja wlasciciela z 2026-10-07 zdjela ja z chartu na rzecz
+    # `--model-status candidate` - kanarek pilnuje teraz tej flagi, bo to ona
+    # jest najmlodsza flaga petli w charcie, czyli ta, ktora obraz moze nie znac.
+    assert any(s == "services/engine/loop.py" and "--model-status" in a
+               for s, a in WYWOLANIA), "flaga z decyzji 07.10"
     assert len(WYWOLANIA) >= 20, len(WYWOLANIA)
 
 

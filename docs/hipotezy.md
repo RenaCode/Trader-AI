@@ -20,7 +20,8 @@ automatycznej promocji `learning` → `active` już nie ma.
 | H-2 | 2026-10-03 | Zmiana METODY z audytu T4 (stała siatka okien + status z minimum 5 przesunięć, progi wejścia na wagach IC, horyzont IC przy `Horizon`): wpływ na werdykt toru 4h | opisowe — bez decyzji GO; wynik nie zmienia H-1 | patrz niżej | H-1 STOP obowiązuje |
 | H-3 | 2026-10-04 | Tor R4: momentum przekrojowe 30 d na decyzji dobowej z filtrem BTC > EMA 50 d, top 3 long-only, pod pesymistycznym modelem wejść (STOP/GO 2) | wszystkie cztery naraz: K1 okna dodatnie ≥ 65% **i** bije B1 przy tej samej ekspozycji w ≥ 65% okien; K2 DSR ≥ 0,95 na 5/5 przesunięć; K3 percentyl permutacyjny ≥ 70 na 5/5 przesunięć; K4 bije B2 przy tej samej ekspozycji w ≥ 55% okien | K1 NIE (okna dodatnie 46%, bije B1 35%), K2 TAK (DSR 0,950–0,980, N = 2), K3 TAK (percentyl 100), K4 NIE (bije B2 44%); oba warianty ekspozycji | **STOP** — R4 nie wchodzi na demo; żaden tor nie spełnia kryteriów, decyzja właściciela (sekcja 12) · zamknięte decyzją A (2026-10-04); reguła R4 na demo wyłącznie jako pomiar egzekucji E-1 |
 | A | 2026-10-04 | Decyzja właściciela po STOP/GO 2 (sekcja 12): zamknięcie poszukiwania przewagi | — (decyzja, nie test) | H-1 STOP, H-3 STOP | **zamknięte z wnioskiem „brak przewagi spełniającej kryteria”**; tor badawczy (ensemble 4h, R4) zamknięty |
-| E-1 | 2026-10-04 | **Pomiar egzekucji, NIE hipoteza przewagi.** Reguła R4 „momentum + filtr trendu” z parametrami zamrożonymi z H-3 na koncie demo, 15% kapitału | opisowe, bez GO: realizacja na giełdzie wobec modelu pesymistycznego (wypełnialność wejść, opóźnienie wysyłki, prowizje, wyjście względem ceny decyzji) | w toku od wdrożenia | wynik finansowy NIE jest wynikiem; nic z tego przebiegu nie podlega promocji |
+| E-1 | 2026-10-04 | **Pomiar egzekucji, NIE hipoteza przewagi.** Reguła R4 „momentum + filtr trendu” z parametrami zamrożonymi z H-3 na koncie demo, 15% kapitału | opisowe, bez GO: realizacja na giełdzie wobec modelu pesymistycznego (wypełnialność wejść, opóźnienie wysyłki, prowizje, wyjście względem ceny decyzji) | w toku od wdrożenia; przerwany 2026-10-07 przed próbą ~30 wejść | **zamknięte decyzją D-1 (2026-10-07)**: R4 przestaje być strategią demo; wynik finansowy NIE jest wynikiem; nic z tego przebiegu nie podlega promocji |
+| D-1 | 2026-10-07 | Decyzja właściciela: demo służy do trenowania algorytmu przed live. Silnik demo (crypto 4h i equity 1h) gra **modelem-kandydatem** (najnowsza wersja `candidate` albo nowsza `active`), żeby zbierać dane w przód (live-OOS kandydata) | — (decyzja, nie test); warunek **DODATKOWY** do bramki live, nie zastępujący: ≥ 12 tygodni kandydata na demo **i** test znaków ≥ 8/12 tygodni dodatnich **i** realizacja wobec symulacji w granicy dopłaty karty | w toku od wdrożenia | bramka przejścia na live bez zmian; kandydat nigdy na live (odmowa w kodzie) |
 | H-4 | 2026-10-05 | Cotygodniowy trening poprawia model: wersja v_k jest lepsza od v_k−1 **w przód**, na tygodniu zamkniętym po zapisaniu obu | test znaków po oknach: v_k lepsza w ≥ 10 z pierwszych 12 tygodni z różnicą ≠ 0 (p ≈ 0,019); n = liczba okien kalendarzowych, nie transakcji | w toku — szkielet pomiaru, miara okna niezaimplementowana | — |
 
 ---
@@ -519,6 +520,62 @@ Zapytania filtrują po `journal.decision.strategia`, więc zlecenia ensemble spr
 przełączenia nie mieszają się z próbą. Przebieg nie ma kryterium GO. Kończy go
 decyzja właściciela; po zebraniu próby (rząd 30 rozstrzygniętych wejść) liczby
 z raportu trafiają tutaj jako wynik E-1.
+
+---
+
+## Decyzja D-1: demo jako live-OOS modelu-kandydata (2026-10-07)
+
+**Decyzja (właściciel, 2026-10-07).** Demo służy do trenowania algorytmu przed
+live. Silnik demo crypto **przestaje grać regułą R4** (`--strategia momentum`,
+pomiar egzekucji E-1) i gra **modelem-kandydatem** na koncie demo, żeby zbierać
+dane w przód. To samo dotyczy silnika demo equity, który do tej pory czekał na
+wersję `active`, a tej bramka promocji bez zgody człowieka nie nadaje
+(poprawka F, 2026-10-05), więc o modelu equity demo nie zbierało niczego.
+**Bramka przejścia na live nie zmienia się.**
+
+**E-1 zamknięty** tą decyzją, przed zebraniem próby ~30 rozstrzygniętych wejść.
+Reguła bez przewagi (H-1, H-3: STOP) mierzyła egzekucję kosztem czasu demo,
+który ma iść na kandydata, a egzekucję (wypełnialność, opóźnienie, prowizje,
+wyjście wobec ceny decyzji) mierzy równie dobrze każda inna strategia na tej
+samej ścieżce giełdowej: `poslizg.py` filtruje po `journal.decision.strategia`,
+więc decyzje R4 z 2026-10-04 … 2026-10-07 zostają osobną, małą próbą E-1, a od
+wdrożenia D-1 próba egzekucji rośnie na decyzjach `ensemble`. H-1, H-3 i A
+zostają bez zmian; D-1 nie jest hipotezą przewagi i nie otwiera kalibracji
+ensemble na nowo. Kod reguły (`services/engine/strategia_momentum.py`) zostaje,
+powrót do E-1 to podmiana flagi w charcie.
+
+**Nowa rola demo: live-OOS kandydata.** Walk-forward mierzy kandydata na
+historii, z której wyszedł; demo mierzy go na tygodniach, których przy
+treningu nie było, pod prawdziwą egzekucją. Wynik demo D-1 jest wynikiem
+**kandydata**, nie modelu zatwierdzonego.
+
+| co | wartość |
+|---|---|
+| model | najnowsza wersja `{engine}_signal_weighting_{bar}` o statusie `candidate`, albo `active`, jeśli nowsza (po zatwierdzonej promocji); nigdy `training` ani `retired`; kandydat z wynikiem `degraded` wchodzi |
+| przeładowanie | model czytany z bazy co cykl; nowy trening wchodzi w kolejnym cyklu, log „MODEL PRZEŁADOWANY”, `model_version_id` w pulsie |
+| ślad | `journal.decision.model_version_id` = wersja kandydata, `strategia` = `ensemble` |
+| brak kandydata | `--wymagaj-modelu`: cykl bez decyzji z logiem „BRAK MODELU-KANDYDATA”, puls `bez_modelu` |
+| tryb | wyłącznie `--mode demo`: odmowa startu w `loop.main`, odmowa w `run_once` i w `active_model` (`kandydat_tylko_na_demo`); na live tylko `active` |
+
+**Kryterium do bramki live (zapisane przed pomiarem, warunek DODATKOWY).**
+Model może przejść bramkę live dopiero wtedy, gdy oprócz wszystkich dotychczasowych
+warunków (docs/08-przed-go-live.md, bramka promocji `--zatwierdz-promocje`)
+spełnia **wszystkie trzy**:
+
+1. **≥ 12 tygodni** gry tym modelem (tą samą strukturą `params`) na demo;
+2. **test znaków: ≥ 8 z 12 tygodni dodatnich** — zwrot tygodnia demo po kosztach
+   z giełdy (`exec.fill.fee`), tydzień kalendarzowy UTC; tydzień bez transakcji
+   to remis, nie próba, i jest raportowany;
+3. **realizacja wobec symulacji w granicy dopłaty karty**: zwrot zrealizowany
+   na demo nie odstaje od zwrotu symulacji tych samych decyzji o więcej niż
+   `Karta.doplata_poza_symulacja` (`services/engine/koszty.py`) na rundę.
+
+Zmiana struktury modelu (`train.zmiana_struktury`) w trakcie 12 tygodni zeruje
+licznik: tygodnie innej struktury nie są tygodniami tego modelu. Żadne z tych
+kryteriów nie **zastępuje** bramki live ani nie promuje wersji samo; to warunek
+konieczny, nie wystarczający. Miara tygodnia i porównanie z symulacją nie są
+jeszcze zaimplementowane (jak H-4 2026-10-05: szkielet do zrobienia przed
+pierwszym werdyktem; najwcześniej 12 tygodni po wdrożeniu D-1).
 
 ---
 

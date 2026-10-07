@@ -200,6 +200,10 @@ OPIS_POWODU_HOLDU = {
 # `momentum` - zamrozona regula R4 na demo (`strategia_momentum`).
 STRATEGIE = {"model": "ensemble", "momentum": strategia_momentum.NAZWA}
 
+# Opis statusu do logu: czego silnik szukal, gdy modelu nie znalazl.
+OPIS_STATUSU = {"active": "'active'",
+                "candidate": "'candidate' albo nowsza 'active'"}
+
 
 def ensure_signal_defs(cur, engine: str) -> dict[str, int]:
     ids = {}
@@ -214,25 +218,76 @@ def ensure_signal_defs(cur, engine: str) -> dict[str, int]:
     return ids
 
 
-def active_model(cur, engine: str, h: Horizon) -> dict:
-    """Wagi i progi z AKTYWNEJ wersji modelu - albo zalozenia poczatkowe.
+# STATUS WERSJI MODELU, KTORA STERUJE SILNIKIEM (`--model-status`).
+#
+# `active` - zwalidowana i zatwierdzona wersja (bramka promocji w `train.py`),
+# jedyna dopuszczalna na live. `candidate` - decyzja wlasciciela z 2026-10-07:
+# demo przestaje byc pomiarem egzekucji regula R4 (E-1) i staje sie live-OOS
+# kandydata, czyli zbiera dane w przod o modelu, ktorego bramka jeszcze nie
+# przepuscila (docs/hipotezy.md, D-1). Kandydat NIE MA PRAWA dotknac live:
+# odmowa startu w `main`, odmowa w `run_once` i odmowa tutaj, w funkcji
+# ladujacej - trzy niezalezne miejsca, bo kazde z nich da sie wywolac osobno.
+STATUSY_MODELU = ("active", "candidate")
 
-    Wersja o statusie 'candidate' (czyli taka, ktora nie przeszla walidacji)
-    swiadomie NIE jest tu brana. Model, ktory nie wykazal przewagi out-of-sample,
-    nie ma prawa sterowac produkcja - a jedyne, co go od niej dzieli, to ten
-    warunek na status.
+
+def kandydat_tylko_na_demo(status: str, mode: str | None) -> None:
+    """Odmowa (ValueError), gdy model inny niz `active` mialby sterowac
+    czymkolwiek poza demo. JEDNO ZDANIE REGULY dla `main`, `run_once`
+    i `active_model`. CZYSTA FUNKCJA."""
+    if status not in STATUSY_MODELU:
+        raise ValueError(f"nieznany status modelu {status!r} "
+                         f"(znane: {list(STATUSY_MODELU)})")
+    if status != "active" and mode != "demo":
+        raise ValueError(f"model o statusie {status!r} tylko z --mode demo "
+                         f"(dostał tryb {mode!r}) — na live handluje wyłącznie "
+                         f"wersja zatwierdzona bramką promocji")
+
+
+def active_model(cur, engine: str, h: Horizon, status: str = "active",
+                 mode: str | None = None) -> dict:
+    """Wagi i progi z wersji modelu o danym statusie - albo zalozenia poczatkowe.
+
+    `status="active"` (domysl, JEDYNY dopuszczalny na live): wersja o statusie
+    'candidate' (czyli taka, ktora nie przeszla walidacji albo czeka na zgode
+    czlowieka) swiadomie NIE jest tu brana. Model, ktory nie wykazal przewagi
+    out-of-sample, nie ma prawa sterowac produkcja - a jedyne, co go od niej
+    dzieli, to ten warunek na status.
+
+    `status="candidate"` (WYLACZNIE `mode="demo"`, decyzja wlasciciela
+    2026-10-07): NAJNOWSZA wersja o statusie 'candidate' albo 'active',
+    zaleznie od tego, ktora jest nowsza. Aktywna wchodzi do wyboru, bo po
+    zatwierdzonej promocji najnowszy model JEST aktywny, a demo nie moze
+    wtedy cofnac sie do starszego kandydata. Wersje 'training' (przebieg
+    w toku albo suchy) i 'retired' nie wchodza nigdy. Kandydat z wynikiem
+    `degraded` wchodzi - po to demo zbiera dane w przod, a bramka live
+    (docs/08-przed-go-live.md) zostaje bez zmian.
+
+    `mode` jest wymagany jawnie przy kandydacie: domyslne `None` NIE jest
+    demo, wiec wywolanie, ktore zapomnialo trybu, konczy sie odmowa, a nie
+    kandydatem na koncie, o ktorym funkcja nic nie wie.
     """
+    kandydat_tylko_na_demo(status, mode)
+    statusy = ("active",) if status == "active" else ("candidate", "active")
     cur.execute(
-        "SELECT mv.id, mv.version, mv.params FROM learn.model_version mv"
+        "SELECT mv.id, mv.version, mv.params, mv.status FROM learn.model_version mv"
         " JOIN learn.model m ON m.id = mv.model_id"
-        " WHERE m.name = %s AND mv.status = 'active'"
+        " WHERE m.name = %s AND mv.status = ANY(%s)"
         " ORDER BY mv.version DESC LIMIT 1",
-        (f"{engine}_signal_weighting_{h.bar}",))
+        (f"{engine}_signal_weighting_{h.bar}", list(statusy)))
     row = cur.fetchone()
     if not row or not (row["params"] or {}).get("weights"):
         return {"weights": None, "enter": ENTER_THRESHOLD, "exit": EXIT_THRESHOLD,
                 "bramki": bramki_z_modelu(None),
-                "min_conf": MIN_CONFIDENCE, "version": None}
+                "min_conf": MIN_CONFIDENCE, "version": None,
+                "model_version_id": None, "status": None}
+    # DRUGI BEZPIECZNIK, NA WYNIKU: przy `status="active"` zapytanie nie
+    # zwroci kandydata - chyba ze ktos zmieni warunek wyzej. Wtedy ma to byc
+    # wyjatek, a nie kandydat na live. `raise`, nie `assert`: `python -O`
+    # wycina asercje, a ten warunek ma obowiazywac zawsze.
+    if status == "active" and row.get("status", "active") != "active":
+        raise RuntimeError(
+            f"active_model: wersja {row['version']} o statusie "
+            f"{row.get('status')!r} przy żądaniu 'active'")
     p = row["params"]
     return {
         "weights": p["weights"],
@@ -246,6 +301,7 @@ def active_model(cur, engine: str, h: Horizon) -> dict:
         "min_conf": float(p.get("min_confidence", MIN_CONFIDENCE)),
         "version": row["version"],
         "model_version_id": row["id"],
+        "status": row.get("status", "active"),
     }
 
 
@@ -1783,7 +1839,8 @@ def rozstrzygnij_plany(cur, engine: str, mode: str, h: Horizon, now: datetime,
     return st
 
 
-async def sprawdz(conn, engine: str = "crypto", h: Horizon | None = None) -> int:
+async def sprawdz(conn, engine: str = "crypto", h: Horizon | None = None,
+                  model_status: str = "active") -> int:
     """Przebieg KONTROLNY: wykonuje wszystkie odczyty, nie zapisuje niczego.
 
     DLACZEGO ISTNIEJE
@@ -1821,7 +1878,15 @@ async def sprawdz(conn, engine: str = "crypto", h: Horizon | None = None) -> int
     risk = RiskKernel(conn, engine, "demo")
     probuj("limity ryzyka konta", risk.check_account)
     ids = probuj("identyfikatory cech horyzontu", lambda: horizon_feature_ids(cur, h))
-    model = probuj("aktywna wersja modelu", lambda: active_model(cur, engine, h))
+    # TEN SAM STATUS CO PRODUKCJA - kontrola z `--model-status candidate`
+    # czyta kandydata, tryb demo (kontrola i tak chodzi na `demo`, wyzej).
+    model = probuj(f"wersja modelu (status {OPIS_STATUSU[model_status]})",
+                   lambda: active_model(cur, engine, h, status=model_status,
+                                        mode="demo"))
+    if model is not None:
+        print(f"         wersja {model['version']} ({model['status']}, "
+              f"id {model['model_version_id']})" if model["version"] else
+              "         brak — założenia początkowe")
 
     # WARUNEK Z `uniwersum.py`, nie przepisany tutaj. Kontrola ma ogladac TEN
     # SAM zbior, ktory obstawia petla — inaczej „sprawdz" sprawdzaloby co innego.
@@ -2084,9 +2149,46 @@ def nowe_stats(**flagi) -> dict:
              "strategia": None,
              # Decyzje strategii momentum ODLOZONE, bo swieca BTC konczaca dobe
              # nie ma jeszcze wszystkich swiec 1h (`strategia_momentum.cel_z_bazy`).
-             "odlozone_momentum": 0}
+             "odlozone_momentum": 0,
+             # KTORY MODEL DECYDOWAL: status, o ktory silnik pyta (`--model-status`),
+             # oraz id i numer wersji, ktora dostal. None: cykl skonczyl sie
+             # na bramce, regula nie czyta modelu albo modelu nie bylo
+             # (zalozenia poczatkowe). Zmiana id miedzy cyklami = przeladowanie
+             # po nowym treningu, logowane w `main`.
+             "model_status": None, "model_version_id": None, "model_wersja": None}
     stats.update(flagi)
     return stats
+
+
+def zmiana_modelu(poprzedni: tuple | None, stats: dict) -> tuple[tuple | None, str | None]:
+    """(nowy stan, komunikat albo None): czy wersja modelu zmienila sie od
+    poprzedniego cyklu. CZYSTA FUNKCJA.
+
+    Stan to (status, id, wersja). Cykl zakonczony bramka przed odczytem
+    modelu (sesja; `model_status` w pulsie None i brak `bez_modelu`) NIE
+    zmienia stanu - noc gieldy nie jest "utrata modelu". Pierwszy cykl
+    procesu tez daje komunikat: log ma mowic, czym silnik zaczal handlowac.
+    """
+    if stats.get("bez_modelu"):
+        teraz = (stats.get("model_status"), None, None)
+    elif stats.get("model_status") is None:
+        return poprzedni, None
+    else:
+        teraz = (stats["model_status"], stats.get("model_version_id"),
+                 stats.get("model_wersja"))
+    if teraz == poprzedni:
+        return poprzedni, None
+
+    def opis(stan):
+        if stan is None:
+            return "start procesu"
+        return (f"wersja {stan[2]} (id {stan[1]})" if stan[1] is not None
+                else "brak modelu")
+
+    if poprzedni is None:
+        return teraz, f"MODEL (status {OPIS_STATUSU[teraz[0]]}): {opis(teraz)}"
+    return teraz, (f"MODEL PRZEŁADOWANY (status {OPIS_STATUSU[teraz[0]]}): "
+                   f"{opis(poprzedni)} -> {opis(teraz)}")
 
 
 def id_wstrzymania_killswitchem(wejscia_wstrzymane: bool,
@@ -2121,7 +2223,8 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
                    wymagaj_modelu: bool = False,
                    sesja: StanSesji | None = None,
                    likwiduj: bool = False,
-                   strategia: str = "model") -> dict:
+                   strategia: str = "model",
+                   model_status: str = "active") -> dict:
     """Jeden przebieg silnika.
 
     `gielda` PRZELACZA ZRODLO PRAWDY O WYPELNIENIU, a nie sposob decydowania.
@@ -2133,10 +2236,21 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
     to ensemble z aktywnej wersji modelu, `momentum` to zamrozona regula R4
     (`strategia_momentum`). Bramki, kill-switch, risk kernel, egzekucja i puls
     sa wspolne - pomiar egzekucji ma dotyczyc tej samej sciezki, ktora handluje.
+
+    `model_status` mowi, KTORA WERSJA modelu steruje strategia `model`:
+    `active` (zatwierdzona) albo `candidate` (najnowszy kandydat, WYLACZNIE
+    demo - patrz `STATUSY_MODELU`). Odmowa jest tu, a nie tylko w `main`, bo
+    `run_once` bywa wolane wprost (testy, skrypty) z pominieciem parsera.
     """
     if strategia not in STRATEGIE:
         raise ValueError(f"nieznana strategia {strategia!r} (znane: {sorted(STRATEGIE)})")
+    kandydat_tylko_na_demo(model_status, mode)
     momentum = strategia == "momentum"
+    if momentum and model_status != "active":
+        # Regula momentum modelu nie czyta - kandydat przy niej bylby flaga,
+        # ktora niczego nie zmienia, a w dzienniku wygladalaby, jakby zmieniala.
+        raise ValueError("strategia momentum nie czyta modelu — --model-status "
+                         "candidate jej nie dotyczy")
     h = h or get_horizon(DEFAULT_BAR)
     if momentum and h.bar_minutes != 240:
         # Parametry H-3 sa zmierzone na swiecach 4h i decyzji na ich zamknieciu
@@ -2215,15 +2329,20 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
     # model i chodzi tak od miesiecy; zmiana jego zachowania przy okazji
     # uruchamiania equity byla by zmiana produkcji, o ktora nikt nie prosil.
     # Wlaczenie nalezy do chartu - tak samo jak wlaczenie egzekucji gieldowej.
+    # (Od 2026-10-07 chart wlacza ja obu silnikom demo, razem z
+    # `--model-status candidate`: bez kandydata cykl bez decyzji, a nie handel
+    # na zalozeniach podpisany jako wynik kandydata.)
     if wymagaj_modelu:
-        m = active_model(cur, engine, h)
+        m = active_model(cur, engine, h, status=model_status, mode=mode)
         if not m.get("version"):
             stats = nowe_stats(
                 bez_modelu=True,
-                model_nazwa=f"{engine}_signal_weighting_{h.bar}")
+                model_nazwa=f"{engine}_signal_weighting_{h.bar}",
+                model_status=model_status)
             if verbose:
-                print(f"  BRAK ZWALIDOWANEGO MODELU "
-                      f"({engine}_signal_weighting_{h.bar}, status 'active') — "
+                print(f"  BRAK {'MODELU-KANDYDATA' if model_status != 'active' else 'ZWALIDOWANEGO MODELU'} "
+                      f"({engine}_signal_weighting_{h.bar}, status "
+                      f"{OPIS_STATUSU[model_status]}) — "
                       f"cykl bez decyzji. Handel na założeniach początkowych "
                       f"jest tu wyłączony świadomie (--wymagaj-modelu).")
             zapisz_puls(cur, engine, mode, stats)
@@ -2389,9 +2508,10 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
     # Atrapa z `None` w miejscu wag i progow, zeby nic nizej nie siegnelo po
     # ensemble przypadkiem: kazde takie siegniecie wywroci cykl, a nie po cichu
     # domiesza wagi modelu do reguly.
-    model = (active_model(cur, engine, h) if not momentum else
+    model = (active_model(cur, engine, h, status=model_status, mode=mode)
+             if not momentum else
              {"version": None, "model_version_id": None, "bramki": None,
-              "weights": None, "min_conf": None})
+              "weights": None, "min_conf": None, "status": None})
     if momentum and verbose:
         print(f"  strategia: {strategia_momentum.OPIS} (zamrożone parametry H-3: "
               f"{dict(strategia_momentum.PARAMETRY)}, budżet "
@@ -2399,7 +2519,7 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
               f"{strategia_momentum.UDZIAL_POZYCJI:.0%} na pozycję = "
               f"{baza_momentum} przy kapitale {kapital}; model nieużywany)")
     elif verbose:
-        print(f"  wagi: {'wersja modelu ' + str(model['version']) if model['version'] else 'założenia początkowe (brak zwalidowanego modelu)'}")
+        print(f"  wagi: {'wersja modelu ' + str(model['version']) + ' (' + str(model['status']) + ', id ' + str(model['model_version_id']) + ')' if model['version'] else 'założenia początkowe (brak modelu o statusie ' + OPIS_STATUSU[model_status] + ')'}")
         print(f"  progi wejścia: {model['bramki'].opis()}")
     # KOMUNIKAT BEZ `verbose`, bo mowi o rozjezdzie wersji, nie o przebiegu.
     #
@@ -2453,6 +2573,11 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
     feature_ids = (horizon_feature_ids(cur, h, [i["symbol"] for i in instrumenty])
                    if not momentum else [])
     stats["strategia"] = strategia
+    # KTORA WERSJA MODELU DECYDOWALA W TYM CYKLU - do pulsu, a `main` porownuje
+    # ja z poprzednim cyklem i ZAPISUJE w logu zmiane (nowy trening kandydata).
+    stats["model_status"] = None if momentum else model_status
+    stats["model_version_id"] = model.get("model_version_id")
+    stats["model_wersja"] = model.get("version")
     # CEL STRATEGII MOMENTUM - liczony RAZ na cykl i tylko wtedy, gdy jest
     # co decydowac (pierwszy instrument bez decyzji w tej swiecy). Patrz
     # `strategia_momentum.cel_z_bazy`.
@@ -3134,6 +3259,7 @@ async def main() -> int:
     # ZWALIDOWANY MODEL JAKO WARUNEK HANDLU. Patrz "BRAMKA 2" w `run_once`.
     # Domysl `False` zostaje SWIADOMIE: wlaczenie tej reguly dla silnika, ktory
     # chodzi na produkcji od miesiecy, byloby zmiana jego zachowania przy okazji.
+    # Wlacza ja chart (od 2026-10-07 oba silniki demo, z `--model-status`).
     ap.add_argument("--wymagaj-modelu", action="store_true", dest="wymagaj_modelu",
                     help="bez aktywnej wersji modelu silnik NIE handluje "
                          "(zamiast cofać się do założeń początkowych)")
@@ -3175,11 +3301,22 @@ async def main() -> int:
     # przelaczenie bylo linia w `values.yaml`, a nie skutkiem wdrozenia obrazu
     # (ta sama zasada co przy `--egzekucja gielda`). `momentum` = decyzja
     # wlasciciela "A" z 2026-10-04: zamrozona regula R4 na demo, pomiar
-    # egzekucji (docs/hipotezy.md, E-1).
+    # egzekucji (docs/hipotezy.md, E-1). E-1 zamkniety decyzja D-1
+    # (2026-10-07) - chart przelaczony na `--model-status candidate`; regula
+    # zostaje w kodzie, powrot = podmiana flagi.
     ap.add_argument("--strategia", default="model", choices=sorted(STRATEGIE),
                     help="model: ensemble z aktywnej wersji modelu; momentum: "
                          "momentum + filtr trendu (zamrożone parametry H-3, "
                          "15%% kapitału)")
+    # KTORA WERSJA MODELU STERUJE ENSEMBLE. Domysl `active` - na live jedyny
+    # dopuszczalny. `candidate` = decyzja wlasciciela z 2026-10-07: demo gra
+    # NAJNOWSZYM kandydatem (albo nowsza aktywna), zeby zbierac dane w przod
+    # o modelu przed bramka live (docs/hipotezy.md, D-1). Wlaczenie to linia
+    # w `values.yaml`, tak jak `--strategia` i `--egzekucja gielda`.
+    ap.add_argument("--model-status", default="active", choices=STATUSY_MODELU,
+                    dest="model_status",
+                    help="active: zatwierdzona wersja modelu; candidate: "
+                         "najnowsza wersja candidate/active — TYLKO --mode demo")
     args = ap.parse_args()
     if args.strategia == "momentum" and args.mode != "demo":
         # Regula bez przewagi (H-3 STOP) chodzi WYLACZNIE po to, zeby zmierzyc
@@ -3187,6 +3324,16 @@ async def main() -> int:
         # za te cene - i to ma byc odmowa startu, nie ostrzezenie w logu.
         sys.exit("--strategia momentum tylko z --mode demo (pomiar egzekucji, "
                  "nie strategia z przewagą)")
+    if args.model_status != "active" and args.mode != "demo":
+        # KANDYDAT NIE PRZESZEDL BRAMKI PROMOCJI. Na demo zbiera dane w przod;
+        # na prawdziwych pieniadzach bylby obejsciem tej bramki jedna flaga.
+        # Odmowa startu, nie ostrzezenie - ta sama zasada co wyzej.
+        sys.exit(f"--model-status {args.model_status} tylko z --mode demo "
+                 f"(kandydat nie przeszedł bramki promocji; na live handluje "
+                 f"wyłącznie wersja 'active')")
+    if args.model_status != "active" and args.strategia == "momentum":
+        sys.exit("--model-status candidate i --strategia momentum wykluczają się: "
+                 "reguła momentum nie czyta modelu")
 
     url = os.environ.get("DATABASE_URL")
     if not url:
@@ -3196,7 +3343,7 @@ async def main() -> int:
 
     if args.sprawdz:
         with psycopg.connect(url, row_factory=dict_row) as conn:
-            return await sprawdz(conn, args.engine, h)
+            return await sprawdz(conn, args.engine, h, args.model_status)
 
     gielda = None
     klucz_gieldy: int | None = None
@@ -3221,6 +3368,11 @@ async def main() -> int:
               f"({strategia_momentum.UDZIAL_POZYCJI:.0%} na pozycję), wejścia tylko "
               f"na zamknięciu doby UTC. Model NIEUŻYWANY. Pomiar egzekucji, "
               f"nie strategia z przewagą (H-1, H-3: STOP).")
+    elif args.model_status == "candidate":
+        print("STRATEGIA: ensemble z MODELU-KANDYDATA — najnowsza wersja "
+              "'candidate' (albo nowsza 'active'), przeładowywana co cykl. "
+              "Tylko demo: live-OOS kandydata przed bramką live "
+              "(docs/hipotezy.md, D-1), nie zatwierdzony model.")
     else:
         print("STRATEGIA: ensemble z aktywnej wersji modelu.")
     print(f"Rachunek papierowy: {args.kind}, zlecenia "
@@ -3266,6 +3418,12 @@ async def main() -> int:
     # LAGODNE ZATRZYMANIE (P-T4): SIGTERM konczy petle na granicy cyklu, a nie
     # w srodku transakcji - patrz services/engine/zatrzymanie.py.
     zatrzymanie = Zatrzymanie().zarejestruj()
+    # WERSJA MODELU Z POPRZEDNIEGO CYKLU. Model jest czytany z bazy co cykl
+    # (`active_model` w `run_once`), wiec nowy trening wchodzi sam w kolejnym
+    # obrocie - bez restartu. Ta zmienna istnieje po to, zeby wejscie nowej
+    # wersji bylo WIDAC w logu (i w pulsie: `model_version_id`), a nie tylko
+    # w kolumnie dziennika decyzji.
+    poprzedni_model: tuple | None = None
     while True:
         if zatrzymanie.ustawione:
             return 0
@@ -3313,7 +3471,11 @@ async def main() -> int:
                                    verbose=not args.quiet, h=h, gielda=gielda,
                                    wymagaj_modelu=args.wymagaj_modelu,
                                    sesja=sesja, likwiduj=args.likwiduj,
-                                   strategia=args.strategia)
+                                   strategia=args.strategia,
+                                   model_status=args.model_status)
+            poprzedni_model, zmiana = zmiana_modelu(poprzedni_model, s)
+            if zmiana:
+                print(f"[{t0:%H:%M:%S}] {zmiana}")
             # CYKL ZABLOKOWANY BRAMKA MA WLASNA LINIE, NIE SAME ZERA.
             #
             # "rozwazone 0, wejscia 0, wyjscia 0..." przez cala noc wyglada
@@ -3323,8 +3485,10 @@ async def main() -> int:
             if s.get("poza_sesja"):
                 print(f"[{t0:%H:%M:%S}] {sesja.opis()} — bez decyzji")
             elif s.get("bez_modelu"):
-                print(f"[{t0:%H:%M:%S}] BEZ ZWALIDOWANEGO MODELU "
-                      f"({s['model_nazwa']}) — bez decyzji")
+                print(f"[{t0:%H:%M:%S}] BEZ "
+                      f"{'MODELU-KANDYDATA' if args.model_status != 'active' else 'ZWALIDOWANEGO MODELU'} "
+                      f"({s['model_nazwa']}, status {OPIS_STATUSU[args.model_status]}) "
+                      f"— bez decyzji")
             else:
                 plany = (f", plany: wypełnione {s['wypelnione']}, "
                          f"niewypełnione {s['niewypelnione']}, czekają {s['czekaja']}"

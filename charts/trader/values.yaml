@@ -448,16 +448,31 @@ workers:
     # i ulamek wypelnienia pozostawalyby ZALOZENIEM. Blad o cztery punkty bazowe
     # przesuwa wynik o tyle, ile cala zmierzona przewaga.
     #
-    # --strategia momentum (od 2026-10-04, decyzja wlasciciela "A"): akcje
-    # wybiera zamrozona regula R4 "momentum + filtr trendu" (H-3), a nie
-    # ensemble - 15% kapitalu, 5% na pozycje, wejscia tylko na zamknieciu doby
-    # UTC, model nieczytany. To NIE jest strategia z przewaga (H-1 i H-3: STOP),
-    # tylko pomiar egzekucji wzgledem modelu pesymistycznego (docs/hipotezy.md,
-    # E-1; raport: `python services/engine/poslizg.py --strategia
-    # momentum_filtr_trendu`). Przez wiekszosc miesiecy ma byc pod kreska.
-    # Petla odmawia startu z ta strategia poza `--mode demo`. Powrot do
-    # ensemble = usuniecie flagi.
-    command: ["sh", "-c", "sleep 90; python services/engine/loop.py --bar 4h --sprawdz && exec python services/engine/loop.py --bar 4h --interval 300 --kind spot_eu --limit --egzekucja gielda --mode demo --strategia momentum"]
+    # --model-status candidate (od 2026-10-07, decyzja wlasciciela): demo
+    # sluzy do trenowania algorytmu przed live, wiec akcje wybiera ensemble
+    # z NAJNOWSZEJ wersji modelu o statusie `candidate` (albo nowszej `active`),
+    # a nie zatwierdzona wersja. Nowy trening wchodzi sam w kolejnym cyklu
+    # (log "MODEL PRZELADOWANY", `model_version_id` w pulsie i w
+    # `journal.decision`). To jest live-OOS kandydata: dane w przod o modelu,
+    # ktorego bramka promocji jeszcze nie przepuscila (docs/hipotezy.md, D-1).
+    # Bramka przejscia na live NIE ZMIENIA SIE; kryterium z D-1 jest do niej
+    # warunkiem DODATKOWYM. Petla odmawia startu z ta flaga poza `--mode demo`,
+    # a `active_model` odmawia kandydata poza demo niezaleznie od parsera.
+    #
+    # ZASTAPILO `--strategia momentum` (2026-10-04 - 2026-10-07, decyzja "A"):
+    # zamrozona regula R4 "momentum + filtr trendu" (H-3) jako pomiar
+    # egzekucji (E-1). E-1 ZAMKNIETY decyzja wlasciciela 2026-10-07: regula
+    # bez przewagi (H-1, H-3: STOP) mierzyla egzekucje kosztem czasu demo,
+    # ktory ma isc na kandydata - a egzekucje mierzy rownie dobrze kazda inna
+    # strategia na tej samej sciezce gieldowej (`poslizg.py` po
+    # `journal.decision.strategia`). Kod reguly zostaje; powrot = podmiana flagi.
+    #
+    # --wymagaj-modelu - tak jak equity: bez kandydata (i bez aktywnej) cykl
+    # konczy sie bez decyzji, zamiast handlowac zalozeniami poczatkowymi
+    # i podpisywac je jako wynik kandydata. Dawny powod, dla ktorego crypto
+    # tej flagi nie mialo ("aktywny model od miesiecy, zmiana zachowania przy
+    # okazji"), nie obowiazuje: ta zmiana JEST zmiana zachowania, z decyzji.
+    command: ["sh", "-c", "sleep 90; python services/engine/loop.py --bar 4h --sprawdz --model-status candidate && exec python services/engine/loop.py --bar 4h --interval 300 --kind spot_eu --limit --wymagaj-modelu --egzekucja gielda --mode demo --model-status candidate"]
     resources:
       limits:   { cpu: 1000m, memory: 512Mi }
       requests: { cpu: 100m,  memory: 128Mi }
@@ -479,8 +494,15 @@ workers:
   # `active_model` przy braku modelu cofa sie do zalozen poczatkowych i handluje
   # dalej - dla silnika, ktory dopiero rusza, znaczyloby to krzywa kapitalu
   # mierzaca heurystyke i wygladajaca jak wynik modelu. Model powstaje pierwszy
-  # (`trainerCron.equity`), handel drugi. Crypto tej flagi nie dostaje swiadomie:
-  # ma aktywny model i chodzi tak od miesiecy.
+  # (`trainerCron.equity`), handel drugi. Od 2026-10-07 crypto tez ja ma
+  # (razem z `--model-status candidate`, patrz `workers.engine`).
+  #
+  # --model-status candidate (decyzja wlasciciela 2026-10-07, jak crypto):
+  # handluje najnowszy kandydat toru `equity_signal_weighting_1h` albo nowsza
+  # aktywna wersja. Do tej pory ta petla czekala na wersje `active`, ktorej
+  # bramka promocji bez zgody czlowieka nie nadaje (`status_nowej_wersji`) -
+  # czyli demo nie zbieralo o modelu equity niczego. Tylko demo; odmowa startu
+  # poza nim. Bez kandydata `--wymagaj-modelu` konczy cykl bez decyzji.
   #
   # --egzekucja gielda --mode demo: tak samo jak crypto. Konto paper Alpaki jest
   # odseparowane, a bez prawdziwych zlecen poslizg i ulamek wypelnienia zostaja
@@ -547,7 +569,7 @@ workers:
     # P-T4: cykl w toku musi sie domknac przed SIGKILL-em.
     terminationGracePeriodSeconds: 150
     priorityClass: true
-    command: ["sh", "-c", "sleep 90; python services/engine/loop.py --engine equity --bar 1h --sprawdz && exec python services/engine/loop.py --engine equity --bar 1h --interval 300 --kind stock --limit --wymagaj-modelu --egzekucja gielda --mode demo"]
+    command: ["sh", "-c", "sleep 90; python services/engine/loop.py --engine equity --bar 1h --sprawdz --model-status candidate && exec python services/engine/loop.py --engine equity --bar 1h --interval 300 --kind stock --limit --wymagaj-modelu --egzekucja gielda --mode demo --model-status candidate"]
     resources:
       limits:   { cpu: 1000m, memory: 512Mi }
       requests: { cpu: 100m,  memory: 128Mi }

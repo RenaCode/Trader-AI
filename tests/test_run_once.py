@@ -137,7 +137,7 @@ def swiat(monkeypatch):
     m(loop, "seed_equity", lambda cur, engine, mode: None)
     m(loop, "pozycje_do_wyceny", lambda cur, engine, mode, as_of: [])
     m(loop, "srednie_spready", lambda cur, ids, bar, teraz: s.spready)
-    m(loop, "active_model", lambda cur, engine, h: {
+    m(loop, "active_model", lambda cur, engine, h, status="active", mode=None: {
         "weights": None, "enter": loop.ENTER_THRESHOLD, "exit": loop.EXIT_THRESHOLD,
         "bramki": loop.bramki_z_modelu(None), "min_conf": loop.MIN_CONFIDENCE,
         "version": None})

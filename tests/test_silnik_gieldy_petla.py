@@ -139,15 +139,22 @@ def test_opis_zawsze_mowi_dlaczego():
 
 
 # ----------------------------------------------------------------- bramka modelu
-def test_petla_equity_wymaga_modelu_a_krypto_nie():
-    """WADA 2. Flaga jest decyzją wpisaną w chart, nie domysłem kodu."""
+def test_petla_equity_i_krypto_wymagaja_modelu():
+    """WADA 2. Flaga jest decyzją wpisaną w chart, nie domysłem kodu.
+
+    Do 2026-10-07 test pilnował też drugiej strony: crypto BEZ flagi, bo
+    włączenie jej dla silnika chodzącego od miesięcy na aktywnym modelu
+    byłoby zmianą zachowania przy okazji. Decyzja właściciela z 2026-10-07
+    (demo gra modelem-kandydatem, `--model-status candidate`) JEST tą zmianą,
+    podjętą wprost: bez kandydata cykl ma kończyć się bez decyzji, a nie
+    handlem na założeniach początkowych podpisanym jako wynik kandydata.
+    Oba silniki mają teraz tę samą parę flag (tests/test_model_kandydat.py).
+    """
     workers = yaml.safe_load(CHART.read_text())["workers"]
-    equity = " ".join(workers["engine-equity"]["command"])
-    crypto = " ".join(workers["engine"]["command"])
-    assert "--wymagaj-modelu" in equity
-    assert "--wymagaj-modelu" not in crypto, (
-        "włączenie tej reguły dla silnika chodzącego na produkcji od miesięcy "
-        "byłoby zmianą jego zachowania przy okazji")
+    for nazwa in ("engine-equity", "engine"):
+        komenda = " ".join(workers[nazwa]["command"])
+        assert "--wymagaj-modelu" in komenda, nazwa
+        assert "--model-status candidate" in komenda, nazwa
 
 
 def test_run_once_oddaje_powod_blokady_a_nie_same_zera():

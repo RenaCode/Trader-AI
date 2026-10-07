@@ -79,6 +79,22 @@ do pustego pokoju.
       takiego kanalu KODEM WYJSCIA, a nie powiadomieniem — bo powiadomienie
       szloby kanalem, ktorego brak wlasnie opisuje
 
+## Demo jako live-OOS kandydata (decyzja wlasciciela 2026-10-07)
+
+Od 2026-10-07 oba silniki demo (`workers.engine`, `workers.engine-equity`) chodza
+z `--model-status candidate --wymagaj-modelu`: handluje najnowsza wersja
+`candidate` (albo nowsza `active`), a nie regula R4 (E-1 zamkniety). Kandydat NIE
+MA PRAWA na live: petla odmawia startu z ta flaga poza `--mode demo`, a funkcja
+ladujaca model odmawia niezaleznie od parsera. Szczegoly: docs/hipotezy.md, D-1.
+
+DODATKOWY WARUNEK WEJSCIA NA LIVE (nie zastepuje zadnej bramki ponizej):
+- [ ] model gral na demo >= 12 tygodni (ta sama struktura `params`),
+- [ ] test znakow: >= 8 z 12 tygodni dodatnich po kosztach z gieldy,
+- [ ] realizacja wobec symulacji tych samych decyzji w granicy doplaty karty
+      (`Karta.doplata_poza_symulacja`) na runde.
+
+Miara tygodnia i porownanie z symulacja: do zbudowania przed pierwszym werdyktem.
+
 ## Brama 0 — czy jest po co isc
 
 Cala zmierzona przewaga to **13,76 punktu bazowego na runde**. Sama prowizja
