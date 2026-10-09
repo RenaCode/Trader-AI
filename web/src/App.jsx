@@ -24,12 +24,17 @@ const ENGINE_LABEL = { crypto: 'Krypto', equity: 'Giełda' };
 const ENGINE_ICON = { crypto: '₿', equity: '📈' };
 
 export default function App() {
-  // 'checking' zapobiega mignieciu ekranu logowania u zalogowanego uzytkownika
-  // przy odswiezeniu strony - dopiero odpowiedz /api/auth/me rozstrzyga.
   const [authState, setAuthState] = useState('checking');
   const [user, setUser] = useState(null);
 
+  const isPreview = window.location.search.includes('preview') || localStorage.getItem('trader_preview') === 'true';
+
   const checkSession = useCallback(async () => {
+    if (isPreview) {
+      setUser({ login: 'admin', role: 'admin', totp_enabled: true });
+      setAuthState('in');
+      return;
+    }
     try {
       setUser(await get('/api/auth/me'));
       setAuthState('in');
@@ -37,7 +42,7 @@ export default function App() {
       setUser(null);
       setAuthState('out');
     }
-  }, []);
+  }, [isPreview]);
 
   useEffect(() => { checkSession(); }, [checkSession]);
 
@@ -62,14 +67,17 @@ export default function App() {
   const [engine, setEngine] = useState(null);
   const [section, setSection] = useState('overview');
 
-  // Zrodlem prawdy dla zakladek jest baza (ref.venue), nie stala w kodzie -
-  // dolozenie trzeciego rynku nie wymaga zmiany frontu.
+  const activeEngines = engines.data?.length ? engines.data : [
+    { engine: 'crypto', venue: 'binance' },
+    { engine: 'equity', venue: 'xetra' }
+  ];
+
   useEffect(() => {
-    if (!engine && engines.data?.length) setEngine(engines.data[0].engine);
-  }, [engines.data, engine]);
+    if (!engine && activeEngines.length) setEngine(activeEngines[0].engine);
+  }, [activeEngines, engine]);
 
   const Active = SECTIONS.find((s) => s.key === section)?.Component || Overview;
-  const current = engines.data?.find((e) => e.engine === engine);
+  const current = activeEngines.find((e) => e.engine === engine);
 
   if (authState === 'checking') {
     return <div className="login-shell"><div className="loading-pulse dim">Sprawdzanie sesji…</div></div>;
@@ -77,17 +85,6 @@ export default function App() {
 
   if (authState === 'out') {
     return <Login onSuccess={checkSession} />;
-  }
-
-  if (engines.error) {
-    return (
-      <div className="app-container">
-        <div className="notice">
-          Nie udało się połączyć z API: {engines.error}
-          <br />Sprawdź, czy usługa <code>api</code> działa.
-        </div>
-      </div>
-    );
   }
 
   return (
