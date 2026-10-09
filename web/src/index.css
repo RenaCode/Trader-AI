@@ -634,6 +634,14 @@ select.input-field option { background: var(--bg-dark); color: var(--text-main);
 .dash-stats     { grid-area: stats; display: flex; flex-direction: column; gap: 14px; min-width: 0; }
 .dash-chart     { grid-area: chart; }
 .dash-side      { grid-area: side; }
+/* W ukladzie czterokolumnowym wysokosc pierwszego wiersza ustala WYKRES, nie
+   karta "Stan silnika": `contain: size` odbiera jej wklad w wysokosc wiersza,
+   wiec karta rozciaga sie do wysokosci wykresu, a nadmiar tresci (rozwiniety
+   stan uczenia, dlugie komunikaty o pulsie) przewija sie w jej wnetrzu.
+   Tylko tutaj - w wezszych ukladach ten sam zapis sciagnalby karte do zera. */
+@media (min-width: 1281px) {
+  .dash-side { contain: size; overflow-y: auto; }
+}
 .dash-orders    { grid-area: orders; }
 .dash-positions { grid-area: positions; }
 .dash-risk      { grid-area: risk; }
@@ -649,6 +657,8 @@ select.input-field option { background: var(--bg-dark); color: var(--text-main);
       "orders positions"
       "risk   risk";
   }
+  /* Rozwiniety stan uczenia wydluza tylko swoja karte, nie kafle kapitalu obok. */
+  .dash-stats, .dash-side { align-self: start; }
 }
 @media (max-width: 720px) {
   .dash {
@@ -704,6 +714,13 @@ select.input-field option { background: var(--bg-dark); color: var(--text-main);
 
 .tile-stack { display: flex; flex-direction: column; gap: 10px; }
 .row-item.tile { padding: 14px; }
+.clamp-2 { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.btn-disclose {
+  display: block; margin-top: 6px; padding: 4px 0; background: none; border: none; cursor: pointer;
+  font-family: var(--font-main); font-size: 0.8rem; font-weight: 500; color: #c4b5fd;
+  border-radius: 4px;
+}
+.btn-disclose:hover { color: #ddd6fe; text-decoration: underline; }
 
 /* Lista "wiersz - pigulka" dla zlecen i pozycji: miesci sie w waskiej karcie
    bez poziomego przewijania, w przeciwienstwie do pieciokolumnowej tabeli. */
