@@ -26,7 +26,17 @@ spec:
   failedJobsHistoryLimit: 1
   jobTemplate:
     spec:
-      backoffLimit: 0
+      # JEDNA POWTORKA (audyt 2026-10-09, W-4). Przy `backoffLimit: 0` planowy
+      # przebieg 04.10 padl na `connection refused` w pierwszej sekundzie poda
+      # (opoznienie kube-routera; bramka migracji z 05.10 czeka na baze, ale
+      # nie na kazda przyczyne) i zadanie TYGODNIOWE oznaczalo tydzien bez
+      # nowej wersji: demo gra v171 policzonym przy starym cenniku do 11.10.
+      # Powtorka jest bezpieczna - trener bywa powtarzany recznie tym samym
+      # szablonem (`--from=cronjob`) - i miesci sie w `activeDeadlineSeconds`
+      # nizej, bo limit czasu obejmuje WSZYSTKIE proby Joba: awaria po trzech
+      # godzinach nie dostanie drugiej. Wiecej niz jedna nie: blad, ktory wraca
+      # dwa razy, jest bledem kodu albo danych, nie sieci.
+      backoffLimit: 1
       # TWARDY LIMIT CZASU PRZEBIEGU - 3 godziny.
       #
       # Bez niego `concurrencyPolicy: Forbid` dziala przeciwko nam: zawieszone

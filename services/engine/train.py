@@ -74,7 +74,8 @@ from services.engine import baseline as odniesienia
 from services.engine import panel_plik
 from services.engine.statystyka import (
     MIN_PROB_ROZRZUTU, PROG_DSR, deflowany_sharpe, profit_factor, rozklad,
-    rozrzut_sharpeow, sharpe as sharpe_proby, sharpe_dla_dsr, spearman, wilson,
+    liczba_niezaleznych, rozrzut_sharpeow, sharpe as sharpe_proby, sharpe_dla_dsr,
+    spearman, wilson,
 )
 from services.engine.uniwersum import (odcisk, opis_wykluczen, srednie_spready,
                                        za_szeroki_spread)
@@ -748,7 +749,8 @@ def podsumowanie_przewagi(zwroty: list[float], sharpe_okien: list[float],
 
 
 def przewaga_dsr(zwroty: list[float], n_prob: int,
-                 odchylenie_prob: float | None = None) -> dict:
+                 odchylenie_prob: float | None = None,
+                 wejscia: list | None = None) -> dict:
     """Deflowany Sharpe dla ZLACZONEJ proby transakcji OOS. CZYSTA FUNKCJA.
 
     Cienka warstwa nad `statystyka.deflowany_sharpe` - istnieje, zeby w jednym
@@ -778,8 +780,25 @@ def przewaga_dsr(zwroty: list[float], n_prob: int,
         w `odchylenie_prob_z_bazy`). None znaczy "nie zmierzono" i wtedy
         `deflowany_sharpe` podstawia wariancje samego estymatora pod H0, czyli
         idzie droga OPTYMISTYCZNA - zmierzone 2026-09-27 o 2,7%, nie o rzad.
+      * `wejscia` to swieca wejscia (`opened_at`) KAZDEJ transakcji z `zwroty`,
+        w tej samej kolejnosci. T we wzorze to liczba ROZNYCH swiec wejscia,
+        nie liczba transakcji (audyt 2026-10-09, W-2): kilkanascie par
+        otwartych na jednej swiecy to jeden szok rynkowy, a liczone osobno
+        podnosily DSR samym poszerzeniem handlu - powielenie proby x2 dawalo
+        0,8875 -> 0,9949. Uzasadnienie miary przy `deflowany_sharpe`.
+        None = stara sciezka (T = liczba transakcji), zostawiona dla
+        wolajacych spoza treningu.
     """
-    return deflowany_sharpe(zwroty, n_prob, odchylenie_prob)
+    n_efektywne = None
+    if wejscia is not None:
+        if len(wejscia) != len(zwroty):
+            raise ValueError(f"wejscia ({len(wejscia)}) nie odpowiadaja "
+                             f"zwrotom ({len(zwroty)}) jeden do jednego")
+        # Brak znacznika (nie powinien wystapic) liczy sie jako osobna
+        # obserwacja - tak jak przed poprawka, nie jako wspolna grupa `None`.
+        n_efektywne = liczba_niezaleznych(
+            [w if w is not None else ("bez_wejscia", i) for i, w in enumerate(wejscia)])
+    return deflowany_sharpe(zwroty, n_prob, odchylenie_prob, n_efektywne)
 
 
 # Rozrzut Sharpe'a MIEDZY KONFIGURACJAMI - material na V[SR_n] Baileya.
@@ -1314,7 +1333,8 @@ def werdykt_dsr(zwroty: list[float], *, doplata: float, n: int,
                 trials_kumulatywnie: int,
                 nieznane: tuple[str, ...],
                 odchylenie_prob: float | None = None,
-                konfiguracji_z_oos: int = 0) -> tuple[bool, str]:
+                konfiguracji_z_oos: int = 0,
+                wejscia: list | None = None) -> tuple[bool, str]:
     """CALA decyzja DSR jednym wywolaniem - to jest to, co wola `train()`.
 
     Istnieje jako osobna funkcja po to, zeby dalo sie przetestowac SKLAD: ze
@@ -1330,7 +1350,7 @@ def werdykt_dsr(zwroty: list[float], *, doplata: float, n: int,
     latwiejszej bramki, niezaleznie od tego, jak dobrze policzono N.
     """
     po = zwroty_po_doplacie(zwroty, doplata)
-    wynik = przewaga_dsr(po, n, odchylenie_prob)
+    wynik = przewaga_dsr(po, n, odchylenie_prob, wejscia)
     # PROBA IDZIE DO BRAMKI, bo bez niej odleglosc od progu da sie podac tylko
     # w DSR - a DSR nie ma skali, w ktorej czlowiek umie ocenic "blisko".
     # `po` to te SAME liczby, z ktorych policzono werdykt (juz po doplacie);
@@ -1380,13 +1400,15 @@ def opis_odpornosci_werdyktu(wynik: dict, zwroty: list[float] | None = None) -> 
     dsr = wynik.get("dsr")
     if dsr is None:
         return ""
-    T = wynik.get("n_obserwacji") or 0
+    # T NIEZALEZNYCH obserwacji, jesli policzone (W-2) - ten sam, ktory stoi
+    # we wzorze DSR; liczba transakcji zanizalaby blad.
+    T = wynik.get("n_efektywne") or wynik.get("n_obserwacji") or 0
     if T < 2:
         return ""
     blad = 1.0 / math.sqrt(T)
     if zwroty:
         cel = sharpe_dla_dsr(zwroty, wynik["n_prob"], PROG_DSR,
-                             wynik.get("odchylenie_prob"))
+                             wynik.get("odchylenie_prob"), wynik.get("n_efektywne"))
         if cel is not None and wynik.get("sharpe") is not None:
             luka = wynik["sharpe"] - cel
             w_bledach = luka / blad
@@ -1401,7 +1423,7 @@ def opis_odpornosci_werdyktu(wynik: dict, zwroty: list[float] | None = None) -> 
                            "okna o jeden dzień przewracało go w obie strony "
                            "(pięć przesunięć: DSR 0,9342–0,9790, trzy razy "
                            "`validated`, dwa razy `learning`). Błąd 1/√T jest "
-                           "przy tym ZANIŻONY, bo zwroty nie są niezależne.")
+                           "przy tym ZANIŻONY, bo pozycje nakładają się w czasie.")
             return zdanie
     return (f" ODPORNOŚĆ WERDYKTU: {abs(dsr - PROG_DSR):.4f} DSR od progu; "
             f"przeliczenia na błąd standardowy NIE MA, bo próba nie została tu "
@@ -1430,7 +1452,10 @@ def bramka_dsr(wynik: dict, zwroty: list[float] | None = None) -> tuple[bool, st
                        f"neutralnym: bez niej nie wiadomo, czy wynik nie jest "
                        f"najlepszym z wielu prób.")
     opis = (f"Deflowany Sharpe {dsr:.4f} przy progu {PROG_DSR:.2f} "
-            f"(Sharpe {wynik['sharpe']:+.4f} z {n} transakcji, "
+            f"(Sharpe {wynik['sharpe']:+.4f} z {n} transakcji"
+            + (f" na {wynik['n_efektywne']} różnych świecach wejścia — T we wzorze"
+               if wynik.get("n_efektywne") not in (None, n) else "")
+            + ", "
             f"{n_prob} przetestowanych konfiguracji — N SELEKCJI tego "
             f"przebiegu, nie licznik kumulatywny; poprzeczka selekcji "
             f"{wynik['prog']:+.4f}, skośność {wynik['skosnosc']:+.3f}, "
@@ -3279,6 +3304,9 @@ class Przebieg:
         # Zwroty WSZYSTKICH transakcji OOS, nie usrednione po oknach - patrz
         # `podsumowanie_przewagi`.
         self.wszystkie_zwroty: list[float] = []
+        # Swieca wejscia (`opened_at`) kazdej transakcji z `wszystkie_zwroty`,
+        # ta sama kolejnosc - T niezaleznych obserwacji w DSR (W-2).
+        self.wejscia_transakcji: list = []
         self.transakcje_stron: list[tuple[float, int, str]] = []
         self.transakcje_pokrycia: list[tuple[float, float, str]] = []
         # To samo rozbite na okna: potrzebne, zeby przeliczyc srednia PO OKNACH
@@ -3360,6 +3388,7 @@ class Przebieg:
             # doplacie odjelaby ja tam drugi raz.
             zwroty_okna = [t["ret"] for t in oos_brutto.trades]
             z.wszystkie_zwroty.extend(zwroty_okna)
+            z.wejscia_transakcji.extend(t.get("opened_at") for t in oos_brutto.trades)
             # ROZBITE NA OKNA, a nie tylko zlaczone - zeby te sama miare, ktora
             # raport podaje dzis (srednia po oknach), dalo sie PRZELICZYC po
             # doliczeniu kosztu. Bez tego „przed" i „po" byloby liczone dwiema
@@ -3769,7 +3798,7 @@ def werdykt(z: Przebieg, *, karta: Karta, n: int, trials: int, sd_prob,
         wszystkie_zwroty, doplata=karta.doplata_poza_symulacja,
         n=n, trials_kumulatywnie=trials,
         nieznane=karta.nieznane, odchylenie_prob=sd_prob,
-        konfiguracji_z_oos=konfiguracji_z_oos)
+        konfiguracji_z_oos=konfiguracji_z_oos, wejscia=z.wejscia_transakcji)
 
     # Prog dobrany do miary NA TRANSAKCJE, nie anualizowanej. 0,05 oznacza,
     # ze sredni zwrot z transakcji to 5% jej wlasnego odchylenia - skromnie,
@@ -3887,7 +3916,7 @@ def werdykt(z: Przebieg, *, karta: Karta, n: int, trials: int, sd_prob,
                         f"Strategia nie wykazuje przewagi.{skala}",
         }[status]
     dsr = przewaga_dsr(zwroty_po_doplacie(wszystkie_zwroty, karta.doplata_poza_symulacja),
-                       n, sd_prob).get("dsr")
+                       n, sd_prob, z.wejscia_transakcji).get("dsr")
     return Status(status, reason, opis_dsr, total, positive, pct, median,
                   ci_lo, ci_hi, odn_lo, odn_hi, dsr)
 
@@ -4344,7 +4373,7 @@ def podsumowanie_przebiegu(z: Przebieg, w: Status, k: Koszty, *, days: int, now:
     # (tabela przesuniec) i dla porownan wariantow. Te same liczby co wyzej,
     # bez parsowania zdan. Zwrot na runde PO doplacie z karty, w pb.
     po_doplacie = zwroty_po_doplacie(wszystkie_zwroty, karta.doplata_poza_symulacja)
-    wynik_dsr = przewaga_dsr(po_doplacie, n_selekcji, sd_prob)
+    wynik_dsr = przewaga_dsr(po_doplacie, n_selekcji, sd_prob, z.wejscia_transakcji)
     podsumowanie = {
         "days": days, "od": f"{now - timedelta(days=days):%Y-%m-%d %H:%M}",
         "do": f"{now:%Y-%m-%d %H:%M}",

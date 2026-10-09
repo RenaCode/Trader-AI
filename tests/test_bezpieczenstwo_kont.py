@@ -470,3 +470,15 @@ def test_csrf_porownywany_przez_compare_digest(monkeypatch):
     with pytest.raises(HTTPException) as e:
         asyncio.run(modul_auth.require_csrf(zadanie(), x_csrf_token="abd", trader_csrf="abc"))
     assert e.value.status_code == 403
+
+
+def test_alarmy_podaja_adres_KLIENTA_a_nie_poda_web():
+    """Audyt 2026-10-09, N-1: alarmy kill-switcha i przepływu kapitału brały
+    `request.client.host`, czyli za Traefikiem i nginx adres poda web.
+    Adres z `X-Forwarded-For` rozbiera jedno miejsce: `auth.adres_klienta`."""
+    from pathlib import Path
+    korzen = Path(__file__).resolve().parents[1]
+    winni = [str(p.relative_to(korzen)) for p in (korzen / "services/api").rglob("*.py")
+             if p.name != "auth.py" or p.parent.name != "api"
+             if "request.client.host" in p.read_text(encoding="utf-8")]
+    assert winni == [], f"`request.client.host` poza auth.adres_klienta: {winni}"

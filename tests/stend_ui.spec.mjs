@@ -78,7 +78,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { BAZA, BRZEGI } from './stend_ui_dane.mjs';
+import { BAZA, BRZEGI, TERAZ } from './stend_ui_dane.mjs';
 
 let chromium;
 try {
@@ -187,6 +187,8 @@ const profil = await zakladka('Profil');
 niema(profil, 'Wyłączona', 'Profil: nieodczytane 2FA nie jest "Wyłączona"');
 const ryzyko = await zakladka('Ryzyko');
 niema(ryzyko, 'brak dozorcy', 'Ryzyko: awaria odczytu pulsu to nie "brak dozorcy"');
+// Audyt 2026-10-09, W-1: hamulec nie moze zalezec od udanego odczytu historii.
+jest(ryzyko, 'Zatrzymaj handel', 'Ryzyko: reczny kill-switch dostepny takze po awarii odczytu');
 const zrodla = await zakladka('Źródła');
 niema(zrodla, 'rusza po wpisaniu klucza',
       'Zrodla: po awarii nie kaze wpisywac klucza, ktory moze byc wpisany');
@@ -209,13 +211,37 @@ jest(t, 'Historia kill-switcha została ucięta',
 const paski = await page.locator('.bar-fill').count();
 ok(paski === 1, 'Ryzyko: pasek tylko dla limitu zmierzonego i wlaczonego', `${paski} z 3`);
 
+// AUTOMAT TRZYMA, RECZNEGO NIE MA (audyt 2026-10-09, W-1). Do tej poprawki
+// przycisk znikal przy kazdym aktywnym zdarzeniu, a `max_daily_loss` z regula
+// `po_ustaniu` po karencji sam wznawial handel.
+TRASY = {
+  ...BRZEGI,
+  '/api/engines/crypto/risk/limits': BRZEGI['/api/engines/crypto/risk/limits'].map(
+    (l) => (l.name === 'max_daily_loss' ? { ...l, enabled: true, wznowienie: 'po_ustaniu' } : l)),
+  '/api/engines/crypto/risk/killswitch': [{
+    id: 900, triggered_at: TERAZ(), reason: 'Strata dzienna 3,4% przekroczyła 3%',
+    limit_name: 'max_daily_loss', released_at: null, released_by: null,
+    release_note: null, released_auto: false, triggered_by: null, active: true,
+  }],
+};
+await page.reload({ waitUntil: 'networkidle' });
+await page.waitForSelector('.nav-tab', { timeout: 20000 });
+t = await zakladka('Ryzyko');
+jest(t, 'Zatrzymaj handel', 'Ryzyko: reczny kill-switch widoczny, gdy trzyma automat');
+jest(t, 'zwolni się sam', 'Ryzyko: automat z regula wznowienia nie udaje recznego');
+niema(t, 'Odblokowanie wymaga ręcznego potwierdzenia',
+      'Ryzyko: przy automacie nie ma zapewnienia, ze handel stoi do recznego zwolnienia');
+TRASY = BRZEGI;
+await page.reload({ waitUntil: 'networkidle' });
+await page.waitForSelector('.nav-tab', { timeout: 20000 });
+
 t = await zakladka('Źródła');
 jest(t, 'Klucz jest wpisany, ale dziś nie było ani jednego wywołania',
      'Zrodla: zero wywolan przy wpisanym kluczu nazwane poprawnie');
 niema(t, 'rusza po wpisaniu klucza', 'Zrodla: nie kaze wpisywac wpisanego klucza');
 jest(t, 'Limit dobowy', 'Zrodla: karta kosztu nie znika przy zerze wywolan');
 jest(t, '3.21 USD przez 30 dni', 'Zrodla: koszt 30-dniowy jest widoczny');
-jest(t, 'limit dobowy nieznany', 'Zrodla: brak wykorzystania nie udaje 0%');
+jest(t, 'żaden limit dobowy nie jest znany', 'Zrodla: brak wykorzystania nie udaje 0%');
 jest(t, 'wyłączony', 'Zrodla: wylaczony kanal RSS jest oznaczony');
 const ocena = await page.locator('.row-item:has-text("Artykul bez oceny")').innerText();
 ok(!/pewność\s*\n?\s*0%/.test(ocena), 'Zrodla: brak oceny NIE renderuje sie jako 0%',

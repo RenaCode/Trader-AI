@@ -4,7 +4,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
-from ..auth import audit, current_user, require_csrf, wymagaj_wlasciciela
+from ..auth import adres_klienta, audit, current_user, require_csrf, wymagaj_wlasciciela
 from ..db import execute, fetch_all, fetch_one
 from ..notifications import powiadom_o_bezpieczenstwie
 from ..typy import Silnik, Tryb
@@ -117,9 +117,11 @@ async def killswitch(engine: Silnik, limit: int = Query(10, le=100)):
 
 
 # Nazwa w `limit_name` dla zatrzymania z panelu. Nie ma takiego limitu
-# w `risk.limit_def`, wiec `wznowienie.wznow` zostawia je recznemu zwolnieniu
-# ("limit ... juz nie istnieje - zostaje reczne"), a proba pozarowa i likwidacja
-# widza je jak kazde prawdziwe zatrzymanie.
+# w `risk.limit_def`, a `wznowienie.wznow` przy aktywnym takim wierszu nie
+# zwalnia ZADNEGO zdarzenia (reczne ma pierwszenstwo, audyt 2026-10-09 W-1).
+# Proba pozarowa i likwidacja widza je jak kazde prawdziwe zatrzymanie.
+# Ta sama wartosc stoi w `wznowienie.LIMIT_RECZNY` (silnik nie importuje
+# routerow API) - zgodnosc pilnuje tests/test_reczny_killswitch.py.
 LIMIT_RECZNY = "reczny"
 
 
@@ -155,13 +157,21 @@ async def wlacz_killswitch(engine: Silnik, body: RecznyKillSwitchBody, request: 
     naprawde handluje. Formularz z wyborem trybu pozwalalby zatrzymac `live`,
     gdy handluje `demo` - i odwrotnie - z poczuciem, ze sie udalo.
 
-    JEDNO AKTYWNE ZATRZYMANIE. Gdy bezpiecznik juz trzyma silnik, drugi wiersz
-    niczego nie zmienia, a do zwolnienia bylyby dwa. `INSERT ... WHERE NOT
-    EXISTS` odrzuca drugie klikniecie, ale NIE wyklucza wyscigu: w READ
-    COMMITTED dwie rownolegle instrukcje nie widza nawzajem swoich
-    niezatwierdzonych wierszy, a tabela nie ma indeksu unikalnego na aktywne
-    zatrzymanie. Skutek wyscigu jest bezpieczny - dwa aktywne wiersze, silnik
-    stoi, dopoki oba nie zostana zwolnione - wiec nie ma tu blokady.
+    RECZNE ZATRZYMANIE JEST MOZLIWE ZAWSZE (audyt 2026-10-09, W-1). Do tej
+    poprawki `INSERT ... WHERE NOT EXISTS` sprawdzal KAZDE aktywne zdarzenie,
+    wiec przy zadzialanym automacie (`max_daily_loss`, `max_drawdown`) endpoint
+    oddawal 409, a przycisk w panelu znikal. Automat ma regule wznowienia
+    i po karencji sam wracal do handlu - wlasciciel, ktory chcial trzymac
+    silnik zatrzymany do przegladu, nie mial jak. Teraz recznym zatrzymaniem
+    jest WLASNY wiersz `limit_name = 'reczny'`, obok automatycznego:
+    `wznowienie.wznow` nie zwalnia niczego, dopoki taki wiersz jest aktywny,
+    a silnik stoi, dopoki aktywny jest choc jeden.
+
+    JEDNO AKTYWNE RECZNE. Drugie klikniecie przy aktywnym recznym nie dopisuje
+    wiersza (do zwolnienia bylyby dwa) i nie jest bledem - zatrzymanie, ktore
+    juz trzyma, to wynik, o ktory proszono: 200 z id istniejacego. Wyscig dwoch
+    rownoleglych klikniec (READ COMMITTED, bez indeksu unikalnego) daje dwa
+    reczne wiersze - bezpiecznie: silnik stoi, dopoki oba nie zostana zwolnione.
 
     BEZ HASLA I BEZ SPRAWDZANIA BLOKADY KONTA - uzasadnienie przy
     `RecznyKillSwitchBody`. Zostaje CSRF, rola wlasciciela, audyt i alarm.
@@ -187,13 +197,23 @@ async def wlacz_killswitch(engine: Silnik, body: RecznyKillSwitchBody, request: 
         " SELECT %s, %s, %s, %s, %s"
         "  WHERE NOT EXISTS (SELECT 1 FROM risk.killswitch_event"
         "                     WHERE engine::text = %s AND mode::text = %s"
-        "                       AND released_at IS NULL)"
+        "                       AND limit_name = %s AND released_at IS NULL)"
         " RETURNING id, triggered_at",
-        (engine, tryb, reason, LIMIT_RECZNY, user["id"], engine, tryb))
+        (engine, tryb, reason, LIMIT_RECZNY, user["id"], engine, tryb, LIMIT_RECZNY))
     if not z:
-        # 409 jak przy powtornym zwolnieniu: ktos widzi inny stan niz baza.
-        raise HTTPException(409, "Kill-switch jest już aktywny — silnik nie handluje. "
-                                 "Odśwież zakładkę, żeby zobaczyć zatrzymanie.")
+        juz = await fetch_one(
+            "SELECT id, triggered_at FROM risk.killswitch_event"
+            " WHERE engine::text = %s AND mode::text = %s AND limit_name = %s"
+            "   AND released_at IS NULL ORDER BY triggered_at LIMIT 1",
+            (engine, tryb, LIMIT_RECZNY))
+        if juz:
+            return {"ok": True, "id": juz["id"], "mode": tryb, "juz_aktywne": True,
+                    "triggered_at": juz["triggered_at"].isoformat(),
+                    "message": "Ręczne zatrzymanie już trzyma silnik — nic nie "
+                               "zmieniono. Zwolnienie: zakładka Ryzyko."}
+        # Zwolnione miedzy INSERT a SELECT - rzadkie, ale wtedy stanu nie znamy.
+        raise HTTPException(409, "Stan kill-switcha zmienił się w trakcie — "
+                                 "odśwież zakładkę i spróbuj ponownie.")
 
     await audit("risk.killswitch_manual", user_id=user["id"],
                 entity="risk.killswitch_event", entity_id=str(z["id"]),
@@ -206,7 +226,8 @@ async def wlacz_killswitch(engine: Silnik, body: RecznyKillSwitchBody, request: 
             f"Kill-switch włączony ręcznie ({engine})",
             f"Handel zatrzymany z panelu ({tryb}), konto {user['login']}.\n\n"
             f"Powód: {powod}\n\nSilnik NIE WEJDZIE w żadną pozycję do czasu "
-            f"ręcznego zwolnienia (zakładka Ryzyko).",
+            f"ręcznego zwolnienia (zakładka Ryzyko). Automatyczne wznowienie "
+            f"jest wstrzymane, dopóki to zatrzymanie trwa.",
             engine=engine, severity="critical",
             data={"event_id": z["id"], "reczny": True, "kto": user["login"],
                   "mode": tryb})
@@ -301,7 +322,9 @@ async def zwolnij_killswitch(engine: Silnik, event_id: int, body: ZwolnienieBody
     # z haslem zwalniala `max_drawdown` po cichu. `critical`, wiec przez bramke
     # na telefon; w tle, jak przy zatrzymaniu, zeby martwy kanal nie wydluzal
     # odpowiedzi.
-    ip = request.client.host if request is not None and request.client else "?"
+    # Za Traefikiem i nginx `request.client` to pod web, nie klient (audyt
+    # 2026-10-09, N-1) - ta sama funkcja co audyt i sesje.
+    ip = (adres_klienta(request) if request is not None else None) or "?"
     notatka = body.note.strip()
     for u in await fetch_all('SELECT id FROM app."user" WHERE is_active'):
         await powiadom_o_bezpieczenstwie(

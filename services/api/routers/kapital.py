@@ -36,7 +36,7 @@ from typing import Literal
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
-from ..auth import audit, current_user, require_csrf, wymagaj_wlasciciela
+from ..auth import adres_klienta, audit, current_user, require_csrf, wymagaj_wlasciciela
 from ..db import execute, fetch_all, fetch_one
 from ..notifications import powiadom_o_bezpieczenstwie
 from ..typy import Silnik, Tryb
@@ -139,7 +139,9 @@ async def dodaj_przeplyw(engine: Silnik, body: PrzeplywBody, request: Request,
 
     # ALARM KRYTYCZNY: zmiana kapitalu zmienia wielkosc kazdej kolejnej pozycji.
     # W tle, jak przy kill-switchu - martwy kanal nie wydluza odpowiedzi.
-    ip = request.client.host if request is not None and request.client else "?"
+    # Za Traefikiem i nginx `request.client` to pod web, nie klient (audyt
+    # 2026-10-09, N-1) - ta sama funkcja co audyt i sesje.
+    ip = (adres_klienta(request) if request is not None else None) or "?"
     rodzaj = "Wpłata" if body.amount > 0 else "Wypłata"
     netto = wplaty + body.amount
     for u in await fetch_all('SELECT id FROM app."user" WHERE is_active'):

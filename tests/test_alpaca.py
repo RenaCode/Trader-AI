@@ -338,3 +338,19 @@ def test_domyslny_limit_czasu_starcza_na_dlugi_backfill():
     from services.exchanges.alpaca import AlpacaAdapter
     import inspect
     assert inspect.signature(AlpacaAdapter.__init__).parameters["timeout"].default >= 60.0
+
+
+@pytest.mark.parametrize("strona", ["Long", "selll", ""])
+def test_nieznana_strona_zlecenia_to_BLAD_a_nie_sprzedaz(strona):
+    """Audyt 2026-10-09, N-4: `else "sell"` zamieniało nieznaną stronę
+    w sprzedaż. Błąd przed jakimkolwiek zapytaniem do giełdy."""
+    zapytania = []
+
+    def handler(req):
+        zapytania.append(req)
+        raise AssertionError("adapter nie może pytać giełdy przy nieznanej stronie")
+
+    with pytest.raises(ValueError):
+        uruchom(_adapter(handler).zloz_zlecenie(symbol="AAPL", strona=strona, ilosc=D("1"),
+                                                cena_limitu=D("100"), id_wlasne="tai-p1"))
+    assert zapytania == []

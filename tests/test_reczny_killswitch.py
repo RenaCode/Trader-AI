@@ -46,10 +46,18 @@ class Atrapa:
             return {"mode": self.puls} if self.puls else None
         if "INSERT INTO risk.killswitch_event" in sql:
             assert "NOT EXISTS" in sql and "released_at IS NULL" in sql
-            if self.aktywny:
+            # Jak baza: NOT EXISTS patrzy WYLACZNIE na aktywne reczne
+            # (`limit_name = %s` z LIMIT_RECZNY). `aktywny`: None, "auto"
+            # (trzyma automat) albo "reczny".
+            tylko_reczne = "limit_name = %s" in sql and params[-1] == risk.LIMIT_RECZNY
+            if self.aktywny == "reczny" or (self.aktywny and not tylko_reczne):
                 return None
             self.wstawione.append(params)
             return {"id": 501, "triggered_at": __import__("datetime").datetime(2026, 10, 4)}
+        if "SELECT id, triggered_at FROM risk.killswitch_event" in sql:
+            if self.aktywny == "reczny":
+                return {"id": 499, "triggered_at": __import__("datetime").datetime(2026, 10, 3)}
+            return None
         raise AssertionError(sql)
 
     async def fetch_all(self, sql, params=None):
@@ -230,11 +238,29 @@ def test_haslo_sprawdzane_ZANIM_odpowiedz_zdradzi_zdarzenie(monkeypatch):
     assert e.value.status_code == 403
 
 
-def test_drugie_zatrzymanie_przy_aktywnym_to_409(monkeypatch):
-    a = Atrapa(aktywny=True)
-    with pytest.raises(HTTPException) as e:
-        wlacz(monkeypatch, a)
-    assert e.value.status_code == 409 and not a.audyt and not a.alarmy
+def test_reczne_zatrzymanie_DZIALA_gdy_trzyma_automat(monkeypatch):
+    """Audyt 2026-10-09, W-1: przy zadziałanym `max_daily_loss` endpoint
+    oddawał 409, a automat po karencji sam wznawiał handel. Właściciel nie
+    miał jak trzymać silnika zatrzymanego do przeglądu."""
+    a = Atrapa(aktywny="auto")
+    odp = wlacz(monkeypatch, a)
+    assert odp["ok"] and odp["id"] == 501 and not odp.get("juz_aktywne")
+    assert a.wstawione and a.wstawione[0][3] == risk.LIMIT_RECZNY
+    assert a.audyt and a.alarmy
+
+
+def test_drugie_reczne_przy_aktywnym_recznym_nic_nie_dopisuje_i_nie_jest_bledem(monkeypatch):
+    """Zatrzymanie, które już trzyma, to wynik, o który proszono — nie 409."""
+    a = Atrapa(aktywny="reczny")
+    odp = wlacz(monkeypatch, a)
+    assert odp["ok"] and odp["juz_aktywne"] and odp["id"] == 499
+    assert not a.wstawione and not a.audyt and not a.alarmy
+
+
+def test_LIMIT_RECZNY_ten_sam_w_API_i_we_wznowieniu():
+    """Dwie kopie stałej (silnik nie importuje routerów API). Rozjazd znaczy,
+    że automat przestaje widzieć ręczne zatrzymanie."""
+    assert risk.LIMIT_RECZNY == wznowienie.LIMIT_RECZNY
 
 
 def test_zostawia_slad_w_audycie_i_wysyla_alarm_krytyczny(monkeypatch):
@@ -304,7 +330,71 @@ def test_automat_wznowienia_NIE_zwalnia_recznego(capsys):
     finally:
         wznowienie.stan_konta = oryginalny
     assert not zwolnione
-    assert "zostaje ręczne" in capsys.readouterr().out
+    # Od 2026-10-09 rozstrzyga to wczesniej: aktywne reczne wstrzymuje automat
+    # w calosci, zanim dojdzie do szukania limitu.
+    assert "RĘCZNE zatrzymanie" in capsys.readouterr().out
+
+
+def _wznow_z(zdarzenia, limity, capsys=None):
+    """`wznow` na atrapie: zwraca (zwolnione UPDATE-y, powiadomienia)."""
+    zwolnione, alarmy = [], []
+
+    async def fetch_all(sql, params=None):
+        if "FROM risk.killswitch_event" in sql:
+            return zdarzenia
+        if 'app."user"' in sql:
+            return [{"id": 7}]
+        return []
+
+    async def fetch_one(sql, params=None):
+        if "risk.limit_def" in sql:
+            return limity.get(params[2])
+        if "count(*)" in sql:
+            return {"n": 0}
+        raise AssertionError(sql)
+
+    async def execute(sql, params=None):
+        zwolnione.append(params)
+
+    async def notify(*a, **kw):
+        alarmy.append((a, kw))
+
+    async def stan(*a, **kw):
+        # Strata dzienna 0% < pol limitu: warunek automatu USTAL.
+        return {"wynik": 1000.0, "szczyt": 1000.0, "doba": 1000.0}
+
+    oryginalny = wznowienie.stan_konta
+    wznowienie.stan_konta = stan
+    try:
+        asyncio.run(wznowienie.wznow(fetch_all, fetch_one, execute, notify, "crypto",
+                                     "demo", dziennik=wznowienie.Dziennik()))
+    finally:
+        wznowienie.stan_konta = oryginalny
+    return zwolnione, alarmy
+
+
+AUTOMAT = {"id": 400, "reason": "max_daily_loss", "limit_name": "max_daily_loss",
+           "triggered_at": None, "wiek_min": 999}
+REGULA_PO_USTANIU = {"max_daily_loss": {"value": 3.0, "wznowienie": "po_ustaniu",
+                                        "max_wznowien": 3}}
+
+
+def test_kontrola_automat_sam_wznawia_gdy_warunek_ustal():
+    """Bez tego test niżej przechodziłby także przy `wznow`, które nie
+    zwalnia niczego nigdy."""
+    zwolnione, alarmy = _wznow_z([AUTOMAT], REGULA_PO_USTANIU)
+    assert [p[-1] for p in zwolnione] == [400] and alarmy
+
+
+def test_aktywne_RECZNE_wstrzymuje_automatyczne_wznowienie_automatu(capsys):
+    """Audyt 2026-10-09, W-1: ręczne zatrzymanie ma pierwszeństwo. Automat
+    z regułą `po_ustaniu`, którego warunek ustał, NIE jest zwalniany, dopóki
+    trzyma ręczne — i nie idzie fałszywe „silnik wraca do handlu"."""
+    reczne = {"id": 501, "reason": "Ręczne zatrzymanie z panelu",
+              "limit_name": risk.LIMIT_RECZNY, "triggered_at": None, "wiek_min": 5}
+    zwolnione, alarmy = _wznow_z([AUTOMAT, reczne], REGULA_PO_USTANIU)
+    assert zwolnione == [] and alarmy == []
+    assert "RĘCZNE zatrzymanie" in capsys.readouterr().out
 
 
 def test_endpoint_chroniony_csrf_i_rola_wlasciciela():

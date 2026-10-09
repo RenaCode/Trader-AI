@@ -121,3 +121,18 @@ def test_RENDER_trener_bramka_z_haslem_WYLACZNIE_wlasnej_roli():
     assert env["DATABASE_URL"] == roboczy["DATABASE_URL"]
     assert env["PGPASSWORD"] == roboczy["PGPASSWORD"]
     assert "Migracje nie dogonily" in bramka["command"][-1]
+
+
+@helm
+def test_trener_tygodniowy_ma_JEDNA_powtorke_w_limicie_czasu():
+    """Audyt 2026-10-09, W-4: planowy trener 04.10 padł na `connection refused`
+    przy `backoffLimit: 0` - jedna przejściowa awaria sieci = tydzień bez nowej
+    wersji. Powtórka musi się mieścić w twardym limicie czasu Joba (liczonym
+    dla wszystkich prób razem), a powtórek nie może być bez końca."""
+    wynik = subprocess.run(["helm", "template", str(KORZEN / "charts/trader"),
+                            "-s", "templates/trainer-cron.yaml"],
+                           capture_output=True, text=True)
+    assert wynik.returncode == 0, wynik.stderr
+    job = yaml.safe_load(wynik.stdout)["spec"]["jobTemplate"]["spec"]
+    assert job["backoffLimit"] == 1
+    assert job["activeDeadlineSeconds"] <= 3 * 3600

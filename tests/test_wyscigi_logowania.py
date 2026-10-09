@@ -323,3 +323,69 @@ def test_usuniecie_klucza_gieldy_jest_zglaszane(monkeypatch):
 
     asyncio.run(kl.delete_credential(3, zadanie(), {"id": 7}))
     assert zgloszone == [("credential.changed", "Usunięto klucz API giełdy")]
+
+
+# ------------------------------- potwierdzenie TOTP (audyt 2026-10-09, S-9)
+
+def _potwierdz(monkeypatch, wiersz, kod_dobry, *, potwierdzone=True):
+    zdarzenia = {"bledne": 0, "wykonane": []}
+
+    async def fetch_one(sql, params=None):
+        if sql.lstrip().startswith("SELECT"):
+            return wiersz
+        if "UPDATE app.totp_secret" in sql:
+            zdarzenia["wykonane"].append(sql)
+            return {"user_id": 7} if potwierdzone else None
+        raise AssertionError(sql)
+
+    async def execute(sql, params=None):
+        zdarzenia["wykonane"].append(sql)
+
+    async def bledne(user, request, akcja):
+        zdarzenia["bledne"] += 1
+
+    async def nic(*a, **k):
+        return None
+
+    monkeypatch.setattr(modul, "fetch_one", fetch_one)
+    monkeypatch.setattr(modul, "execute", execute)
+    monkeypatch.setattr(modul, "audit", nic)
+    monkeypatch.setattr(modul, "powiadom_o_bezpieczenstwie", nic)
+    monkeypatch.setattr(modul, "_odnotuj_bledne_ponowne", bledne)
+    monkeypatch.setattr(modul, "verify_totp", lambda *a, **k: 1 if kod_dobry else None)
+
+    class Pudelko:
+        def decrypt(self, b):
+            return "SEKRET"
+    import services.api.security as bezp
+    monkeypatch.setattr(bezp, "SecretBox", Pudelko)
+    try:
+        return asyncio.run(modul.totp_confirm(
+            modul.TotpConfirmBody(code="123456"), zadanie(),
+            {"id": 7, "session_id": 3})), zdarzenia
+    except HTTPException as e:
+        return e.status_code, zdarzenia
+
+
+def test_potwierdzenie_przy_WLACZONYM_TOTP_nie_wydaje_nowych_kodow(monkeypatch):
+    """Dobry kod przy potwierdzonym TOTP oddawał 10 nowych kodów zapasowych,
+    a te zwalniają kill-switch i wyłączają TOTP."""
+    from datetime import datetime
+    wynik, z = _potwierdz(monkeypatch, {"secret_enc": b"x", "last_step": 5,
+                                        "confirmed_at": datetime(2026, 10, 1)}, True)
+    assert wynik == 409
+    assert not any("backup_code" in s for s in z["wykonane"])
+
+
+def test_bledny_kod_potwierdzenia_LICZY_SIE_jak_bledne_haslo(monkeypatch):
+    """200 błędnych kodów dawało 0 wpisów `failed_logins`."""
+    wynik, z = _potwierdz(monkeypatch, {"secret_enc": b"x", "last_step": None,
+                                        "confirmed_at": None}, False)
+    assert wynik == 401 and z["bledne"] == 1
+
+
+def test_rownolegle_potwierdzenie_nie_wydaje_drugiego_kompletu(monkeypatch):
+    wynik, z = _potwierdz(monkeypatch, {"secret_enc": b"x", "last_step": None,
+                                        "confirmed_at": None}, True, potwierdzone=False)
+    assert wynik == 409
+    assert not any("backup_code" in s for s in z["wykonane"])
