@@ -1,6 +1,5 @@
 name: testy
 on:
-  push: { branches: [main] }
   pull_request:
   # WYWOLYWALNY Z INNEGO PRZEBIEGU.
   #
@@ -15,11 +14,27 @@ on:
   # listy zaleznosci, a rozjazd bylby widoczny dopiero wtedy, gdy jedna z dwoch
   # kopii przestanie cokolwiek sprawdzac.
   #
-  # `push` na `main` ZOSTAJE mimo tego, ze `docker-publish.yml` wola ten sam
-  # workflow przy kazdym pushu na `main`. Podwojny przebieg kosztuje minute
-  # runnera; brak wlasnego wyzwalacza kosztowalby caly nadzor nad testami
-  # w dniu, w ktorym tamten plik zostanie wylaczony albo zepsuty.
+  # BEZ `push` NA `main` (audyt 2026-10-09, W-3). Do tego dnia push na `main`
+  # puszczal ten workflow DWA razy: wlasnym wyzwalaczem i przez `workflow_call`
+  # z `docker-publish.yml`, a kazdy przebieg mial drugi pelny `pytest` w kroku
+  # pilnujacym pominietych - czyli 4 pelne przebiegi na commit. Od 01.10 dalo
+  # to ok. 1046 rozliczanych minut z 2000 na miesiac (GitHub Free). Komentarz
+  # sprzed tej zmiany bronil wlasnego `push` tym, ze "podwojny przebieg kosztuje
+  # minute runnera" - kosztowal kilkanascie.
+  #
+  # Ryzyko "ktos wylaczy docker-publish i testy znikna z main" pilnuje test
+  # (tests/test_publikacja_bramkowana_testami.py): `docker-publish.yml` MUSI
+  # wolac ten plik z `push` na `main`, bez warunku. Reczne odpalenie:
+  # `workflow_dispatch`.
   workflow_call: {}
+  workflow_dispatch: {}
+# Nowy push do tej samej galezi PR przerywa przebieg dla starego commita - jego
+# wynik i tak nikogo juz nie obchodzi. Przy `workflow_call` (push na `main`)
+# grupa to identyfikator przebiegu, czyli NIC nie jest przerywane: przerwany
+# test na `main` zablokowalby `deploy` dla commita, ktory juz jest na `main`.
+concurrency:
+  group: testy-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: true
 # Tylko odczyt - te joby wykonuja kod repozytorium i zaleznosci (U-10).
 permissions:
   contents: read
@@ -79,23 +94,26 @@ jobs:
       # -B wyłącza zapis bajtkodu. Bez tego mutacja pliku o niezmienionym
       # rozmiarze potrafi trafić w stary .pyc i dać wynik nie z tego kodu.
       #
-      # TEST_DB_URL wlacza te 26 testow. Gdyby kiedys znowu zniknelo, przebieg
-      # nadal bedzie ZIELONY, tylko przestanie sprawdzac baze - dlatego krok
-      # nizej pilnuje, zeby liczba pominietych byla ZEROWA.
-      - run: python -B -m pytest tests/ -v
-        env:
-          TEST_DB_URL: postgresql://trader:ci@localhost:5432/trader
-      # CISZA WYGLADA IDENTYCZNIE JAK ZDROWIE - dlatego osobny krok.
-      # `pytest` z pominietymi testami konczy sie kodem 0, wiec samo "zielono"
-      # nie dowodzi, ze baza byla podlaczona. Ten krok pada, jesli cokolwiek
-      # zostalo pominiete, czyli jesli `TEST_DB_URL` przestanie dzialac.
-      - name: Zaden test nie moze byc pominiety
+      # TEST_DB_URL wlacza testy bazodanowe. Gdyby kiedys znowu zniknelo,
+      # pytest nadal skonczy sie ZIELONO, tylko przestanie sprawdzac baze -
+      # dlatego ten sam krok pada, jesli cokolwiek zostalo pominiete.
+      #
+      # CISZA WYGLADA IDENTYCZNIE JAK ZDROWIE. `pytest` z pominietymi testami
+      # konczy sie kodem 0, wiec samo "zielono" nie dowodzi, ze baza byla
+      # podlaczona. Do 2026-10-09 sprawdzal to osobny krok, ktory puszczal
+      # CALY zestaw drugi raz (5 min runnera na kazdy przebieg). Teraz
+      # sprawdzana jest linia podsumowania TEGO przebiegu.
+      #
+      # `pipefail` jest tu warunkiem, nie ozdoba: bez niego kod wyjscia potoku
+      # to kod `tee`, czyli 0 - i czerwony pytest dalby zielony krok.
+      - name: pytest (zaden test nie moze byc pominiety)
+        shell: bash
         run: |
-          python -B -m pytest tests/ -q --override-ini="addopts=" \
-            | tee /tmp/wynik.txt
-          if grep -qE "[0-9]+ skipped" /tmp/wynik.txt; then
+          set -o pipefail
+          python -B -m pytest tests/ -v | tee /tmp/wynik.txt
+          if tail -n 5 /tmp/wynik.txt | grep -qE "[0-9]+ skipped"; then
             echo "::error::Testy zostaly POMINIETE - baza nie byla podlaczona:"
-            grep -E "[0-9]+ skipped" /tmp/wynik.txt
+            tail -n 5 /tmp/wynik.txt | grep -E "[0-9]+ skipped"
             exit 1
           fi
         env:

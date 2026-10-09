@@ -106,6 +106,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
+import re
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -2835,6 +2836,48 @@ CYKLI_ZWLOKI = 3
 MIN_PROG_S = 900
 
 
+# PRZYCZYNA BRAKU ANALIZ NEWSOW W TYTULE ALARMU (audyt 2026-10-09, S-2).
+#
+# Worker news zglasza "cisze zamiast pracy" jako awarie cyklu (`cisza_zamiast_
+# pracy` w news_worker.py), wiec trafia tu jak kazdy worker, ktory "nie domyka
+# cykli" - z diagnoza "szukaj po stronie zrodla danych albo bazy". Przy
+# odcietych dostawcach LLM to jest zla wskazowka: zrodla i baza dzialaja,
+# a trzy przyczyny wymagaja trzech roznych reakcji. Rozpoznajemy je z napisow,
+# ktore sklada `services/ingest/llm.py` (`Wyczerpany`/`Przeciazony`).
+PRZYCZYNY_BRAKU_ANALIZ = (
+    # (wzorzec, krotko do tytulu, co zrobic)
+    (r"(\w+): brak srodkow na koncie",
+     "{d}: brak środków na koncie",
+     "{d}: konto bez środków — samo się nie odnowi, wymaga doładowania"),
+    (r"(\w+): klucz odrzucony",
+     "{d}: klucz odrzucony",
+     "{d}: klucz odrzucony albo bez uprawnień do modelu — wymaga wymiany klucza"),
+    (r"(\w+): wyczerpany limit DOBOWY",
+     "{d}: limit dobowy",
+     "{d}: wyczerpany limit dobowy klucza — odnowi się następnej doby"),
+    (r"(\w+): (?:awaria po stronie dostawcy|limit tempa|brak odpowiedzi)",
+     "{d}: awaria przejściowa",
+     "{d}: awaria albo przeciążenie po stronie dostawcy — przejściowe"),
+)
+
+
+def przyczyny_braku_analiz(blad: str | None) -> list[tuple[str, str]]:
+    """(krotko, co zrobic) dla kazdego rozpoznanego dostawcy. CZYSTA FUNKCJA.
+    Pusta lista: to nie jest brak analiz albo przyczyny nie rozpoznano."""
+    if not blad or "BEZ ANALIZ" not in blad:
+        return []
+    wynik, widziane = [], set()
+    for wzorzec, krotko, rada in PRZYCZYNY_BRAKU_ANALIZ:
+        for d in re.findall(wzorzec, blad):
+            # `gemini: wyczerpany limit DOBOWY: wyczerpany limit DOBOWY ...` -
+            # ten sam dostawca dwa razy w jednym napisie.
+            if d in widziane:
+                continue
+            widziane.add(d)
+            wynik.append((krotko.format(d=d), rada.format(d=d)))
+    return wynik
+
+
 def ocen_puls_workerow(wiersze: list[dict], cykli_zwloki: int = CYKLI_ZWLOKI,
                        min_prog_s: int = MIN_PROG_S,
                        prog_s: int | None = None) -> list[tuple[str, str, str]]:
@@ -2871,7 +2914,18 @@ def ocen_puls_workerow(wiersze: list[dict], cykli_zwloki: int = CYKLI_ZWLOKI,
         # Swieza => cykle sie koncza, tylko bledem.
         pracuje = (w["proba_wiek_s"] is not None and w["proba_wiek_s"] <= prog
                    and w["proba_wiek_s"] < w["wiek_s"])
-        if pracuje:
+        llm = przyczyny_braku_analiz(w.get("ostatni_blad")) if pracuje else []
+        if llm:
+            tytul = (f"Analiza newsów stoi — "
+                     f"{'; '.join(k for k, _ in llm)}")
+            diagnoza = (
+                f"Worker {w['worker']} pobiera artykuły, ale żaden dostawca LLM "
+                f"ich nie analizuje ({w['awarii_pod_rzad']} cykli pod rząd):\n"
+                + "\n".join(f"  • {r}" for _, r in llm)
+                + "\n\nTo NIE jest awaria poda, źródeł ani bazy — restart nie "
+                f"pomoże. Cecha news_sent ma lukę do czasu powrotu analizy.\n"
+                f"Pełny opis: {w['ostatni_blad']}")
+        elif pracuje:
             tytul = f"Worker {w['worker']} nie domyka cykli"
             diagnoza = (
                 f"Proces ODPOWIADA — ostatnia próba {w['proba_wiek_s'] / 60:.0f} min "
@@ -3548,12 +3602,22 @@ async def sprawdz_decyzje(fetch_all, notify, sucho: bool = False, *,
 # przebiegi kazdego WLACZONEGO zadania - liste podaje chart, bo tylko on wie,
 # ktore zadania sa wlaczone.
 #
-# ODSTEP Z DANYCH, NIE Z HARMONOGRAMU - ta sama zasada co `dlugosc_swiecy_petli`.
-# Harmonogram mieszka w `values.yaml`; druga kopia tutaj rozjechalaby sie przy
+# ODSTEP Z DANYCH ALBO Z HARMONOGRAMU PODANEGO PRZEZ CHART - nigdy z kopii tutaj.
+# Harmonogram mieszka w `values.yaml`; druga kopia w kodzie rozjechalaby sie przy
 # pierwszej zmianie (trening nocny -> tygodniowy, F-2.3) i czujka krzyczalaby
 # o zadaniu, ktore chodzi dokladnie tak, jak ma.
 #
-# Cisza = brak przebiegu dluzej niz CISZA_KROTNOSC typowych odstepow + zapas.
+# SAMA MEDIANA Z DANYCH NIE WYSTARCZA (audyt 2026-10-09, S-4). Przy tygodniowym
+# trenerze 03-05.10 poszly trzy przebiegi w dwie doby (reczne powtorki po padzie
+# z 04.10 i weryfikacje), mediana wyszla 29,9 h i od 08.10 czujka zglaszala
+# "trainer: cisza" o zadaniu, ktore do 11.10 nie mialo kiedy pojsc. Dlatego chart
+# podaje `schedule` kazdego CronJoba (`--harmonogramy`, ten sam napis co w
+# `values.yaml`, wiec bez drugiej kopii), a oczekiwany odstep to WIEKSZA
+# z median i najdluzszej przerwy w harmonogramie: skupione powtorki nie skracaja
+# oczekiwania ponizej planu, a zadanie chodzace rzadziej niz plan nadal
+# podnosi je z danych.
+#
+# Cisza = brak przebiegu dluzej niz CISZA_KROTNOSC oczekiwanych odstepow + zapas.
 CISZA_KROTNOSC = 2
 CISZA_ZAPAS_MIN = 30
 # Ile przebiegow wstecz czytamy i ile trzeba, zeby odstep cokolwiek znaczyl.
@@ -3603,8 +3667,64 @@ def odstep_powtorki_zadania(zgloszen: int) -> timedelta:
     return timedelta(hours=min(h, ZADANIE_POWTORKA_MAX_H))
 
 
+def _pole_crona(pole: str, od: int, do: int) -> set[int]:
+    """Jedno pole wyrazenia crona -> zbior wartosci. Obsluguje `*`, `a-b`,
+    `/krok` i listy po przecinku - tyle, ile uzywa chart."""
+    wynik: set[int] = set()
+    for czesc in pole.split(","):
+        zakres, _, krok = czesc.partition("/")
+        if zakres == "*":
+            a, b = od, do
+        elif "-" in zakres:
+            a, b = (int(x) for x in zakres.split("-", 1))
+        else:
+            a = b = int(zakres)
+            if krok:
+                b = do
+        wynik.update(range(a, b + 1, int(krok) if krok else 1))
+    return wynik
+
+
+def najdluzsza_przerwa_harmonogramu(cron: str) -> timedelta | None:
+    """Najdluzsza przerwa miedzy kolejnymi uruchomieniami wedlug wyrazenia
+    crona (5 pol). CZYSTA FUNKCJA. `None` dla wyrazenia, ktorego nie umiemy
+    przeczytac albo ktore w ciagu 8 tygodni nie odpala sie dwa razy (np.
+    zawieszone `0 0 31 2 *`) - wtedy zostaje sama mediana z danych.
+
+    Liczone przejsciem minuta po minucie przez 8 tygodni od stalej daty: dosc
+    na harmonogram tygodniowy i bez zaleznosci od strefy (przesuniecie czasu
+    zmienia przerwe o godzine, a zapas ciszy liczy sie w dobach)."""
+    try:
+        mi, go, dm, mc, dt = cron.split()
+        minuty, godziny = _pole_crona(mi, 0, 59), _pole_crona(go, 0, 23)
+        dni_mies, miesiace = _pole_crona(dm, 1, 31), _pole_crona(mc, 1, 12)
+        dni_tyg = {d % 7 for d in _pole_crona(dt, 0, 7)}
+    except ValueError:
+        return None
+    # Semantyka crona: przy obu polach dnia ograniczonych wystarczy jedno.
+    oba = dm != "*" and dt != "*"
+    t = datetime(2026, 1, 5, tzinfo=timezone.utc)
+    koniec = t + timedelta(weeks=8)
+    poprzedni, przerwa = None, timedelta(0)
+    while t < koniec:
+        if t.hour in godziny and t.minute in minuty and t.month in miesiace:
+            w_mies, w_tyg = t.day in dni_mies, (t.isoweekday() % 7) in dni_tyg
+            if (w_mies or w_tyg) if oba else (w_mies and w_tyg):
+                if poprzedni is not None:
+                    przerwa = max(przerwa, t - poprzedni)
+                poprzedni = t
+            t += timedelta(minutes=1)
+        elif t.hour in godziny:
+            t += timedelta(minutes=1)
+        else:
+            t = t.replace(minute=0) + timedelta(hours=1)
+    return przerwa or None
+
+
 def ocen_zadania(historia: dict[str, list[dict]], teraz: datetime,
-                 dziennik_od: datetime | None) -> list[tuple[str, str]]:
+                 dziennik_od: datetime | None,
+                 harmonogramy: dict[str, str] | None = None
+                 ) -> list[tuple[str, str]]:
     """Ktore zadania zawiodly albo zamilkly. CZYSTA FUNKCJA.
 
     `historia`: nazwa -> przebiegi od najnowszego (`id`, `finished_at`,
@@ -3640,21 +3760,29 @@ def ocen_zadania(historia: dict[str, list[dict]], teraz: datetime,
                           f"przeszło, ale harmonogram nadal zawodzi — następny "
                           f"planowy przebieg może paść z tego samego powodu"))
             continue
-        if len(przebiegi) < MIN_PRZEBIEGOW_ODSTEPU:
+        z_planu = najdluzsza_przerwa_harmonogramu((harmonogramy or {}).get(nazwa, ""))
+        if len(przebiegi) >= MIN_PRZEBIEGOW_ODSTEPU:
+            konce = [p["finished_at"] for p in przebiegi]
+            odstepy = sorted((a - b).total_seconds() for a, b in zip(konce, konce[1:]))
+            typowy = odstepy[len(odstepy) // 2]
+        elif z_planu is None:
             continue
-        konce = [p["finished_at"] for p in przebiegi]
-        odstepy = sorted((a - b).total_seconds() for a, b in zip(konce, konce[1:]))
-        typowy = odstepy[len(odstepy) // 2]
+        else:
+            typowy = 0.0
+        zrodlo = "typowy odstęp"
+        if z_planu is not None and z_planu.total_seconds() >= typowy:
+            typowy, zrodlo = z_planu.total_seconds(), "odstęp z harmonogramu"
         cisza = (teraz - ostatni["finished_at"]).total_seconds()
         if cisza > CISZA_KROTNOSC * typowy + CISZA_ZAPAS_MIN * 60:
             braki.append((f"{nazwa}:cisza:{ostatni['id']}",
                           f"{nazwa}: ostatni przebieg {cisza / 3600:.1f} h temu, "
-                          f"typowy odstęp {typowy / 3600:.1f} h"))
+                          f"{zrodlo} {typowy / 3600:.1f} h"))
     return braki
 
 
 async def sprawdz_zadania(fetch_all, notify, sucho: bool = False, *,
                           zadania: list[str],
+                          harmonogramy: dict[str, str] | None = None,
                           teraz: datetime | None = None) -> int:
     """Czy kazde wlaczone zadanie cykliczne skonczylo sie powodzeniem
     i czy w ogole chodzi."""
@@ -3682,7 +3810,8 @@ async def sprawdz_zadania(fetch_all, notify, sucho: bool = False, *,
         else:
             print(f"zadanie {nazwa}: brak zapisanych przebiegów")
 
-    braki = ocen_zadania(historia, teraz, od[0]["od"] if od else None)
+    braki = ocen_zadania(historia, teraz, od[0]["od"] if od else None,
+                         harmonogramy)
     if not braki:
         print("  każde zadanie skończyło się powodzeniem i chodzi w swoim rytmie")
         return 0
@@ -3921,6 +4050,10 @@ async def main() -> int:
     ap.add_argument("--zadania", default="",
                     help="lista nazw zadan dla --co zadania, po przecinku; "
                          "podaje ja chart z flag `enabled`")
+    ap.add_argument("--harmonogramy", default="",
+                    help="dla --co zadania: `nazwa=<cron>` rozdzielone `;` - "
+                         "`schedule` CronJobow z values.yaml; oczekiwany odstep "
+                         "nie spada ponizej najdluzszej przerwy w harmonogramie")
     ap.add_argument("--prog-statusu-h", type=int, default=None, dest="prog_statusu_h",
                     help="prog nieswiezosci odczytu statusu w godzinach dla "
                          "--co instrumenty; do wywolania sciezki alarmowej na "
@@ -3987,7 +4120,9 @@ async def main() -> int:
         if args.co == "zadania":
             return await sprawdz_zadania(
                 fetch_all, notify, sucho=args.sucho,
-                zadania=[z for z in args.zadania.split(",") if z])
+                zadania=[z for z in args.zadania.split(",") if z],
+                harmonogramy=dict(h.split("=", 1) for h in
+                                  args.harmonogramy.split(";") if "=" in h))
         if args.co == "decyzje":
             return await sprawdz_decyzje(fetch_all, notify, sucho=args.sucho,
                                          engine=args.engine, mode=args.mode,
