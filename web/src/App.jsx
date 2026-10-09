@@ -23,11 +23,27 @@ const SECTIONS = [
 const ENGINE_LABEL = { crypto: 'Krypto', equity: 'Giełda' };
 const ENGINE_ICON = { crypto: '₿', equity: '📈' };
 
+/* Podglad UI bez backendu - WYLACZNIE w `npm run dev` (import.meta.env.DEV).
+   W buildzie produkcyjnym Vite podstawia false i caly kod podgladu znika:
+   na produkcji nie ma przycisku, falszywego konta ani zmyslonych rynkow. */
+function readPreview() {
+  try {
+    return window.location.search.includes('preview')
+      || window.localStorage.getItem('trader_preview') === 'true';
+  } catch { return false; }
+}
+const PREVIEW_ENGINES = [
+  { engine: 'crypto', venue: 'binance' },
+  { engine: 'equity', venue: 'xetra' },
+];
+
 export default function App() {
+  // 'checking' zapobiega mignieciu ekranu logowania u zalogowanego uzytkownika
+  // przy odswiezeniu strony - dopiero odpowiedz /api/auth/me rozstrzyga.
   const [authState, setAuthState] = useState('checking');
   const [user, setUser] = useState(null);
 
-  const isPreview = window.location.search.includes('preview') || localStorage.getItem('trader_preview') === 'true';
+  const isPreview = import.meta.env.DEV && readPreview();
 
   const checkSession = useCallback(async () => {
     if (isPreview) {
@@ -67,10 +83,12 @@ export default function App() {
   const [engine, setEngine] = useState(null);
   const [section, setSection] = useState('overview');
 
-  const activeEngines = engines.data?.length ? engines.data : [
-    { engine: 'crypto', venue: 'binance' },
-    { engine: 'equity', venue: 'xetra' }
-  ];
+  // Zrodlem prawdy dla zakladek jest baza (ref.venue), nie stala w kodzie -
+  // dolozenie trzeciego rynku nie wymaga zmiany frontu. Zmyslone rynki tylko
+  // w podgladzie deweloperskim.
+  const activeEngines = engines.data?.length
+    ? engines.data
+    : (import.meta.env.DEV && isPreview ? PREVIEW_ENGINES : []);
 
   useEffect(() => {
     if (!engine && activeEngines.length) setEngine(activeEngines[0].engine);
@@ -85,6 +103,17 @@ export default function App() {
 
   if (authState === 'out') {
     return <Login onSuccess={checkSession} />;
+  }
+
+  if (engines.error && !(import.meta.env.DEV && isPreview)) {
+    return (
+      <div className="app-container">
+        <div className="notice">
+          Nie udało się połączyć z API: {engines.error}
+          <br />Sprawdź, czy usługa <code>api</code> działa.
+        </div>
+      </div>
+    );
   }
 
   return (
