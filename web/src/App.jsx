@@ -23,13 +23,34 @@ const SECTIONS = [
 const ENGINE_LABEL = { crypto: 'Krypto', equity: 'Giełda' };
 const ENGINE_ICON = { crypto: '₿', equity: '📈' };
 
+/* Podglad UI bez backendu - WYLACZNIE w `npm run dev` (import.meta.env.DEV).
+   W buildzie produkcyjnym Vite podstawia false i caly kod podgladu znika:
+   na produkcji nie ma przycisku, falszywego konta ani zmyslonych rynkow. */
+function readPreview() {
+  try {
+    return window.location.search.includes('preview')
+      || window.localStorage.getItem('trader_preview') === 'true';
+  } catch { return false; }
+}
+const PREVIEW_ENGINES = [
+  { engine: 'crypto', venue: 'binance' },
+  { engine: 'equity', venue: 'xetra' },
+];
+
 export default function App() {
   // 'checking' zapobiega mignieciu ekranu logowania u zalogowanego uzytkownika
   // przy odswiezeniu strony - dopiero odpowiedz /api/auth/me rozstrzyga.
   const [authState, setAuthState] = useState('checking');
   const [user, setUser] = useState(null);
 
+  const isPreview = import.meta.env.DEV && readPreview();
+
   const checkSession = useCallback(async () => {
+    if (isPreview) {
+      setUser({ login: 'admin', role: 'admin', totp_enabled: true });
+      setAuthState('in');
+      return;
+    }
     try {
       setUser(await get('/api/auth/me'));
       setAuthState('in');
@@ -37,7 +58,7 @@ export default function App() {
       setUser(null);
       setAuthState('out');
     }
-  }, []);
+  }, [isPreview]);
 
   useEffect(() => { checkSession(); }, [checkSession]);
 
@@ -63,13 +84,18 @@ export default function App() {
   const [section, setSection] = useState('overview');
 
   // Zrodlem prawdy dla zakladek jest baza (ref.venue), nie stala w kodzie -
-  // dolozenie trzeciego rynku nie wymaga zmiany frontu.
+  // dolozenie trzeciego rynku nie wymaga zmiany frontu. Zmyslone rynki tylko
+  // w podgladzie deweloperskim.
+  const activeEngines = engines.data?.length
+    ? engines.data
+    : (import.meta.env.DEV && isPreview ? PREVIEW_ENGINES : []);
+
   useEffect(() => {
-    if (!engine && engines.data?.length) setEngine(engines.data[0].engine);
-  }, [engines.data, engine]);
+    if (!engine && activeEngines.length) setEngine(activeEngines[0].engine);
+  }, [activeEngines, engine]);
 
   const Active = SECTIONS.find((s) => s.key === section)?.Component || Overview;
-  const current = engines.data?.find((e) => e.engine === engine);
+  const current = activeEngines.find((e) => e.engine === engine);
 
   if (authState === 'checking') {
     return <div className="login-shell"><div className="loading-pulse dim">Sprawdzanie sesji…</div></div>;
@@ -79,7 +105,7 @@ export default function App() {
     return <Login onSuccess={checkSession} />;
   }
 
-  if (engines.error) {
+  if (engines.error && !(import.meta.env.DEV && isPreview)) {
     return (
       <div className="app-container">
         <div className="notice">
