@@ -215,7 +215,7 @@ jest(t, 'Klucz jest wpisany, ale dziś nie było ani jednego wywołania',
 niema(t, 'rusza po wpisaniu klucza', 'Zrodla: nie kaze wpisywac wpisanego klucza');
 jest(t, 'Limit dobowy', 'Zrodla: karta kosztu nie znika przy zerze wywolan');
 jest(t, '3.21 USD przez 30 dni', 'Zrodla: koszt 30-dniowy jest widoczny');
-jest(t, 'limit dobowy nieznany', 'Zrodla: brak wykorzystania nie udaje 0%');
+jest(t, 'żaden limit dobowy nie jest znany', 'Zrodla: brak wykorzystania nie udaje 0%');
 jest(t, 'wyłączony', 'Zrodla: wylaczony kanal RSS jest oznaczony');
 const ocena = await page.locator('.row-item:has-text("Artykul bez oceny")').innerText();
 ok(!/pewność\s*\n?\s*0%/.test(ocena), 'Zrodla: brak oceny NIE renderuje sie jako 0%',

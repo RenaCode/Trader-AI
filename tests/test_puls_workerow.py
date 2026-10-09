@@ -747,3 +747,51 @@ def test_prog_ROSNIE_z_interwalem_workera_a_nie_jest_stala():
     # Ponizej podlogi milczymy nawet przy krotkim interwale: restart poda trwa
     # minuty, a czujka chodzi co dziesiec.
     assert ocen_puls_workerow([wiersz("market", 60, 600)]) == []
+
+
+# --------------- przyczyna braku analiz newsów (audyt 2026-10-09, S-2)
+
+# Napis z produkcji 09.10 (log trader-news), w kształcie `cisza_zamiast_pracy`.
+BEZ_ANALIZ_0910 = (
+    "BEZ ANALIZ: czeka 12, przeanalizowanych 0 (dostawca odcięty — gemini: "
+    "wyczerpany limit DOBOWY: wyczerpany limit DOBOWY klucza dla modelu "
+    "gemini-3.5-flash (HTTP 429). Ponawianie nie pomoze - limit odnawia sie "
+    "dopiero nastepnej doby.; anthropic: awaria TRWALA: anthropic: brak srodkow "
+    "na koncie (HTTP 400, model claude-opus-5). Ponawianie nie pomoze - to sie "
+    "nie odnowi samo, wymaga doladowania konta albo wymiany klucza.; "
+    "porzuconych po wyczerpaniu prób: 1); ostatnia analiza 4 h temu")
+
+
+def _alarm_news(blad):
+    (powod,) = ocen_puls_workerow([wiersz("news", 300, wiek_s=16_000,
+                                          proba_wiek_s=60, awarii=57, blad=blad)])
+    return powod
+
+
+def test_brak_analiz_nazywa_PRZYCZYNE_u_kazdego_dostawcy():
+    """Produkcja 09.10: tytuł „Worker news nie domyka cykli" i rada „szukaj po
+    stronie źródła danych albo bazy" — a źródła i baza działały. Konto
+    Anthropic bez środków i limit dobowy Gemini wymagają innych reakcji."""
+    _, tytul, tresc = _alarm_news(BEZ_ANALIZ_0910)
+    assert tytul.startswith("Analiza newsów stoi")
+    assert "anthropic: brak środków na koncie" in tytul
+    assert "gemini: limit dobowy" in tytul
+    assert "wymaga doładowania" in tresc and "następnej doby" in tresc
+    assert "źródła danych albo bazy" not in tresc
+    assert tytul.count("gemini") == 1, "ten sam dostawca zgłoszony dwa razy"
+
+
+def test_brak_analiz_z_awaria_przejsciowa_nie_udaje_braku_srodkow():
+    blad = ("BEZ ANALIZ: czeka 3, przeanalizowanych 0 (dostawca odcięty — "
+            "anthropic: awaria po stronie dostawcy (HTTP 529, model x)); "
+            "ostatnia analiza 1 h temu")
+    _, tytul, tresc = _alarm_news(blad)
+    assert "anthropic: awaria przejściowa" in tytul
+    assert "środków" not in tytul
+
+
+def test_zwykly_blad_workera_zostaje_przy_starej_diagnozie():
+    """Kontrola: rozpoznanie dotyczy wyłącznie ciszy analiz."""
+    _, tytul, tresc = _alarm_news("psycopg.OperationalError: connection refused")
+    assert tytul == "Worker news nie domyka cykli"
+    assert "źródła danych albo bazy" in tresc

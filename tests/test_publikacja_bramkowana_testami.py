@@ -96,3 +96,65 @@ def test_pakiet_testow_chodzi_z_wylaczonym_bajtkodem():
     assert "python -B -m pytest" in krok, (
         "`pytest` bez `-B` — stary bajtkod może przepuścić kod, którego nikt "
         "nie sprawdził")
+
+
+# --- JEDEN PELNY PRZEBIEG NA COMMIT (audyt 2026-10-09, W-3) -------------------
+#
+# Do 09.10 push na `main` puszczal `tests.yml` dwa razy (wlasny `push` +
+# `workflow_call` z publikacji), a kazdy przebieg mial drugi pelny `pytest`
+# w kroku pilnujacym pominietych: 4 pelne przebiegi na commit, ok. 1046 minut
+# od 01.10 przy limicie 2000/mies. Ponizsze testy pilnuja, ze oszczednosc NIE
+# zostala kupiona utrata bramki.
+
+def _kroki_pytest(nazwa: str) -> list[str]:
+    jobs = _workflow(nazwa)["jobs"]
+    return [str(k.get("run", "")) for job in jobs.values()
+            for k in job.get("steps", []) if "-m pytest" in str(k.get("run", ""))]
+
+
+def test_tests_yml_NIE_odpala_sie_osobno_na_push():
+    """Push na `main` dostaje testy z `workflow_call` publikacji. Wlasny
+    `push` byl drugim, identycznym przebiegiem tego samego commita."""
+    assert "push" not in _wyzwalacze(_workflow("tests.yml")), (
+        "`tests.yml` ma `push` — push na `main` puszcza pytest dwa razy "
+        "(drugi raz przez `workflow_call` z docker-publish.yml)")
+
+
+def test_testy_na_main_NADAL_biegna_przez_publikacje():
+    """Druga strona tamtego testu: bez `push` w `tests.yml` jedyna droga
+    testow na `main` to job `testy` w publikacji. Musi sie odpalac na kazdy
+    push na `main`, bez warunku (warunek pilnuje test wyzej)."""
+    wyzw = _wyzwalacze(_workflow("docker-publish.yml"))
+    assert "main" in wyzw["push"]["branches"]
+    assert "paths" not in wyzw["push"], (
+        "filtr sciezek na poziomie wyzwalacza pominie testy dla czesci commitow")
+    assert "pull_request" in _wyzwalacze(_workflow("tests.yml"))
+
+
+def test_jeden_pelny_pytest_na_przebieg():
+    """Krok „zaden test nie moze byc pominiety" puszczal caly zestaw drugi
+    raz. Pominiecia sprawdza sie z wyniku pierwszego przebiegu."""
+    kroki = _kroki_pytest("tests.yml")
+    assert len(kroki) == 1, f"`tests.yml` puszcza pytest {len(kroki)}x: {kroki}"
+    assert not _kroki_pytest("docker-publish.yml"), (
+        "docker-publish.yml ma wlasna kopie pytest obok `workflow_call`")
+
+
+def test_kontrola_pominietych_czyta_TEN_przebieg_z_pipefail():
+    """`pytest | tee` bez `pipefail` daje kod wyjscia `tee`, czyli 0: czerwony
+    zestaw konczylby sie zielonym krokiem (audyt N-3). Po zlaczeniu krokow to
+    bylaby JEDYNA bramka, wiec dziura przestalaby byc teoretyczna."""
+    (krok,) = _kroki_pytest("tests.yml")
+    assert "set -o pipefail" in krok
+    assert "skipped" in krok and "exit 1" in krok, (
+        "jedyny przebieg pytest nie pada przy pominietych testach — brak bazy "
+        "wygladalby jak zielone CI")
+
+
+def test_stend_ui_jest_uruchamiany_w_CI():
+    """Audyt 2026-10-09, S-1: `stend_ui.spec.mjs` byl czerwony 16 dni, bo nie
+    wolal go zaden workflow. Test, ktorego nikt nie uruchamia, nie pilnuje
+    niczego - a wyglada w repozytorium tak samo jak ten, ktory pilnuje."""
+    kroki = [str(k.get("run", "")) for k in
+             _workflow("docker-publish.yml")["jobs"]["smoke"]["steps"]]
+    assert any("node tests/stend_ui.spec.mjs" in k for k in kroki)

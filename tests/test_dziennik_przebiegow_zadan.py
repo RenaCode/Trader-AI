@@ -426,3 +426,94 @@ def test_zapytanie_o_poprzednie_zgloszenia_NA_POSTGRESIE(monkeypatch, capsys):
 
     assert asyncio.run(przebieg()) == 0
     assert "BŁĄD KANAŁU" in capsys.readouterr().out
+
+
+# ------------------- oczekiwany odstęp z harmonogramu (audyt 2026-10-09, S-4)
+from services.engine.dozor import najdluzsza_przerwa_harmonogramu  # noqa: E402
+
+TYGODNIOWY = {"trainer": "40 4 * * 0"}
+
+
+def _trener_po_padzie_0410():
+    """Produkcja: planowy 04.10 padł, powtórki i weryfikacje 03-05.10 dały
+    trzy przebiegi w dwie doby. Czujka liczy 08.10 ~03:00 UTC, 95 h po
+    ostatnim."""
+    teraz = datetime(2026, 10, 9, 10, 0, tzinfo=timezone.utc)
+    h = {"trainer": [
+        {"id": 284, "finished_at": teraz - timedelta(hours=95), "exit_code": 0},
+        {"id": 283, "finished_at": teraz - timedelta(hours=95 + 29.9), "exit_code": 0},
+        {"id": 282, "finished_at": teraz - timedelta(hours=95 + 50), "exit_code": 0},
+    ]}
+    return h, teraz
+
+
+def test_skupione_powtorki_tygodniowego_trenera_NIE_daja_ciszy():
+    """Odtworzenie fałszywego alarmu „trainer: ostatni przebieg 95.0 h temu,
+    typowy odstęp 29.9 h": harmonogram tygodniowy, do następnego planowego
+    nic nie zaległo."""
+    h, teraz = _trener_po_padzie_0410()
+    # Kontrola: bez harmonogramu (stara ścieżka) alarm wychodzi — czyli test
+    # naprawdę stoi na tym scenariuszu, a nie na pustej historii.
+    assert [k for k, _ in ocen_zadania(h, teraz, DZIENNIK_STARY)] == ["trainer:cisza:284"]
+    assert ocen_zadania(h, teraz, DZIENNIK_STARY, TYGODNIOWY) == []
+
+
+def test_tygodniowy_trener_milczacy_ponad_dwa_tygodnie_NADAL_zglasza():
+    """Harmonogram podnosi oczekiwanie, nie wyłącza czujki."""
+    h, teraz = _trener_po_padzie_0410()
+    pozniej = teraz + timedelta(days=12)
+    braki = ocen_zadania(h, pozniej, DZIENNIK_STARY, TYGODNIOWY)
+    assert [k for k, _ in braki] == ["trainer:cisza:284"]
+    assert "odstęp z harmonogramu 168.0 h" in braki[0][1]
+
+
+def test_harmonogram_pozwala_ocenic_cisze_juz_przy_jednym_przebiegu():
+    """Mediana potrzebuje trzech wierszy; plan wiadomo od pierwszego."""
+    h = {"backup": [_p(1, 60)]}
+    assert ocen_zadania(h, TERAZ, DZIENNIK_STARY) == []
+    braki = ocen_zadania(h, TERAZ, DZIENNIK_STARY, {"backup": "17 3 * * *"})
+    assert [k for k, _ in braki] == ["backup:cisza:1"]
+
+
+def test_dane_rzadsze_niz_plan_nadal_podnosza_oczekiwanie():
+    """Zadanie, które realnie chodzi co 2 doby przy planie dobowym, liczy się
+    z mediany — tak jak przed poprawką."""
+    h = {"kurs": [_p(3, 60), _p(2, 108), _p(1, 156)]}
+    assert ocen_zadania(h, TERAZ, DZIENNIK_STARY, {"kurs": "17 3 * * *"}) == []
+
+
+@pytest.mark.parametrize("cron,godzin", [
+    ("40 4 * * 0", 168), ("17 3 * * *", 24), ("*/10 * * * *", 10 / 60),
+    ("7 */6 * * *", 6), ("13 */6 * * *", 6), ("0,30 * * * *", 0.5),
+    ("0 9 * * 1-5", 72),
+])
+def test_najdluzsza_przerwa_harmonogramu(cron, godzin):
+    assert najdluzsza_przerwa_harmonogramu(cron) == timedelta(hours=godzin)
+
+
+@pytest.mark.parametrize("cron", ["0 0 31 2 *", "", "bzdura", "1 2 3"])
+def test_harmonogram_nieczytelny_albo_zawieszony_daje_None(cron):
+    assert najdluzsza_przerwa_harmonogramu(cron) is None
+
+
+@bez_helma
+def test_zywotnosc_dostaje_TE_SAME_harmonogramy_co_CronJoby():
+    """Druga kopia harmonogramu rozjechałaby się przy pierwszej zmianie —
+    dlatego chart podaje `schedule` z tego samego miejsca, co CronJob."""
+    cronjoby = _cronjoby()
+    plan = {}
+    for cj in cronjoby:
+        c = cj["spec"]["jobTemplate"]["spec"]["template"]["spec"]["containers"][0]
+        polecenie = c["command"]
+        if "--nazwa" in polecenie:
+            plan[polecenie[polecenie.index("--nazwa") + 1]] = cj["spec"]["schedule"]
+        elif cj["metadata"]["name"] == "trader-backup":
+            plan["backup"] = cj["spec"]["schedule"]
+    zyw = next(cj for cj in cronjoby if cj["metadata"]["name"] == "trader-zywotnosc")
+    skrypt = zyw["spec"]["jobTemplate"]["spec"]["template"]["spec"]["containers"][0]["command"][-1]
+    linia = next(w for w in skrypt.splitlines() if "--co zadania" in w)
+    m = re.search(r'--harmonogramy "([^"]*)"', linia)
+    assert m, "zywotnosc nie podaje harmonogramów — oczekiwany odstęp z samej mediany"
+    podane = dict(h.split("=", 1) for h in m.group(1).split(";"))
+    assert podane == {n: s for n, s in plan.items() if n in podane}
+    assert set(podane) == set(plan) - {"zywotnosc"}

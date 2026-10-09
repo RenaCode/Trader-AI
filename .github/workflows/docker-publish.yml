@@ -180,6 +180,13 @@ jobs:
           BASE_URL: http://localhost:4173
         run: node tests/smoke.spec.mjs
 
+      # Stend z PODSTAWIONYM API (bez bazy i serwera): co widzi wlasciciel,
+      # gdy odczyt padnie. Do 2026-10-09 nie wolal go zaden workflow i byl
+      # czerwony od 23.09 (napis zmieniony w e9b090e) - nikt tego nie widzial.
+      # Koszt ok. 20 s: build i Playwright sa juz postawione krokami wyzej.
+      - name: Stend UI (podstawione API)
+        run: node tests/stend_ui.spec.mjs
+
       - name: Logi przy niepowodzeniu
         if: failure()
         run: |
@@ -200,6 +207,10 @@ jobs:
   # `web/src/components/Risk.jsx`), wiec "nic sie nie zmienilo w kodzie" nie
   # znaczy "nie ma czego sprawdzac". Job pominiety przez filtr nie bramkuje
   # niczego, a wyglada w przegladzie tak samo jak job, ktory przeszedl.
+  #
+  # JEDYNE testy na `main` (od 2026-10-09): `tests.yml` nie ma juz wlasnego
+  # `push`, bo kazdy commit szedl przez pytest dwa razy. Usuniecie tego joba
+  # albo dopisanie mu warunku zostawia `main` bez testow.
   testy:
     name: Testy jednostkowe
     uses: ./.github/workflows/tests.yml

@@ -41,14 +41,19 @@ z poprzedniego zamkniecia (zmierzone: 1050 min przy progu 180).
 {{/* ZADANIA CYKLICZNE DO `--co zadania` (F-8.4) - z flag `enabled`, bo tylko
 chart wie, ktore sa wlaczone. Nazwy = `--nazwa` w `przebieg_zadania.py`.
 `zywotnosc` nie pilnuje samej siebie: jej kod niezerowy znaczy "czujka cos
-zglosila", nie awarie, a cisze wlasnego zadania zobaczy dopiero ktos inny. */}}
+zglosila", nie awarie, a cisze wlasnego zadania zobaczy dopiero ktos inny.
+Harmonogramy obok nazw (audyt 2026-10-09, S-4): ten sam `schedule`, ktory
+dostaje CronJob, wiec czujka nie trzyma drugiej kopii. Bez niego oczekiwany
+odstep szedl z samej mediany i trzy skupione powtorki tygodniowego trenera
+dawaly falszywe "trainer: cisza". */}}
 {{- $zadania := list }}
-{{- if .Values.trainerCron.enabled }}{{ $zadania = append $zadania "trainer" }}{{ end }}
-{{- if .Values.probaCron.enabled }}{{ $zadania = append $zadania "proba-killswitcha" }}{{ end }}
-{{- if .Values.postmortemCron.enabled }}{{ $zadania = append $zadania "postmortem" }}{{ end }}
-{{- if .Values.instrumentyCron.enabled }}{{ $zadania = append $zadania "instrumenty" }}{{ end }}
-{{- if .Values.kursCron.enabled }}{{ $zadania = append $zadania "kurs" }}{{ end }}
-{{- if .Values.backup.enabled }}{{ $zadania = append $zadania "backup" }}{{ end }}
+{{- $harmonogramy := list }}
+{{- if .Values.trainerCron.enabled }}{{ $zadania = append $zadania "trainer" }}{{ $harmonogramy = append $harmonogramy (printf "trainer=%s" .Values.trainerCron.schedule) }}{{ end }}
+{{- if .Values.probaCron.enabled }}{{ $zadania = append $zadania "proba-killswitcha" }}{{ $harmonogramy = append $harmonogramy (printf "proba-killswitcha=%s" .Values.probaCron.schedule) }}{{ end }}
+{{- if .Values.postmortemCron.enabled }}{{ $zadania = append $zadania "postmortem" }}{{ $harmonogramy = append $harmonogramy (printf "postmortem=%s" .Values.postmortemCron.schedule) }}{{ end }}
+{{- if .Values.instrumentyCron.enabled }}{{ $zadania = append $zadania "instrumenty" }}{{ $harmonogramy = append $harmonogramy (printf "instrumenty=%s" .Values.instrumentyCron.schedule) }}{{ end }}
+{{- if .Values.kursCron.enabled }}{{ $zadania = append $zadania "kurs" }}{{ $harmonogramy = append $harmonogramy (printf "kurs=%s" .Values.kursCron.schedule) }}{{ end }}
+{{- if .Values.backup.enabled }}{{ $zadania = append $zadania "backup" }}{{ $harmonogramy = append $harmonogramy (printf "backup=%s" .Values.backup.schedule) }}{{ end }}
 # Czujka zywotnosci silnikow.
 #
 # MUSI byc osobnym procesem: martwy proces nie zglosi wlasnej smierci. Petla
@@ -75,6 +80,12 @@ spec:
     spec:
       # Bez ponawiania: awaria silnika nie naprawi sie przez powtorzenie
       # sprawdzenia, a kazde powtorzenie wyslaloby to samo powiadomienie.
+      #
+      # "Failed" W `kubectl get jobs` ZNACZY TU "WYSLANO NOWE POWIADOMIENIE",
+      # a nie "czujka padla" (audyt 2026-10-09, S-3). Kolejne przebiegi o tej
+      # samej, juz zgloszonej awarii koncza sie `Complete`. Co zglosila - log
+      # tego joba (linie MILCZY / ZADANIE / ...); pad samej czujki widac po
+      # tym, ze w logu nie ma podsumowan sekcji.
       backoffLimit: 0
       # TWARDY LIMIT CZASU - 540 s, czyli o minute krocej niz okres (600 s).
       #
@@ -256,7 +267,7 @@ spec:
                   # przebieg z kodem niezerowym albo cisza > 2 typowe odstepy ->
                   # `job.nieudany`. Do tej pory nieudany job byl widoczny
                   # wylacznie w `kubectl get jobs`.
-                  python services/engine/dozor.py --co zadania --zadania {{ join "," $zadania | quote }} || RC=$?
+                  python services/engine/dozor.py --co zadania --zadania {{ join "," $zadania | quote }} --harmonogramy {{ join ";" $harmonogramy | quote }} || RC=$?
                   # CZY ALARM MA JAK OPUSCIC PANEL.
                   #
                   # Wszystkie czujki wyzej koncza sie powiadomieniem. Ta sprawdza
