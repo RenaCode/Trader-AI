@@ -5,12 +5,16 @@
    statusow uczenia. */
 
 :root {
-  --bg-dark: #070913;
-  --bg-card: rgba(18, 22, 41, 0.7);
-  --bg-card-hover: rgba(26, 32, 58, 0.85);
-  --bg-inset: rgba(9, 12, 24, 0.6);
-  --border-glass: rgba(255, 255, 255, 0.07);
-  --border-glass-strong: rgba(255, 255, 255, 0.13);
+  --bg-dark: #06070d;
+  --bg-card: rgba(16, 17, 30, 0.72);
+  --bg-card-hover: rgba(24, 25, 44, 0.85);
+  --bg-inset: rgba(8, 9, 18, 0.66);
+  --border-glass: rgba(255, 255, 255, 0.08);
+  --border-glass-strong: rgba(255, 255, 255, 0.14);
+  /* Fioletowa poswiata w naglowku karty - jedyny "dekor" systemu, wspolny dla
+     wszystkich kart, zeby siatka czytala sie jako jedna powierzchnia. */
+  --card-glow: radial-gradient(130% 90px at 0% 0%, rgba(139, 92, 246, 0.16) 0%, rgba(139, 92, 246, 0) 70%);
+  --sidebar-w: 224px;
   --border-glass-glow: rgba(124, 58, 237, 0.3);
 
   --color-primary: #7c3aed;      /* Fiolet AI - wspolny z Dietetykiem */
@@ -28,12 +32,13 @@
   --neutral: #94a3b8;
 
   --gradient-ai: linear-gradient(135deg, #7c3aed 0%, #c084fc 100%);
-  --gradient-dark: linear-gradient(180deg, #070913 0%, #0d1127 100%);
+  --gradient-dark: linear-gradient(180deg, #06070d 0%, #0a0b18 100%);
   --gradient-profit: linear-gradient(180deg, rgba(52, 211, 153, 0.28) 0%, rgba(52, 211, 153, 0) 100%);
 
   --text-main: #f1f5f9;
-  --text-muted: #94a3b8;
-  --text-dim: #64748b;
+  --text-muted: #a1a8bb;
+  /* #64748b mial na tle kart kontrast ~3,9:1 - za malo dla drobnego tekstu. */
+  --text-dim: #7c8499;
 
   --font-main: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
   --font-display: 'Outfit', -apple-system, BlinkMacSystemFont, sans-serif;
@@ -42,7 +47,7 @@
   --shadow-glow: 0 8px 32px 0 rgba(0, 0, 0, 0.37);
   --focus-ring: 0 0 0 3px rgba(124, 58, 237, 0.45);
 
-  --radius-lg: 18px;
+  --radius-lg: 14px;
   --radius-md: 12px;
   --radius-sm: 8px;
   --transition-smooth: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
@@ -54,8 +59,15 @@
 :focus-visible { outline: none; box-shadow: var(--focus-ring); }
 
 body {
-  background: var(--bg-dark);
-  background-image: var(--gradient-dark);
+  background-color: var(--bg-dark);
+  /* Delikatna siatka jak papier milimetrowy wykresu - rysowana gradientami,
+     bez obrazkow (CSP: img-src 'self' data:). */
+  background-image:
+    linear-gradient(rgba(255, 255, 255, 0.022) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.022) 1px, transparent 1px),
+    var(--gradient-dark);
+  background-size: 56px 56px, 56px 56px, auto;
+  background-attachment: fixed;
   color: var(--text-main);
   font-family: var(--font-main);
   min-height: 100vh;
@@ -67,77 +79,123 @@ body {
 
 body::before, body::after {
   content: ''; position: fixed; width: 320px; height: 320px; border-radius: 50%;
-  filter: blur(110px); z-index: -1; opacity: 0.14; pointer-events: none;
+  filter: blur(120px); z-index: -1; opacity: 0.1; pointer-events: none;
 }
 body::before { top: 6%; left: 8%; background: var(--color-primary); }
-body::after  { bottom: 10%; right: 8%; background: var(--color-blue); }
+body::after  { bottom: 10%; right: 8%; background: #4c1d95; }
 
 ::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: rgba(0,0,0,0.2); border-radius: 4px; }
 ::-webkit-scrollbar-thumb { background: rgba(124,58,237,0.3); border-radius: 4px; }
 ::-webkit-scrollbar-thumb:hover { background: rgba(124,58,237,0.5); }
 
-/* ------------------------------------------------------------------ uklad */
+/* ------------------------------------------------------------------ uklad
+   Szkielet: boczny pasek nawigacji + kolumna tresci. Ponizej 900 px pasek
+   boczny zamienia sie w dolny pasek z przewijanymi w poziomie zakladkami -
+   te same przyciski `.nav-tab`, nie druga kopia nawigacji. */
 .app-container { max-width: 1400px; margin: 0 auto; padding: 24px 20px 64px; }
-
-.app-header {
-  display: flex; align-items: center; justify-content: space-between;
-  gap: 16px; flex-wrap: wrap; margin-bottom: 22px;
+.app-container.shell {
+  max-width: none; padding: 0;
+  display: grid; grid-template-columns: var(--sidebar-w) minmax(0, 1fr);
+  min-height: 100vh;
 }
+.main { min-width: 0; padding: 0 24px 48px; }
+
+.sidebar {
+  position: sticky; top: 0; height: 100vh;
+  display: flex; flex-direction: column; gap: 22px;
+  padding: 22px 14px 18px;
+  background: rgba(8, 9, 17, 0.82);
+  backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
+  border-right: 1px solid var(--border-glass);
+}
+.brand { display: flex; align-items: center; gap: 11px; padding: 0 8px; }
+.brand-compact { display: none; }
+
 .logo-container { display: flex; align-items: center; gap: 12px; }
 .logo-icon {
-  width: 42px; height: 42px; border-radius: var(--radius-md);
-  background: var(--gradient-ai); display: grid; place-items: center;
-  font-size: 1.3rem; box-shadow: 0 0 22px rgba(124,58,237,0.35);
+  width: 34px; height: 34px; border-radius: 10px; flex: none;
+  background: var(--gradient-ai); display: grid; place-items: center; color: #fff;
+  font-size: 1.05rem; box-shadow: 0 0 22px rgba(124,58,237,0.35);
 }
-.logo-text { font-family: var(--font-display); font-size: 1.35rem; font-weight: 700; letter-spacing: -0.02em; }
+.logo-text { font-family: var(--font-display); font-size: 1.2rem; font-weight: 600; letter-spacing: -0.01em; }
 .logo-badge {
-  font-size: 0.68rem; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase;
+  font-size: 0.68rem; font-weight: 600; letter-spacing: 0.08em;
   padding: 3px 9px; border-radius: 999px; border: 1px solid var(--border-glass-strong);
-  color: var(--text-muted);
+  color: var(--text-muted); white-space: nowrap;
 }
 .logo-badge.demo { color: var(--color-orange); border-color: rgba(245,158,11,0.4); background: rgba(245,158,11,0.08); }
 .logo-badge.live { color: var(--danger-light); border-color: rgba(239,68,68,0.45); background: rgba(239,68,68,0.1); }
 
-/* Zakladki silnikow (CRYPTO / EQUITY) - najwyzszy poziom nawigacji. */
-.engine-tabs { display: flex; gap: 8px; background: var(--bg-inset);
-  padding: 5px; border-radius: 999px; border: 1px solid var(--border-glass); }
-.engine-tab {
-  border: none; background: transparent; color: var(--text-muted); cursor: pointer;
-  font-family: var(--font-main); font-size: 0.86rem; font-weight: 600;
-  padding: 9px 20px; border-radius: 999px; transition: var(--transition-smooth);
-  display: flex; align-items: center; gap: 8px;
-}
-.engine-tab:hover { color: var(--text-main); }
-.engine-tab.active { background: var(--gradient-ai); color: #fff; box-shadow: 0 4px 16px rgba(124,58,237,0.35); }
-.engine-tab .dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; opacity: 0.85; }
-
-/* Nawigacja sekcji wewnatrz silnika. */
-.nav-tabs { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 4px; margin-bottom: 20px; }
+/* Nawigacja sekcji: pionowa lista z ikonami. */
+.nav-tabs { display: flex; flex-direction: column; gap: 4px; }
 .nav-tab {
+  display: flex; align-items: center; gap: 12px;
   border: 1px solid transparent; background: transparent; color: var(--text-muted);
-  cursor: pointer; font-family: var(--font-main); font-size: 0.85rem; font-weight: 500;
-  padding: 8px 15px; border-radius: var(--radius-sm); white-space: nowrap;
-  transition: var(--transition-smooth);
+  cursor: pointer; font-family: var(--font-main); font-size: 0.9rem; font-weight: 500;
+  padding: 10px 12px; border-radius: 10px; white-space: nowrap; text-align: left;
+  transition: color 0.2s, background-color 0.2s, border-color 0.2s;
 }
+.nav-tab .icon { flex: none; opacity: 0.85; }
 .nav-tab:hover { color: var(--text-main); background: rgba(255,255,255,0.04); }
-.nav-tab.active { color: var(--text-main); background: var(--bg-card); border-color: var(--border-glass-glow); }
+.nav-tab.active {
+  color: var(--text-main);
+  background: linear-gradient(90deg, rgba(139,92,246,0.16), rgba(255,255,255,0.04));
+  border-color: var(--border-glass-strong);
+}
+.nav-tab.active .icon { color: #c4b5fd; opacity: 1; }
+
+/* Pasek gorny: zakladki rynkow w ksztalcie tickerow + konto. */
+.topbar {
+  position: sticky; top: 0; z-index: 40;
+  display: flex; align-items: center; gap: 14px;
+  margin: 0 -24px 0; padding: 12px 24px;
+  background: rgba(6, 7, 13, 0.78);
+  backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+  border-bottom: 1px solid var(--border-glass);
+}
+.engine-tabs { display: flex; gap: 10px; min-width: 0; overflow-x: auto; scrollbar-width: none; }
+.engine-tabs::-webkit-scrollbar { display: none; }
+.engine-tab {
+  flex: none; display: inline-flex; align-items: center; gap: 9px;
+  border: 1px solid var(--border-glass); background: var(--bg-inset);
+  color: var(--text-muted); cursor: pointer;
+  font-family: var(--font-main); font-size: 0.86rem; font-weight: 500;
+  padding: 8px 14px 8px 9px; border-radius: 11px;
+  transition: border-color 0.2s, background-color 0.2s, color 0.2s;
+}
+.engine-tab:hover { color: var(--text-main); border-color: var(--border-glass-strong); }
+.engine-tab.active {
+  color: var(--text-main); background: rgba(139, 92, 246, 0.1);
+  border-color: rgba(167, 139, 250, 0.5);
+  box-shadow: 0 0 0 1px rgba(139, 92, 246, 0.15), 0 6px 22px -8px rgba(124, 58, 237, 0.6);
+}
+.engine-glyph {
+  width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center;
+  font-size: 0.78rem; font-weight: 700; color: #fff; flex: none;
+}
+.engine-glyph.crypto { background: #f7931a; }
+.engine-glyph.equity { background: #0891b2; }
+.engine-value { color: var(--text-main); font-weight: 500; }
+.engine-change { font-size: 0.82rem; }
+
+.page-head {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 8px 16px;
+  flex-wrap: wrap; margin: 22px 0 16px;
+}
+.page-title { font-family: var(--font-display); font-size: 1.45rem; font-weight: 600; letter-spacing: -0.015em; }
+.page-meta { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; font-size: 0.8rem; color: var(--text-dim); }
 
 /* ------------------------------------------------------------------ karty */
 .glass-card {
   background: var(--bg-card);
   backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
   border: 1px solid var(--border-glass);
+  background-image: var(--card-glow);
   border-radius: var(--radius-lg);
-  box-shadow: var(--shadow-glow);
-  padding: 20px;
-  transition: var(--transition-smooth);
-}
-.glass-card:hover {
-  background: var(--bg-card-hover);
-  border-color: rgba(255, 255, 255, 0.14);
-  transform: translateY(-2px);
-  box-shadow: var(--shadow-glow), 0 12px 32px rgba(124, 58, 237, 0.12);
+  box-shadow: var(--shadow-glow), inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  padding: 18px;
+  min-width: 0;
 }
 .glass-card.tight { padding: 16px; }
 
@@ -157,14 +215,15 @@ body::after  { bottom: 10%; right: 8%; background: var(--color-blue); }
 
 /* ------------------------------------------------------------------ statystyki */
 .stat { display: flex; flex-direction: column; gap: 5px; }
-.stat-label { font-size: 0.74rem; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.06em; font-weight: 600; }
-.stat-value { font-family: var(--font-mono); font-size: 1.5rem; font-weight: 500; letter-spacing: -0.02em; }
+.stat-label { font-size: 0.82rem; color: var(--text-muted); font-weight: 500; }
+.stat-value { font-family: var(--font-mono); font-size: 1.5rem; font-weight: 500; letter-spacing: -0.02em;
+              font-variant-numeric: tabular-nums; }
 .stat-value.sm { font-size: 1.15rem; }
 .stat-sub { font-size: 0.78rem; color: var(--text-muted); }
 .profit { color: var(--profit); }
 .loss { color: var(--loss); }
 .dim { color: var(--text-dim); }
-.mono { font-family: var(--font-mono); }
+.mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
 
 /* ------------------------------------------------------------------ znaczniki */
 .badge {
@@ -204,8 +263,8 @@ a.src-link:hover { text-decoration: underline; }
 /* ------------------------------------------------------------------ tabela */
 .table { width: 100%; border-collapse: collapse; font-size: 0.83rem; }
 .table th {
-  text-align: left; font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.06em;
-  color: var(--text-dim); font-weight: 600; padding: 8px 10px;
+  text-align: left; font-size: 0.74rem;
+  color: var(--text-dim); font-weight: 500; padding: 8px 10px; white-space: nowrap;
   border-bottom: 1px solid var(--border-glass);
 }
 .table td { padding: 9px 10px; border-bottom: 1px solid rgba(255,255,255,0.04); }
@@ -228,7 +287,7 @@ a.src-link:hover { text-decoration: underline; }
 .chart-legend .key { display: inline-flex; align-items: center; gap: 6px; }
 .chart-legend .swatch { width: 10px; height: 3px; border-radius: 2px; }
 
-.app-footer { text-align: center; margin-top: 40px; font-size: 0.78rem; color: var(--text-dim); }
+.app-footer { margin-top: auto; padding: 0 8px; font-size: 0.74rem; line-height: 1.6; color: var(--text-dim); }
 .app-footer a { color: var(--text-muted); text-decoration: none; }
 .app-footer a:hover { text-decoration: underline; }
 
@@ -322,7 +381,7 @@ a.src-link:hover { text-decoration: underline; }
 .login-legal a:hover { text-decoration: underline; }
 
 /* ------------------------------------------------------------------ pasek konta */
-.user-menu { display: flex; align-items: center; gap: 10px; }
+.user-menu { display: flex; align-items: center; gap: 10px; margin-left: auto; flex: none; }
 .user-chip {
   display: inline-flex; align-items: center; gap: 8px;
   font-size: 0.8rem; color: var(--text-muted);
@@ -416,7 +475,7 @@ select.input-field option { background: var(--bg-dark); color: var(--text-main);
   position: relative;
   background: var(--bg-inset); border: 1px solid var(--border-glass);
   border-radius: var(--radius-sm); cursor: pointer;
-  font-size: 1rem; line-height: 1; padding: 9px 12px;
+  color: var(--text-muted); line-height: 0; padding: 8px 10px;
   transition: var(--transition-smooth);
 }
 .bell-btn:hover { border-color: var(--border-glass-strong); background: var(--bg-card-hover); }
@@ -560,3 +619,173 @@ select.input-field option { background: var(--bg-dark); color: var(--text-main);
 }
 .logo-badge.bad { color: var(--danger-light); border-color: rgba(239,68,68,0.45); background: rgba(239,68,68,0.1); }
 .logo-badge.muted { opacity: 0.55; }
+
+/* ------------------------------------------------------------------ pulpit "Stan"
+   Siatka jak w makiecie: kolumna kafli kapitalu | wykres | stan silnika,
+   pod spodem zlecenia, pozycje, metryki. Obszary nazwane, zeby kolejnosc na
+   telefonie dalo sie ustawic bez zmiany JSX. */
+.dash {
+  display: grid; gap: 16px;
+  grid-template-columns: minmax(230px, 280px) minmax(0, 1fr) minmax(0, 1fr) minmax(230px, 290px);
+  grid-template-areas:
+    "stats chart     chart  side"
+    "stats orders positions risk";
+}
+.dash-stats     { grid-area: stats; display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+.dash-chart     { grid-area: chart; }
+.dash-side      { grid-area: side; }
+.dash-orders    { grid-area: orders; }
+.dash-positions { grid-area: positions; }
+.dash-risk      { grid-area: risk; }
+.dash-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.dash-pair .stat-value { font-size: 1.25rem; }
+
+@media (max-width: 1280px) {
+  .dash {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    grid-template-areas:
+      "chart  chart"
+      "stats  side"
+      "orders positions"
+      "risk   risk";
+  }
+}
+@media (max-width: 720px) {
+  .dash {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas: "stats" "chart" "side" "positions" "orders" "risk";
+  }
+}
+
+.stat-value.lg { font-size: 1.85rem; }
+.stat-value.sm { font-size: 1.1rem; }
+.stat-label { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.glass-card.accent {
+  background-image: radial-gradient(140% 120px at 0% 0%, rgba(139, 92, 246, 0.3) 0%, rgba(139, 92, 246, 0) 72%);
+  border-color: rgba(167, 139, 250, 0.22);
+}
+.glass-card.tint-profit {
+  background-image: linear-gradient(160deg, rgba(52, 211, 153, 0.14), rgba(52, 211, 153, 0.02) 70%);
+  border-color: rgba(52, 211, 153, 0.3);
+}
+.glass-card.tint-loss {
+  background-image: linear-gradient(160deg, rgba(248, 113, 113, 0.14), rgba(248, 113, 113, 0.02) 70%);
+  border-color: rgba(248, 113, 113, 0.3);
+}
+
+/* Pigulka statusu / wyniku. `solid` = pelne tlo, jak PnL w makiecie. */
+.pill {
+  display: inline-flex; align-items: center; flex: none;
+  font-size: 0.76rem; font-weight: 500; line-height: 1;
+  padding: 5px 9px; border-radius: 7px;
+  background: rgba(255, 255, 255, 0.07); color: var(--text-muted);
+  border: 1px solid var(--border-glass);
+  font-family: var(--font-mono); font-variant-numeric: tabular-nums;
+}
+.pill.profit { color: var(--profit); background: rgba(52, 211, 153, 0.1); border-color: rgba(52, 211, 153, 0.28); }
+.pill.loss   { color: var(--loss);   background: rgba(248, 113, 113, 0.1); border-color: rgba(248, 113, 113, 0.28); }
+.pill.solid.profit { color: #052e1f; background: var(--profit); border-color: transparent; font-weight: 600; }
+.pill.solid.loss   { color: #3b0a0a; background: var(--loss);   border-color: transparent; font-weight: 600; }
+
+.chart-head { display: inline-flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+.chart-head-value { font-size: 1.15rem; font-weight: 500; color: var(--profit); }
+.chart-sub { display: block; margin: -8px 0 10px; font-size: 0.74rem; color: var(--text-dim); }
+
+.segmented {
+  display: inline-flex; gap: 2px; padding: 3px; flex: none;
+  background: var(--bg-inset); border: 1px solid var(--border-glass); border-radius: 9px;
+}
+.segmented button {
+  border: none; background: transparent; color: var(--text-dim); cursor: pointer;
+  font-family: var(--font-mono); font-size: 0.75rem; padding: 5px 10px; border-radius: 6px;
+}
+.segmented button:hover { color: var(--text-main); }
+.segmented button.on { background: rgba(255, 255, 255, 0.09); color: var(--text-main); }
+
+.tile-stack { display: flex; flex-direction: column; gap: 10px; }
+.row-item.tile { padding: 14px; }
+
+/* Lista "wiersz - pigulka" dla zlecen i pozycji: miesci sie w waskiej karcie
+   bez poziomego przewijania, w przeciwienstwie do pieciokolumnowej tabeli. */
+.line-list { display: flex; flex-direction: column; max-height: 300px; overflow-y: auto; }
+.line-head, .line {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+}
+.line-head { font-size: 0.76rem; color: var(--text-dim); padding: 0 0 8px; border-bottom: 1px solid var(--border-glass); }
+.line { padding: 10px 0; border-bottom: 1px solid rgba(255, 255, 255, 0.05); font-size: 0.86rem; }
+.line:last-child { border-bottom: none; }
+.line-main { min-width: 0; }
+.line-main strong { font-weight: 600; }
+.line-sub { display: block; margin-top: 3px; font-size: 0.75rem; color: var(--text-dim);
+            overflow-wrap: anywhere; }
+
+.kv { display: flex; flex-direction: column; }
+.kv > div {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 12px;
+  padding: 9px 0; border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+.kv > div:last-child { border-bottom: none; }
+.kv dt { font-size: 0.86rem; color: var(--text-muted); }
+.kv dd { font-size: 0.9rem; text-align: right; }
+
+.btn-logout { display: inline-flex; align-items: center; gap: 7px; }
+
+/* ------------------------------------------------------------------ telefon */
+@media (max-width: 900px) {
+  .app-container.shell { grid-template-columns: minmax(0, 1fr); }
+  .main { padding: 0 16px calc(84px + env(safe-area-inset-bottom)); }
+  .topbar { margin: 0 -16px; padding: 10px 16px; flex-wrap: wrap; row-gap: 10px; }
+  .brand-compact { display: flex; padding: 0; }
+  .brand-compact .logo-icon { width: 30px; height: 30px; }
+  .user-menu { gap: 6px; }
+  .user-chip { padding: 4px 6px; }
+  .user-login, .user-chip .avatar, .btn-logout span { display: none; }
+  .btn-logout { padding: 8px 10px; }
+  /* Rynki w osobnym wierszu: dwie rowne kolumny, wartosc nad zmiana. Nazwa
+     rynku zostaje dla czytnika ekranu (glif jest aria-hidden). */
+  .topbar .engine-tabs { order: 3; flex: 1 0 100%; display: grid;
+                         grid-auto-columns: minmax(150px, 1fr); grid-auto-flow: column; gap: 8px; }
+  .engine-tab { position: relative; display: grid; grid-template-columns: auto minmax(0, 1fr); column-gap: 9px;
+                padding: 7px 10px 7px 8px; text-align: left; }
+  .engine-glyph { grid-row: span 2; }
+  .engine-name { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+  .engine-value { font-size: 0.8rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .engine-change { font-size: 0.74rem; }
+  .card-title { flex-wrap: wrap; }
+
+  /* Pasek boczny -> dolny pasek z zakladkami. */
+  .sidebar {
+    position: fixed; top: auto; bottom: 0; left: 0; right: 0; z-index: 50;
+    height: auto; padding: 6px 8px calc(6px + env(safe-area-inset-bottom));
+    border-right: none; border-top: 1px solid var(--border-glass);
+    background: rgba(8, 9, 17, 0.94);
+  }
+  .sidebar .brand, .sidebar .app-footer { display: none; }
+  .nav-tabs { flex-direction: row; overflow-x: auto; scrollbar-width: none; gap: 2px; }
+  .nav-tabs::-webkit-scrollbar { display: none; }
+  /* Siedem zakladek nie miesci sie na 375 px - wygaszona prawa krawedz mowi
+     "przewin", zamiast udawac, ze Ustawien i Profilu nie ma. */
+  .nav-tabs {
+    -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 24px), transparent);
+            mask-image: linear-gradient(to right, #000 calc(100% - 24px), transparent);
+    padding-right: 16px;
+  }
+  .nav-tab {
+    flex: 1 0 auto; flex-direction: column; gap: 3px;
+    font-size: 0.68rem; padding: 6px 10px; min-width: 64px; text-align: center;
+  }
+  .nav-tab.active { background: rgba(139, 92, 246, 0.14); }
+  .page-head { margin: 16px 0 12px; }
+  .page-title { font-size: 1.25rem; }
+}
+@media (max-width: 420px) {
+  .stat-value.lg { font-size: 1.6rem; }
+  .brand-compact .logo-text { display: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important; animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important; scroll-behavior: auto !important;
+  }
+}

@@ -2,6 +2,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { get, post } from '../utils/api';
 import { fmtAgo } from '../utils/format';
+import Icon from './Icon';
 
 const TONE = { critical: 'bad', warning: 'warn', info: 'info' };
 
@@ -88,7 +89,7 @@ export default function Bell() {
       <button className="bell-btn" onClick={toggle}
               aria-label={countErr ? 'Powiadomienia — licznik nieznany' : 'Powiadomienia'}
               aria-expanded={open}>
-        <span aria-hidden="true">🔔</span>
+        <Icon name="bell" size={18} />
         {countErr ? (
           /* Plakietka stanu NIEZNANEGO zamiast jej schowania. Schowana znaczy
              "zero", a zera tu nikt nie zmierzył. */
