@@ -26,6 +26,63 @@ function Stat({ label, value, sub, tone, size, card = '', pill }) {
   );
 }
 
+/* STAN UCZENIA, ZWIJANY.
+
+   `learning_reason` pisze trener (train.py, `reason`) i na produkcji ma
+   kilkanascie zdan: werdykt z przesuniec siatki, przedzial ufnosci, skala
+   ekspozycji, DSR z karta kosztu, liste blokujacych kryteriow, wstrzymana
+   promocje. Rozwiniety na stale wydluzal karte "Stan silnika" tak, ze obok
+   krzywej kapitalu zostawalo puste pole. Domyslnie widac wiec status i jedno
+   zdanie podsumowania; pelna tresc - bez skrotow i bez zmian - po rozwinieciu.
+
+   Podsumowanie to okna dodatnie z /learning/state, gdy sa zmierzone. Bez nich
+   pokazujemy poczatek samego `reason` (przyciety CSS-em do dwoch linii), a nie
+   wymyslone zdanie. Rozwiniecie pamieta przegladarka - tylko jako wygoda;
+   bez localStorage karta po prostu startuje zwinieta. */
+const KLUCZ_ROZWINIECIA = 'trader_stan_uczenia_rozwiniety';
+
+function czytajRozwiniecie() {
+  try { return window.localStorage.getItem(KLUCZ_ROZWINIECIA) === '1'; } catch { return false; }
+}
+
+function LearningTile({ status, reason, state }) {
+  const [open, setOpen] = useState(czytajRozwiniecie);
+  const toggle = () => {
+    const next = !open;
+    setOpen(next);
+    try { window.localStorage.setItem(KLUCZ_ROZWINIECIA, next ? '1' : '0'); } catch { /* bez pamieci */ }
+  };
+  const windows = state?.windows_total != null
+    ? `Okna dodatnie ${state.windows_positive}/${state.windows_total} (${fmtNum(state.windows_positive_pct, 1)}%)`
+    : null;
+  const bodyId = 'stan-uczenia-tresc';
+
+  return (
+    <div className="row-item tile">
+      <div className="row-head">
+        <span className="row-title">Stan uczenia</span>
+        <span className={`badge ${STATE_TONE[status] || 'info'}`}>
+          {STATE_PL[status] || '—'}
+        </span>
+      </div>
+      {!open && (windows
+        ? <div className="row-meta"><span className="mono">{windows}</span></div>
+        : reason && <div className="row-body clamp-2">{reason}</div>)}
+      {/* Przycisk NAD trescia: po rozwinieciu karta przewija sie w srodku,
+          wiec "Zwin" pod dlugim tekstem lezalby poza widokiem. */}
+      {reason && (
+        <>
+          <button type="button" className="btn-disclose" aria-expanded={open}
+                  aria-controls={open ? bodyId : undefined} onClick={toggle}>
+            {open ? 'Zwiń' : 'Pokaż szczegóły'}
+          </button>
+          {open && <div className="row-body" id={bodyId}>{reason}</div>}
+        </>
+      )}
+    </div>
+  );
+}
+
 /* Zakres krzywej kapitalu. To dni historii, nie interwal swiecy - API oddaje
    punkty kapitalu, nie swiece OHLC. */
 const RANGES = [7, 45, 90];
@@ -179,15 +236,7 @@ export default function Overview({ engine }) {
               )}
             </div>
 
-            <div className="row-item tile">
-              <div className="row-head">
-                <span className="row-title">Stan uczenia</span>
-                <span className={`badge ${STATE_TONE[o?.learning_status] || 'info'}`}>
-                  {STATE_PL[o?.learning_status] || '—'}
-                </span>
-              </div>
-              {o?.learning_reason && <div className="row-body">{o.learning_reason}</div>}
-            </div>
+            <LearningTile status={o?.learning_status} reason={o?.learning_reason} state={s} />
           </div>
         </div>
 
