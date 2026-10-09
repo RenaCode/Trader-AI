@@ -37,7 +37,7 @@ api:
 web:
   image:
     repository: ghcr.io/renacode/trader-ai-web
-    tag: "sha-e7fa421"
+    tag: "sha-d775e2a"
     pullPolicy: IfNotPresent
   resources:
     limits:   { cpu: 200m, memory: 256Mi }
