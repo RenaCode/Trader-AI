@@ -300,6 +300,12 @@ jobs:
     permissions:
       contents: write
     needs: [changes, build]
+    # `always()` KONIECZNE (2026-10-09): `build` zalezy od verify-migrations,
+    # pomijanej, gdy zmiana nie dotyka api. GitHub przenosi „skipped" przodka
+    # na kazdy job bez always(), wiec przy zmianie SAMEGO web/ ten job byl
+    # pomijany, tag sie nie podbijal i nowy front nigdy nie wchodzil na produkcje
+    # (UI z #11 zbudowany, trader-web dalej na starym obrazie).
+    if: always() && needs.changes.result == 'success' && needs.build.result == 'success'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5

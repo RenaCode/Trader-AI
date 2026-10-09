@@ -94,3 +94,16 @@ def test_reczne_budowanie_na_serwerze_zniknelo_razem_z_odwolaniami():
                 f"{plik}:{nr} każe uruchomić skrypt, którego już nie ma — "
                 f"wysyła człowieka na serwer po ścieżkę usuniętą 2026-09-24: "
                 f"{linia.strip()}")
+
+
+def test_podbicie_tagu_dziala_takze_przy_zmianie_samego_web():
+    """Regresja 2026-10-09: `build` zalezy od verify-migrations, a ta jest
+    pomijana bez zmian w api. GitHub przenosi „skipped" przodka na kazdy job
+    BEZ always() — update-git byl wtedy pomijany i zmiana samego frontu nigdy
+    nie trafiala na produkcje (obraz zbudowany, tag w values.yaml stary)."""
+    job = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))["jobs"]["update-git"]
+    warunek = str(job.get("if", ""))
+    assert "always()" in warunek, "bez always() pominiety przodek blokuje podbicie tagu"
+    # always() samo przepuscilo by tez nieudany build — tag wskazalby obraz,
+    # ktorego nie ma.
+    assert "needs.build.result == 'success'" in warunek
