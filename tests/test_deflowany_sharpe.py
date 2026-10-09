@@ -676,3 +676,75 @@ def test_opis_podaje_ZRODLO_N_i_zastrzezenie_o_dolnej_granicy():
     assert "N = 57 rozróżnialnych konfiguracji z learn.model_version" in opis
     assert "DOLNA GRANICA" in opis
     assert "12613" in opis and "NIE jest tu mianownikiem" in opis
+
+
+# ------------------------- T niezależnych obserwacji (audyt 2026-10-09, W-2)
+
+def _proba_skorelowana(seed=7, swiec=60, na_swiece=8):
+    """Transakcje w grupach po świecy wejścia: wspólny szok rynkowy + szum
+    własny. Tak wygląda próba OOS, w której kilkanaście par wchodzi na tej
+    samej świecy 4h."""
+    r = random.Random(seed)
+    zwroty, wejscia = [], []
+    for c in range(swiec):
+        szok = r.gauss(0.003, 0.01)
+        for _ in range(na_swiece):
+            zwroty.append(szok + r.gauss(0, 0.004))
+            wejscia.append(f"2026-09-{c:03d}")
+    return zwroty, wejscia
+
+
+def test_kontrola_bez_swiec_wejscia_POWIELENIE_podnosi_DSR():
+    """Wada z audytu: ta sama próba ×2, ×3 (zero nowej informacji) podnosiła
+    DSR, bo T rosło z liczbą wierszy. Bez tej kontroli test niżej przechodziłby
+    także na próbie, na której DSR i tak nie reaguje na T."""
+    zwroty, _ = _proba_skorelowana()
+    d1 = przewaga_dsr(zwroty, 17)["dsr"]
+    d3 = przewaga_dsr(zwroty * 3, 17)["dsr"]
+    assert d3 > d1 + 0.05
+
+
+def test_POWIELONA_proba_NIE_podnosi_DSR():
+    """Audyt 2026-10-09, W-2: od DSR zależy `validated`, więc strategia
+    handlująca szerzej nie może przechodzić bramki samym powieleniem
+    skorelowanych transakcji."""
+    zwroty, wejscia = _proba_skorelowana()
+    baza = przewaga_dsr(zwroty, 17, None, wejscia)
+    assert baza["n_efektywne"] == 60 and baza["n_obserwacji"] == 480
+    for k in (2, 3):
+        w = przewaga_dsr(zwroty * k, 17, None, wejscia * k)
+        assert w["n_efektywne"] == 60
+        # Tolerancja: odchylenie próbkowe z n-1 drga przy powieleniu o ~1e-4.
+        assert w["dsr"] <= baza["dsr"] + 1e-3, (k, w["dsr"], baza["dsr"])
+
+
+def test_transakcje_na_ROZNYCH_swiecach_licza_sie_jak_przed_poprawka():
+    """Próba bez skupień nie traci nic: T = liczba transakcji."""
+    zwroty, _ = _proba_skorelowana(swiec=300, na_swiece=1)
+    rozne = [f"s{i}" for i in range(len(zwroty))]
+    assert przewaga_dsr(zwroty, 17, None, rozne)["dsr"] == pytest.approx(
+        przewaga_dsr(zwroty, 17)["dsr"])
+
+
+def test_wejscia_niezgodne_ze_zwrotami_to_blad_nie_cicha_zgadywanka():
+    with pytest.raises(ValueError):
+        przewaga_dsr([0.01, 0.02, -0.01], 17, None, ["a", "b"])
+
+
+def test_werdykt_przebiegu_liczy_DSR_po_swiecach_wejscia():
+    """Skład w `werdykt`: `Przebieg.wejscia_transakcji` idzie do DSR razem
+    z `wszystkie_zwroty`."""
+    import services.engine.train as tr
+    zwroty, wejscia = _proba_skorelowana()
+
+    def status(k):
+        z = tr.Przebieg()
+        z.all_sharpes = [0.1] * 30
+        z.positive = 30
+        z.wszystkie_zwroty = zwroty * k
+        z.wejscia_transakcji = wejscia * k
+        return tr.werdykt(z, karta=karta_rundy("spot_eu", True, spread_bps=0.0), n=17,
+                          trials=1, sd_prob=None, konfiguracji_z_oos=0)
+    w1, w3 = status(1), status(3)
+    assert w3.dsr <= w1.dsr + 1e-3
+    assert "na 60 różnych świecach wejścia" in w1.opis_dsr

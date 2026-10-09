@@ -696,13 +696,19 @@ class AlpacaAdapter:
         # arkusza (`gielda_exec.zloz_plan`), zeby miedzy arkuszem a POST-em nie
         # stalo zadne zapytanie. Drugie sprawdzenie tutaj wstawialoby z powrotem
         # te sekundy, przez ktore cena PostOnly przestaje byc pasywna.
+        # STRONA BEZ ZGADYWANIA (audyt 2026-10-09, N-4), jak `bybit._strona_bybita`:
+        # `else "sell"` zamienialo literowke albo "Long" w zlecenie w PRZECIWNA
+        # strone - i to zanim pojdzie jakiekolwiek zapytanie, ktorego nie da sie cofnac.
+        side = strona.strip().lower()
+        if side not in ("buy", "sell"):
+            raise ValueError(f"nieznana strona zlecenia: {strona!r}")
         if not istnienie_sprawdzone:
             istnieje = await self.stan_zlecenia(id_wlasne)
             if istnieje is not None:
                 return ZlozoneZlecenie(id_wlasne=id_wlasne, id_gieldy=istnieje.id_gieldy,
                                        status=istnieje.status, juz_istnialo=True)
         body = {"symbol": symbol, "qty": str(ilosc),
-                "side": "buy" if strona.lower() == "buy" else "sell",
+                "side": side,
                 "type": "market" if rynkowe else "limit",
                 "time_in_force": time_in_force,
                 "client_order_id": id_wlasne}

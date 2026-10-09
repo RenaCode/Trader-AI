@@ -611,16 +611,34 @@ async def totp_confirm(body: TotpConfirmBody, request: Request,
     from ..security import SecretBox
 
     row = await fetch_one(
-        "SELECT secret_enc, last_step FROM app.totp_secret WHERE user_id = %s", (user["id"],))
+        "SELECT secret_enc, last_step, confirmed_at FROM app.totp_secret"
+        " WHERE user_id = %s", (user["id"],))
     if not row:
         raise HTTPException(status_code=404, detail="Najpierw uruchom konfiguracje")
+    # JUZ WLACZONE = 409, A NIE NOWE KODY ZAPASOWE (audyt 2026-10-09, S-9).
+    # Do tej poprawki potwierdzenie przy wlaczonym TOTP kasowalo kody zapasowe
+    # i oddawalo 10 nowych - a te zwalniaja kill-switch i wylaczaja TOTP.
+    # Przejeta sesja z haslem i aplikacja wlasciciela pod reka nie potrzebowala
+    # niczego wiecej. `totp_setup` ma to samo 409, wiec reset sekretu tez nie
+    # otwiera tej drogi.
+    if row.get("confirmed_at"):
+        raise HTTPException(status_code=409, detail="Drugi skladnik jest juz wlaczony")
     step = verify_totp(SecretBox().decrypt(bytes(row["secret_enc"])), body.code,
                        last_step=row["last_step"])
     if step is None:
+        # POMYLKA LICZY SIE jak przy hasle i przy kodzie w zalogowanej sesji
+        # (`potwierdz_kod_totp`). Bez tego 200 blednych kodow nie zostawialo
+        # sladu w `failed_logins`, a jedynym hamulcem byl limit Traefika.
+        await _odnotuj_bledne_ponowne(user, request, "auth.totp_confirm")
         raise HTTPException(status_code=401, detail="Kod nie pasuje - sprawdz zegar urzadzenia")
 
-    await execute("UPDATE app.totp_secret SET confirmed_at = now(), last_step = %s"
-                  " WHERE user_id = %s", (step, user["id"]))
+    # Warunkowo: dwa rownolegle potwierdzenia nie wydadza dwoch kompletow kodow.
+    potwierdzone = await fetch_one(
+        "UPDATE app.totp_secret SET confirmed_at = now(), last_step = %s"
+        " WHERE user_id = %s AND confirmed_at IS NULL RETURNING user_id",
+        (step, user["id"]))
+    if not potwierdzone:
+        raise HTTPException(status_code=409, detail="Drugi skladnik jest juz wlaczony")
     await execute("DELETE FROM app.backup_code WHERE user_id = %s", (user["id"],))
 
     codes = new_backup_codes()

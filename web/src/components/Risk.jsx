@@ -38,11 +38,13 @@ const WZNOWIENIE_PL = {
    i formularz zwolnienia znikal, choc bezpiecznik dalej dzialal. 100 to gorna
    granica przyjmowana przez API. */
 const KS_LIMIT = 100;
+// `limit_name` recznego zatrzymania - `LIMIT_RECZNY` w services/api/routers/risk.py.
+const LIMIT_RECZNY = 'reczny';
 
 /* ZWOLNIENIE Z HASLEM - zwolnienie wznawia handel, wiec przejety cookie sesji
    nie moze go wystarczyc (przeglad 2026-10-04). Pomylki licza sie razem
    z logowaniem i blokuja konto, tak jak zmiana hasla. */
-function ZwolnijKillSwitch({ engine, zdarzenie, onZwolniony }) {
+function ZwolnijKillSwitch({ engine, zdarzenie, regula, recznePrzytrzymuje, onZwolniony }) {
   const [note, setNote] = useState('');
   const [haslo, setHaslo] = useState('');
   const [kod, setKod] = useState('');
@@ -52,9 +54,24 @@ function ZwolnijKillSwitch({ engine, zdarzenie, onZwolniony }) {
   return (
     <div className="notice">
       <strong>Kill-switch aktywny.</strong> {zdarzenie.reason} — uruchomiony{' '}
-      {fmtAgo(zdarzenie.triggered_at)}.
-      Odblokowanie wymaga ręcznego potwierdzenia; automatyczne wznowienie po obsunięciu
-      kapitału jest najprostszą drogą do powtórzenia tej samej straty.
+      {fmtAgo(zdarzenie.triggered_at)}.{' '}
+      {/* Automat z regula wznowienia zwalnia sie SAM (wznowienie.py) - napis
+          "wymaga recznego potwierdzenia" byl przy nim nieprawda (audyt
+          2026-10-09, W-1). */}
+      {regula && regula !== 'reczne' && !recznePrzytrzymuje ? (
+        <>
+          <strong>Ten limit zwolni się sam</strong>, gdy warunek ustanie
+          ({WZNOWIENIE_PL[regula]?.etykieta || regula}). Żeby trzymać handel zatrzymany
+          do przeglądu, włącz ręczny kill-switch poniżej — automat nie zdejmuje ręcznego.
+        </>
+      ) : regula && regula !== 'reczne' ? (
+        <>Automatyczne wznowienie wstrzymane — trzyma ręczne zatrzymanie.</>
+      ) : (
+        <>
+          Odblokowanie wymaga ręcznego potwierdzenia; automatyczne wznowienie po obsunięciu
+          kapitału jest najprostszą drogą do powtórzenia tej samej straty.
+        </>
+      )}
 
       <div style={{ marginTop: 12 }}>
         <label className="field" style={{ marginBottom: 8 }}>
@@ -114,7 +131,7 @@ function ZwolnijKillSwitch({ engine, zdarzenie, onZwolniony }) {
    Formularz jest zwiniety za przyciskiem z powodem: zatrzymanie handlu nie moze
    byc jednym przypadkowym kliknieciem. Tryb (demo/live) wybiera serwer z pulsu
    silnika. */
-function WlaczKillSwitch({ engine, onWlaczony }) {
+function WlaczKillSwitch({ engine, automatTrzyma, reczneJuz, onWlaczony }) {
   const [otwarty, setOtwarty] = useState(false);
   const [powod, setPowod] = useState('');
   const [busy, setBusy] = useState(false);
@@ -129,6 +146,16 @@ function WlaczKillSwitch({ engine, onWlaczony }) {
           Ręczny kill-switch
           <span className="hint">zatrzymuje otwieranie pozycji do ręcznego zwolnienia</span>
         </div>
+        {reczneJuz ? (
+          <p className="hint" style={{ marginTop: 0 }}>
+            Ręczne zatrzymanie już trzyma silnik — kolejne niczego nie zmieni.
+          </p>
+        ) : automatTrzyma ? (
+          <p className="hint" style={{ marginTop: 0 }}>
+            Silnik trzyma teraz limit automatyczny, który może zwolnić się sam. Ręczne
+            zatrzymanie ma pierwszeństwo: automat nie wznowi handlu, dopóki je zwolnisz.
+          </p>
+        ) : null}
         <button className="btn" onClick={() => setOtwarty(true)}>Zatrzymaj handel…</button>
       </div>
     );
@@ -185,6 +212,7 @@ export default function Risk({ engine }) {
 
   const ksLista = ks.data || [];
   const active = ksLista.filter((k) => k.active);
+  const reczneAktywne = active.some((k) => k.limit_name === LIMIT_RECZNY);
   // Odpowiedz doklejona do limitu moze ukrywac starsze zdarzenia, w tym aktywne.
   const ksUciete = ksLista.length >= KS_LIMIT;
 
@@ -204,14 +232,21 @@ export default function Risk({ engine }) {
     <div className="grid" style={{ gap: 16 }}>
       {active.map((k) => (
         <ZwolnijKillSwitch key={k.id} engine={engine} zdarzenie={k}
+                           regula={k.limit_name === LIMIT_RECZNY ? null
+                             : (limits.data || []).find((l) => l.name === k.limit_name)?.wznowienie}
+                           recznePrzytrzymuje={reczneAktywne}
                            onZwolniony={() => ks.reload?.()} />
       ))}
 
-      {/* Tylko przy pewnym stanie: bez odczytu historii nie wiadomo, czy
-          bezpiecznik juz trzyma silnik (API i tak odpowie 409). */}
-      {ks.data && !ks.error && active.length === 0 && (
-        <WlaczKillSwitch engine={engine} onWlaczony={() => ks.reload?.()} />
-      )}
+      {/* ZAWSZE, w kazdym stanie (audyt 2026-10-09, W-1). Do tej poprawki
+          przycisk byl tylko przy `active.length === 0`, a API odpowiadalo 409
+          przy kazdym aktywnym zdarzeniu - wiec przy zadzialanym automacie
+          wlasciciel nie mial jak zatrzymac handlu do przegladu, a automat po
+          karencji sam go wznawial. Teraz reczne to osobny wiersz z
+          pierwszenstwem, a API przyjmuje je takze przy nieudanym odczycie
+          historii (drugie reczne nie dopisuje wiersza). */}
+      <WlaczKillSwitch engine={engine} automatTrzyma={active.length > 0 && !reczneAktywne}
+                       reczneJuz={reczneAktywne} onWlaczony={() => ks.reload?.()} />
 
       {active.length === 0 && ksUciete && (
         <div className="notice">

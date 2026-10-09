@@ -46,6 +46,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from services.engine import stan_kapitalu  # noqa: E402
 
+# `limit_name` recznego zatrzymania z panelu - ta sama wartosc co
+# `services/api/routers/risk.py:LIMIT_RECZNY` (silnik nie importuje routerow).
+#
+# RECZNE MA PIERWSZENSTWO (audyt 2026-10-09, W-1). Dopoki aktywne jest reczne
+# zatrzymanie, ta funkcja nie zwalnia NICZEGO - takze automatu, ktorego warunek
+# juz ustal. Zwolnienie samego automatu przy trzymajacym recznym nie wznowiloby
+# handlu (silnik stoi przy kazdym aktywnym wierszu), ale wyslaloby krytyczne
+# "Kill-switch zwolniony AUTOMATYCZNIE - silnik wraca do handlu", czyli
+# nieprawde, a po recznym zwolnieniu wlasciciel nie mialby juz czego ocenic.
+LIMIT_RECZNY = "reczny"
+
 # Minimalny czas od zadzialania. Nie jest to warunek wznowienia - jest to
 # warunek ROZWAZANIA wznowienia. Sam uplyw czasu niczego nie dowodzi.
 KARENCJA_MIN = int(os.environ.get("WZNOWIENIE_KARENCJA_MIN", "60"))
@@ -217,6 +228,14 @@ async def wznow(fetch_all, fetch_one, execute, notify, engine: str = "crypto",
         " ORDER BY k.triggered_at", (engine, mode))
     if not zdarzenia:
         dz.stan("wznowienie", "brak", "wznowienie: brak aktywnych kill-switchy")
+        return 0
+
+    reczne = [z for z in zdarzenia if z["limit_name"] == LIMIT_RECZNY]
+    if reczne:
+        ids = ",".join(str(z["id"]) for z in reczne)
+        dz.stan("wznowienie", f"reczne:{ids}",
+                f"wznowienie: aktywne RĘCZNE zatrzymanie (id={ids}) — automat nie "
+                f"zwalnia żadnego z {len(zdarzenia)} zdarzeń do jego zwolnienia")
         return 0
 
     stan = await stan_konta(fetch_one, engine, mode)

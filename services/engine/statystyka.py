@@ -338,8 +338,20 @@ def oczekiwany_maksymalny_sharpe(n_prob: int,
         + GAMMA_EULERA * _N01.inv_cdf(1 - 1 / (n_prob * math.e)))
 
 
+def liczba_niezaleznych(klucze: list) -> int:
+    """Ile NIEZALEZNYCH obserwacji jest w probie, ktorej obserwacje skupiaja sie
+    w grupach o wspolnym szoku (np. transakcje otwarte na tej samej swiecy).
+    CZYSTA FUNKCJA. Liczba roznych kluczy.
+
+    To jest gorna granica korelacji wewnatrz grupy (rho = 1): grupa liczy sie
+    jako jedna obserwacja niezaleznie od liczebnosci. Uzasadnienie wyboru przy
+    `deflowany_sharpe` (argument `n_efektywne`)."""
+    return len(set(klucze))
+
+
 def deflowany_sharpe(zwroty: list[float], n_prob: int,
-                     odchylenie_prob: float | None = None) -> dict:
+                     odchylenie_prob: float | None = None,
+                     n_efektywne: int | None = None) -> dict:
     """Deflowany Sharpe (Bailey, Lopez de Prado 2014). CZYSTA FUNKCJA.
 
     Odpowiada na pytanie, na ktore sam Sharpe nie odpowiada: jakie jest
@@ -406,9 +418,42 @@ def deflowany_sharpe(zwroty: list[float], n_prob: int,
     Zwraca SLOWNIK ZAWSZE, z `dsr = None` i wypelnionym `powod`, gdy nie ma
     czego liczyc. Bramka ma wtedy WSTRZYMAC promocje, a nie przepuscic ja -
     patrz `train.bramka_dsr`.
+
+    `n_efektywne` - T W PIERWIASTKU TO LICZBA NIEZALEZNYCH OBSERWACJI, NIE WIERSZY
+    (audyt 2026-10-09, W-2).
+
+    Wzor zaklada T niezaleznych zwrotow: blad standardowy Sharpe'a maleje jak
+    1/sqrt(T-1). Transakcje OOS nie sa niezalezne - kilkanascie par krypto
+    otwieranych na tej samej swiecy 4h niesie jeden szok rynkowy (korelacja
+    par ok. 0,8, `train.py` przy `n_trades`). Z T rownym liczbie transakcji
+    strategia, ktora handluje SZERZEJ, przechodzi bramke latwiej, choc w zadnym
+    oknie nie jest lepsza: ta sama proba 500 transakcji powielona x2 i x3 (zero
+    nowej informacji) dawala DSR 0,8875 -> 0,9949 -> 0,9998.
+
+    Dlatego T = `n_efektywne`, gdy podane - w `train` liczba ROZNYCH SWIEC
+    WEJSCIA (`liczba_niezaleznych`). Dlaczego ta miara, a nie inna:
+      * powielenie proby jej nie zmienia (duplikat ma te sama swiece), wiec
+        powielenie nie podnosi DSR - to jest test regresji;
+      * jest gorna granica korelacji w swiecy (rho = 1). Przy rho ~ 0,8 i m
+        transakcjach w swiecy prawdziwe T_eff = n / (1 + (m-1)*rho) wychodzi
+        najwyzej ok. 1/rho = 1,25x wiecej - blad w strone OSTROZNIEJSZEJ bramki,
+        jedynej dopuszczalnej. Estymacja rho z proby (ICC) przy kilku-
+        kilkunastu transakcjach na swiece ma rozrzut wiekszy niz ta roznica,
+        a pomylka w dol ULATWIALABY bramke;
+      * okna testowe walk-forward sa ROZLACZNE, wiec swiece wejscia nie
+        powtarzaja sie miedzy oknami (nakladanie 29/30 dotyczy okien
+        TRENINGOWYCH, nie testowych);
+      * NIE koryguje autokorelacji szeregowej (pozycje trzymane przez kilka
+        swiec nakladaja sie w czasie). Ta zostaje i dziala w te sama strone:
+        prawdziwe T jest jeszcze mniejsze.
+    Sharpe, skosnosc i kurtoza zostaja liczone NA TRANSAKCJE - to ta sama
+    jednostka, w ktorej mierzony jest rozrzut konfiguracji (`odchylenie_prob`)
+    i w ktorej bramka ma prog. Zmienia sie wylacznie liczba obserwacji.
     """
+    t_obs = len(zwroty) if n_efektywne is None else min(n_efektywne, len(zwroty))
     wynik = {"dsr": None, "sharpe": None, "prog": None, "skosnosc": None,
              "kurtoza": None, "n_obserwacji": len(zwroty), "n_prob": n_prob,
+             "n_efektywne": t_obs,
              "odchylenie_prob": odchylenie_prob,
              # CZY TO POMIAR, CZY PODSTAWIENIE - NAZWANE, NIE DOMYSLNE.
              # Ustawiane na wejsciu, a nie przy uzyciu: gdyby stalo nizej, kazda
@@ -431,6 +476,10 @@ def deflowany_sharpe(zwroty: list[float], n_prob: int,
         wynik["powod"] = "skośność i kurtoza nieobliczalne na tej próbie"
         return wynik
     wynik.update({"sharpe": sr, "skosnosc": g3, "kurtoza": g4})
+    if t_obs < 2:
+        wynik["powod"] = (f"za mało niezależnych obserwacji ({t_obs} różnych "
+                          f"świec wejścia przy {len(zwroty)} transakcjach)")
+        return wynik
 
     # Mianownik PSR. Moze wyjsc niedodatni przy duzym Sharpe i duzej skosnosci -
     # wtedy wzor nie ma zastosowania i oddajemy brak, a nie liczbe.
@@ -459,7 +508,7 @@ def deflowany_sharpe(zwroty: list[float], n_prob: int,
     # Zmierzone 2026-09-27 (tor 4h): pomiar 0,0266 wobec podlogi 0,0259 - przeszedl
     # o 2,7%. Margines jest maly, a blad estymacji sd przy n=28 wynosi ~14%, wiec
     # ten warunek NIE jest formalnoscia: kolejny przebieg moze zmierzyc ponizej.
-    podloga = sigma / math.sqrt(len(zwroty) - 1)
+    podloga = sigma / math.sqrt(t_obs - 1)
     wynik["odchylenie_podloga_h0"] = podloga
     if odchylenie_prob is None:
         odchylenie_prob = podloga
@@ -477,11 +526,12 @@ def deflowany_sharpe(zwroty: list[float], n_prob: int,
                           "policzyć")
         return wynik
     wynik["prog"] = prog
-    wynik["dsr"] = _N01.cdf((sr - prog) * math.sqrt(len(zwroty) - 1) / sigma)
+    wynik["dsr"] = _N01.cdf((sr - prog) * math.sqrt(t_obs - 1) / sigma)
     return wynik
 
 def sharpe_dla_dsr(zwroty: list[float], n_prob: int, cel: float,
-                   odchylenie_prob: float | None = None) -> float | None:
+                   odchylenie_prob: float | None = None,
+                   n_efektywne: int | None = None) -> float | None:
     """Jaki Sharpe/transakcje dalby DSR rowny `cel` na TEJ SAMEJ probie.
 
     PO CO. Sam werdykt "DSR 0,9524 przy progu 0,95" nie mowi, jak blisko progu
@@ -515,7 +565,7 @@ def sharpe_dla_dsr(zwroty: list[float], n_prob: int, cel: float,
     zerowe odchylenie, nieobliczalna skosnosc) - te same przypadki, w ktorych
     `deflowany_sharpe` oddaje `dsr = None`.
     """
-    baza = deflowany_sharpe(zwroty, n_prob, odchylenie_prob)
+    baza = deflowany_sharpe(zwroty, n_prob, odchylenie_prob, n_efektywne)
     if baza["dsr"] is None or baza["sharpe"] is None:
         return None
     sd = statistics.stdev(zwroty)
@@ -524,7 +574,7 @@ def sharpe_dla_dsr(zwroty: list[float], n_prob: int, cel: float,
 
     def dsr_po(delta: float) -> float | None:
         return deflowany_sharpe([z + delta for z in zwroty], n_prob,
-                                odchylenie_prob)["dsr"]
+                                odchylenie_prob, n_efektywne)["dsr"]
 
     # Widelki: szukamy delty, przy ktorej DSR przechodzi przez `cel`. Rozszerzamy
     # je, dopoki cel nie znajdzie sie miedzy koncami - zamiast zgadywac zakres.

@@ -35,6 +35,16 @@ Sprawdzone przed zapisem: `PODSUMOWANIE_JSON` kazdego wariantu przechodzi
 walk-forward i miary OOS bez zmian, inna jest tylko para, ktora dostaje
 produkcja.
 
+PRZEGENEROWANY CZWARTY RAZ, 2026-10-09 (audyt W-2, T w DSR = liczba roznych
+swiec wejscia, nie transakcji): zmienia sie WYLACZNIE `dsr` (takze w
+`przesuniecia` i `stabilny`) oraz linie z DSR w wydruku (wartosc i dopisek
+„na N roznych swiecach wejscia"). Sprawdzone przed zapisem porownaniem klucz
+po kluczu i linia po linii: zaden `status`, zadne okno, transakcja ani miara
+OOS sie nie zmienia. Na panelu syntetycznym swiec jest o ok. 10% mniej niz
+transakcji, wiec DSR przy ujemnym Sharpe lekko ROSNIE (mniejsze T = mniejsza
+pewnosc, ze przewaga jest ujemna), a przy dodatnim (`ic_stock`) SPADA
+0,7051 -> 0,6816.
+
 Zmiana wyniku zamierzona (nowa miara, poprawka) oznacza swiadome
 przegenerowanie zrzutu:
 

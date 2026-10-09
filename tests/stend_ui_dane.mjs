@@ -23,7 +23,7 @@ export const BAZA = {
   '/api/notifications/count': { unread: 0, critical: 0 },
 };
 
-const TERAZ = () => new Date().toISOString();
+export const TERAZ = () => new Date().toISOString();
 const PRZED = (ms) => new Date(Date.now() - ms).toISOString();
 
 /* Scenariusz brzegowy: wszystko odpowiada 200, ale niesie wartosci, przy
