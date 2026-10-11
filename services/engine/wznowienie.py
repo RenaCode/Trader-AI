@@ -325,15 +325,33 @@ async def wznow(fetch_all, fetch_one, execute, notify, engine: str = "crypto",
             dz.stan(klucz, f"trwa:{nazwa}", f"  {opis}: warunek trwa ({dowod})")
             continue
 
+        if sucho:
+            dz.zdarzenie(klucz, f"  {opis}: WZNAWIAM — {dowod}")
+            zwolnione += 1
+            continue
+        # RECZNE ZATRZYMANIE SPRAWDZANE PONOWNIE W TYM SAMYM UPDATE (audyt
+        # 2026-10-10, N2-1). Lista zdarzen jest czytana raz, na poczatku
+        # przebiegu; klikniecie "Zatrzymaj handel" miedzy tym odczytem a zapisem
+        # zwalnialo automat i wysylalo krytyczne "Silnik wraca do handlu", choc
+        # silnik stal na recznym. `fetch_one` z RETURNING, a nie `execute`:
+        # brak wiersza znaczy, ze nie zwolniono NIC i alarmu byc nie moze.
+        zapis = await fetch_one(
+            "UPDATE risk.killswitch_event k SET released_at = now(),"
+            " released_auto = true, release_note = %s"
+            " WHERE k.id = %s AND k.released_at IS NULL"
+            "   AND NOT EXISTS (SELECT 1 FROM risk.killswitch_event r"
+            "                    WHERE r.engine = k.engine AND r.mode = k.mode"
+            "                      AND r.limit_name = %s AND r.released_at IS NULL)"
+            " RETURNING k.id",
+            (f"Wznowienie automatyczne ({lim['wznowienie']}): {dowod}", z["id"],
+             LIMIT_RECZNY))
+        if not zapis:
+            dz.zdarzenie(klucz, f"  {opis}: NIE wznawiam — w trakcie przebiegu "
+                                f"pojawiło się ręczne zatrzymanie albo zdarzenie "
+                                f"zostało już zwolnione")
+            continue
         dz.zdarzenie(klucz, f"  {opis}: WZNAWIAM — {dowod}")
         zwolnione += 1
-        if sucho:
-            continue
-        await execute(
-            "UPDATE risk.killswitch_event SET released_at = now(),"
-            " released_auto = true, release_note = %s"
-            " WHERE id = %s AND released_at IS NULL",
-            (f"Wznowienie automatyczne ({lim['wznowienie']}): {dowod}", z["id"]))
         # `killswitch.released` / `critical` (T-4, T-6): handel wraca bez
         # czlowieka, wiec wiadomosc idzie przez bramke na telefon. Jako
         # `warning` lezala tylko w dzwonku, a wlasciciel po alarmie
