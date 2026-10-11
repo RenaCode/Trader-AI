@@ -45,13 +45,21 @@ async def current_user(
     Przy `SSO_NAGLOWKI=1` i obecnym `Remote-User` (services/api/sso.py) sesja
     aplikacji musi nalezec do TEGO loginu. Brak sesji, sesja martwa albo
     cudza = nowa sesja `sso` bez hasla i bez TOTP aplikacji (Authelia wymusila
-    2FA, zanim zadanie tu doszlo). Bez naglowka - dokladnie jak dotad, takze
-    przy wlaczonej fladze: to jest droga awaryjna przez `kubectl port-forward`,
-    gdy Authelia lezy.
+    2FA, zanim zadanie tu doszlo). Bez naglowka - sesja z hasla jak dotad,
+    takze przy wlaczonej fladze: to jest droga awaryjna przez `kubectl
+    port-forward`, gdy Authelia lezy. Sesja `sso` bez naglowka - 401.
     """
     sso_login = sso.login_z_naglowka(request)
     if sso_login is None:
-        return await _uzytkownik_z_sesji(request, trader_session)
+        row = await _uzytkownik_z_sesji(request, trader_session)
+        if row["sso"]:
+            # Sesja `sso` nie przeszla hasla ani TOTP aplikacji - jej jedynym
+            # dowodem jest naglowek Authelii. Bez niego (port-forward, flaga
+            # wylaczona po wycofaniu SSO) to token na okaziciela: skopiowane
+            # ciasteczko nie moze ominac hasla i TOTP drogi awaryjnej.
+            raise HTTPException(status_code=401,
+                                detail="Sesja SSO jest wazna tylko przez portal logowania")
+        return row
     if trader_session:
         try:
             row = await _uzytkownik_z_sesji(request, trader_session)

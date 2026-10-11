@@ -12,6 +12,14 @@ import Icon from './components/Icon';
 import { ApiError, get, post, useApi, setSessionExpiredHandler, setSsoSession } from './utils/api';
 import { fmtMoney, fmtPct } from './utils/format';
 
+function adresPortalu(url) {
+  if (typeof url !== 'string' || !url) return null;
+  try {
+    const u = new URL(url);
+    return u.protocol === 'https:' ? u.href : null;
+  } catch { return null; }
+}
+
 const SECTIONS = [
   { key: 'overview', label: 'Stan',           icon: 'home',     Component: Overview },
   { key: 'learning', label: 'Stopień nauki',  icon: 'learning', Component: Learning },
@@ -106,8 +114,11 @@ export default function App() {
     try { r = await post('/api/auth/logout'); } catch { /* sesja i tak przepada */ }
     // Za Authelia sesje konczy portal (wszystkie aplikacje naraz) - bez tego
     // nastepne zadanie zalozyloby nowa sesje z tego samego naglowka.
-    if (r?.wyloguj_url) {
-      window.location.assign(r.wyloguj_url);
+    // Tylko https: adres idzie do window.location, a `javascript:` z blednej
+    // konfiguracji (SSO_WYLOGUJ_URL) wykonalby sie na tej domenie.
+    const portal = adresPortalu(r?.wyloguj_url);
+    if (portal) {
+      window.location.assign(portal);
       return;
     }
     setUser(null);

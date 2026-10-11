@@ -323,6 +323,27 @@ def test_flaga_bez_naglowka_zwykle_logowanie(konta, monkeypatch):
 
 
 @bazodanowy
+def test_sesja_sso_bez_naglowka_nic_nie_otwiera(konta, monkeypatch):
+    """Skopiowane ciasteczko sesji `sso` przez port-forward (bez Authelii, wiec
+    bez `Remote-User`) albo po wylaczeniu flagi nie omija hasla i TOTP drogi
+    awaryjnej. Z naglowkiem ta sama sesja dziala dalej."""
+    monkeypatch.setenv("SSO_NAGLOWKI", "1")
+    wl = konta(totp=True)
+    with _klient() as k:
+        assert k.get("/api/auth/me", headers=_authelia(wl["login"])).status_code == 200
+        csrf = k.cookies.get("__Host-trader_csrf")
+        for sciezka in ("/api/auth/me", "/api/engines", "/api/auth/sessions"):
+            assert k.get(sciezka).status_code == 401, sciezka
+        assert k.post("/api/auth/logout", headers={"X-CSRF-Token": csrf}).status_code == 401
+        monkeypatch.delenv("SSO_NAGLOWKI")
+        assert k.get("/api/auth/me").status_code == 401
+        monkeypatch.setenv("SSO_NAGLOWKI", "1")
+        r = k.get("/api/auth/me", headers=_authelia(wl["login"]))
+        assert r.status_code == 200 and r.json()["sso"] is True
+    assert len(_sesje(wl["id"])) == 1
+
+
+@bazodanowy
 def test_zmiana_remote_user_daje_sesje_nowego_i_uniewaznia_stara(konta, monkeypatch):
     monkeypatch.setenv("SSO_NAGLOWKI", "1")
     a, b = konta(), konta()
