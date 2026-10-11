@@ -345,7 +345,11 @@ ok(!niepelny, 'Cisza bez odczytu: zaden PUT nie jest niepelny',
 
 // ================================== 5: sesja SSO (Authelia, docs/sso-tozsamosc.md)
 console.log('\n--- SCENARIUSZ 5: SSO - wylogowanie przez portal, odmowa konta ---');
-const PORTAL = `http://localhost:${PORT}/portal-wylogowania`;
+// Front przechodzi na portal tylko pod adresem https: (audyt 2026-10-11) - portal
+// jest atrapa pod zmyslonym hostem https, obslugiwana przez page.route.
+const PORTAL = 'https://portal.example.test/logout';
+await page.route('https://portal.example.test/**', (r) =>
+  r.fulfill({ status: 200, contentType: 'text/html', body: '<html><body>portal</body></html>' }));
 TRASY = { ...BRZEGI,
   '/api/auth/me': { login: 'uzytkownik1', role: 'owner', totp_enabled: true, sso: true },
   '/api/auth/logout': { ok: true, wyloguj_url: PORTAL } };
