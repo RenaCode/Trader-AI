@@ -305,8 +305,11 @@ def content_hash(title: str, summary: str) -> bytes:
 
 
 # Naglowek domyslny. Zawiera adres kontaktowy, bo SEC tego WYMAGA w swojej
-# polityce dostepu automatycznego i bez niego oddaje 403.
-UA_DEFAULT = "Trader-AI/0.1 (+https://trader.renacode.com; mbeczynski@gmail.com)"
+# polityce dostepu automatycznego i bez niego oddaje 403. Adres SKRZYNKI
+# PROJEKTU, nie prywatny (repozytorium jest publiczne od 2026-10); inny
+# naglowek ustawia sie zmienna `NEWS_USER_AGENT`.
+UA_DEFAULT = (os.environ.get("NEWS_USER_AGENT")
+              or "Trader-AI/0.1 (+https://trader.renacode.com; contact@renacode.com)")
 
 # Zapasowy naglowek przegladarkowy. Czesc wydawcow (np. Bitcoin Magazine za
 # Cloudflare) odrzuca kazdy niebrowserowy User-Agent. Uzywany WYLACZNIE po

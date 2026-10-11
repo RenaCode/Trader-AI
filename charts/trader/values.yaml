@@ -186,8 +186,8 @@ ingress:
 #   workery, Joby      <- nikt (nie nasluchuja na zadnym porcie)
 #
 # Zmierzone na klastrze 2026-10-03 (`ss` w przestrzeniach sieciowych podow):
-# do bazy laczyly sie api i dozorcy, do trader-web wylacznie Traefik
-# (10.42.0.6). Monitoring, bramka i Argo CD NIE lacza sie z zadnym podem tego
+# do bazy laczyly sie api i dozorcy, do trader-web wylacznie pod Traefika.
+# Monitoring, bramka i Argo CD NIE lacza sie z zadnym podem tego
 # chartu - monitoring pyta API klastra i kubeleta, Argo CD tylko API klastra.
 #
 # Czego polityka NIE blokuje, i to jest wlasnosc kube-routera w k3s, nie
@@ -209,14 +209,12 @@ networkPolicy:
     namespace: kube-system
     podLabels:
       app.kubernetes.io/name: traefik
-  # EGRESS (2026-10-03): pody tego chartu NIE dochodza do sieci domowej.
-  # Wezel ma trase do 192.168.3.0/24 (LAN: UDM, TV, Fibaro) i 10.13.13.0/24
-  # (tunel WireGuard; 10.13.13.1 to wg0 SAMEGO wezla) przez wg0, a UDM wpuszcza
-  # cale 10.13.13.0/24 - audyt 03.10 doszedl z poda tradera do UDM :443, TV
-  # :5555 i Fibaro :80. Reszta ruchu wychodzacego zostaje bez zmian: DNS,
-  # pody klastra, internet, API klastra. Reguly: `trader.regulyEgress`
-  # w _helpers.tpl. Z 10.13.13.1 nie korzysta zaden pod (adres sluzy tylko
-  # ruchowi Z domu do Traefika), wiec blokowane jest cale /24.
+  # EGRESS (2026-10-03): pody tego chartu NIE dochodza do sieci prywatnych
+  # osiagalnych z wezla przez tunel (`siecDomowa`) - audyt 03.10 doszedl z poda
+  # tradera do urzadzen w tych sieciach. Reszta ruchu wychodzacego zostaje bez
+  # zmian: DNS, pody klastra, internet, API klastra. Reguly:
+  # `trader.regulyEgress` w _helpers.tpl. Zaden pod nie korzysta z adresow
+  # w tych sieciach, wiec blokowane sa cale zakresy.
   #
   # Szybkie wycofanie samego egress: `egress.enabled: false`.
   egress:

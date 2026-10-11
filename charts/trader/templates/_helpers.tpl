@@ -267,11 +267,10 @@ trader.renacode.com/component: job
 {{- end -}}
 
 {{/*
-REGULY EGRESS - WSZYSTKO POZA SIECIA DOMOWA (2026-10-03).
+REGULY EGRESS - WSZYSTKO POZA `networkPolicy.egress.siecDomowa` (2026-10-03).
 
-Wezel ma trase 192.168.3.0/24 i 10.13.13.0/24 przez wg0 (tunel do domu),
-a UDM wpuszcza cale 10.13.13.0/24 - bez tej polityki kazdy pod dochodzil do
-UDM, telewizora i Fibaro. Trzy reguly, suma (OR):
+Wezel ma trase do sieci prywatnych przez tunel - bez tej polityki kazdy pod
+dochodzil do urzadzen w tych sieciach. Trzy reguly, suma (OR):
 
   1. DNS do CoreDNS (UDP i TCP 53),
   2. dowolny pod w klastrze (`namespaceSelector: {}`) - ruch wewnatrz
