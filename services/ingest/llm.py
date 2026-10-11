@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import sys
 import time
 from typing import Any, NamedTuple
@@ -165,6 +166,25 @@ def _bez_additional_properties(schema: Any) -> Any:
     return schema
 
 
+# PRZYROSTEK WYDANIA W NAZWIE MODELU, KTORA ODDAJE DOSTAWCA.
+#
+# Od 2026-10 zapisujemy model z ODPOWIEDZI (`modelVersion` u Google, `model`
+# u Anthropica), a nie z konfiguracji. Odpowiedz potrafi nazwac ten sam model
+# z przyrostkiem wydania: alias `claude-haiku-4-5` wraca jako
+# `claude-haiku-4-5-20251001`, Google dokleja `-001`. Do cennika i do pytania
+# "czy to ten sam model" przyrostek jest szumem - bez jego odciecia kazde
+# wywolanie haiku wyceniloby sie po CENNIK_DOMYSLNY, czyli dziesieciokrotnie
+# za drogo, a bramka dobowa zamknelaby potok po ulamku faktycznego wydatku.
+# Do bazy idzie nazwa PELNA - zapis ma mowic, co odpowiedzialo.
+_PRZYROSTEK_WYDANIA = re.compile(r"-(\d{8}|\d{3})$")
+
+
+def bez_wydania(model: str) -> str:
+    """Nazwa modelu bez przyrostka wydania i bez prefiksu `models/`."""
+    model = model.removeprefix("models/")
+    return _PRZYROSTEK_WYDANIA.sub("", model)
+
+
 class Wykonawca(NamedTuple):
     """Dostawca i model, ktore NAPRAWDE obsluzyly wywolanie.
 
@@ -280,6 +300,8 @@ class Dostawca:
     #
     # Wymiana klucza NIE czeka na ten czas - nowy klucz to nowy obiekt dostawcy,
     # a stanu bezpiecznika nie wolno wtedy przenosic (patrz `DostawcaMieszany`).
+    # DOLADOWANIE konta przy tym samym kluczu tez nie czeka (od 2026-10):
+    # w trakcie odciecia ida rzadkie proby, patrz `PROBA_PO_S`.
     ZWARCIE_TRWALE_S = 6 * 3600.0
 
     # Stan bezpiecznika. Atrybuty KLASY, zeby podklasy nie musialy wolac
@@ -322,27 +344,68 @@ class Dostawca:
     _zadan_http: int = 0
     _zadan_rozliczonych: int = 0
 
+    # PROBA PO AWARII TRWALEJ (audyt 2026-10-10).
+    #
+    # Szesc godzin odciecia mialo sens, dopoki jedynym, co konczy brak kredytu,
+    # byl uplyw czasu. Nie jest: konczy go CZLOWIEK, ktory doladowuje konto - a po
+    # doladowaniu czekal do szesciu godzin albo restartowal poda. Dlatego w trakcie
+    # odciecia TRWALEGO przepuszczamy POJEDYNCZE zapytanie co `_odstep_proby`
+    # sekund, z odstepem rosnacym x2 od `PROBA_PO_S` do `PROBA_MAX_S`. Udana proba
+    # zdejmuje odciecie od razu; nieudana kosztuje jedna odmowe (400 za brak
+    # kredytu nie jest rozliczany) i podwaja odstep. Doba bez doladowania to
+    # okolo 15 prob zamiast 15 tysiecy wywolan sprzed bezpiecznika, a doladowanie
+    # widac najpozniej po `PROBA_MAX_S`.
+    #
+    # TYLKO DLA AWARII TRWALEJ. Limit tempa i limit dobowy mijaja z uplywem czasu
+    # i tam proba niczego nie przyspieszy - tylko zjadlaby prog dostawcy.
+    PROBA_PO_S = 15 * 60.0
+    PROBA_MAX_S = 2 * 3600.0
+    _odciecie_trwale: bool = False
+    _proba_od: float = 0.0
+    _odstep_proby: float = 0.0
+
+    # Pary (model zadany, model z odpowiedzi), o ktorych podmianie juz powiedzielismy.
+    _zgloszone_podmiany: frozenset = frozenset()
+
     async def zapytaj(self, *, model: str, system: str, user: str,
                       schema: dict, max_tokens: int) -> tuple[dict, dict]:
         raise NotImplementedError
 
     def czy_ma_czym_pytac(self) -> bool:
-        """Czy pytanie tego dostawcy ma jeszcze jakikolwiek sens w tym cyklu."""
-        return time.monotonic() >= self._niedostepny_do
+        """Czy pytanie tego dostawcy ma jeszcze jakikolwiek sens w tym cyklu.
+
+        W odcieciu trwalym - True takze wtedy, gdy przypada proba: wolajacy
+        (mieszanka, petla po artykulach) ma wtedy zapytac, a `zapytaj` zuzyje
+        okno proby, zanim pojdzie do API.
+        """
+        teraz = time.monotonic()
+        if teraz >= self._niedostepny_do:
+            return True
+        return self._odciecie_trwale and teraz >= self._proba_od
 
     def powod_niedostepnosci(self) -> str:
         return "" if self.czy_ma_czym_pytac() else self._powod_niedostepnosci
 
-    def odetnij(self, ile_s: float, powod: str) -> None:
+    def odetnij(self, ile_s: float, powod: str, *, trwale: bool = False) -> None:
         """Przestan pytac tego dostawce przez `ile_s` sekund.
 
         Nie skraca juz trwajacego odciecia: awaria trwala, po ktorej przyjdzie
         zwykly limit tempa, nie moze zamienic szesciu godzin w dziesiec minut.
+
+        `trwale=True` (brak kredytu, martwy klucz) wlacza proby co
+        `_odstep_proby` - patrz `PROBA_PO_S`. Kolejne odciecie trwale w trakcie
+        trwajacego nie przestawia harmonogramu prob: przesuwa go `_sprawdz_
+        dostepnosc` w chwili, gdy proba wychodzi.
         """
-        do = time.monotonic() + ile_s
+        teraz = time.monotonic()
+        do = teraz + ile_s
         if do > self._niedostepny_do:
             self._niedostepny_do = do
             self._powod_niedostepnosci = powod
+        if trwale and not self._odciecie_trwale:
+            self._odciecie_trwale = True
+            self._odstep_proby = self.PROBA_PO_S
+            self._proba_od = teraz + self._odstep_proby
 
     def _sprawdz_dostepnosc(self) -> None:
         """Podnosi `BrakDostawcy` zamiast wolac API, o ktorym wiadomo, ze odmowi.
@@ -350,11 +413,67 @@ class Dostawca:
         Wolane na wejsciu `zapytaj`, bo bezpiecznik ma dzialac takze wtedy, gdy
         dostawca jest jeden - wyczerpany kredyt pali wtedy dokladnie tyle samo
         wywolan, co w mieszance, tylko nikt nie ma go od czego odbic.
+
+        Przepuszczajac PROBE, od razu przesuwa termin nastepnej: zapytanie
+        rownolegle albo kolejny artykul w tej samej petli maja zobaczyc
+        odciecie, a nie druga probe.
         """
-        if not self.czy_ma_czym_pytac():
-            raise BrakDostawcy(
-                f"{self.nazwa}: {self._powod_niedostepnosci} — odciety na "
-                f"{(self._niedostepny_do - time.monotonic()) / 60:.0f} min")
+        teraz = time.monotonic()
+        if teraz >= self._niedostepny_do:
+            return
+        if self._odciecie_trwale and teraz >= self._proba_od:
+            self._odstep_proby = min(self._odstep_proby * 2, self.PROBA_MAX_S)
+            self._proba_od = teraz + self._odstep_proby
+            print(f"[llm] {self.nazwa}: proba po awarii trwalej "
+                  f"({self._powod_niedostepnosci}); kolejna za "
+                  f"{(self._proba_od - teraz) / 60:.0f} min, jesli ta odmowi",
+                  file=sys.stderr, flush=True)
+            return
+        raise BrakDostawcy(
+            f"{self.nazwa}: {self._powod_niedostepnosci} — odciety na "
+            f"{(self._niedostepny_do - teraz) / 60:.0f} min")
+
+    def _potwierdz_dostepnosc(self) -> None:
+        """Dostawca przyjal zapytanie - konto i klucz dzialaja.
+
+        Wolane po KAZDEJ odpowiedzi 2xx, takze takiej, z ktorej nie bedzie
+        wyniku (odmowa modelu, uciecie): ona rowniez dowodzi, ze kredyt jest.
+        Zdejmuje wylacznie odciecie TRWALE - limit tempa trwa swoje niezaleznie
+        od tego, ze jedno zapytanie sie przecisnelo.
+        """
+        if not self._odciecie_trwale:
+            return
+        self._odciecie_trwale = False
+        self._niedostepny_do = 0.0
+        self._powod_niedostepnosci = ""
+        self._odmowy_pod_rzad = 0
+        print(f"[llm] {self.nazwa}: proba udana — odciecie zdjete, dostawca "
+              f"wraca do pracy", file=sys.stderr, flush=True)
+
+    def _model_z_odpowiedzi(self, zadany: str, oddany: str | None) -> str:
+        """Model, ktory NAZWAL SIE w odpowiedzi; zadany, gdy odpowiedz milczy.
+
+        DLACZEGO NIE NAZWA Z KONFIGURACJI. Google wycofal `gemini-3.5-flash`
+        i przekierowuje zapytania o niego na `gemini-3.6-flash` - bez bledu,
+        bez ostrzezenia w odpowiedzi poza polem `modelVersion`. Kazdy wiersz
+        `news.article_analysis` byl przez to podpisany modelem, ktory go NIE
+        napisal, a cecha `news_sent` dostala uskok, ktorego podpis mial
+        wlasnie pokazac. Podpis z konfiguracji opisuje zamiar, nie fakt.
+
+        Podmiana (inny model niz zadany, nie liczac przyrostka wydania) idzie
+        do logu RAZ na pare - to jest uskok w cesze, nie szczegol.
+        """
+        oddany = (oddany or "").strip().removeprefix("models/")
+        faktyczny = oddany or zadany
+        para = (zadany, faktyczny)
+        if bez_wydania(faktyczny) != bez_wydania(zadany) \
+                and para not in self._zgloszone_podmiany:
+            self._zgloszone_podmiany = self._zgloszone_podmiany | {para}
+            print(f"[llm] {self.nazwa}: zapytanie o {zadany} obsluzyl "
+                  f"{faktyczny} — wiersze podpisane faktycznym modelem; jesli to "
+                  f"model analizy, cecha news_sent ma w tym miejscu uskok",
+                  file=sys.stderr, flush=True)
+        return faktyczny
 
     def uzyty_model(self, model: str, usage: dict) -> str:
         """Model, ktory NAPRAWDE obsluzyl zapytanie.
@@ -366,8 +485,16 @@ class Dostawca:
         """
         return usage.get("model_uzyty") or model
 
+    def stawka(self, model: str) -> tuple[float, float]:
+        """Stawka modelu; nazwa z przyrostkiem wydania bierze stawke rodziny.
+
+        Nieznany model - `CENNIK_DOMYSLNY`, czyli najdrozsza taryfa.
+        """
+        return (self.CENNIK.get(model) or self.CENNIK.get(bez_wydania(model))
+                or self.CENNIK_DOMYSLNY)
+
     def koszt(self, model: str, usage: dict) -> float:
-        inp, out = self.CENNIK.get(model, self.CENNIK_DOMYSLNY)
+        inp, out = self.stawka(model)
         # Odczyt z cache kosztuje ~10% ceny wejscia u obu dostawcow.
         billed_in = (usage["input"] - usage["cache_read"]) + usage["cache_read"] * 0.1
         return round(billed_in / 1e6 * inp + usage["output"] / 1e6 * out, 6)
@@ -550,7 +677,7 @@ class DostawcaAnthropic(Dostawca):
             # dopoki nie zrobi czegos czlowiek.
             powod = ("brak srodkow na koncie" if rozliczeniowa
                      else "klucz odrzucony albo bez uprawnien do modelu")
-            self.odetnij(self.ZWARCIE_TRWALE_S, f"{powod} (HTTP {kod})")
+            self.odetnij(self.ZWARCIE_TRWALE_S, f"{powod} (HTTP {kod})", trwale=True)
             raise Wyczerpany(
                 f"{self.nazwa}: {powod} (HTTP {kod}, model {model}). Ponawianie "
                 f"nie pomoze - to sie nie odnowi samo, wymaga doladowania konta "
@@ -584,11 +711,24 @@ class DostawcaAnthropic(Dostawca):
             # oryginalny - patrz `_przeloz_odmowe`.
             self._przeloz_odmowe(e, model)
             raise
+        self._potwierdz_dostepnosc()
+        # Model z ODPOWIEDZI, nie z zapytania - patrz `_model_z_odpowiedzi`.
+        faktyczny = self._model_z_odpowiedzi(model, getattr(r, "model", None))
         usage = {
             "input": r.usage.input_tokens,
             "output": r.usage.output_tokens,
             "cache_read": getattr(r.usage, "cache_read_input_tokens", 0) or 0,
+            "model_uzyty": faktyczny,
         }
+        try:
+            return self._wynik_anthropica(r, model, max_tokens, usage)
+        except Exception as e:                                   # noqa: BLE001
+            oznacz_wykonawce(e, self.nazwa, faktyczny)
+            raise
+
+    @staticmethod
+    def _wynik_anthropica(r, model: str, max_tokens: int,
+                          usage: dict) -> tuple[dict, dict]:
         if r.stop_reason == "refusal":
             raise Odmowa(usage)
         # ODPOWIEDZ UCIETA NA LIMICIE TOKENOW TO NIE JEST WYNIK.
@@ -681,7 +821,7 @@ class DostawcaGemini(Dostawca):
         self._http = http or httpx.AsyncClient(timeout=90.0)
         self._wlasny_http = http is None
         self._ostatnie = 0.0
-        self.model_analizy = os.environ.get("ANALYSIS_MODEL_GEMINI", "gemini-3.5-flash")
+        self.model_analizy = os.environ.get("ANALYSIS_MODEL_GEMINI", "gemini-3.6-flash")
         self.model_triazu = os.environ.get("TRIAGE_MODEL_GEMINI", "gemini-3.5-flash-lite")
 
     async def _przepustnica(self) -> None:
@@ -759,7 +899,8 @@ class DostawcaGemini(Dostawca):
             return
         powod = ("klucz odrzucony albo rozliczenie wylaczone"
                  if r.status_code != 403 else "brak uprawnien do modelu")
-        self.odetnij(self.ZWARCIE_TRWALE_S, f"{powod} (HTTP {r.status_code})")
+        self.odetnij(self.ZWARCIE_TRWALE_S, f"{powod} (HTTP {r.status_code})",
+                     trwale=True)
         raise Wyczerpany(
             f"{self.nazwa}: {powod} (HTTP {r.status_code}, model {model}). "
             f"Ponawianie nie pomoze - wymaga wymiany klucza albo wlaczenia "
@@ -779,6 +920,7 @@ class DostawcaGemini(Dostawca):
             if r.status_code not in self.PONAWIALNE:
                 self._odmowa_trwala(r, model)
                 r.raise_for_status()
+                self._potwierdz_dostepnosc()
                 return r
             if r.status_code == 429 and self.limit_dobowy(r):
                 # BEZ PONAWIANIA. Piec prob z narastajacym odstepem kosztowalo
@@ -813,8 +955,20 @@ class DostawcaGemini(Dostawca):
         }
         r = await self._poslij(model, body)
         d = r.json()
+        # `modelVersion`, nie `model`: zapytanie o wycofany `gemini-3.5-flash`
+        # Google obsluguje modelem `gemini-3.6-flash` i mowi o tym tylko tutaj.
+        faktyczny = self._model_z_odpowiedzi(model, d.get("modelVersion"))
         usage = self._uzycie(d.get("usageMetadata", {}))
+        usage["model_uzyty"] = faktyczny
+        try:
+            return self._wynik_gemini(d, model, max_tokens, usage)
+        except Exception as e:                                   # noqa: BLE001
+            oznacz_wykonawce(e, self.nazwa, faktyczny)
+            raise
 
+    @staticmethod
+    def _wynik_gemini(d: dict, model: str, max_tokens: int,
+                      usage: dict) -> tuple[dict, dict]:
         kandydaci = d.get("candidates") or []
         if not kandydaci:
             # Odfiltrowany prompt nie zwraca kandydata w ogole.
@@ -1056,8 +1210,14 @@ class DostawcaMieszany(Dostawca):
             zuzycie = getattr(e, "usage", None)
             if isinstance(zuzycie, dict):
                 zuzycie.setdefault("model_uzyty", model)
+                zuzycie["model_zadany"] = model
             raise
-        usage["model_uzyty"] = model
+        # `setdefault`, nie przypisanie: dostawca wpisuje tu model Z ODPOWIEDZI
+        # (np. `gemini-3.6-flash` za wycofany `gemini-3.5-flash`). Nadpisanie
+        # modelem zadanym przywracaloby podpis z konfiguracji. `model_zadany`
+        # zostaje do kierowania wyceny - nazwa z odpowiedzi nie musi byc w `_dla`.
+        usage.setdefault("model_uzyty", model)
+        usage["model_zadany"] = model
         return data, usage
 
     def _zanotuj_odmowe(self, dostawca: Dostawca, e: Przeciazony) -> None:
@@ -1086,7 +1246,7 @@ class DostawcaMieszany(Dostawca):
         powod = ("awaria TRWALA" if trwala
                  else "wyczerpany limit DOBOWY" if e.dobowy
                  else f"odmowy {dostawca._odmowy_pod_rzad} razy pod rzad")
-        dostawca.odetnij(ile_s, f"{powod}: {e}")
+        dostawca.odetnij(ile_s, f"{powod}: {e}", trwale=trwala)
         # GLOSNO, raz na zwarcie - tu jestesmy tylko wtedy, gdy dostawca byl
         # przed chwila jeszcze pytany. Cicha zmiana modelu triazu znaczy, ze
         # probka artykulow zmienia sie bez sladu, a to widac dopiero w wynikach,
@@ -1163,6 +1323,9 @@ class DostawcaMieszany(Dostawca):
             nowy._niedostepny_do = stary._niedostepny_do
             nowy._powod_niedostepnosci = stary._powod_niedostepnosci
             nowy._odmowy_pod_rzad = stary._odmowy_pod_rzad
+            nowy._odciecie_trwale = stary._odciecie_trwale
+            nowy._proba_od = stary._proba_od
+            nowy._odstep_proby = stary._odstep_proby
             # LICZNIK ZADAN HTTP IDZIE RAZEM Z BEZPIECZNIKIEM i z tego samego
             # powodu: ta metoda wolno wolac WYLACZNIE przy NIEZMIENIONYCH
             # kluczach, a niezmieniony klucz to ten sam prog dobowy u dostawcy.
@@ -1180,7 +1343,10 @@ class DostawcaMieszany(Dostawca):
         # opiera sie wlasnie na niej. Po zejsciu awaryjnym model z `usage`
         # rozni sie od tego, o ktory prosilismy.
         faktyczny = self.uzyty_model(model, usage)
-        return self._dla(faktyczny).koszt(faktyczny, usage)
+        # DOSTAWCE wskazuje model ZADANY - ten mieszanka zna. Model z odpowiedzi
+        # (`modelVersion` po przekierowaniu) moze byc spoza czworki z `_dla`.
+        # Bez `model_zadany` nazwa spoza mieszanki nadal konczy sie ValueError.
+        return self._dla(usage.get("model_zadany") or faktyczny).koszt(faktyczny, usage)
 
     def _zwarcie_otwarte(self) -> bool:
         """Czy dostawca TRIAZU jest odciety. Stan trzyma on sam."""

@@ -267,7 +267,12 @@ llm:
   triageModel: "claude-haiku-4-5"
   # Odpowiedniki u Gemini, gdy ustawiony jest jego klucz. Mieszanka kieruje
   # triaz do Gemini (5,5x taniej przy 94% wywolan), analize do Anthropica.
-  analysisModelGemini: "gemini-3.5-flash"
+  #
+  # `gemini-3.5-flash` jest WYCOFANY: Google obsluguje zapytania o niego modelem
+  # `gemini-3.6-flash` (ai.google.dev/gemini-api/docs/deprecations). Data
+  # przekierowania nieznana - od niej do 2026-10 wiersze z Gemini byly podpisane
+  # modelem z konfiguracji. Od 2026-10 podpis bierzemy z `modelVersion` odpowiedzi.
+  analysisModelGemini: "gemini-3.6-flash"
   triageModelGemini: "gemini-3.5-flash-lite"
   # TWARDY LIMIT KWOTOWY na dobe.
   dailyUsd: "5.0"

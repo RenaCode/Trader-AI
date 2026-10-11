@@ -212,7 +212,10 @@ def test_POPRAWNA_ODPOWIEDZ_dalej_wraca_jako_slownik():
     dane, usage = _pytaj(d)
 
     assert dane == {"worth_analyzing": True}
-    assert usage == {"input": 100, "output": 50, "cache_read": 20}
+    # `model_uzyty` od 2026-10: model z odpowiedzi; atrapa go nie podaje,
+    # wiec zostaje zadany.
+    assert usage == {"input": 100, "output": 50, "cache_read": 20,
+                     "model_uzyty": "claude-opus-5"}
 
 
 # ------------------------------------------------- limit tokenów samej analizy
