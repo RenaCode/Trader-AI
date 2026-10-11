@@ -751,3 +751,190 @@ def opis_bramy_0(b: Brama0) -> list[str]:
         linie.append(f"  {nazwa}: " + ("NIE ZMIERZONO" if v is None else f"{v:.1f} pb"))
     linie.extend(f"  - {p}" for p in b.powody)
     return linie
+
+
+# ------------------------------------------- kandydatki Bramy 0 (2026-10-11)
+#
+# CENNIKI GIELD DOSTEPNYCH Z UE, zebrane w docs/brama-0-gieldy.md. TO NIE JEST
+# `CENNIK`: zaden z tych wpisow nie zasila petli, symulacji ani uzgodnienia -
+# silnik demo nadal liczy `spot_eu`, a `koszty(kind)` tych nazw nie zna.
+# Tabela istnieje po to, zeby werdykt Bramy 0 dla kazdej kandydatki byl
+# LICZONY z tych samych liczb, ktore stoja w dokumencie, a nie przepisany
+# recznie - test `tests/test_brama_0_kandydaci.py` pilnuje, ze dokument
+# wymienia kazda kandydatke i ze zadna nie jest OTWARTA.
+#
+# SKAD SA LICZBY I CZEGO NIE DOWODZA:
+#   * stawka: DEKLARACJA z publicznego cennika (URL i data w `zrodlo`), na
+#     najnizszym poziomie bez VIP i bez tokenu gieldy. Jedyna stawka ZMIERZONA
+#     z konta to `spot_eu` (/v5/account/fee-rate, api-demo.bybit.eu,
+#     2026-10-05) - i to z konta DEMO. Brama wymaga stawki z konta docelowego,
+#     wiec kazdy wpis wchodzi jako `stawka_konta_docelowego=False`;
+#   * spread: MEDIANA PO UNIWERSUM z jednego odczytu publicznej ksiegi
+#     (12 probek co 2 s, 2026-10-11 17:48 UTC, 10 aktywow `tradeable`;
+#     skrypt w opisie PR). To nie jest 30 dni wlasnych zlecen, wiec wchodzi
+#     jako `spread_nasza_ksiega=False` - podloga, nie pomiar;
+#   * niewypelnienie: NIE DA SIE go zmierzyc z zewnatrz. Wymaga wlasnych
+#     zlecen na tej gieldzie (demo). Zostaje None, a `zapas_na_niewypelnienie_pb`
+#     mowi, ile pb z progu zostaje na ten skladnik.
+#
+# Z tego wynika, ze `brama_0_kandydatki` NIGDY nie oddaje OTWARTA - najlepszy
+# mozliwy stan to NIEROZSTRZYGNIETA z dodatnim zapasem. Otworzyc brame moze
+# tylko komplet pomiarow na koncie docelowym (docs/hipotezy.md, B-0).
+
+@dataclass(frozen=True)
+class KandydatGieldy:
+    nazwa: str
+    rynek: str                 # "spot" | "perp" | "stock"
+    podmiot: str               # kto jest kontrahentem i pod jaka licencja
+    maker: float | None        # ulamek na noge; None = cennik bez rozbicia
+    taker: float | None
+    spread_pb: float | None    # mediana pelnego spreadu po uniwersum, pb
+    n_aktywow: int             # ile z 10 aktywow uniwersum ma tam ksiege
+    dostepna_pl: bool | None   # None = niepotwierdzone
+    zrodlo: str                # URL cennika + data odczytu
+    uwaga: str = ""
+
+
+KANDYDACI_BRAMY_0: tuple[KandydatGieldy, ...] = (
+    KandydatGieldy(
+        "bybit_eu", "spot", "Bybit EU GmbH, Wieden; MiCA (FMA AT)",
+        0.0025, 0.0025, 2.46, 10, True,
+        "/v5/account/fee-rate api-demo.bybit.eu 2026-10-05 (135 par jednakowo); "
+        "cennik publiczny: 0,25% maker i taker od 2026-10-05",
+        "JEDYNA stawka zmierzona z konta (demo). Spread karty 11.10: 7,03 pb "
+        "z 30 dni (czesciowo obca ksiega); snapshot wlasnej ksiegi 2,46 pb"),
+    KandydatGieldy(
+        "okx_eu_usdc", "spot", "OKX Europe (OKCoin Europe Ltd), Malta; MiCA (MFSA)",
+        0.0008, 0.0010, 3.21, 10, True,
+        "okx.com/en-eu/fees, odczyt 2026-10-11 przez zrodla wtorne",
+        "0,08/0,10% tylko z otwartym kontem X-Perps (MiFID); bez niego "
+        "0,20/0,35% - do potwierdzenia na koncie"),
+    KandydatGieldy(
+        "okx_eu_eur", "spot", "jak okx_eu_usdc, pary EUR",
+        0.0008, 0.0010, 7.91, 10, True,
+        "jak okx_eu_usdc", "ksiega EUR 2,5x szersza niz USDC (ARB 32 pb)"),
+    KandydatGieldy(
+        "bitvavo", "spot", "Bitvavo B.V., Amsterdam; MiCA (AFM NL)",
+        0.0015, 0.0025, 1.48, 10, True,
+        "bitvavo.com/en/fees (403 dla robota) + zrodla wtorne, 2026-10-11",
+        "tylko pary EUR; wolumen stablecoinow nie liczy sie do progow"),
+    KandydatGieldy(
+        "kraken_pro", "spot", "Payward Europe Solutions Ltd, Irlandia; MiCA (CBI)",
+        0.0040, 0.0080, 1.13, 10, True,
+        "kraken.com/features/fee-schedule, odczyt 2026-10-11 (poziomy "
+        "miedzyproduktowe od 2026-07-09)",
+        "Level 1 (> 0 USD): 0,40/0,80%; Level 3 (AoP >= 20 tys. USD) 0,22/0,38%"),
+    KandydatGieldy(
+        "coinbase_advanced", "spot", "Coinbase Europe Ltd, Luksemburg; MiCA (CSSF)",
+        0.0060, 0.0120, 2.57, 7, True,
+        "zrodla wtorne 2026-10-11 (Coinbase nie publikuje pelnej tabeli bez "
+        "logowania; help.coinbase.com 403 dla robota)",
+        "Intro 1 (>= 0 USD): 0,60/1,20%; SUI, NEAR, ARB bez ksiegi EUR"),
+    KandydatGieldy(
+        "bitstamp", "spot", "Bitstamp Europe S.A., Luksemburg; MiCA (CSSF)",
+        0.0030, 0.0040, None, 0, True,
+        "zrodla wtorne 2026-10-11",
+        "0/0% tylko do 1000 USD obrotu w 30 dniach - przy 1,6 transakcji na "
+        "dobe prog pada w pierwszym tygodniu; spread niepobrany"),
+    KandydatGieldy(
+        "kucoin_eu", "spot", "KuCoin EU Exchange GmbH, Wieden; MiCA (FMA AT)",
+        0.0010, 0.0010, 4.85, 9, None,
+        "zrodla wtorne 2026-10-11",
+        "licencja jest, start operacji w EU niepotwierdzony (lipiec 2026); "
+        "0,08% z oplata w KCS - token gieldy, ryzyko kontrahenta"),
+    KandydatGieldy(
+        "cryptocom_exchange", "spot", "Crypto.com (Foris DAX MT Ltd), Malta; MiCA (MFSA)",
+        0.00075, 0.00075, 0.72, 10, None,
+        "zrodla wtorne 2026-10-11 (crypto.com/exchange/document/fees-limits "
+        "renderuje sie skryptem)",
+        "czy Exchange (nie App) jest w zakresie licencji MiCA - niepotwierdzone"),
+    KandydatGieldy(
+        "binance", "spot", "Binance - BRAK licencji MiCA",
+        0.0010, 0.0010, 0.89, 10, False,
+        "parkiet.com / unchainedcrypto.com 2026-06",
+        "od 2026-07-01 Binance Poland nie przyjmuje nowych klientow, uslugi "
+        "ograniczone; wniosek MiCA w Grecji wycofany"),
+    KandydatGieldy(
+        "bitget", "spot", "Bitget - BRAK licencji MiCA (wniosek w FMA AT)",
+        0.0010, 0.0010, 2.42, 8, False,
+        "tangem.com/learning-hub, 2026", "poza zakresem do czasu licencji"),
+    KandydatGieldy(
+        "kraken_perp", "perp", "Payward Europe Digital Solutions (CY) Ltd; MiFID II (CySEC 342/17)",
+        0.0002, 0.0005, 1.99, 10, True,
+        "kraken.com/features/fee-schedule 2026-10-11: Level 1 futures 0,02/0,05%; "
+        "support.kraken.com derivatives-eligibility-requirements-eea",
+        "EEA pasportowane; klient indywidualny: pelna weryfikacja + kwestionariusz "
+        "+ NIP. Zwolnienie z oplat EEA (0/0 do 10 mln USD) wygaslo 2026-07-19, "
+        "tylko nowi klienci. Finansowanie POZA wzorem bramy, w symulacji. "
+        "Demo: demo-futures.kraken.com. Spread z PF_*USD (multi-collateral)"),
+    KandydatGieldy(
+        "okx_xperps", "perp", "OKX (Malta) MiFID; X-Perps = kontrakt z 5-letnim terminem",
+        0.0002, 0.0005, None, 0, True,
+        "cointelegraph/fintechfutures 2026 (zrodla wtorne); okx.com/en-eu/fees",
+        "30 krajow EEA, detal od 2026-07-28 (Simple Mode). Uniwersum X-Perps "
+        "i ksiega niepobrane (instrumenty poza publicznym API globalnym). "
+        "5-letni termin to konstrukcja omijajaca klasyfikacje CFD (ESMA "
+        "24.02.2026) - ryzyko regulacyjne"),
+    KandydatGieldy(
+        "coinbase_futures_eu", "perp", "Coinbase Financial Services Europe Ltd; MiFID II (CySEC 374/19)",
+        None, None, None, 0, None,
+        "theblock.co / decrypt.co 2026-03-09",
+        "cennik 'od 0,02% za kontrakt' bez rozbicia maker/taker; 26 krajow bez "
+        "potwierdzenia PL; kontrakty BTC, ETH, SOL - nie cale uniwersum"),
+    KandydatGieldy(
+        "one_trading_perp", "perp", "One Trading (OTF, AFM NL); MiFID II",
+        0.0010, 0.0020, None, 2, False,
+        "support.onetrading.com art. 21953902771473 (zrodla wtorne; 403 dla robota)",
+        "tylko BTC/EUR i ETH/EUR; detal tylko DE/NL/AT; API: -0,005/0,015% "
+        "(wtorne, niepotwierdzone)"),
+    KandydatGieldy(
+        "gemini_perp", "perp", "Gemini Intergalactic EU Artemis; MiFID II (MFSA)",
+        0.0002, 0.0007, None, 0, False,
+        "gemini.com/fees/derivative-fees-table 2026-10-11",
+        "konta EEA ZAMKNIETE 2026-04-06 - poza zakresem"),
+    KandydatGieldy(
+        "deribit", "perp", "Deribit FZE (Dubaj, VARA) / DRB Panama dla detalu",
+        0.00015, 0.00035, 4.67, 10, False,
+        "support.deribit.com restricted-jurisdictions; cennik 2026-08",
+        "poza UE; po ESMA 24.02.2026 perp dla detalu z UE = CFD pod MiFID, "
+        "DRB Panama go nie ma - nie kandydat"),
+    KandydatGieldy(
+        "alpaca_stock", "stock", "Alpaca Securities LLC (FINRA/SIPC), USA",
+        0.0, 0.0, None, 0, None,
+        "alpaca.markets/support/non-us-business; sec.gov fee-rate-advisories/2026-2; "
+        "finra.org Information Notice 2026-03-17",
+        "konto indywidualne non-US: tak, bez minimum; konto firmowe: beta "
+        "tylko podmioty z USA, 30 tys. USD minimum - JDG handlowalaby jako "
+        "osoba fizyczna. SEC Section 31: 20,60 USD/mln od 2026-04-04 = 0,206 pb "
+        "na nodze sprzedazy; TAF 0,000195 USD/akcje (max 9,79 USD). Spread "
+        "NIEZMIERZONY (feed IEX, docs/08). Uniwersum: akcje USA, nie krypto"),
+)
+
+
+def brama_0_kandydatki(k: KandydatGieldy, *,
+                       niewypelnienie_pb: float | None = None) -> Brama0:
+    """Werdykt Bramy 0 z DEKLAROWANEGO cennika i spreadu z jednego odczytu.
+
+    Nigdy nie oddaje OTWARTA: stawka nie jest z konta docelowego, spread nie
+    jest z wlasnej ksiegi, niewypelnienia nikt tam nie zmierzyl. Odpowiada
+    na jedno pytanie: czy kandydatka jest ZAMKNIETA juz na tym, co wiadomo,
+    czy zostaje do zmierzenia. `niewypelnienie_pb` pozwala podstawic liczbe
+    z innego rynku (np. 40 pb z symulacji na swiecach globalnych) jako test
+    wrazliwosci - wynik z takim podstawieniem to scenariusz, nie pomiar.
+    """
+    return brama_0(k.maker, stawka_konta_docelowego=False,
+                   spread_pb=k.spread_pb, spread_nasza_ksiega=False,
+                   niewypelnienie_pb=niewypelnienie_pb)
+
+
+def zapas_na_niewypelnienie_pb(k: KandydatGieldy,
+                               prog_pb: float = PROG_BRAMY_0_PB) -> float | None:
+    """Ile pb z progu zostaje na niewypelnienie po prowizji i spreadzie.
+
+    None, gdy stawki albo spreadu nie ma - zapas liczony bez ktoregos z nich
+    wygladalby na wiekszy, niz jest. Ujemny zapas = kandydatka zamknieta
+    zanim ktokolwiek zmierzy niewypelnienie.
+    """
+    if k.maker is None or k.spread_pb is None:
+        return None
+    return prog_pb - (2 * k.maker * 1e4 + k.spread_pb)

@@ -18,6 +18,7 @@ z osobnymi modelami, osobnym ryzykiem i osobnymi zakładkami w UI.
 | [`docs/05-ochrona-kapitalu.md`](docs/05-ochrona-kapitalu.md) | **Czy rachunek może wyjść na minus** — go/no-go przed wpłatą realnych środków |
 | [`docs/06-architektura-bezpiecznika.md`](docs/06-architektura-bezpiecznika.md) | **Kto pilnuje pilnującego** — dlaczego dozorca ryzyka jest osobnym podem |
 | [`docs/07-czego-brakuje.md`](docs/07-czego-brakuje.md) | **Przegląd luk** wobec działających botów — co sprawdzone w kodzie, nie w dokumentacji |
+| [`docs/brama-0-gieldy.md`](docs/brama-0-gieldy.md) | **Brama 0 na giełdach dostępnych z UE** — cenniki, spready, niewypełnienie; tor spot zamknięty na prowizji, perp MiFID do zmierzenia (B-0) |
 
 ## Stan projektu
 
@@ -37,8 +38,8 @@ z osobnymi modelami, osobnym ryzykiem i osobnymi zakładkami w UI.
 - [x] Symulacja **portfelowa** przez ten sam risk kernel co produkcja
 - [x] Rola bazy bez uprawnień superużytkownika + kontrola uprawnień
 - [x] Kopie zapasowe (weryfikowane), rotacja `SECRETS_KEY`, limit wydatków na API
-- [x] 3085 testów jednostkowych (reguły ryzyka, portfel, koszty, TOTP, kryptografia),
-      zmierzone 03.10.2026 — polecenie i sposób sprawdzenia w sekcji [Testy](#testy)
+- [x] 3699 testów jednostkowych (reguły ryzyka, portfel, koszty, TOTP, kryptografia),
+      zmierzone 11.10.2026 — polecenie i sposób sprawdzenia w sekcji [Testy](#testy)
 - [x] Ustawienia, powiadomienia (w aplikacji / WhatsApp / webhook), profil konta
 - [x] **Alarmy krytyczne poza panel** — każdy alarm `critical` idzie też przez
       bramkę RenaCode (WhatsApp, zapasowo mail), z tłumieniem powtórek

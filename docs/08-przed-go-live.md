@@ -136,6 +136,29 @@ decyzja wlasciciela, nie zadanie inzynierskie. Przy zmianie gieldy zegar demo
       (czujka `trader-zywotnosc`, sekcja selekcji negatywnej)
 - [ ] suma <= 12 pb
 
+**ANALIZA GIELD 2026-10-11** (`docs/brama-0-gieldy.md`; tablica i werdykty
+liczone w `koszty.KANDYDACI_BRAMY_0`, test `tests/test_brama_0_kandydaci.py`):
+
+- [x] cenniki 18 gield/brokerow dostepnych z UE (MiCA/MiFID), spready
+      z publicznych ksiag dla 10 aktywow uniwersum (12 probek, 11.10 17:48 UTC)
+- [x] **kazdy spot w UE ZAMKNIETY na samej prowizji**: najtanszy 15 pb
+      (crypto.com 0,075%), OKX 16 pb (tylko z kontem MiFID), Bitvavo 30 pb,
+      bybit.eu 50 pb, Kraken Pro 80 pb (Level 1 od 9.07.2026), Coinbase 120 pb.
+      Rabaty tokenem gieldy nie schodza ponizej 12 pb. Tor spot = wynik negatywny
+- [x] jedyny zapas: perpetual long-only pod MiFID (Kraken, Payward Europe
+      Digital Solutions CY): 4 pb + 1,99 pb spreadu = 6 pb, zostaje 6 pb na
+      niewypelnienie — **NIEROZSTRZYGNIETA**, nie OTWARTA
+- [ ] niewypelnienie na gieldzie docelowej: NIE DA SIE zmierzyc z zewnatrz;
+      symulacja 11.10 daje 40 pb (swiece globalne) — gdyby to bylo prawda dla
+      Krakena, brama zamknieta 5x. Rozstrzyga demo na gieldzie docelowej:
+      **B-0** w docs/hipotezy.md (decyzja do 25.10, pomiar do 29.11)
+- [ ] finansowanie perpetuala (poza wzorem bramy): 2–3 pb/runde bazowo [A],
+      w hossie do 25 pb; naliczane w symulacji H-12 ze stawek gieldy docelowej
+- [x] equity (Alpaca): prowizja 0 + SEC 0,206 pb (noga sprzedazy, od 4.04.2026)
+      + TAF 0,000195 USD/akcje — brama prawie na pewno otwarta na prowizji,
+      ale tor przegrywa PRZED kosztami (koszt progowy −41,5 pb, 11.10), wiec
+      brama nie jest tam pytaniem; konto firmowe Alpaca tylko dla podmiotow USA
+
 Ponizej historia tej bramy sprzed 2026-10-11 - liczby przy prowizji 0,20%.
 
 ### Historia (do 2026-10-11)
@@ -631,7 +654,7 @@ a zmiana gieldy zeruje pozycje 2 i 3 (nowy cennik, nowa ksiega, nowe 16 tygodni)
 
 | # | warunek | gdzie jest mierzony | stan 2026-10-11 |
 | --- | --- | --- | --- |
-| 1 | Koszt rundy na koncie DOCELOWYM <= 12 pb (2 x maker + spread wlasnej ksiegi + niewypelnienie z demo) | `koszty.brama_0`, sekcja `BRAMA 0` w logu trenera, stawka: `mozliwosci.py --stawki` (`trader-zywotnosc`), spread: zapytanie nr 5, niewypelnienie: czujka selekcji negatywnej w `trader-zywotnosc` | **NIE** — 50 pb samej prowizji |
+| 1 | Koszt rundy na koncie DOCELOWYM <= 12 pb (2 x maker + spread wlasnej ksiegi + niewypelnienie z demo) | `koszty.brama_0`, sekcja `BRAMA 0` w logu trenera, stawka: `mozliwosci.py --stawki` (`trader-zywotnosc`), spread: zapytanie nr 5, niewypelnienie: czujka selekcji negatywnej w `trader-zywotnosc`; kandydatki: `koszty.KANDYDACI_BRAMY_0`, `docs/brama-0-gieldy.md` | **NIE** — 50 pb samej prowizji; 11.10: zaden spot w UE < 15 pb; perp MiFID (Kraken) 6 pb bez niewypelnienia → B-0 |
 | 2 | Walk-forward na TYM cenniku i modelu pesymistycznym (H-10): zwrot/runde po doplacie > 0 w 5/5 przesuniec, DSR >= 0,95 z T = swiece wejscia, N ze WSZYSTKIMI decyzjami projektowymi od tej daty | `PODSUMOWANIE_JSON` toru 4h (`przesuniecia.*.zwrot_na_runde_pb`, `.dsr`), `statystyka.przewaga_dsr`; N: `n_selekcji` to dolna granica - pelne N z zapytania nr 4 plus rejestr hipotez | **NIE** — 11.10: −56…−68 pb, DSR 0 na 5/5 |
 | 3a | Demo >= 16 tygodni tym samym `params`, >= 150 wejsc, test znakow tygodni p <= 0,05, realizacja >= 0,9 x symulacja (D-2) | docs/hipotezy.md D-2; tygodnie: zapytanie nr 3 (miara w kodzie do zbudowania) | seria jeszcze nie ruszyla |
 | 3b | \|wypelnialnosc wejsc sim − demo\| <= 10 pp na wejsciach zebranych PO wdrozeniu H-10 | linia „Wypełnialność WEJŚĆ" w logu trenera, `PODSUMOWANIE_JSON.wypelnialnosc_wejsc`; demo: `poslizg.py --strategia ensemble`, zapytanie nr 2 | H-5 PORAZKA (76-79% mieszane vs 65,6%), H-10 w toku |
