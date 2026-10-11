@@ -28,7 +28,7 @@ imagePullSecrets:
 api:
   image:
     repository: ghcr.io/renacode/trader-ai-api
-    tag: "sha-f61181b"
+    tag: "sha-0cdbf23"
     pullPolicy: IfNotPresent
   resources:
     limits:   { cpu: 1000m, memory: 1Gi }
@@ -1040,13 +1040,22 @@ trainerCron:
     # do karty liczbe, ktora zabija kazda strategie na artefakcie danych.
     # spreadBps: <tylko wariant; feed IEX NIE jest pomiarem naszego spreadu>
     # spreadObcaKsiega: true
-  # Limity dobrane do ZMIERZONEGO zuzycia (388 MB przy pelnym przebiegu na
-  # 24 instrumentach), nie do zapasu "na wszelki wypadek". Wezel ma 7,8 GB
-  # i dzieli je z trzema innymi projektami; limit 3 GB dla zadania, ktore
-  # bierze 0,4 GB, podnosil przeciazenie do 186% bez zadnego pozytku.
+  # Limity dobrane do ZMIERZONEGO zuzycia, nie do zapasu "na wszelki
+  # wypadek". Wezel ma 7,8 GB i dzieli je z trzema innymi projektami; limit
+  # 3 GB dla zadania, ktore bierze 0,4 GB, podnosil przeciazenie do 186% bez
+  # zadnego pozytku.
+  #
+  # POMIAR Z 2026-10-11 (Job trader-trainer-29861440, cAdvisor): tor crypto 1h
+  # (1400 dni, 3,8 mln wartosci cech, 5 przesuniec) trzymal 965-977 MiB
+  # working set i 974 MiB RSS przy limicie 1024 MiB - 5% zapasu. Tor 4h
+  # 442 MiB, equity 282 MiB. Liczba 388 MB sprzed toru 1h byla juz nieaktualna.
+  # Od H-10 (PR #19) kazdy tor crypto liczy DODATKOWY przebieg kalibracyjny,
+  # a dane 1h rosna co tydzien. OOM zabija najwiekszy proces w kontenerze,
+  # czyli `train.py` toru 1h: kod 137, tor bez wyniku, Job czerwony.
+  # Request = zmierzone zuzycie, zeby planista nie liczyl na 384 MiB.
   resources:
-    limits:   { cpu: 2000m, memory: 1Gi }
-    requests: { cpu: 200m,  memory: 384Mi }
+    limits:   { cpu: 2000m, memory: 1536Mi }
+    requests: { cpu: 200m,  memory: 1Gi }
 
 # DZIENNIK JAKOSCIOWY z zamknietych transakcji (learn.postmortem).
 #

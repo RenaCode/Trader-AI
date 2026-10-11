@@ -4729,6 +4729,10 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
         egzekucja = dc_replace(egzekucja, przebicie_bps=przebicie)
         kt = dc_replace(kt, egzekucja=egzekucja)
         k = dc_replace(k, egzekucja=egzekucja)
+        # Liczniki kalibracji nie sa juz potrzebne, a tor 1h stoi przy limicie
+        # pamieci (values.yaml, trainerCron.resources) - nie trzymac ich przez
+        # piec kolejnych walk-forwardow.
+        del kal
     zapis = (None if sucho else
              lambda i, okno, m: zapisz_okno(cur, conn, run_id, i, okno, m))
     z, idx = walk_forward(kt, okna_wf(panels, h, start, now), wybor=wybor,
