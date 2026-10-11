@@ -26,6 +26,8 @@ permissions:
 jobs:
   changes:
     runs-on: ubuntu-latest
+    # Limit czasu: zawieszenie nie moze palic godzin minut runnera (GitHub Free).
+    timeout-minutes: 5
     outputs:
       api: ${{ steps.filter.outputs.api }}
       web: ${{ steps.filter.outputs.web }}
@@ -65,6 +67,8 @@ jobs:
     needs: changes
     if: needs.changes.outputs.api == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
+    # Limit czasu: zawieszenie nie moze palic godzin minut runnera (GitHub Free).
+    timeout-minutes: 15
     services:
       db:
         image: timescale/timescaledb-ha:pg17@sha256:a693dd7fbb75b51c3d717507a9956501686edb123b48dd90b094fd5612d53abe
@@ -104,6 +108,8 @@ jobs:
       needs.changes.outputs.api == 'true' || needs.changes.outputs.web == 'true' ||
       github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
+    # Limit czasu: zawieszenie nie moze palic godzin minut runnera (GitHub Free).
+    timeout-minutes: 20
     services:
       db:
         image: timescale/timescaledb-ha:pg17@sha256:a693dd7fbb75b51c3d717507a9956501686edb123b48dd90b094fd5612d53abe
@@ -228,6 +234,8 @@ jobs:
       (needs.smoke.result == 'success' || needs.smoke.result == 'skipped') &&
       (needs.changes.outputs.api == 'true' || needs.changes.outputs.web == 'true' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
+    # Limit czasu: zawieszenie nie moze palic godzin minut runnera (GitHub Free).
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -318,6 +326,8 @@ jobs:
     # (UI z #11 zbudowany, trader-web dalej na starym obrazie).
     if: always() && needs.changes.result == 'success' && needs.build.result == 'success'
     runs-on: ubuntu-latest
+    # Limit czasu: zawieszenie nie moze palic godzin minut runnera (GitHub Free).
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:

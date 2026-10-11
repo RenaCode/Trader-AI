@@ -16,6 +16,7 @@ from fastapi import Depends
 
 from .auth import current_user
 from .db import close_pool, fetch_one, open_pool
+from .notifications import dokoncz_w_tle
 from .security import SecretBox
 from .routers import (auth, account, credentials, eksport, kapital, kapital_laczny,
                       learning, moves,
@@ -30,6 +31,8 @@ async def lifespan(app: FastAPI):
     SecretBox()
     await open_pool()
     yield
+    # Wysylki w tle (alarm o nowym logowaniu) uzywaja puli - najpierw one.
+    await dokoncz_w_tle()
     await close_pool()
 
 

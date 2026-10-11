@@ -382,3 +382,41 @@ def test_sesja_sso_nie_jest_swiezym_uwierzytelnieniem(konta, monkeypatch):
     akcje = [a["action"] for a in _audyt(wl["id"])]
     assert "auth.password_changed" not in akcje
     assert akcje.count("auth.reauth_failed") == 2
+
+
+# ------------------------------------------------------------ zamkniecie API
+def test_zamkniecie_api_czeka_na_wysylki_w_tle_przed_pula(monkeypatch):
+    """Alarm o nowym logowaniu (SSO i haslo) idzie w tle. Gdy `lifespan`
+    zamykal pule przed nim, zadanie otwieralo NOWA globalna pule na zamykanej
+    petli: alarm przepadal, a petla TestClienta wisiala w `_cancel_all_tasks`
+    (CI 11.10 stalo 4,5 h). Kolejnosc: najpierw wysylki, potem pula."""
+    import asyncio
+
+    from fastapi import FastAPI
+
+    from services.api import main, notifications
+
+    kolejnosc: list[str] = []
+
+    async def wysylka():
+        await asyncio.sleep(0.05)
+        kolejnosc.append("wysylka")
+
+    async def otworz():
+        kolejnosc.append("open")
+
+    async def zamknij():
+        kolejnosc.append("close")
+
+    monkeypatch.setattr(main, "SecretBox", lambda: None)
+    monkeypatch.setattr(main, "open_pool", otworz)
+    monkeypatch.setattr(main, "close_pool", zamknij)
+
+    async def przebieg():
+        async with main.lifespan(FastAPI()):
+            zadanie = asyncio.create_task(wysylka())
+            notifications._w_tle.add(zadanie)
+            zadanie.add_done_callback(notifications._w_tle.discard)
+
+    asyncio.run(przebieg())
+    assert kolejnosc == ["open", "wysylka", "close"]
