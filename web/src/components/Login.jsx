@@ -4,7 +4,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { post, ApiError } from '../utils/api';
 
-export default function Login({ onSuccess }) {
+export default function Login({ onSuccess, notice = '' }) {
   const [step, setStep] = useState('password');     // 'password' | 'mfa'
   const [login, setLogin] = useState('');
   const [password, setPassword] = useState('');
@@ -100,6 +100,13 @@ export default function Login({ onSuccess }) {
             ? 'Dostęp wyłącznie dla właściciela systemu.'
             : 'Drugi składnik potwierdza, że to nadal Ty.'}</p>
         </div>
+
+        {/* Odmowa SSO (brak konta dla loginu z Authelii, konto zablokowane).
+            Formularz zostaje pod spodem jako droga awaryjna - przez
+            `kubectl port-forward`, gdy Authelia lezy. */}
+        {notice && step === 'password' && (
+          <div className="form-error sso-refusal" role="alert">{notice}</div>
+        )}
 
         {step === 'password' ? (
           <form onSubmit={submitPassword} noValidate>

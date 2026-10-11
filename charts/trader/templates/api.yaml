@@ -86,6 +86,16 @@ spec:
             {{- include "trader.llmEnv" . | nindent 12 }}
             - name: CORS_ORIGINS
               value: "https://{{ .Values.ingress.host }}"
+            {{- if .Values.sso.enabled }}
+            # Zaufanie do `Remote-User` - tylko razem z middleware'ami SSO
+            # z ingress.yaml (ten sam przelacznik, values.yaml `sso`).
+            - name: SSO_NAGLOWKI
+              value: "1"
+            - name: SSO_GRUPA
+              value: {{ .Values.sso.grupa | quote }}
+            - name: SSO_WYLOGUJ_URL
+              value: "{{ .Values.sso.wylogujUrl }}?rd=https://{{ .Values.ingress.host }}/"
+            {{- end }}
           ports:
             - containerPort: 8000
           # DWIE SONDY, DWA PYTANIA - i one nie moga pytac o to samo.

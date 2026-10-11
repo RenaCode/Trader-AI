@@ -9,7 +9,7 @@ import Settings from './components/Settings';
 import Profile from './components/Profile';
 import Bell from './components/Bell';
 import Icon from './components/Icon';
-import { get, post, useApi, setSessionExpiredHandler } from './utils/api';
+import { ApiError, get, post, useApi, setSessionExpiredHandler, setSsoSession } from './utils/api';
 import { fmtMoney, fmtPct } from './utils/format';
 
 const SECTIONS = [
@@ -72,6 +72,7 @@ export default function App() {
   // przy odswiezeniu strony - dopiero odpowiedz /api/auth/me rozstrzyga.
   const [authState, setAuthState] = useState('checking');
   const [user, setUser] = useState(null);
+  const [ssoRefusal, setSsoRefusal] = useState('');
 
   const isPreview = import.meta.env.DEV && readPreview();
 
@@ -82,9 +83,17 @@ export default function App() {
       return;
     }
     try {
-      setUser(await get('/api/auth/me'));
+      const me = await get('/api/auth/me');
+      setSsoSession(me?.sso);
+      setSsoRefusal('');
+      setUser(me);
       setAuthState('in');
-    } catch {
+    } catch (e) {
+      // 400/403/429 z /me to ODMOWA SSO (services/api/sso.py, auth.py:_sesja_sso):
+      // Authelia wpuscila, ale Trader nie ma tego konta albo konto jest
+      // zablokowane. Komunikat ma byc na ekranie - bez niego pusty formularz
+      // hasla wyglada, jakby SSO po prostu nie dzialalo.
+      setSsoRefusal(e instanceof ApiError && e.status !== 401 ? e.message : '');
       setUser(null);
       setAuthState('out');
     }
@@ -93,7 +102,14 @@ export default function App() {
   useEffect(() => { checkSession(); }, [checkSession]);
 
   const signOut = useCallback(async () => {
-    try { await post('/api/auth/logout'); } catch { /* sesja i tak przepada */ }
+    let r = null;
+    try { r = await post('/api/auth/logout'); } catch { /* sesja i tak przepada */ }
+    // Za Authelia sesje konczy portal (wszystkie aplikacje naraz) - bez tego
+    // nastepne zadanie zalozyloby nowa sesje z tego samego naglowka.
+    if (r?.wyloguj_url) {
+      window.location.assign(r.wyloguj_url);
+      return;
+    }
     setUser(null);
     setAuthState('out');
   }, []);
@@ -136,7 +152,7 @@ export default function App() {
   }
 
   if (authState === 'out') {
-    return <Login onSuccess={checkSession} />;
+    return <Login onSuccess={checkSession} notice={ssoRefusal} />;
   }
 
   if (engines.error && !(import.meta.env.DEV && isPreview)) {
@@ -218,9 +234,11 @@ export default function App() {
             <span className="user-chip">
               <span className="avatar" aria-hidden="true">{(user?.login || '?').slice(0, 1).toUpperCase()}</span>
               <span className="user-login">{user?.login}</span>
-              {user?.totp_enabled
-                ? <span className="badge ok">2FA</span>
-                : <span className="badge warn">bez 2FA</span>}
+              {user?.sso
+                ? <span className="badge ok" title="Zalogowano przez Authelię (2FA portalu)">SSO</span>
+                : user?.totp_enabled
+                  ? <span className="badge ok">2FA</span>
+                  : <span className="badge warn">bez 2FA</span>}
             </span>
             <button className="btn-ghost btn-logout" onClick={signOut}>
               <Icon name="logout" size={16} />
