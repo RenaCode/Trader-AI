@@ -664,3 +664,90 @@ def opis_karty(k: Karta) -> list[str]:
             f"{', '.join(k.nieznane)}. Prawdziwy koszt jest WIEKSZY o "
             f"nieznana wartosc; ta liczba jest dolnym oszacowaniem, nie kosztem.")
     return linie
+
+
+# ----------------------------------------------------------------- Brama 0
+#
+# TWARDY WARUNEK DOPUSZCZENIA DALSZEJ PRACY NAD STRATEGIA (2026-10-11,
+# docs/08-przed-go-live.md, Brama 0; docs/hipotezy.md, Z-1).
+#
+# Przy zmierzonym IC 0,03-0,04 i odchyleniu zwrotu 12 h 3,2% (docs/03)
+# przewaga brutto to rzad 10-13 pb na runde. Runda drozsza niz 12 pb zjada ja
+# w calosci, wiec zadne strojenie wag, progow ani horyzontu nie da wyniku
+# dodatniego - rozstrzyga koszt, nie statystyka. Dlatego prog stoi PRZED
+# kazda nowa hipoteza strategii, a nie po niej.
+#
+# Runda = 2 x maker (stawka z /v5/account/fee-rate KONTA DOCELOWEGO, nie
+# demo) + spread wlasnej ksiegi z 30 dni + koszt niewypelnienia zmierzony na
+# demo. bybit.eu tego nie spelnia: sam maker 0,25% to 50 pb.
+PROG_BRAMY_0_PB = 12.0
+
+OTWARTA = "OTWARTA"
+ZAMKNIETA = "ZAMKNIETA"
+NIEROZSTRZYGNIETA = "NIEROZSTRZYGNIETA"
+
+
+@dataclass(frozen=True)
+class Brama0:
+    stan: str
+    runda_pb: float                       # suma skladnikow, ktore MAJA wartosc
+    skladniki: dict[str, float | None]    # pb na runde; None = brak pomiaru
+    powody: tuple[str, ...]
+
+
+def brama_0(maker: float | None, *, stawka_konta_docelowego: bool,
+            spread_pb: float | None, spread_nasza_ksiega: bool,
+            niewypelnienie_pb: float | None,
+            prog_pb: float = PROG_BRAMY_0_PB) -> Brama0:
+    """Werdykt Bramy 0 z pomiarow. CZYSTA FUNKCJA - zadnych wywolan gieldy.
+
+    `maker` - ulamek ceny na noge; `stawka_konta_docelowego` - czy odczytana
+    z konta, na ktorym ma isc live (demo nie jest dowodem stawki live).
+    `spread_pb` - PELNY spread na runde (jak `spread.Pomiar.bps`);
+    `spread_nasza_ksiega` - z ksiegi, na ktorej skladamy zlecenia.
+    `niewypelnienie_pb` - koszt niewypelnienia z demo (`koszt_niewypelnienia`
+    z wypelnialnosci i ruchu, ktory przepadl), w pb na runde.
+
+    NIEWYPELNIENIE WCHODZI JAKO max(0, x). Ze znakiem ujemnym oznacza, ze
+    wejscia, ktore nie weszly, stracilyby - na spadajacym rynku tak jest
+    zawsze, niezaleznie od egzekucji. Brama otwarta dzieki temu, ze rynek
+    akurat spadal, bylaby otwarta przez pogode, nie przez koszt.
+
+    ZAMKNIETA juz wtedy, gdy SUMA ZNANYCH skladnikow przekracza prog: pozostale
+    sa z definicji nieujemne, wiec moga ja tylko podniesc. OTWARTA wylacznie
+    przy komplecie pomiarow: stawka z konta docelowego, spread z wlasnej
+    ksiegi, niewypelnienie z demo - i sumie <= progu.
+    """
+    sklad = {
+        "prowizja": None if maker is None else 2 * maker * 1e4,
+        "spread": spread_pb,
+        "niewypelnienie": (None if niewypelnienie_pb is None
+                           else max(0.0, niewypelnienie_pb)),
+    }
+    suma = sum(v for v in sklad.values() if v is not None)
+    braki = []
+    if maker is None:
+        braki.append("stawka maker nieznana")
+    elif not stawka_konta_docelowego:
+        braki.append("stawka maker z konta demo, nie z konta docelowego")
+    if spread_pb is None:
+        braki.append("spread niezmierzony")
+    elif not spread_nasza_ksiega:
+        braki.append("spread z obcej ksiegi (tylko podloga)")
+    if niewypelnienie_pb is None:
+        braki.append("koszt niewypelnienia z demo niezmierzony")
+    if suma > prog_pb:
+        return Brama0(ZAMKNIETA, suma, sklad, (
+            f"runda co najmniej {suma:.1f} pb > {prog_pb:g} pb",) + tuple(braki))
+    if braki:
+        return Brama0(NIEROZSTRZYGNIETA, suma, sklad, tuple(braki))
+    return Brama0(OTWARTA, suma, sklad, (f"runda {suma:.1f} pb <= {prog_pb:g} pb",))
+
+
+def opis_bramy_0(b: Brama0) -> list[str]:
+    """Wiersze do logu. Skladnik bez wartosci slowami, nigdy zerem."""
+    linie = [f"BRAMA 0 (runda <= {PROG_BRAMY_0_PB:g} pb, docs/08): {b.stan}"]
+    for nazwa, v in b.skladniki.items():
+        linie.append(f"  {nazwa}: " + ("NIE ZMIERZONO" if v is None else f"{v:.1f} pb"))
+    linie.extend(f"  - {p}" for p in b.powody)
+    return linie
