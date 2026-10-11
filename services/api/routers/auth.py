@@ -22,6 +22,7 @@ from ..auth import (
     SESSION_IDLE_S, SQL_SESJE_AKTYWNE, adres_klienta, audit,
     clear_session_cookies, current_user, require_csrf, set_session_cookies,
 )
+from .. import sso
 from ..db import execute, fetch_all, fetch_one
 from ..notifications import powiadom_o_bezpieczenstwie
 from ..security import (
@@ -305,6 +306,9 @@ async def me(user: dict = Depends(current_user)):
         "role": user["role"],
         "totp_enabled": bool(totp and totp["enabled"]),
         "session_expires_at": user["expires_at"].isoformat(),
+        # Sesja z naglowka Authelii: panel przeladowuje sie wtedy przy bledzie
+        # sieci (wygasla sesja portalu), zamiast pokazywac formularz hasla.
+        "sso": bool(user.get("sso")),
     }
 
 
@@ -431,10 +435,12 @@ async def _zglos_nowe_urzadzenie(user_id: int, request: Request) -> None:
     # Udane logowanie to KAZDA z trzech akcji: konto bez drugiego skladnika
     # konczy na `auth.login`, konto z TOTP na `auth.mfa` albo
     # `auth.mfa_backup_code`. Samo `auth.login` sprawialo, ze przy wlaczonym
-    # TOTP zadne urzadzenie nie bylo nigdy "znane".
+    # TOTP zadne urzadzenie nie bylo nigdy "znane". Czwarta - `auth.sso_login`
+    # (sesja z naglowka Authelii, services/api/auth.py:_sesja_sso).
     znane = await fetch_one(
         "SELECT 1 FROM app.audit_log WHERE actor_user_id = %s"
-        "   AND action IN ('auth.login', 'auth.mfa', 'auth.mfa_backup_code')"
+        "   AND action IN ('auth.login', 'auth.mfa', 'auth.mfa_backup_code',"
+        "                  'auth.sso_login')"
         "   AND ip IS NOT DISTINCT FROM %s::inet AND user_agent IS NOT DISTINCT FROM %s"
         "   AND at < now() - interval '1 second' LIMIT 1",
         (user_id, ip, ua))
@@ -549,6 +555,14 @@ async def logout(request: Request, response: Response, user: dict = Depends(curr
     await execute("UPDATE app.session SET revoked_at = now() WHERE id = %s", (user["session_id"],))
     clear_session_cookies(response)
     await audit("auth.logout", user_id=user["id"], request=request)
+    # ZA AUTHELIA SAMO USUNIECIE SESJI APLIKACJI NIE WYLOGOWUJE. Nastepne
+    # zadanie przyjdzie z tym samym `Remote-User` i `current_user` zalozy
+    # nowa sesje. Konczy ja dopiero portal: panel idzie pod ten adres, a sesja
+    # Authelii (ciasteczko na `renacode.com`) gasnie dla wszystkich trzech
+    # aplikacji naraz. Decyduje naglowek TEGO zadania, nie rodzaj sesji: sesja
+    # z wlasnego logowania za Authelia tez ma za soba sesje portalu.
+    if sso.login_z_naglowka(request) and sso.adres_wylogowania():
+        return {"ok": True, "wyloguj_url": sso.adres_wylogowania()}
     return {"ok": True}
 
 

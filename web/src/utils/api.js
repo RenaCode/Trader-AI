@@ -24,6 +24,28 @@ function csrfToken() {
 let sessionExpired = null;
 export function setSessionExpiredHandler(fn) { sessionExpired = fn; }
 
+/* SESJA Z AUTHELII (SSO, /api/auth/me -> `sso: true`). Gdy wygasnie sesja
+   portalu, Traefik odpowiada na `fetch` przekierowaniem na auth.renacode.com,
+   ktorego `fetch` nie przejdzie - zostaje blad sieci albo 401. Formularz hasla
+   aplikacji jest wtedy zla odpowiedzia: wlasciwa jest strona logowania
+   Authelii, a do niej prowadzi przeladowanie strony (nawigacja najwyzszego
+   poziomu przejdzie przekierowanie i wroci na ten sam adres).
+   Najwyzej raz na 30 s - przy lezacym API przeladowanie w petli zabraloby
+   uzytkownikowi ekran, na ktorym widac blad. */
+let ssoSession = false;
+export function setSsoSession(on) { ssoSession = !!on; }
+const SSO_RELOAD_KEY = 'trader_sso_reload_at';
+function reloadForSso() {
+  if (!ssoSession) return false;
+  try {
+    const last = Number(window.sessionStorage.getItem(SSO_RELOAD_KEY) || 0);
+    if (Date.now() - last < 30000) return false;
+    window.sessionStorage.setItem(SSO_RELOAD_KEY, String(Date.now()));
+  } catch { return false; }
+  window.location.reload();
+  return true;
+}
+
 /* 401 spod /api/auth/ znaczy "zle dane" - zle haslo, zly kod TOTP, wygasly
    bilet miedzy krokami logowania - a nie "sesja wygasla". Ten blad nalezy do
    formularza, ktory go wywolal (Login, zmiana hasla, wlaczanie 2FA); wyrzucenie
@@ -39,12 +61,18 @@ async function request(path, { method = 'GET', body } = {}) {
   if (body !== undefined) headers['Content-Type'] = 'application/json';
   if (method !== 'GET' && method !== 'HEAD') headers['X-CSRF-Token'] = csrfToken();
 
-  const res = await fetch(path, {
-    method,
-    headers,
-    credentials: 'same-origin',
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
+  let res;
+  try {
+    res = await fetch(path, {
+      method,
+      headers,
+      credentials: 'same-origin',
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+  } catch (e) {
+    reloadForSso();
+    throw e;
+  }
 
   if (res.status === 204) return null;
 
@@ -56,7 +84,7 @@ async function request(path, { method = 'GET', body } = {}) {
 
   if (!res.ok) {
     const detail = payload?.detail;
-    if (res.status === 401 && !isLoginFlow(path, method)) sessionExpired?.();
+    if (res.status === 401 && !isLoginFlow(path, method) && !reloadForSso()) sessionExpired?.();
     throw new ApiError(
       res.status,
       typeof detail === 'string' ? detail : `Błąd ${res.status}`
