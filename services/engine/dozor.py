@@ -3620,6 +3620,18 @@ async def sprawdz_decyzje(fetch_all, notify, sucho: bool = False, *,
 # Cisza = brak przebiegu dluzej niz CISZA_KROTNOSC oczekiwanych odstepow + zapas.
 CISZA_KROTNOSC = 2
 CISZA_ZAPAS_MIN = 30
+#
+# ...ALE NIE WTEDY, GDY ODSTEP POCHODZI Z HARMONOGRAMU (audyt 2026-10-10, N2-4).
+# Krotnosc 2 ma sens dla mediany z danych - to ona jest niepewna. Odstep
+# z harmonogramu jest PLANEM: tygodniowy trener, ktory nie wystartowal
+# (ImagePull, brak wiersza `job_run`), byl zglaszany dopiero po 2 x 7 d, czyli
+# przy DRUGIM opuszczonym terminie. Z harmonogramu prog to plan + zapas na czas
+# trwania przebiegu i rozrzut startu: CZESC_ZAPASU planu, nie mniej niz
+# CISZA_ZAPAS_MIN i nie wiecej niz ZAPAS_HARMONOGRAMU_MAX_H (trener ma limit
+# 3 h, `activeDeadlineSeconds`; 12 h to cztery takie limity). Tydzien -> 7,5 d,
+# doba -> 30 h, 6 h -> 7,5 h.
+CZESC_ZAPASU = 0.25
+ZAPAS_HARMONOGRAMU_MAX_H = 12
 # Ile przebiegow wstecz czytamy i ile trzeba, zeby odstep cokolwiek znaczyl.
 PRZEBIEGOW_WSTECZ = 10
 MIN_PRZEBIEGOW_ODSTEPU = 3
@@ -3667,9 +3679,18 @@ def odstep_powtorki_zadania(zgloszen: int) -> timedelta:
     return timedelta(hours=min(h, ZADANIE_POWTORKA_MAX_H))
 
 
+# Nazwy w polach dnia tygodnia i miesiaca (`SUN`, `JAN`). Bez nich `40 4 * * SUN`
+# dawalo ValueError -> None -> cichy powrot do samej mediany (N2-4).
+_NAZWY_CRONA = {n: i for i, n in enumerate(
+    ("SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"))} | {n: i + 1 for i, n in enumerate(
+    ("JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"))}
+
+
 def _pole_crona(pole: str, od: int, do: int) -> set[int]:
     """Jedno pole wyrazenia crona -> zbior wartosci. Obsluguje `*`, `a-b`,
-    `/krok` i listy po przecinku - tyle, ile uzywa chart."""
+    `/krok`, listy po przecinku i nazwy dni/miesiecy - tyle, ile uzywa chart."""
+    pole = re.sub(r"[A-Za-z]{3}",
+                  lambda m: str(_NAZWY_CRONA.get(m.group(0).upper(), m.group(0))), pole)
     wynik: set[int] = set()
     for czesc in pole.split(","):
         zakres, _, krok = czesc.partition("/")
@@ -3770,10 +3791,13 @@ def ocen_zadania(historia: dict[str, list[dict]], teraz: datetime,
         else:
             typowy = 0.0
         zrodlo = "typowy odstęp"
+        prog = CISZA_KROTNOSC * typowy + CISZA_ZAPAS_MIN * 60
         if z_planu is not None and z_planu.total_seconds() >= typowy:
             typowy, zrodlo = z_planu.total_seconds(), "odstęp z harmonogramu"
+            prog = typowy + min(max(CZESC_ZAPASU * typowy, CISZA_ZAPAS_MIN * 60),
+                                ZAPAS_HARMONOGRAMU_MAX_H * 3600)
         cisza = (teraz - ostatni["finished_at"]).total_seconds()
-        if cisza > CISZA_KROTNOSC * typowy + CISZA_ZAPAS_MIN * 60:
+        if cisza > prog:
             braki.append((f"{nazwa}:cisza:{ostatni['id']}",
                           f"{nazwa}: ostatni przebieg {cisza / 3600:.1f} h temu, "
                           f"{zrodlo} {typowy / 3600:.1f} h"))
