@@ -51,7 +51,7 @@ from services.engine.koszty import (
 )
 from services.engine.portfolio import Egzekucja, wycena_wysylki
 from services.engine.risk_rules import START_EQUITY
-from services.engine.statystyka import deflowany_sharpe, wilson
+from services.engine.statystyka import deflowany_sharpe, liczba_niezaleznych, wilson
 
 # PARAMETRY H-3 - USTALONE PRZED POMIAREM (docs/hipotezy.md). Te same liczby co
 # B2 poza rebalansem: B2 zmienia sklad co tydzien, R4 codziennie.
@@ -182,6 +182,9 @@ class WynikOkna:
     zwrot: float = 0.0                  # % START_EQUITY, po doplacie
     ekspozycja: float = 0.0             # srednia czesc kapitalu w rynku
     rundy: list[float] = field(default_factory=list)   # zwrot rundy po doplacie
+    # Chwila wejscia KAZDEJ rundy z `rundy`, w tej samej kolejnosci - klucz
+    # grupowania dla T w DSR (patrz `ocen_przesuniecie`).
+    wejscia_rund: list[datetime] = field(default_factory=list)
     wypelnione: int = 0
     niewypelnione: int = 0
     brak_swiec: int = 0
@@ -228,6 +231,7 @@ def symuluj_okno(decyzje: list[Decyzja], ceny_konca: dict[str, float | None],
         ret = wyj / wej - 1 - k.maker - k.taker * wyj / wej
         ret = zwroty_po_doplacie([ret], doplata)[0]
         w.rundy.append(ret)
+        w.wejscia_rund.append(t_wej)
         pnl += ret * notional
         czas_w_rynku += notional * (t - t_wej).total_seconds()
 
@@ -391,8 +395,15 @@ def ocen_przesuniecie(okna: list[Okno], dane: Dane, udzial: float, doplata: floa
     percentyl = (100 * (sum(1 for x in perm if x < statystyka)
                         + 0.5 * sum(1 for x in perm if x == statystyka)) / len(perm)
                  if perm else None)
-    dsr = deflowany_sharpe(rundy, N_WARIANTOW)
-    dsr_projektu = deflowany_sharpe(rundy, 59 + N_WARIANTOW)
+    # T W DSR TO LICZBA ROZNYCH CHWIL WEJSCIA, NIE LICZBA RUND (audyt 2026-10-10,
+    # S2-4; ta sama korekta co W-2 w trenerze). Rundy top-k otwarte na jednym
+    # rebalansie dziela jeden szok rynkowy - liczone osobno podnosily DSR samym
+    # poszerzeniem top-k. Grupowanie po chwili wejscia jest gorna granica
+    # korelacji w grupie (rho = 1), wiec bramka K2 bledzi w strone ostroznosci.
+    # Te same chwile w nakladajacych sie oknach licza sie raz.
+    n_efektywne = liczba_niezaleznych([t for w in wyniki for t in w.wejscia_rund])
+    dsr = deflowany_sharpe(rundy, N_WARIANTOW, n_efektywne=n_efektywne)
+    dsr_projektu = deflowany_sharpe(rundy, 59 + N_WARIANTOW, n_efektywne=n_efektywne)
     utracone = [u for w in wyniki for u in w.utracone]
     fill = wyp / (wyp + niewyp) if wyp + niewyp else None
     odn_srednie = {}
@@ -408,6 +419,7 @@ def ocen_przesuniecie(okna: list[Okno], dane: Dane, udzial: float, doplata: floa
         "dodatnie": sum(1 for _, w in z_ekspozycja if w.zwrot > 0),
         "bije": bije,
         "rund": len(rundy),
+        "rund_niezaleznych": n_efektywne,
         "zwrot_na_runde_pb": statistics.fmean(rundy) * 1e4 if rundy else None,
         "sharpe_rundy": dsr["sharpe"],
         "dsr": dsr["dsr"],
@@ -493,7 +505,7 @@ def _f(x, fmt: str) -> str:
 
 
 def tabela(po: dict[int, dict]) -> list[str]:
-    linie = ["| przesunięcie | okna (z ekspozycją) | dodatnie | rund | zwrot/rundę po "
+    linie = ["| przesunięcie | okna (z ekspozycją) | dodatnie | rund (różnych wejść = T w DSR) | zwrot/rundę po "
              "dopłacie (pb) | Sharpe/rundę | DSR (N=2) | DSR (N=61) | wypełnialność "
              "| bije B1 | bije B2 | bije B3 | percentyl perm. |",
              "|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
@@ -505,7 +517,7 @@ def tabela(po: dict[int, dict]) -> list[str]:
         dod = (f"{m['dodatnie']}/{m['z_ekspozycja']} "
                f"({m['dodatnie'] / m['z_ekspozycja']:.0%})" if m["z_ekspozycja"] else "—")
         linie.append(
-            f"| {p:+d} | {m['okna']} ({m['z_ekspozycja']}) | {dod} | {m['rund']} | "
+            f"| {p:+d} | {m['okna']} ({m['z_ekspozycja']}) | {dod} | {m['rund']} ({m.get('rund_niezaleznych', '—')}) | "
             f"{_f(m['zwrot_na_runde_pb'], '+.1f')} | {_f(m['sharpe_rundy'], '+.4f')} | "
             f"{_f(m['dsr'], '.4f')} | {_f(m['dsr_projektu'], '.4f')} | "
             f"{_f(m['wypelnialnosc'], '.1%')} | {b('B1')} | {b('B2')} | {b('B3')} | "

@@ -95,6 +95,7 @@ function PasswordSection() {
   const [cur, setCur] = useState('');
   const [next, setNext] = useState('');
   const [again, setAgain] = useState('');
+  const [kod, setKod] = useState('');
   const [state, setState] = useState(null);
   const [busy, setBusy] = useState(false);
 
@@ -102,10 +103,11 @@ function PasswordSection() {
     if (next !== again) { setState({ ok: false, message: 'Nowe hasła nie są identyczne.' }); return; }
     setBusy(true); setState(null);
     try {
-      await post('/api/auth/password', { current_password: cur, new_password: next });
-      setCur(''); setNext(''); setAgain('');
+      await post('/api/auth/password', { current_password: cur, new_password: next,
+                                         kod: kod.trim() || null });
+      setCur(''); setNext(''); setAgain(''); setKod('');
       setState({ ok: true, message: 'Hasło zmienione. Wszystkie pozostałe sesje zostały unieważnione.' });
-    } catch (e) { setState({ ok: false, message: e.message }); }
+    } catch (e) { setState({ ok: false, message: e.message }); setKod(''); }
     finally { setBusy(false); }
   };
 
@@ -128,6 +130,17 @@ function PasswordSection() {
                  onChange={(e) => setAgain(e.target.value)} />
         </label>
       </div>
+      {/* Przy wlaczonej weryfikacji dwuetapowej serwer wymaga kodu (audyt
+          2026-10-10, S2-5): zmiana hasla wylogowuje wszystkie inne urzadzenia,
+          wiec samo haslo z przejetej sesji nie moze jej otwierac. */}
+      <label className="field" style={{ marginTop: 12, marginBottom: 0 }}>
+        <span className="field-label">
+          Kod weryfikacji dwuetapowej (albo kod zapasowy) — jeśli jest włączona
+        </span>
+        <input className="input-field" value={kod} maxLength={64}
+               inputMode="numeric" autoComplete="one-time-code"
+               onChange={(e) => setKod(e.target.value)} />
+      </label>
       <div className="row-body">Minimum 12 znaków. Hasło jest hashowane algorytmem Argon2id.</div>
       <button className="btn-ghost" onClick={save} disabled={busy || !cur || next.length < 12}
               style={{ marginTop: 6 }}>
@@ -247,6 +260,10 @@ function NotificationsSection() {
   const [state, setState] = useState(null);
   const [busy, setBusy] = useState(false);
   const [form, setForm] = useState({ kind: 'whatsapp', label: '', telefon: '', apikey: '', url: '' });
+  // Potwierdzenie zmiany kanalu (audyt 2026-10-10, S-11): kanal to droga alarmu
+  // o przejeciu konta, wiec sama sesja nie moze go dodac, podmienic ani usunac.
+  const [haslo, setHaslo] = useState('');
+  const [kod, setKod] = useState('');
   const [errs, setErrs] = useState({});
   const [quietState, setQuietState] = useState(null);
   // Ostatnia wartosc ciszy POTWIERDZONA przez serwer. Pola edytuja `quiet`,
@@ -293,11 +310,12 @@ function NotificationsSection() {
   const addChannel = async () => {
     setBusy(true); setState(null);
     try {
-      await post('/api/notifications/channels', form);
+      await post('/api/notifications/channels', { ...form, haslo, kod: kod.trim() || null });
       setForm({ kind: form.kind, label: '', telefon: '', apikey: '', url: '' });
+      setHaslo(''); setKod('');
       await load();
       setState({ ok: true, message: 'Kanał dodany. Wyślij wiadomość testową, żeby go zweryfikować.' });
-    } catch (e) { setState({ ok: false, message: e.message }); }
+    } catch (e) { setState({ ok: false, message: e.message }); setKod(''); }
     finally { setBusy(false); }
   };
 
@@ -316,8 +334,14 @@ function NotificationsSection() {
 
   const removeChannel = async (id) => {
     setBusy(true); setState(null);
-    try { await del(`/api/notifications/channels/${id}`); await load(); }
-    catch (e) { setState({ ok: false, message: e?.message || 'Nie udało się usunąć kanału' }); }
+    try {
+      await del(`/api/notifications/channels/${id}`, { haslo, kod: kod.trim() || null });
+      setHaslo(''); setKod('');
+      await load();
+    } catch (e) {
+      setState({ ok: false, message: e?.message || 'Nie udało się usunąć kanału' });
+      setKod('');
+    }
     finally { setBusy(false); }
   };
 
@@ -403,7 +427,8 @@ function NotificationsSection() {
                             style={{ padding: '6px 14px', fontSize: '0.78rem' }}>
                       Wyślij test
                     </button>
-                    <button className="btn-ghost" disabled={busy}
+                    <button className="btn-ghost" disabled={busy || !haslo}
+                            title={haslo ? '' : 'Wpisz hasło poniżej'}
                             onClick={() => removeChannel(c.id)}
                             style={{ padding: '6px 14px', fontSize: '0.78rem',
                                      borderColor: 'rgba(239,68,68,0.3)', color: 'var(--danger-light)' }}>
@@ -456,7 +481,23 @@ function NotificationsSection() {
           </label>
         )}
 
-        <button className="btn-ghost" style={{ marginTop: 12 }} disabled={busy || !form.label}
+        <div className="grid grid-2" style={{ gap: 12, marginTop: 12 }}>
+          <label className="field" style={{ marginBottom: 0 }}>
+            <span className="field-label">Hasło — wymagane, żeby dodać, zmienić lub usunąć kanał</span>
+            <input className="input-field" type="password" value={haslo}
+                   autoComplete="current-password"
+                   onChange={(e) => setHaslo(e.target.value)} />
+          </label>
+          <label className="field" style={{ marginBottom: 0 }}>
+            <span className="field-label">Kod weryfikacji dwuetapowej — jeśli jest włączona</span>
+            <input className="input-field" value={kod} maxLength={64}
+                   inputMode="numeric" autoComplete="one-time-code"
+                   onChange={(e) => setKod(e.target.value)} />
+          </label>
+        </div>
+
+        <button className="btn-ghost" style={{ marginTop: 12 }}
+                disabled={busy || !form.label || !haslo}
                 onClick={addChannel}>
           {busy ? 'Zapisywanie…' : 'Dodaj kanał'}
         </button>

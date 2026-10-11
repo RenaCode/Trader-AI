@@ -7,6 +7,8 @@ w gotowce, a decyzja nie widzi niczego, co zamknelo sie po niej.
 import random
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from services.engine import r4_momentum as r4
 from services.engine.koszty import POSLIZG_TAKER, koszty
 
@@ -257,3 +259,54 @@ def test_eksperyment_r4_drukuje_werdykt(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "## Wariant P" in out and "## Wariant F" in out
     assert out.count("STOP/GO 2:") == 2
+
+
+# ------------------------------------------------------------ DSR po wejsciach
+
+def _okno_atrapa():
+    return r4.Okno(T0, T0 + timedelta(days=30), [], [], {}, {})
+
+
+def _dane_atrapa():
+    """Pola, ktore `ocen_przesuniecie` przekazuje do (podstawionej) symulacji."""
+    from types import SimpleNamespace
+    return SimpleNamespace(spread_bps={}, kind="spot_eu")
+
+
+def _wynik(zwroty, chwile):
+    w = r4.WynikOkna()
+    w.rundy, w.wejscia_rund = list(zwroty), list(chwile)
+    return w
+
+
+def test_DSR_K2_liczy_T_po_chwilach_wejscia_a_nie_po_rundach(monkeypatch):
+    """Audyt 2026-10-10, S2-4: bramka STOP/GO momentum liczyla T = liczba rund.
+    Rundy top-k z jednego rebalansu dziela szok - trzy kopie tej samej proby
+    (top-3 na kazdej dacie) podnosily DSR samym poszerzeniem top-k."""
+    rng = random.Random(7)
+    pojedyncze = [rng.gauss(0.004, 0.03) for _ in range(60)]
+    chwile = [T0 + timedelta(days=i) for i in range(60)]
+
+    def ocen(zwroty, ch):
+        monkeypatch.setattr(r4, "symuluj_okno", lambda *a, **k: _wynik(zwroty, ch))
+        return r4.ocen_przesuniecie([_okno_atrapa()], _dane_atrapa(), 1.0, 0.0,
+                                    n_permutacji=0, seed=1)
+
+    jedna = ocen(pojedyncze, chwile)
+    top3 = ocen([z for z in pojedyncze for _ in range(3)],
+                [t for t in chwile for _ in range(3)])
+
+    assert top3["dsr"] == pytest.approx(jedna["dsr"], abs=0.02), (
+        "szerokosc top-k podniosla DSR - T liczone po rundach, nie po wejsciach")
+    assert top3["dsr_projektu"] == pytest.approx(jedna["dsr_projektu"], abs=0.02)
+    assert top3["rund"] == 180 and top3["rund_niezaleznych"] == 60
+
+
+def test_symulacja_zapisuje_chwile_wejscia_kazdej_rundy():
+    panele, swiece = _rynek({"BTCUSDC": 0.004, "ETHUSDC": 0.006, "SOLUSDC": 0.009,
+                             "ADAUSDC": 0.002, "XRPUSDC": -0.001, "DOGEUSDC": 0.008})
+    od, do = _okno(panele)
+    _, w = _symuluj(panele, swiece, od, do)
+    assert len(w.wejscia_rund) == len(w.rundy) == 3
+    # Trzy wejscia z jednej decyzji = jedna chwila, jedna obserwacja niezalezna.
+    assert len(set(w.wejscia_rund)) == 1

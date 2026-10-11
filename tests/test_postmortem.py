@@ -297,3 +297,20 @@ def test_sekret_nowej_roli_jest_wymieniony_w_dokumentacji_wdrozenia():
     sql = MIGRACJA.read_text()
     assert "POSTMORTEM_DB_PASSWORD" in sql
     assert "PRZED migracja" in sql
+
+
+def test_POSTMORTEM_widzi_te_same_klucze_dostawcow_co_skaner_wiadomosci():
+    """Audyt 2026-10-10, N2-3: `trader-postmortem` padał co dobę na
+    „anthropic: brak środków", a skaner wiadomości w tym samym czasie schodził
+    na Gemini. Job nie miał wpisów `GEMINI_API_KEY`/`ANTHROPIC_API_KEY`, więc
+    klucz trzymany tylko w sekrecie k8s był dla niego niewidoczny
+    i `zbuduj_dostawce` budował samego Anthropica - bez zejścia awaryjnego."""
+    szablony = KORZEN / "charts/trader/templates"
+    postmortem = (szablony / "postmortem-cron.yaml").read_text()
+    workers = (szablony / "workers.yaml").read_text()
+    for s in (postmortem, workers):
+        assert 'include "trader.llmKluczeEnv"' in s
+    helpers = (szablony / "_helpers.tpl").read_text()
+    blok = helpers.split('define "trader.llmKluczeEnv"')[1].split("{{- end -}}")[0]
+    for klucz in ("ANTHROPIC_API_KEY", "GEMINI_API_KEY"):
+        assert f"key: {klucz}, optional: true" in blok

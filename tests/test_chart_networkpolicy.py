@@ -13,6 +13,7 @@ czesc wymaga `helm` i pomija sie bez niego.
 """
 from __future__ import annotations
 
+import ipaddress
 import shutil
 import subprocess
 from pathlib import Path
@@ -158,12 +159,14 @@ def test_polityki_ingress_nie_maja_egress():
 
 
 # ------------------------------------------------- egress (2026-10-03)
-SIEC_DOMOWA = ["192.168.3.0/24", "10.13.13.0/24"]
+# Z values.yaml, nie kopia: test pilnuje, ze `except` niesie dokladnie liste z chartu.
+SIEC_DOMOWA = yaml.safe_load(CHART.joinpath("values.yaml").read_text())[
+    "networkPolicy"]["egress"]["siecDomowa"]
 
 
 @z_helmem
 def test_egress_obejmuje_KAZDY_pod_chartu():
-    """Audyt 03.10: pod tradera dochodzil przez wg0 do UDM, TV i Fibaro.
+    """Audyt 03.10: pod tradera dochodzil przez tunel do urzadzen w sieci prywatnej.
     Pod pominiety przez selektor egress zostaje z ta sama luka."""
     docs = _render()
     p = _polityki(docs)
@@ -187,6 +190,9 @@ def test_egress_blokuje_dom_i_zostawia_reszte():
         assert {(x["protocol"], x["port"]) for x in dns["ports"]} == {("UDP", 53), ("TCP", 53)}
         assert klaster == {"to": [{"namespaceSelector": {}}]}
         assert swiat == {"to": [{"ipBlock": {"cidr": "0.0.0.0/0", "except": SIEC_DOMOWA}}]}
+    # Lista z chartu nie moze zniknac po cichu - pusta znaczy pody znowu w sieci prywatnej.
+    assert len(SIEC_DOMOWA) >= 2
+    assert all(ipaddress.ip_network(c).is_private for c in SIEC_DOMOWA)
 
 
 @z_helmem

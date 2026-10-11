@@ -109,6 +109,7 @@ spec:
                 - name: SECRETS_KEY
                   valueFrom:
                     secretKeyRef: { name: {{ .Values.secretName }}, key: SECRETS_KEY }
+                {{- include "trader.llmKluczeEnv" . | nindent 16 }}
                 {{- include "trader.llmEnv" . | nindent 16 }}
                 - name: PYTHONUNBUFFERED
                   value: "1"

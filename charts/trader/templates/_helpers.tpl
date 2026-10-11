@@ -134,6 +134,23 @@ jest zabezpieczeniem na wypadek braku zmiennej, a nie deklaracją tego, czym
 system pracuje — przez cały czas życia projektu ANALYSIS_MODEL nie istniał
 nigdzie indziej i dlatego każda analiza szła najdroższym modelem.
 */}}
+{{/*
+KLUCZE DOSTAWCOW ANALIZY ZE SRODOWISKA - sciezka zapasowa obok widoku
+`app.secret_llm` (`news_worker._klucz`: baza ma pierwszenstwo). JEDNA definicja
+dla workerow i post-mortemu (audyt 2026-10-10, N2-3): post-mortem nie mial tych
+wpisow, wiec przy kluczu Gemini trzymanym tylko w sekrecie k8s budowal samego
+Anthropica i przy pustym koncie padal zamiast zejsc na Gemini jak skaner
+wiadomosci. Obie `optional`: brak klucza w sekrecie nie moze zatrzymac poda.
+*/}}
+{{- define "trader.llmKluczeEnv" -}}
+- name: ANTHROPIC_API_KEY
+  valueFrom:
+    secretKeyRef: { name: {{ .Values.secretName }}, key: ANTHROPIC_API_KEY, optional: true }
+- name: GEMINI_API_KEY
+  valueFrom:
+    secretKeyRef: { name: {{ .Values.secretName }}, key: GEMINI_API_KEY, optional: true }
+{{- end -}}
+
 {{- define "trader.llmEnv" -}}
 - name: ANALYSIS_MODEL
   value: {{ required "llm.analysisModel musi byc ustawiony wprost" .Values.llm.analysisModel | quote }}
@@ -250,11 +267,10 @@ trader.renacode.com/component: job
 {{- end -}}
 
 {{/*
-REGULY EGRESS - WSZYSTKO POZA SIECIA DOMOWA (2026-10-03).
+REGULY EGRESS - WSZYSTKO POZA `networkPolicy.egress.siecDomowa` (2026-10-03).
 
-Wezel ma trase 192.168.3.0/24 i 10.13.13.0/24 przez wg0 (tunel do domu),
-a UDM wpuszcza cale 10.13.13.0/24 - bez tej polityki kazdy pod dochodzil do
-UDM, telewizora i Fibaro. Trzy reguly, suma (OR):
+Wezel ma trase do sieci prywatnych przez tunel - bez tej polityki kazdy pod
+dochodzil do urzadzen w tych sieciach. Trzy reguly, suma (OR):
 
   1. DNS do CoreDNS (UDP i TCP 53),
   2. dowolny pod w klastrze (`namespaceSelector: {}`) - ruch wewnatrz

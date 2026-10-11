@@ -159,12 +159,7 @@ spec:
             # Klucze dostawcow analizy sa czytane PRZEDE WSZYSTKIM z bazy
             # (wpisane w UI). Te wpisy sa tylko sciezka zapasowa i celowo optional.
             # Anthropic ma pierwszenstwo, gdy ustawione sa oba.
-            - name: ANTHROPIC_API_KEY
-              valueFrom:
-                secretKeyRef: { name: {{ $.Values.secretName }}, key: ANTHROPIC_API_KEY, optional: true }
-            - name: GEMINI_API_KEY
-              valueFrom:
-                secretKeyRef: { name: {{ $.Values.secretName }}, key: GEMINI_API_KEY, optional: true }
+            {{- include "trader.llmKluczeEnv" $ | nindent 12 }}
             {{/*
             Modele i limity dostawcy analizy. Wspolna definicja z API - patrz
             `trader.llmEnv` w _helpers.tpl, tam jest powod.

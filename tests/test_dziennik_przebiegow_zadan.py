@@ -486,12 +486,14 @@ def test_dane_rzadsze_niz_plan_nadal_podnosza_oczekiwanie():
     ("40 4 * * 0", 168), ("17 3 * * *", 24), ("*/10 * * * *", 10 / 60),
     ("7 */6 * * *", 6), ("13 */6 * * *", 6), ("0,30 * * * *", 0.5),
     ("0 9 * * 1-5", 72),
+    # Nazwy (audyt 2026-10-10, N2-4): dawaly None, czyli cichy powrot do mediany.
+    ("40 4 * * SUN", 168), ("0 9 * * mon-fri", 72),
 ])
 def test_najdluzsza_przerwa_harmonogramu(cron, godzin):
     assert najdluzsza_przerwa_harmonogramu(cron) == timedelta(hours=godzin)
 
 
-@pytest.mark.parametrize("cron", ["0 0 31 2 *", "", "bzdura", "1 2 3"])
+@pytest.mark.parametrize("cron", ["0 0 31 2 *", "", "bzdura", "1 2 3", "0 0 * * XYZ"])
 def test_harmonogram_nieczytelny_albo_zawieszony_daje_None(cron):
     assert najdluzsza_przerwa_harmonogramu(cron) is None
 
@@ -517,3 +519,25 @@ def test_zywotnosc_dostaje_TE_SAME_harmonogramy_co_CronJoby():
     podane = dict(h.split("=", 1) for h in m.group(1).split(";"))
     assert podane == {n: s for n, s in plan.items() if n in podane}
     assert set(podane) == set(plan) - {"zywotnosc"}
+
+
+def test_TYGODNIOWY_trener_bez_startu_zgloszony_po_tygodniu_a_nie_po_dwoch():
+    """Audyt 2026-10-10, N2-4: próg `2 x 7 d + 30 min` zgłaszał trenera, który
+    nie wystartował (ImagePull, brak wiersza), dopiero przy DRUGIM opuszczonym
+    terminie. Z harmonogramu próg to plan + zapas na czas trwania przebiegu."""
+    teraz = datetime(2026, 10, 20, 12, 0, tzinfo=timezone.utc)
+    h = {"trainer": [{"id": 300, "finished_at": teraz - timedelta(days=8),
+                      "exit_code": 0}]}
+    braki = ocen_zadania(h, teraz, DZIENNIK_STARY, TYGODNIOWY)
+    assert [k for k, _ in braki] == ["trainer:cisza:300"]
+    # Zapas na czas trwania i rozrzut startu: 7 d + 6 h to jeszcze nie cisza.
+    h["trainer"][0]["finished_at"] = teraz - timedelta(days=7, hours=6)
+    assert ocen_zadania(h, teraz, DZIENNIK_STARY, TYGODNIOWY) == []
+
+
+def test_dobowe_zadanie_z_harmonogramem_zglaszane_po_jednym_opuszczonym_terminie():
+    h = {"backup": [_p(1, 31)]}
+    assert [k for k, _ in ocen_zadania(h, TERAZ, DZIENNIK_STARY,
+                                      {"backup": "17 3 * * *"})] == ["backup:cisza:1"]
+    h = {"backup": [_p(1, 29)]}
+    assert ocen_zadania(h, TERAZ, DZIENNIK_STARY, {"backup": "17 3 * * *"}) == []

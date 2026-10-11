@@ -12,6 +12,7 @@ from ..auth import audit, current_user, require_csrf
 from ..db import execute, fetch_all, fetch_one
 from ..notifications import WebhookNiedozwolony, adres_webhooka, notify
 from ..security import SecretBox
+from .auth import potwierdz_haslo, potwierdz_kod_totp, totp_wlaczone
 
 # Kanaly dostarczania = enum notify.channel_kind (migracja 0027).
 Kanal = Literal["inapp", "whatsapp", "webhook"]
@@ -28,6 +29,38 @@ class ChannelBody(BaseModel):
     apikey: str | None = Field(default=None, max_length=64)
     url: str | None = Field(default=None, max_length=500)
     secret: str | None = Field(default=None, max_length=200)
+    # HASLO (i kod, gdy konto ma TOTP) - patrz `_potwierdz_zmiane_kanalu`.
+    haslo: str = Field(min_length=1, max_length=1024)
+    kod: str | None = Field(default=None, max_length=64)
+
+
+class PotwierdzenieBody(BaseModel):
+    haslo: str = Field(min_length=1, max_length=1024)
+    kod: str | None = Field(default=None, max_length=64)
+
+
+async def _potwierdz_zmiane_kanalu(user: dict, haslo: str, kod: str | None,
+                                   request: Request, akcja: str) -> None:
+    """Haslo, a przy TOTP takze kod - przed dodaniem, nadpisaniem i usunieciem kanalu.
+
+    KANAL TO DROGA, KTORA PRZYCHODZI ALARM O PRZEJECIU KONTA (audyt 2026-10-10,
+    S-11/S2-5). Do tej poprawki wystarczala sesja: przejete ciasteczko usuwalo
+    WhatsApp (albo podmienialo numer - `ON CONFLICT` nadpisuje konfiguracje
+    kanalu o tej samej nazwie), a alarmy `always_on` o zmianie hasla
+    i o kill-switchu szly juz tylko do dzwonka w panelu, do ktorego wlasciciel
+    po zmianie hasla nie mial dostepu. Preferencje (`/preferences`) zostaja bez
+    hasla: zdarzen `always_on` nie wyciszaja (`notify` wysyla je wszystkimi
+    kanalami niezaleznie od preferencji).
+
+    403, nie 401: 401 spoza /api/auth/ front traktuje jako wygasla sesje.
+    Pomylki ida do wspolnego licznika z logowaniem (`potwierdz_haslo`).
+    """
+    await potwierdz_haslo(user, haslo, request, akcja=akcja, status=403,
+                          komunikat="Hasło jest nieprawidłowe")
+    if await totp_wlaczone(user["id"]):
+        await potwierdz_kod_totp(user, kod, request, akcja=f"{akcja}.kod", status=403,
+                                 komunikat="Kod weryfikacji dwuetapowej jest wymagany "
+                                           "albo nieprawidłowy")
 
 
 class PreferenceBody(BaseModel):
@@ -130,6 +163,8 @@ async def list_channels(user: dict = Depends(current_user)):
 
 @router.post("/channels", dependencies=[Depends(require_csrf)])
 async def add_channel(body: ChannelBody, request: Request, user: dict = Depends(current_user)):
+    await _potwierdz_zmiane_kanalu(user, body.haslo, body.kod, request,
+                                   "notify.channel_added")
     if body.kind == "whatsapp":
         if not body.telefon or not body.apikey:
             raise HTTPException(400, "WhatsApp wymaga numeru telefonu i klucza CallMeBot")
@@ -204,7 +239,11 @@ async def test_channel(channel_id: int, user: dict = Depends(current_user)):
 
 
 @router.delete("/channels/{channel_id}", dependencies=[Depends(require_csrf)])
-async def delete_channel(channel_id: int, request: Request, user: dict = Depends(current_user)):
+async def delete_channel(channel_id: int, body: PotwierdzenieBody, request: Request,
+                         user: dict = Depends(current_user)):
+    # Haslo PRZED odczytem: 404 nie moze mowic zgadujacemu, ktore kanaly istnieja.
+    await _potwierdz_zmiane_kanalu(user, body.haslo, body.kod, request,
+                                   "notify.channel_removed")
     row = await fetch_one("SELECT kind::text AS kind, label FROM notify.channel"
                           " WHERE id = %s AND user_id = %s",
                           (channel_id, user["id"]))

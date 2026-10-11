@@ -274,7 +274,7 @@ który klucz jest ustawiony:
 | kolejność | sekret w UI / zmienna | triaż | analiza |
 |---|---|---|---|
 | 1 | `anthropic_api_key` / `ANTHROPIC_API_KEY` | claude-haiku-4-5 | claude-opus-5 |
-| 2 | `gemini_api_key` / `GEMINI_API_KEY` | gemini-3.5-flash-lite | gemini-3.5-flash |
+| 2 | `gemini_api_key` / `GEMINI_API_KEY` | gemini-3.5-flash-lite | gemini-3.6-flash |
 
 Anthropic wygrywa, gdy ustawione są oba — jest dostawcą docelowym, a Gemini
 wszedł jako ścieżka na czas oczekiwania na klucz. Klucz z bazy (wpisany
@@ -291,6 +291,14 @@ potok twardo.
 > uskok, którego kalibracja wagi nie zakłada. Model zapisuje się przy każdym
 > wierszu (`news.article_analysis.model`), a zmiana trybu jest wykrzyczana
 > w logu — ale to jest wykrywalność, nie rozwiązanie.
+>
+> **Podpis to model z odpowiedzi, nie z konfiguracji** (od 2026-10): `modelVersion`
+> u Gemini, `model` u Anthropica. Powód: Google wycofał `gemini-3.5-flash`
+> i obsługuje zapytania o niego modelem `gemini-3.6-flash`, mówiąc o tym tylko
+> w odpowiedzi. Wiersze sprzed tej zmiany podpisane `gemini-3.5-flash` mogą więc
+> pochodzić z 3.6 — data przekierowania jest nieznana, więc w `news_sent` jest
+> w tym okresie uskok, którego podpis nie pokazuje. Podmiana modelu przez
+> dostawcę idzie do logu jako `[llm] … obsluzyl …`.
 
 **Kiedy to wpłynie na model.** Nigdy wstecz. Analizy powstają od dnia wpięcia
 klucza, więc `news_shock` jest martwy we wszystkich oknach historycznych. Wchodzi

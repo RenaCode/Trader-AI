@@ -393,6 +393,23 @@ a.src-link:hover { text-decoration: underline; }
   background: var(--gradient-ai); color: #fff;
   display: grid; place-items: center; font-size: 0.7rem; font-weight: 700;
 }
+/* PRZYCISK W TRESCI KARTY (zakladka Ryzyko). Klasa `.btn` byla uzywana przez
+   kill-switch od poczatku, a nigdy nie istniala - najwazniejsza kontrolka
+   panelu renderowala sie jako surowy przycisk przegladarki na ciemnym motywie
+   (audyt 2026-10-10, N2-2). `.btn-danger` dla akcji, ktora zatrzymuje handel. */
+.btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  background: rgba(255,255,255,0.04); border: 1px solid var(--border-glass-strong);
+  color: var(--text-main); border-radius: var(--radius-sm);
+  font-family: var(--font-main); font-size: 0.85rem; font-weight: 600;
+  padding: 9px 16px; cursor: pointer; transition: var(--transition-smooth);
+}
+.btn:hover:not(:disabled) { background: rgba(255,255,255,0.08); }
+.btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.btn-danger { color: #fff; background: var(--danger); border-color: var(--danger); }
+.btn-danger:hover:not(:disabled) { background: var(--danger-light); border-color: var(--danger-light); }
+.kill-likwidacja { color: var(--danger-light); }
+
 .btn-ghost {
   background: transparent; border: 1px solid var(--border-glass);
   color: var(--text-muted); border-radius: var(--radius-sm);

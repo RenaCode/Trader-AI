@@ -189,6 +189,10 @@ const ryzyko = await zakladka('Ryzyko');
 niema(ryzyko, 'brak dozorcy', 'Ryzyko: awaria odczytu pulsu to nie "brak dozorcy"');
 // Audyt 2026-10-09, W-1: hamulec nie moze zalezec od udanego odczytu historii.
 jest(ryzyko, 'Zatrzymaj handel', 'Ryzyko: reczny kill-switch dostepny takze po awarii odczytu');
+// Audyt 2026-10-10, S2-3: nieodczytane ustawienie likwidacji to NIE "otwarte zostaja".
+jest(ryzyko, 'nie wiadomo, czy zamknie otwarte',
+     'Ryzyko: awaria odczytu skutku kill-switcha nie udaje lagodnej wersji');
+niema(ryzyko, 'otwarte zostają', 'Ryzyko: brak pulsu nie obiecuje, ze pozycje zostana');
 const zrodla = await zakladka('Źródła');
 niema(zrodla, 'rusza po wpisaniu klucza',
       'Zrodla: po awarii nie kaze wpisywac klucza, ktory moze byc wpisany');
@@ -223,6 +227,12 @@ TRASY = {
     limit_name: 'max_daily_loss', released_at: null, released_by: null,
     release_note: null, released_auto: false, triggered_by: null, active: true,
   }],
+  // Silnik z `--likwiduj-po-killswitchu` (audyt 2026-10-10, S2-3).
+  '/api/engines/crypto/risk/killswitch/skutek': {
+    likwiduje: true, mode: 'demo', as_of: TERAZ(),
+    opis: 'Silnik przestanie otwierać pozycje i ZAMKNIE WSZYSTKIE OTWARTE POZYCJE '
+      + 'ZLECENIEM RYNKOWYM (stawka taker + niezmierzony poślizg).',
+  },
 };
 await page.reload({ waitUntil: 'networkidle' });
 await page.waitForSelector('.nav-tab', { timeout: 20000 });
@@ -231,6 +241,18 @@ jest(t, 'Zatrzymaj handel', 'Ryzyko: reczny kill-switch widoczny, gdy trzyma aut
 jest(t, 'zwolni się sam', 'Ryzyko: automat z regula wznowienia nie udaje recznego');
 niema(t, 'Odblokowanie wymaga ręcznego potwierdzenia',
       'Ryzyko: przy automacie nie ma zapewnienia, ze handel stoi do recznego zwolnienia');
+jest(t, 'ZAMYKA wszystkie pozycje rynkowo',
+     'Ryzyko: przy wlaczonej likwidacji karta mowi o sprzedazy, nie o wstrzymaniu');
+// Audyt 2026-10-10, N2-2: klasa `.btn` nie istniala - surowy przycisk przegladarki.
+const tloKs = await page.getByRole('button', { name: 'Zatrzymaj handel…' })
+  .evaluate((b) => getComputedStyle(b).backgroundColor);
+ok(tloKs !== 'rgba(0, 0, 0, 0)' && !/239, 239, 239|240, 240, 240/.test(tloKs),
+   'Ryzyko: przycisk kill-switcha ma styl panelu, nie domyslny przegladarki', tloKs);
+await page.getByRole('button', { name: 'Zatrzymaj handel…' }).click();
+t = await page.locator('.app-container').innerText();
+jest(t, 'ZLECENIEM RYNKOWYM', 'Ryzyko: formularz zatrzymania mowi o zamknieciu pozycji');
+jest(t, 'Włącz kill-switch i zamknij pozycje',
+     'Ryzyko: przycisk nazywa sprzedaz, ktora uruchomi');
 TRASY = BRZEGI;
 await page.reload({ waitUntil: 'networkidle' });
 await page.waitForSelector('.nav-tab', { timeout: 20000 });

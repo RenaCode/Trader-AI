@@ -76,6 +76,10 @@ class Baza:
         raise AssertionError(f"nieoczekiwane zapytanie: {sql}")
 
     async def fetch_one(self, sql, params=None):
+        if sql.startswith("UPDATE risk.killswitch_event"):
+            # Zwolnienie idzie przez UPDATE ... RETURNING (N2-1).
+            self.zwolnione.append(params[1])
+            return {"id": params[1]}
         if "risk.limit_def" in sql:
             return {"value": 10, "wznowienie": self.wznowienie, "max_wznowien": 3}
         if "released_auto" in sql:

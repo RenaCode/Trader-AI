@@ -335,7 +335,7 @@ def test_automat_wznowienia_NIE_zwalnia_recznego(capsys):
     assert "RĘCZNE zatrzymanie" in capsys.readouterr().out
 
 
-def _wznow_z(zdarzenia, limity, capsys=None):
+def _wznow_z(zdarzenia, limity, capsys=None, reczne_w_trakcie=False):
     """`wznow` na atrapie: zwraca (zwolnione UPDATE-y, powiadomienia)."""
     zwolnione, alarmy = [], []
 
@@ -347,6 +347,14 @@ def _wznow_z(zdarzenia, limity, capsys=None):
         return []
 
     async def fetch_one(sql, params=None):
+        if sql.startswith("UPDATE risk.killswitch_event"):
+            # Zwolnienie idzie przez UPDATE ... RETURNING (N2-1); atrapa
+            # odwzorowuje NOT EXISTS po aktywnym recznym.
+            assert "NOT EXISTS" in sql and params[-1] == risk.LIMIT_RECZNY, sql
+            if reczne_w_trakcie:
+                return None
+            zwolnione.append(params)
+            return {"id": params[1]}
         if "risk.limit_def" in sql:
             return limity.get(params[2])
         if "count(*)" in sql:
@@ -383,7 +391,7 @@ def test_kontrola_automat_sam_wznawia_gdy_warunek_ustal():
     """Bez tego test niżej przechodziłby także przy `wznow`, które nie
     zwalnia niczego nigdy."""
     zwolnione, alarmy = _wznow_z([AUTOMAT], REGULA_PO_USTANIU)
-    assert [p[-1] for p in zwolnione] == [400] and alarmy
+    assert [p[1] for p in zwolnione] == [400] and alarmy
 
 
 def test_aktywne_RECZNE_wstrzymuje_automatyczne_wznowienie_automatu(capsys):
@@ -419,3 +427,59 @@ def test_interfejs_zatrzymuje_bez_hasla_a_zwalnia_z_haslem():
     assert 'type="password"' in zwolnij_ui
     assert "{ note: note.trim(), haslo, kod: kod.trim() || null }" in zwolnij_ui
     assert "triggered_by" in zrodlo, "historia ma mówić, kto zatrzymał ręcznie"
+
+
+# ---------------------------------------------- co zatrzymanie zrobi z pozycjami
+
+class AtrapaPulsu(Atrapa):
+    def __init__(self, likwiduje, **kw):
+        super().__init__(**kw)
+        self.likwiduje = likwiduje
+
+    async def fetch_one(self, sql, params=None):
+        if "risk.engine_heartbeat" in sql:
+            assert "likwiduj_po_killswitchu" in sql, "puls czytany bez ustawienia likwidacji"
+            return {"mode": self.puls, "likwiduje": self.likwiduje,
+                    "last_beat_at": __import__("datetime").datetime(2026, 10, 10)}
+        return await super().fetch_one(sql, params)
+
+
+@pytest.mark.parametrize("z_pulsu,oczekiwane", [("true", True), ("false", False),
+                                                (None, None), ("null", None)])
+def test_SKUTEK_kill_switcha_z_pulsu_silnika(monkeypatch, z_pulsu, oczekiwane):
+    """Audyt 2026-10-10, S2-3: przy `--likwiduj-po-killswitchu` ręczne zatrzymanie
+    sprzedaje całą ekspozycję rynkowo, a panel mówił tylko o wstrzymaniu wejść."""
+    a = AtrapaPulsu(z_pulsu)
+    _podstaw(monkeypatch, a)
+    odp = asyncio.run(risk.skutek_killswitcha("crypto"))
+    assert odp["likwiduje"] is oczekiwane
+    if oczekiwane is True:
+        assert "ZLECENIEM RYNKOWYM" in odp["opis"]
+    elif oczekiwane is False:
+        assert "ZOSTAJĄ" in odp["opis"]
+    else:
+        assert "Nie wiadomo" in odp["opis"]
+
+
+def test_ZATRZYMANIE_przy_likwidacji_mowi_o_sprzedazy_w_odpowiedzi_i_alarmie(monkeypatch):
+    a = AtrapaPulsu("true")
+    odp = wlacz(monkeypatch, a)
+    assert odp["likwiduje"] is True
+    assert "ZLECENIEM RYNKOWYM" in odp["message"]
+    assert all("ZLECENIEM RYNKOWYM" in tresc for _, _, _, tresc, _ in a.alarmy)
+
+    b = AtrapaPulsu("false")
+    odp = wlacz(monkeypatch, b)
+    assert odp["likwiduje"] is False and "ZOSTAJĄ" in odp["message"]
+
+
+def test_RECZNE_kliknięte_w_trakcie_przebiegu_NIE_daje_falszywego_wznowienia():
+    """Audyt 2026-10-10, N2-1: `wznow` czyta listę zdarzeń raz. Ręczne
+    zatrzymanie zapisane między tym odczytem a UPDATE zwalniało automat
+    i szło krytyczne „Silnik wraca do handlu", choć silnik stał na ręcznym.
+    UPDATE sprawdza ręczne ponownie; brak zwolnionego wiersza = brak alarmu."""
+    zwolnione, alarmy = _wznow_z([AUTOMAT], REGULA_PO_USTANIU, reczne_w_trakcie=True)
+    assert zwolnione == [] and alarmy == []
+    # Kontrola: bez ręcznego ten sam automat JEST zwalniany i ogłaszany.
+    zwolnione, alarmy = _wznow_z([AUTOMAT], REGULA_PO_USTANIU)
+    assert len(zwolnione) == 1 and alarmy
