@@ -126,9 +126,10 @@ def test_numer_bez_kierunkowego_jest_ODRZUCANY_przy_zapisie():
         assert not wzorzec.fullmatch(zly), f"{zly} nie powinien przejsc"
 
     # Model przyjmuje 'whatsapp', a nie juz 'telegram'.
-    ChannelBody(kind="whatsapp", label="telefon", telefon="+48123456789", apikey="1")
+    ChannelBody(kind="whatsapp", label="telefon", telefon="+48123456789", apikey="1",
+                haslo="x")
     with pytest.raises(Exception):
-        ChannelBody(kind="telegram", label="x")
+        ChannelBody(kind="telegram", label="x", haslo="x")
 
 
 def test_telegram_zniknal_z_kodu_i_ze_schematu():

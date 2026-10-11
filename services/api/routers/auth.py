@@ -59,6 +59,12 @@ class TotpConfirmBody(BaseModel):
 class PasswordBody(BaseModel):
     current_password: str = Field(min_length=1, max_length=512)
     new_password: str = Field(min_length=12, max_length=512)
+    # KOD DRUGIEGO SKLADNIKA, gdy konto ma TOTP (audyt 2026-10-10, S2-5). Zmiana
+    # hasla uniewaznia wszystkie inne sesje - razem z usunieciem kanalow
+    # powiadomien (S-11) przejeta sesja i podejrzane haslo wystarczaly, zeby
+    # po cichu odciac wlasciciela od konta. Drugi skladnik ma chronic dokladnie
+    # przed tym, wiec zmiana hasla nie moze go omijac.
+    kod: str | None = Field(default=None, max_length=64)
 
 
 class TotpDisableBody(BaseModel):
@@ -551,6 +557,11 @@ async def change_password(body: PasswordBody, request: Request,
                           user: dict = Depends(current_user)):
     await potwierdz_haslo(user, body.current_password, request, akcja="auth.password",
                           status=401, komunikat="Biezace haslo jest nieprawidlowe")
+    if await totp_wlaczone(user["id"]):
+        await potwierdz_kod_totp(user, body.kod, request, akcja="auth.password.kod",
+                                 status=401,
+                                 komunikat="Kod weryfikacji dwuetapowej jest wymagany "
+                                           "albo nieprawidłowy")
 
     await execute("UPDATE app.user SET password_hash = %s WHERE id = %s",
                   (await hash_password_async(body.new_password), user["id"]))

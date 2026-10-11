@@ -482,3 +482,101 @@ def test_alarmy_podaja_adres_KLIENTA_a_nie_poda_web():
              if p.name != "auth.py" or p.parent.name != "api"
              if "request.client.host" in p.read_text(encoding="utf-8")]
     assert winni == [], f"`request.client.host` poza auth.adres_klienta: {winni}"
+
+
+# ============================== S2-5 (audyt 2026-10-10): zmiana hasla przy TOTP
+def _zmien_haslo(kod=None):
+    return modul.change_password(
+        modul.PasswordBody(current_password=HASLO, new_password="nowe-haslo-12345", kod=kod),
+        zadanie(), UZYTKOWNIK)
+
+
+def test_ZMIANA_HASLA_przy_TOTP_samym_haslem_nie_przechodzi(baza):
+    """Przejęta sesja + podejrzane hasło: zmiana hasła unieważniała WSZYSTKIE
+    inne sesje i odcinała właściciela, mimo włączonego drugiego składnika."""
+    b = baza(totp=True)
+    przed = b.konto["password_hash"]
+    kod, _ = status(_zmien_haslo())
+    assert kod == 401
+    assert b.konto["password_hash"] == przed, "hasło zmienione bez kodu TOTP"
+    kod, _ = status(_zmien_haslo("000000"))
+    assert kod == 401 and b.konto["password_hash"] == przed
+    assert b.konto["failed_logins"] >= 1, "zły kod nie liczy się jako próba"
+
+
+def test_zmiana_hasla_przy_TOTP_dobrym_kodem(baza):
+    b = baza(totp=True)
+    przed = b.konto["password_hash"]
+    assert status(_zmien_haslo(pyotp.TOTP(SEKRET).now()))[0] == 200
+    assert b.konto["password_hash"] != przed
+    assert b.powiadomienia == ["credential.changed"]
+
+
+def test_zmiana_hasla_bez_TOTP_nie_wymaga_kodu(baza):
+    b = baza()
+    przed = b.konto["password_hash"]
+    assert status(_zmien_haslo())[0] == 200
+    assert b.konto["password_hash"] != przed
+
+
+# ============================== S-11 (audyt 2026-10-03/10): kanaly powiadomien
+@pytest.fixture
+def kanaly(baza, monkeypatch):
+    from services.api.routers import notifications as modul_kanalow
+
+    b = baza(totp=True)
+    b.kanaly_zmiany = []
+    b.audyt_kanalow = []
+    poprzednie = b.fetch_one
+
+    async def fetch_one(sql, params=None):
+        if "FROM notify.channel" in sql:
+            return {"kind": "whatsapp", "label": "telefon"}
+        return await poprzednie(sql, params)
+
+    async def execute(sql, params=None):
+        b.kanaly_zmiany.append(" ".join(sql.split())[:40])
+
+    async def audyt(akcja, **k):
+        b.audyt_kanalow.append(akcja)
+
+    monkeypatch.setattr(modul_kanalow, "fetch_one", fetch_one)
+    monkeypatch.setattr(modul_kanalow, "execute", execute)
+    monkeypatch.setattr(modul_kanalow, "audit", audyt)
+    monkeypatch.setattr(modul_kanalow, "SecretBox", PudelkoJawne)
+    return b, modul_kanalow
+
+
+def _usun(m, haslo, kod=None):
+    return m.delete_channel(5, m.PotwierdzenieBody(haslo=haslo, kod=kod),
+                            zadanie(), UZYTKOWNIK)
+
+
+def _dodaj(m, haslo, kod=None):
+    return m.add_channel(m.ChannelBody(kind="whatsapp", label="telefon",
+                                       telefon="+48123456789", apikey="1",
+                                       haslo=haslo, kod=kod),
+                         zadanie(), UZYTKOWNIK)
+
+
+def test_USUNIECIE_KANALU_wymaga_hasla_i_kodu(kanaly):
+    """Sama sesja usuwała WhatsApp - alarm o przejęciu konta szedł potem tylko
+    do dzwonka w panelu, do którego właściciel nie miał już dostępu."""
+    b, m = kanaly
+    assert status(_usun(m, "zle"))[0] == 403
+    assert status(_usun(m, HASLO))[0] == 403, "TOTP włączone - samo hasło nie wystarcza"
+    assert b.kanaly_zmiany == [], "kanał usunięty bez potwierdzenia"
+    assert status(_usun(m, HASLO, pyotp.TOTP(SEKRET).now()))[0] == 200
+    assert b.kanaly_zmiany == ["DELETE FROM notify.channel WHERE id = %s"]
+
+
+def test_DODANIE_albo_NADPISANIE_kanalu_wymaga_hasla_i_kodu(kanaly):
+    """`ON CONFLICT (user_id, kind, label)` nadpisuje konfigurację - sesja
+    podmieniała numer, na który idą alarmy."""
+    b, m = kanaly
+    with pytest.raises(ValidationError):
+        m.ChannelBody(kind="whatsapp", label="telefon", telefon="+48123456789", apikey="1")
+    assert status(_dodaj(m, HASLO))[0] == 403
+    assert b.kanaly_zmiany == []
+    assert status(_dodaj(m, HASLO, pyotp.TOTP(SEKRET).now()))[0] == 200
+    assert b.kanaly_zmiany and b.kanaly_zmiany[0].startswith("INSERT INTO notify.channel")
