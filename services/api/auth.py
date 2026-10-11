@@ -52,7 +52,7 @@ async def current_user(
     sso_login = sso.login_z_naglowka(request)
     if sso_login is None:
         row = await _uzytkownik_z_sesji(request, trader_session)
-        if row["sso"]:
+        if row.get("sso"):
             # Sesja `sso` nie przeszla hasla ani TOTP aplikacji - jej jedynym
             # dowodem jest naglowek Authelii. Bez niego (port-forward, flaga
             # wylaczona po wycofaniu SSO) to token na okaziciela: skopiowane
