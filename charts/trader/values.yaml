@@ -910,6 +910,15 @@ trainerCron:
   # `candidate` i licznik N liczy ja osobno. Promocja tylko recznie.
   pesymistyczna: true
   opoznienie: 20
+  # PRZEBICIE KALIBROWANE DO WYPELNIALNOSCI DEMO (2026-10-11, docs/hipotezy.md
+  # H-10). H-5 zawiodla: samo dotkniecie limitu dawalo w symulacji 76-79%
+  # wypelnien wobec 65,6% wejsc na demo. `--wypelnialnosc-docelowa` uruchamia
+  # przebieg kalibracyjny, ktory dobiera przebicie limitu (`portfolio.
+  # kalibruj_przebicie`) tak, by wypelnialnosc WEJSC w symulacji nie
+  # przekraczala tej liczby. Liczba to POMIAR: 42/64 wejsc E-1 (`poslizg.py`),
+  # nie wybor. Nowa wartosc = nowy pomiar demo i nowy klucz `params`
+  # (`candidate`). Tylko crypto: dla equity nie ma pomiaru na koncie.
+  wypelnialnoscDocelowa: 0.656
   # DWA TORY, NIE JEDEN PRZEBIEG POWTARZANY CZESCIEJ.
   #
   # Czestszy trening tego samego horyzontu nie dodaje informacji: okna przesuwaja

@@ -23,6 +23,7 @@ dostarcza im tylko stan trzymany w pamieci zamiast w bazie.
 """
 from __future__ import annotations
 
+import math
 import statistics
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
@@ -151,16 +152,39 @@ class Egzekucja:
     spreadu w modelu jest TRUDNIEJSZE wypelnienie. To swiadomie ostrozne:
     maker na bid formalnie zarabia pol spreadu, ale tylko na zleceniach, ktore
     weszly - a to te, przy ktorych rynek poszedl przeciw nam.
+
+    PRZEBICIE (2026-10-11, H-10). Dotkniecie ceny nie jest wypelnieniem.
+    PostOnly na bid staje NA KONCU kolejki po tej cenie, a swieca 1h pochodzi
+    z ksiegi globalnej (~1000x wolumen unijnej) - `low` rowny naszemu limitowi
+    mowi, ze ktos gdzies handlowal po tej cenie, nie ze nasza kolejka doszla do
+    nas. Model z samym dotknieciem dal 76-79% wypelnien wobec 65,6% na demo
+    (42/64, E-1), czyli wiecej, niz H-5 dopuszcza (10 pp).
+
+      * `przebicie_bps` - o ile `low` (kupno) / `high` (sprzedaz) musi PRZEJSC
+        za limit, zeby WEJSCIE sie wypelnilo. 0 = samo dotkniecie, czyli model
+        sprzed zmiany co do bitu. Liczba nie jest wybierana recznie: kalibruje
+        ja `kalibruj_przebicie` tak, zeby wypelnialnosc WEJSC w symulacji
+        odtwarzala wypelnialnosc zmierzona na demo. Kalibracja patrzy wylacznie
+        na to, CZY zlecenie weszlo, nigdy na zwrot transakcji.
+      * DOTYCZY TYLKO WEJSC. Kryterium H-5 i pomiar demo dotycza wejsc;
+        wyjscie na produkcji po dwoch odrzuceniach PostOnly idzie takerem
+        (`gielda_exec.PROBY_POSTONLY_WYJSCIA`), wiec jego wypelnialnosc jest
+        inna wielkoscia. Zaostrzenie wyjsc bez pomiaru byloby zgadywaniem.
     """
     limit: bool = False
     opoznienie_min: int = 0
     spread_per_instrument: dict[str, float] | None = None
     pesymistyczna: bool = False
+    przebicie_bps: float = 0.0
+    # Skad wzielo sie `przebicie_bps`: wypelnialnosc wejsc demo, do ktorej je
+    # skalibrowano (`train.kalibracja_wypelnien`). None = bez kalibracji.
+    # Symulacja tego pola nie czyta - to opis miary dla `params` i dozoru.
+    wypelnialnosc_docelowa: float | None = None
 
     @property
     def zmienia_cene_lub_okno(self) -> bool:
         """Czy ten wariant odchodzi od modelu sprzed 2026-10-03."""
-        return bool(self.opoznienie_min or self.pesymistyczna
+        return bool(self.opoznienie_min or self.pesymistyczna or self.przebicie_bps
                     or any((self.spread_per_instrument or {}).values()))
 
 
@@ -219,6 +243,10 @@ class PortfolioResult:
     # bylo dokladnie tym zdaniem, ktore produkcja (65%) obalila.
     wypelnione_wejscia: int = 0
     wypelnione_wyjscia: int = 0
+    # GLEBOKOSC KAZDEGO WEJSCIA Z LIMITEM w modelu z godzin (`glebokosc_bps`),
+    # takze tych, ktore nie weszly - material na `kalibruj_przebicie`. Bez
+    # wejsc, ktorym zabraklo swiecy 1h (te sa w `brak_swiec_wykonania`).
+    glebokosci_wejsc: list[float] = field(default_factory=list)
     # Ruch, ktory przepadl przez niewypelnione WEJSCIE: zwrot ze strony
     # pozycji od ceny limitu do ceny `UTRACONY_RUCH_SWIEC` swiec pozniej.
     # Material na skladnik `niewypelnienie` karty (`koszty.koszt_niewypelnienia`).
@@ -319,6 +347,56 @@ def _wypelnione(limit: float, swieca: dict, kupno: bool) -> bool:
     zadnego prawdopodobienstwa; sprawdzamy fakt z danych swiecy.
     """
     return swieca["low"] <= limit if kupno else swieca["high"] >= limit
+
+
+def glebokosc_bps(limit: float, swieca: dict, kupno: bool) -> float:
+    """O ile swieca PRZESZLA za limit, w pb ceny limitu. Ujemna = nie dotknela.
+
+    Kupno: (limit - low) / limit. Sprzedaz: (high - limit) / limit. Ta sama
+    relacja co `_wypelnione`: `glebokosc >= 0` wtedy i tylko wtedy, gdy swieca
+    dotknela limitu (z dokladnoscia do zaokraglenia przy rownosci).
+    """
+    if kupno:
+        return (limit - swieca["low"]) / limit * 1e4
+    return (swieca["high"] - limit) / limit * 1e4
+
+
+def kalibruj_przebicie(glebokosci: list[float], prob: int,
+                       wypelnialnosc_docelowa: float) -> float:
+    """Najmniejsze przebicie (pb) >= 0, przy ktorym wypelnialnosc wejsc
+    `#(glebokosc >= przebicie) / prob` nie przekracza docelowej.
+
+    `glebokosci` - po jednej na wejscie, dla ktorego BYLY swiece do sprawdzenia
+    (`PortfolioResult.glebokosci_wejsc`); `prob` - wszystkie rozstrzygniete
+    wejscia, razem z tymi bez swiecy 1h (te sa niewypelnione przy kazdym
+    przebiciu, wiec wchodza do mianownika, a nie do rozkladu).
+
+    TYLKO ZAOSTRZA. Gdy symulacja juz wypelnia nie wiecej niz demo, wynik to 0:
+    model nie moze wypelniac latwiej niz „swieca dotknela limitu", bo to
+    jest warunek konieczny wypelnienia na kazdej gieldzie. Luzowanie modelu,
+    zeby dogonic wyzsza wypelnialnosc, byloby zgadywaniem kolejki w druga strone.
+
+    KALIBRACJA DOTYCZY WYPELNIALNOSCI, NIE WYNIKU. Funkcja nie widzi zwrotow
+    transakcji. Gdyby widziala, „przebicie dobrane tak, zeby demo sie zgadzalo"
+    byloby strojeniem strategii z dodatkowym krokiem.
+
+    Przy remisach w rozkladzie dokladne trafienie bywa niemozliwe - wynik
+    jest wtedy pierwsza wartoscia, ktora schodzi PONIZEJ celu (ostroznie).
+    """
+    if prob <= 0 or not glebokosci:
+        return 0.0
+    if not 0.0 < wypelnialnosc_docelowa <= 1.0:
+        raise ValueError(f"wypełnialność docelowa poza (0, 1]: {wypelnialnosc_docelowa}")
+    if sum(1 for g in glebokosci if g >= 0) / prob <= wypelnialnosc_docelowa:
+        return 0.0
+    malejaco = sorted(glebokosci, reverse=True)
+    k = int(wypelnialnosc_docelowa * prob)   # tyle wejsc wolno wypelnic
+    if k >= len(malejaco):
+        return 0.0
+    granica = malejaco[k]                     # pierwsza, ktora ma odpasc
+    if k > 0 and malejaco[k - 1] > granica:
+        return max(0.0, (malejaco[k - 1] + granica) / 2)
+    return max(0.0, math.nextafter(granica, math.inf))
 
 
 # Rozdzielczosc swiec, z ktorych model pesymistyczny czyta cene wysylki
@@ -443,12 +521,13 @@ def simulate_portfolio(panels: dict[str, list[dict]],
     spready = egz.spread_per_instrument or {}
 
     def zlecenie_z_limitem(sym: str, row: dict, nxt_row: dict,
-                           kupno: bool) -> float | None:
+                           kupno: bool, wejscie: bool = False) -> float | None:
         """Cena limitu, jesli zlecenie WESZLO; None, jesli nie.
 
         Przy wartosciach domyslnych `Egzekucja` to jest dokladnie model sprzed
         2026-10-03: limit = zamkniecie swiecy decyzyjnej, wypelnienie, gdy
-        nastepna swieca go dotknela.
+        nastepna swieca go dotknela. `wejscie` - przebicie (H-10) i zapis
+        glebokosci dotycza tylko wejsc (patrz `Egzekucja`).
         """
         if not egz.zmienia_cene_lub_okno:
             limit_px = row["price"]
@@ -464,7 +543,11 @@ def simulate_portfolio(panels: dict[str, list[dict]],
         else:
             cena, swieca = row["price"], nxt_row
         limit_px = z_polowa_spreadu(cena, spready.get(sym, 0.0), kupno)
-        return limit_px if _wypelnione(limit_px, swieca, kupno) else None
+        if not wejscie:
+            return limit_px if _wypelnione(limit_px, swieca, kupno) else None
+        glebokosc = glebokosc_bps(limit_px, swieca, kupno)
+        res.glebokosci_wejsc.append(glebokosc)
+        return limit_px if glebokosc >= egz.przebicie_bps else None
 
     k = koszty(kind)
     fee = k.maker if egz.limit else k.taker
@@ -855,7 +938,7 @@ def simulate_portfolio(panels: dict[str, list[dict]],
             side = 1 if score > 0 else -1
             if egz.limit:
                 limit_px = zlecenie_z_limitem(sym, cur["row"], rows[nxt_idx],
-                                              kupno=side > 0)
+                                              kupno=side > 0, wejscie=True)
                 if limit_px is None:
                     res.niewypelnione_wejscia += 1
                     # Ruch, ktory przepadl: od ceny, po ktorej chcielismy wejsc,
@@ -975,6 +1058,12 @@ def metrics(res: PortfolioResult, min_trades: int) -> dict:
             "killswitch": res.killswitch_reason,
             "niewypelnione": res.niewypelnione_wejscia + res.niewypelnione_wyjscia,
             "wypelnione": res.wypelnione_wejscia + res.wypelnione_wyjscia,
+            # SAME WEJSCIA (2026-10-11). Kryterium H-5 i pomiar demo (42/64)
+            # dotycza WEJSC; suma wyzej miesza je z wyjsciami, ktore ponawiaja
+            # sie co decyzje i na produkcji koncza takerem. Do 11.10 trener
+            # zestawial z demo wlasnie te sume.
+            "niewypelnione_wejscia": res.niewypelnione_wejscia,
+            "wypelnione_wejscia": res.wypelnione_wejscia,
             "pominiete_shorty": res.pominiete_shorty,
             "pominiete_bez_progu": res.pominiete_bez_progu}
     if len(rets) < min_trades:

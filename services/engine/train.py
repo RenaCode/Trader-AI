@@ -61,13 +61,14 @@ from services.engine.bramki import (
     EXIT_RATIO, MIN_PROB_PROGU, PROG_WEJSCIA_POCZATKOWY, Bramki, bramki_z_prob,
 )
 from services.engine.portfolio import (
-    Egzekucja, indeks_swiec, kup_i_trzymaj, metrics as portfolio_metrics,
+    Egzekucja, indeks_swiec, kalibruj_przebicie, kup_i_trzymaj,
+    metrics as portfolio_metrics,
     precompute_panels, simulate_portfolio, udzial_powtornych_wejsc,
     wynik_po_doplacie,
 )
 from services.engine.koszty import (
-    NIEZMIERZONE, Karta, karta_rundy, koszt_niewypelnienia, koszty, opis_karty,
-    zwroty_po_doplacie,
+    NIEZMIERZONE, Karta, brama_0, karta_rundy, koszt_niewypelnienia, koszty,
+    opis_bramy_0, opis_karty, zwroty_po_doplacie,
 )
 from services.engine.spread import Pomiar, opis_pomiaru, zmierz_spread
 from services.engine import baseline as odniesienia
@@ -1131,6 +1132,11 @@ def znacznik_miary(karta: Karta, egzekucja: Egzekucja | None = None) -> dict[str
     if egzekucja is not None:
         znacznik["egzekucja_pesymistyczna"] = 1.0 if egzekucja.pesymistyczna else 0.0
         znacznik["opoznienie_min"] = float(egzekucja.opoznienie_min or 0)
+        # H-10: przebicie kalibrowane do wypelnialnosci demo to inny model
+        # wypelnien niz samo dotkniecie. Zapisywana jest wypelnialnosc
+        # DOCELOWA, nie samo przebicie: przebicie wychodzi z kalibracji co
+        # przebieg inne, a ta sama definicja miary ma dawac ta sama klase.
+        znacznik["wypelnialnosc_docelowa"] = float(egzekucja.wypelnialnosc_docelowa or 0)
     return znacznik
 
 
@@ -1750,6 +1756,70 @@ def wypelnialnosc_symulacji(wypelnione: int, niewypelnione: int) -> float | None
     `poslizg.wypelnialnosc` na produkcji (wypelnione / rozstrzygniete)."""
     razem = wypelnione + niewypelnione
     return wypelnione / razem if razem else None
+
+
+# WYPELNIALNOSC WEJSC NA DEMO, z ktora H-5 porownuje symulacje: 42 z 64
+# rozstrzygnietych wejsc E-1 (2026-10-04..07, `poslizg.py --strategia
+# momentum_filtr_trendu`). Stala do wydruku, nie do rachunku - kalibracja
+# bierze liczbe z `--wypelnialnosc-docelowa` (chart), zeby jej zmiana byla
+# widoczna jako zmiana konfiguracji, a nie edycja kodu.
+WYPELNIALNOSC_DEMO_E1 = (42, 64)
+
+
+def kalibracja_wypelnien(z: "Przebieg", docelowa: float) -> tuple[float, list[str]]:
+    """Przebicie (pb) z przebiegu kalibracyjnego i wiersze do logu.
+
+    `z` - liczniki walk-forwardu policzonego BEZ przebicia (samo dotkniecie)
+    na tej samej siatce, co przebieg wlasciwy. Patrzy wylacznie na to, czy
+    wejscia weszly (`glebokosci_wejsc_oos`), nie na zwroty (H-10).
+    """
+    prob = z.wypelnione_wejsc_oos + z.niewypelnione_wejsc_oos
+    przed = wypelnialnosc_symulacji(z.wypelnione_wejsc_oos, z.niewypelnione_wejsc_oos)
+    przebicie = kalibruj_przebicie(z.glebokosci_wejsc_oos, prob, docelowa)
+    po = (sum(1 for g in z.glebokosci_wejsc_oos if g >= przebicie) / prob
+          if prob else None)
+    linie = [
+        "  KALIBRACJA WYPEŁNIEŃ (H-10): wypełnialność wejść przy samym dotknięciu "
+        + (f"{przed:.1%}" if przed is not None else "—")
+        + f" ({prob} wejść), docelowa z demo {docelowa:.1%}",
+        f"    przebicie {przebicie:.2f} pb (kupno: `low` co najmniej tyle POD limitem)"
+        + (f" → {po:.1%} na tych samych wejściach" if po is not None else "")
+        + ("; symulacja już nie wypełnia częściej niż demo, model bez zmian"
+           if przebicie == 0 else ""),
+    ]
+    return przebicie, linie
+
+
+def opis_wypelnialnosci_wejsc(z: "Przebieg", egzekucja: Egzekucja,
+                              kind: str = "spot_eu") -> list[str]:
+    """Wypelnialnosc WEJSC w symulacji OOS obok demo - liczba, ktora czyta H-5.
+
+    Do 2026-10-11 log zestawial z demo („ok. 65%") wypelnialnosc wejsc
+    i wyjsc RAZEM. Wyjscia ponawiaja sie co decyzje, wiec ta suma nie jest
+    wielkoscia, ktora zmierzono na demo (wejscia, 42/64). Pomiar demo jest
+    tylko dla crypto - equity dostaje sama liczbe symulacji.
+    """
+    wyp, niewyp = z.wypelnione_wejsc_oos, z.niewypelnione_wejsc_oos
+    w = wypelnialnosc_symulacji(wyp, niewyp)
+    if kind not in ("spot", "spot_eu", "perp"):
+        return [("Wypełnialność WEJŚĆ w symulacji OOS: "
+                 + (f"{w:.1%}" if w is not None else "—")
+                 + f" ({wyp} weszło, {niewyp} nie) — pomiaru na koncie dla tego "
+                 f"rynku nie ma")]
+    demo_wyp, demo_prob = WYPELNIALNOSC_DEMO_E1
+    demo = demo_wyp / demo_prob
+    linie = [("Wypełnialność WEJŚĆ w symulacji OOS: "
+              + (f"{w:.1%}" if w is not None else "—")
+              + f" ({wyp} weszło, {niewyp} nie) wobec demo {demo:.1%} "
+              f"({demo_wyp}/{demo_prob}, E-1)"
+              + (f" — różnica {abs(w - demo) * 100:.1f} pp, kryterium H-5: ≤ 10 pp"
+                 if w is not None else ""))]
+    if egzekucja.wypelnialnosc_docelowa is not None:
+        linie.append(f"  przebicie {egzekucja.przebicie_bps:.2f} pb skalibrowane do "
+                     f"{egzekucja.wypelnialnosc_docelowa:.1%} — zgodność z demo jest tu "
+                     f"WŁASNOŚCIĄ KALIBRACJI, nie testem; test to porównanie z "
+                     f"wejściami demo zebranymi PO kalibracji (H-10)")
+    return linie
 
 
 def atr_threshold(panel: list[dict]) -> float | None:
@@ -2612,6 +2682,11 @@ def params_przebiegu(h: Horizon, trials_per_window: int, wybor: str, kind: str,
         params_przebiegu["egzekucja_pesymistyczna"] = True
     if egzekucja.opoznienie_min:
         params_przebiegu["opoznienie_min"] = egzekucja.opoznienie_min
+    # PRZEBICIE KALIBROWANE DO DEMO (H-10). Klucz to wypelnialnosc DOCELOWA,
+    # nie samo przebicie: przebicie liczy sie z danych co przebieg (jak wagi),
+    # a konfiguracje wyznacza to, do czego je kalibrujemy.
+    if egzekucja.wypelnialnosc_docelowa is not None:
+        params_przebiegu["wypelnialnosc_docelowa"] = egzekucja.wypelnialnosc_docelowa
     # STRONA UCZENIA (H-6) - klucz tylko dla rynku bez shortow; ten sam
     # zestaw wag przy progu z |score| i z score > 0 to dwie rozne strategie.
     if strona:
@@ -3257,6 +3332,12 @@ class Przebieg:
         self.wypelnione_oos = 0
         self.utracone_oos: list[float] = []
         self.brak_swiec_oos = 0
+        # SAME WEJSCIA (2026-10-11). Kryterium H-5 porownuje z demo wypelnialnosc
+        # WEJSC; suma wyzej miesza je z wyjsciami. Glebokosci - material na
+        # kalibracje przebicia (`kalibracja_wypelnien`).
+        self.wypelnione_wejsc_oos = 0
+        self.niewypelnione_wejsc_oos = 0
+        self.glebokosci_wejsc_oos: list[float] = []
         # ODNIESIENIA B0-B3 (`baseline.py`): {nazwa: [pobite, porownywalne]}.
         self.bije_odn: dict[str, list[int]] = {n: [0, 0] for n in ("B1", "B2", "B3")}
         self.b0_dodatnie = [0, 0]      # [zwrot > 0, okna]
@@ -3324,6 +3405,9 @@ class Przebieg:
         z.wypelnione_oos += m.oos_m["wypelnione"]
         z.utracone_oos.extend(m.oos_brutto.utracone_ruchy)
         z.brak_swiec_oos += m.oos_brutto.brak_swiec_wykonania
+        z.wypelnione_wejsc_oos += m.oos_m["wypelnione_wejscia"]
+        z.niewypelnione_wejsc_oos += m.oos_m["niewypelnione_wejscia"]
+        z.glebokosci_wejsc_oos.extend(m.oos_brutto.glebokosci_wejsc)
 
     def dodaj(self, m: Metryki, okno: Okno, h: Horizon,
               waluta_symbolu: dict[str, str], best_w: dict) -> None:
@@ -4291,13 +4375,27 @@ def wypisz_podsumowanie(z: Przebieg, w: Status, k: Koszty, *, kind: str, wybor: 
         print("Wypełnialność zleceń z limitem w symulacji OOS: "
               + (f"{wypelnialnosc:.1%}" if wypelnialnosc is not None else "—")
               + f" ({wypelnione_oos} weszło, {niewypelnione_oos} nie; w tym "
-              f"{brak_swiec_oos} bez świecy 1h). Produkcja demo: ok. 65%.")
+              f"{brak_swiec_oos} bez świecy 1h) — wejścia i wyjścia razem, "
+              f"NIE do porównania z demo")
+        for linia in opis_wypelnialnosci_wejsc(z, egzekucja, kind):
+            print(linia)
         for linia in opis_karty(karta_po):
             print(linia)
     elif egzekucja.limit:
         print(f"Niewypełnione zlecenia z limitem w symulacji OOS: "
               f"{niewypelnione_oos} (wejścia + wyjścia, wszystkie okna). "
               f"Ich KOSZT nie jest w dopłacie — w karcie stoi jako NIEZMIERZONE.")
+    if egzekucja.limit and kind in ("spot", "spot_eu", "perp"):
+        # BRAMA 0 (docs/08, 2026-10-11) w kazdym przebiegu crypto z limitem: stawka
+        # z cennika (odczyt z konta DEMO), spread z tej samej karty. Koszt
+        # niewypelnienia z DEMO trener nie ma - liczba z symulacji to inna
+        # wielkosc - wiec stoi jako niezmierzony; przy prowizji 50 pb
+        # werdykt i tak nie zalezy od niego.
+        for linia in opis_bramy_0(brama_0(
+                koszty(kind).maker, stawka_konta_docelowego=False,
+                spread_pb=spread_bps, spread_nasza_ksiega=spread_nasza_ksiega,
+                niewypelnienie_pb=None)):
+            print(linia)
     # ODNIESIENIA B0-B3 - zbiorczo. Kryterium STOP/GO 1 (docs/hipotezy.md):
     # bije B2 przy tej samej ekspozycji w >= 60% okien.
     for nazwa in ("B1", "B2", "B3"):
@@ -4387,6 +4485,12 @@ def podsumowanie_przebiegu(z: Przebieg, w: Status, k: Koszty, *, days: int, now:
         "dsr": wynik_dsr.get("dsr"), "n_selekcji": n_selekcji,
         "mediana_sharpe": median,
         "wypelnialnosc": wypelnialnosc,
+        # Same wejscia - te liczbe porownuje z demo H-5 (patrz
+        # `opis_wypelnialnosci_wejsc`); `wypelnialnosc` wyzej to wejscia + wyjscia.
+        "wypelnialnosc_wejsc": wypelnialnosc_symulacji(z.wypelnione_wejsc_oos,
+                                                       z.niewypelnione_wejsc_oos),
+        "przebicie_pb": egzekucja.przebicie_bps,
+        "wypelnialnosc_docelowa": egzekucja.wypelnialnosc_docelowa,
         "niewypelnienie_pb": koszt_niewyp * 1e4 if koszt_niewyp is not None else None,
         "brak_swiec_1h": brak_swiec_oos,
         "bije_b1": bije_odn["B1"], "bije_b2": bije_odn["B2"], "bije_b3": bije_odn["B3"],
@@ -4612,6 +4716,19 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
         print(f"  siatka okien zakotwiczona: {od:%Y-%m-%d} + k×{h.step_days} dni, "
               f"pierwsze okno od {start:%Y-%m-%d %H:%M}; przesunięcia "
               f"{', '.join(f'{p:+d}' for p in sorted(przesuniecia))} dni")
+    if egzekucja.wypelnialnosc_docelowa is not None:
+        # PRZEBIEG KALIBRACYJNY (H-10): ta sama siatka, samo dotkniecie, bez
+        # zapisow. Z niego tylko przebicie - wynik tego przebiegu nie wchodzi
+        # nigdzie, bo liczono go INNYM modelem wypelnien niz werdykt.
+        kal, _ = walk_forward(kt, okna_wf(panels, h, start, now), wybor=wybor,
+                              trials_per_window=trials_per_window,
+                              zapisz_hipoteze=lambda w: None, glowny=False)
+        przebicie, linie = kalibracja_wypelnien(kal, egzekucja.wypelnialnosc_docelowa)
+        for linia in linie:
+            print(linia)
+        egzekucja = dc_replace(egzekucja, przebicie_bps=przebicie)
+        kt = dc_replace(kt, egzekucja=egzekucja)
+        k = dc_replace(k, egzekucja=egzekucja)
     zapis = (None if sucho else
              lambda i, okno, m: zapisz_okno(cur, conn, run_id, i, okno, m))
     z, idx = walk_forward(kt, okna_wf(panels, h, start, now), wybor=wybor,
@@ -4757,6 +4874,15 @@ def _sprawdz_argumenty(ap: argparse.ArgumentParser, args) -> tuple[datetime | No
                  "pojedyncza flaga to wariant pomiaru i wymaga --sucho")
     if args.opoznienie_min < 0:
         sys.exit("--opoznienie nie moze byc ujemne")
+    # KALIBRACJA PRZEBICIA (H-10) tylko na pelnym modelu pesymistycznym: przebicie
+    # dotyczy godziny po wysylce, a bez niej wejscie ma cala swiece 4h i liczba
+    # skalibrowana na jednym modelu opisywalaby inny.
+    if args.wypelnialnosc_docelowa is not None:
+        if not pelny_pesymistyczny:
+            sys.exit("--wypelnialnosc-docelowa wymaga --egzekucja-pesymistyczna "
+                     "razem z --opoznienie N (N > 0)")
+        if not 0.0 < args.wypelnialnosc_docelowa <= 1.0:
+            sys.exit("--wypelnialnosc-docelowa to ulamek z (0, 1], np. 0.656")
     if args.horyzont_etykiety is not None and args.horyzont_etykiety < 1:
         sys.exit("--horyzont-etykiety musi byc >= 1 swieca")
 
@@ -4882,6 +5008,16 @@ def main() -> int:
                          "zmierzenia; trainerCron: 20, przyjete w H-1, nie zmierzone). Wymaga "
                          "--limit; bez --sucho tylko razem z "
                          "--egzekucja-pesymistyczna")
+    # WYPELNIALNOSC WEJSC Z DEMO (H-10). Liczba z pomiaru, nie z wyboru:
+    # `poslizg.py` na wejsciach demo. Zmiana to zmiana konfiguracji (`params`),
+    # wiec wersja zostaje `candidate`.
+    ap.add_argument("--wypelnialnosc-docelowa", type=float, default=None,
+                    dest="wypelnialnosc_docelowa",
+                    help="wypelnialnosc WEJSC zmierzona na demo (ulamek, np. "
+                         "0.656 = 42/64 z E-1). Przebieg kalibracyjny dobiera "
+                         "przebicie limitu tak, zeby symulacja wypelniala wejscia "
+                         "nie czesciej niz demo (H-10). Wymaga pelnego modelu "
+                         "pesymistycznego")
     ap.add_argument("--panel", default="",
                     help="plik z scripts/eksport_paneli.py - przebieg BEZ BAZY "
                          "(harness offline); wymusza --sucho")
@@ -4926,7 +5062,8 @@ def main() -> int:
           else _BezBazy()) as conn:
         h = get_horizon(args.bar)
         egz = Egzekucja(limit=args.limit, opoznienie_min=args.opoznienie_min,
-                        pesymistyczna=args.pesymistyczna)
+                        pesymistyczna=args.pesymistyczna,
+                        wypelnialnosc_docelowa=args.wypelnialnosc_docelowa)
         if plik is not None:
             print(f"Panel Z PLIKU {args.panel}: {plik['engine']}/{plik['bar']}, "
                   f"{plik['dni']} dni do {plik['do']:%Y-%m-%d %H:%M} UTC — "

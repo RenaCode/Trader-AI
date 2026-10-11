@@ -21,11 +21,15 @@ automatycznej promocji `learning` → `active` już nie ma.
 | H-3 | 2026-10-04 | Tor R4: momentum przekrojowe 30 d na decyzji dobowej z filtrem BTC > EMA 50 d, top 3 long-only, pod pesymistycznym modelem wejść (STOP/GO 2) | wszystkie cztery naraz: K1 okna dodatnie ≥ 65% **i** bije B1 przy tej samej ekspozycji w ≥ 65% okien; K2 DSR ≥ 0,95 na 5/5 przesunięć; K3 percentyl permutacyjny ≥ 70 na 5/5 przesunięć; K4 bije B2 przy tej samej ekspozycji w ≥ 55% okien | K1 NIE (okna dodatnie 46%, bije B1 35%), K2 TAK (DSR 0,950–0,980, N = 2), K3 TAK (percentyl 100), K4 NIE (bije B2 44%); oba warianty ekspozycji | **STOP** — R4 nie wchodzi na demo; żaden tor nie spełnia kryteriów, decyzja właściciela (sekcja 12) · zamknięte decyzją A (2026-10-04); reguła R4 na demo wyłącznie jako pomiar egzekucji E-1 |
 | A | 2026-10-04 | Decyzja właściciela po STOP/GO 2 (sekcja 12): zamknięcie poszukiwania przewagi | — (decyzja, nie test) | H-1 STOP, H-3 STOP | **zamknięte z wnioskiem „brak przewagi spełniającej kryteria”**; tor badawczy (ensemble 4h, R4) zamknięty |
 | E-1 | 2026-10-04 | **Pomiar egzekucji, NIE hipoteza przewagi.** Reguła R4 „momentum + filtr trendu” z parametrami zamrożonymi z H-3 na koncie demo, 15% kapitału | opisowe, bez GO: realizacja na giełdzie wobec modelu pesymistycznego (wypełnialność wejść, opóźnienie wysyłki, prowizje, wyjście względem ceny decyzji) | w toku od wdrożenia; przerwany 2026-10-07 przed próbą ~30 wejść | **zamknięte decyzją D-1 (2026-10-07)**: R4 przestaje być strategią demo; wynik finansowy NIE jest wynikiem; nic z tego przebiegu nie podlega promocji |
-| D-1 | 2026-10-07 | Decyzja właściciela: demo służy do trenowania algorytmu przed live. Silnik demo (crypto 4h i equity 1h) gra **modelem-kandydatem** (najnowsza wersja `candidate` albo nowsza `active`), żeby zbierać dane w przód (live-OOS kandydata) | — (decyzja, nie test); warunek **DODATKOWY** do bramki live, nie zastępujący: ≥ 12 tygodni kandydata na demo **i** test znaków ≥ 8/12 tygodni dodatnich **i** realizacja wobec symulacji w granicy dopłaty karty | w toku od wdrożenia | bramka przejścia na live bez zmian; kandydat nigdy na live (odmowa w kodzie) |
+| D-1 | 2026-10-07 | Decyzja właściciela: demo służy do trenowania algorytmu przed live. Silnik demo (crypto 4h i equity 1h) gra **modelem-kandydatem** (najnowsza wersja `candidate` albo nowsza `active`), żeby zbierać dane w przód (live-OOS kandydata) | — (decyzja, nie test); warunek **DODATKOWY** do bramki live, nie zastępujący: ≥ 12 tygodni kandydata na demo **i** test znaków ≥ 8/12 tygodni dodatnich **i** realizacja wobec symulacji w granicy dopłaty karty | w toku od wdrożenia | bramka przejścia na live bez zmian; kandydat nigdy na live (odmowa w kodzie) · **kryterium (pkt 1–3) zastąpione przez D-2 (2026-10-11)** przed pierwszym tygodniem serii (od D-1 zero wejść) |
 | H-4 | 2026-10-05 | Cotygodniowy trening poprawia model: wersja v_k jest lepsza od v_k−1 **w przód**, na tygodniu zamkniętym po zapisaniu obu | test znaków po oknach: v_k lepsza w ≥ 10 z pierwszych 12 tygodni z różnicą ≠ 0 (p ≈ 0,019); n = liczba okien kalendarzowych, nie transakcji | w toku — miara okna `H-4/m1` zapisana 2026-10-07 przed pierwszym oknem; pierwsza para liczona po 2026-10-19 | — |
-| H-5 | 2026-10-07 | Trening produkcyjny (`trainerCron`, crypto i equity) liczy się pesymistycznym modelem wypełnień z H-1 (`--egzekucja-pesymistyczna --opoznienie 20`), więc symulacja treningu wypełnia zlecenia tak jak demo | wypełnialność wejść w symulacji OOS pierwszego przebiegu 4h po wdrożeniu różni się o ≤ 10 pp od wypełnialności wejść zmierzonej na demo (E-1) w tym samym tygodniu; > 10 pp = model wypełnień do korekty (nowa hipoteza) | w toku | **zmiana struktury → `candidate`**, bez auto-promocji; bramka live bez zmian |
+| H-5 | 2026-10-07 | Trening produkcyjny (`trainerCron`, crypto i equity) liczy się pesymistycznym modelem wypełnień z H-1 (`--egzekucja-pesymistyczna --opoznienie 20`), więc symulacja treningu wypełnia zlecenia tak jak demo | wypełnialność wejść w symulacji OOS pierwszego przebiegu 4h po wdrożeniu różni się o ≤ 10 pp od wypełnialności wejść zmierzonej na demo (E-1) w tym samym tygodniu; > 10 pp = model wypełnień do korekty (nowa hipoteza) | 2026-10-11: symulacja 76,7–78,7% (5 przesunięć) wobec demo 65,6% (42/64, E-1) — ale symulacja liczyła wejścia **i wyjścia razem**, a demo w tym tygodniu nie miało ani jednego wejścia ensemble; patrz sekcja H-5 niżej | **PORAŻKA na dostępnej mierze** (różnica 11–13 pp) → korekta modelu jako H-10; kandydaci liczeni samym modelem H-5 nie są zatwierdzani |
 | H-6 | 2026-10-07 | Na rynku bez shortów (`spot`, `spot_eu`) trening uczy się tylko strony długiej: próg p88 z rozkładu score > 0, wagi IC z obserwacji, na których long jest możliwy | wobec wariantu dwustronnego na tych samych oknach i przesunięciach: zwrot/rundę po dopłacie wyższy w ≥ 4/5 przesunięć **i** średni zwrot strony długiej w oknach z dominującym `trend_down` nie niższy; inaczej uczenie dwustronne wraca do kodu | w toku | **zmiana struktury → `candidate`**, bez auto-promocji; `stock` bez zmian |
 | H-7 | 2026-10-07 | Horyzont etykiety IC (dziś 12 h) ma odpowiadać czasowi trzymania pozycji; najpierw POMIAR mediany trzymania, liczba zmienia się dopiero po nim | krok 1: mediana trzymania (wyjścia sygnałem) z pierwszego przebiegu produkcyjnego; krok 2 tylko przy różnicy ≥ 2× wobec horyzontu etykiety: przebieg `--sucho --horyzont-etykiety M` lepszy od domyślnego w ≥ 4/5 przesunięć i z minimum DSR nie niższym | w toku — krok 1 | domyślna liczba **bez zmian**; inna wartość = zmiana struktury → `candidate` |
+| H-9 | 2026-10-11 | Ensemble 4h na `spot_eu` przy PRAWDZIWEJ prowizji (0,25%/nogę = 0,50%/rundę, `koszty.CENNIK`) i modelu pesymistycznym wypełnień ma dodatni zwrot po kosztach. **Zapisane PO przebiegu z 11.10 — dotyczy NASTĘPNEGO planowego przebiegu (18.10)** | GO = zwrot/rundę po dopłacie > 0 w ≥ 4/5 przesunięć **i** DSR ≥ 0,95 na minimum z przesunięć (T = różne świece wejścia). Wszystko inne = **STOP: ensemble 4h na `spot_eu` zamknięty NA STAŁE**. Przewidywanie: −20…−45 pb/rundę, DSR ≈ 0 | — (obserwacja 11.10 poniżej NIE jest wynikiem H-9) | — |
+| H-10 | 2026-10-11 | Po porażce H-5: przebicie limitu wejścia kalibrowane do wypełnialności wejść demo (`--wypelnialnosc-docelowa 0.656`, `portfolio.kalibruj_przebicie`) odtwarza egzekucję demo | wypełnialność WEJŚĆ symulacji (przebieg trenera po wdrożeniu) różni się o ≤ 10 pp od wypełnialności wejść ensemble na demo z ≥ 100 rozstrzygniętych wejść zebranych PO wdrożeniu; > 10 pp = nowy pomiar celu jako nowa hipoteza | w toku | **zmiana struktury → `candidate`** (klucz `wypelnialnosc_docelowa`); bramka live bez zmian |
+| D-2 | 2026-10-11 | Decyzja właściciela (przyjęcie audytu strategii 10.10): kryterium demo D-1 zaostrzone, bo test 8/12 ma α = 0,194 | wszystkie naraz: ≥ 16 tygodni tej samej struktury `params`; test znaków ≥ 12/16 tygodni dodatnich (jednostronny p = 0,038); skumulowany zwrot po prowizjach z giełdy > 0 **i** ≥ 0,9 × symulacja tych samych decyzji; ≥ 150 rozstrzygniętych wejść; tygodnie 07–11.10 POZA serią | w toku — seria zaczyna się w poniedziałek po wejściu na demo pierwszej wersji struktury liczonej po tej zmianie | warunek DODATKOWY do bramki live (docs/08), nie zastępuje żadnego |
+| Z-1 | 2026-10-11 | Decyzja właściciela: zamrożenie struktury strategii do przejścia Bramy 0 | — (decyzja, nie test): **zero nowych hipotez strategii** (H-7 krok 2, warianty R4, uniwersum, horyzont, sygnały, progi); wyjątek: korekta POMIARU survivorship (uniwersum z instrumentów listowanych w chwili okna) | obowiązuje | `--hipoteza` dla hipotezy strategii odmawiana przez właściciela, nie przez kod — patrz sekcja Z-1 |
 
 ---
 
@@ -828,3 +832,209 @@ pierwszym oknem (2026-10-12).
 - **Jedna iteracja.** Czas trzymania zależy od wag, a wagi od horyzontu etykiety,
   więc po zmianie M się przesunie. Kolejna korekta to nowa hipoteza i kolejna
   próba do N, a nie dostrajanie w pętli.
+
+---
+
+## Audyt strategii 10.10 przyjęty: H-9, H-10, D-2, Z-1 (zapisane 2026-10-11)
+
+**Skąd.** Niezależna ocena strategii z 2026-10-10 (werdykt: przewagi brak
+i na cenniku `spot_eu` być nie może — runda 0,50% prowizji wobec przewagi brutto
+rzędu 10–13 pb przy IC 0,03–0,04). Właściciel przyjął werdykt i rekomendacje.
+Numer H-8 nie istnieje: H-9 to numer nadany w raporcie audytu, zachowany, żeby
+odsyłacze się zgadzały.
+
+### Kolejność, która rozstrzyga o uczciwości H-9
+
+Planowy przebieg trenera **odbył się 2026-10-11 rano** (CronJob `trader-trainer`,
+niedziela 04:40 Europe/Warsaw, Job `Complete` przed zapisem tej sekcji). Raport
+zalecał zapisanie H-9 **przed** tym przebiegiem; to się nie stało. Dlatego:
+
+- H-9 odnosi się do **następnego planowego przebiegu: niedziela 2026-10-18**
+  (albo pierwszego planowego po nim, jeśli ten padnie — nie do ręcznego
+  powtórzenia; incydent 25.09: `kubectl create job --from=cronjob` nie służy
+  pomiarom);
+- wynik z 11.10 jest opisany niżej jako **obserwacja**. Nie jest wynikiem H-9
+  i nie wolno go do niej zaliczyć — ani w stronę STOP, ani w stronę GO.
+  Kryterium zostało zapisane po zobaczeniu tych liczb i **nie zostało do nich
+  dopasowane**: progi (4/5, DSR ≥ 0,95) są słowo w słowo te z raportu z 10.10,
+  sprzed przebiegu.
+
+### Obserwacja: przebieg 2026-10-11 (NIE wynik H-9)
+
+Pierwszy przebieg produkcyjny przy prowizji 0,500%/rundę i modelu pesymistycznym
+(H-5), log Joba `trader-trainer-29861440`, tor 4h:
+
+| przesunięcie | okna | dodatnie | transakcji | zwrot/rundę po dopłacie (pb) | DSR | wypełnialność (wejścia + wyjścia) |
+|---|---|---|---|---|---|---|
+| −2 | 33 | 10 | 742 | −66,9 | 0,0000 | 76,7% |
+| −1 | 30 | 9 | 664 | −65,7 | 0,0000 | 77,6% |
+| 0 | 30 | 10 | 681 | −56,2 | 0,0000 | 78,7% |
+| +1 | 32 | 9 | 694 | −65,1 | 0,0000 | 78,5% |
+| +2 | 31 | 10 | 675 | −67,8 | 0,0000 | 78,4% |
+
+Status `degraded` 5/5, okna dodatnie 28–33%, koszt progowy z brutto −48 pb
+(ujemny już przed dopłatą), wersja 172 = `candidate` (zmiana struktury) i od
+11.10 to nią gra silnik demo (D-1). Tor 1h: −91 pb, 2/87 okien dodatnich;
+equity 1h: −42 pb, `degraded`. Mediana trzymania 5 świec 4h (q1 2,5, q3 9)
+wobec etykiety 3 świec — poniżej progu kroku 2 H-7 (≥ 6), a H-7 krok 2 i tak
+jest zamrożony (Z-1).
+
+Liczby wypadają **poniżej** przedziału przewidywania H-9 (−20…−45 pb). Gdyby
+H-9 była zapisana przed 11.10, ten przebieg dałby STOP. Nie była — więc STOP
+albo GO rozstrzyga dopiero 18.10.
+
+### H-9: ensemble 4h przy prawdziwej prowizji (zapisane 2026-10-11, przed przebiegiem 18.10)
+
+- **Pytanie**: czy ensemble 4h na `spot_eu` ma dodatni zwrot po kosztach przy
+  stawce, którą giełda naprawdę nalicza (maker 0,25% = 0,50% rundy,
+  `koszty.CENNIK["spot_eu"]`, czujka `mozliwosci.py --stawki`), a nie 0,20%,
+  przy której liczono H-1…H-3 i v171.
+- **Przebieg**: planowy `trainerCron` (bez zmian parametrów pod H-9): `--kind
+  spot_eu --limit --egzekucja-pesymistyczna --opoznienie 20`, siatka
+  zakotwiczona 2022-09-01, przesunięcia −2…+2, `--wybor ic`, `--trials 60`.
+  Model wypełnień — ten, który stoi w `trainerCron` w chwili przebiegu: H-5,
+  a jeśli H-10 zostanie wdrożona przed 18.10, H-5 z przebiciem kalibrowanym.
+  Kryterium jest to samo w obu wypadkach; log mówi, który model liczył.
+- **Miary**: z `PODSUMOWANIE_JSON` toru 4h, klucz `przesuniecia`:
+  `zwrot_na_runde_pb` (po dopłacie z karty) i `dsr` na każde przesunięcie.
+  DSR z T = liczba różnych świec wejścia (PR #17), N = `n_selekcji` przebiegu.
+- **GO**: zwrot/rundę po dopłacie > 0 w **≥ 4 z 5** przesunięć **i** DSR
+  ≥ 0,95 na **minimum** z przesunięć. GO nie promuje niczego samo: dalej
+  obowiązuje Brama 0 (docs/08) i promocja wyłącznie `--zatwierdz-promocje`.
+- **STOP** (każdy inny wynik, także przebieg bez wyniku dla toru 4h): **ensemble
+  4h na `spot_eu` zamknięty NA STAŁE.** Nie „`learning` w nieskończoność",
+  nie kolejny wariant progu ani horyzontu. Konkretnie: żadna nowa hipoteza
+  strategii dla tego toru; trener tygodniowy może dalej liczyć (zbiera H-4 i
+  dryf), a demo może dalej grać kandydatem wyłącznie jako pomiar egzekucji
+  (jak E-1: wynik finansowy NIE jest wynikiem). Ponowne otwarcie tylko po
+  przejściu Bramy 0 na innym cenniku albo innej giełdzie, jako nowa hipoteza
+  od zera, z N liczonym od tej daty.
+- **Przewidywanie (zapisane z góry)**: zwrot/rundę **−20…−45 pb**, DSR ≈ 0
+  na każdym przesunięciu, czyli STOP. Źródło: H-1 (b) −11 pb przy 0,20% minus
+  brakujące 30 pb prowizji.
+- **Czego wynik nie rozstrzyga**: niczego o innej giełdzie, innym cenniku ani
+  innej strategii. GO przy tym cenniku byłoby sprzeczne z rachunkiem IC (docs/03)
+  i pierwszym krokiem byłby audyt pomiaru (`analityk`), nie wdrożenie.
+
+### H-5: wynik (2026-10-11)
+
+Kryterium H-5 porównuje wypełnialność **wejść** w symulacji z wypełnialnością
+wejść na demo w **tym samym tygodniu**. Przebieg 11.10 podał 76,7–78,7%
+(„Wypełnialność zleceń z limitem w symulacji OOS"), a log zestawiał to z „ok.
+65%" na demo. Przy weryfikacji okazało się, że:
+
+1. liczba z logu to **wejścia i wyjścia razem** (`portfolio.metrics`:
+   `wypelnione = wypelnione_wejscia + wypelnione_wyjscia`); to samo dotyczy
+   76% z H-1 (b). Wypełnialności samych wejść log nie podawał;
+2. w tygodniu 07–11.10 demo nie miało **ani jednego** wejścia ensemble (stara
+   para v171, 0 wejść od D-1). Jedyny pomiar demo to E-1: 42/64 = 65,6%,
+   przedział 95% Wilsona 53,4–76,1%, inna reguła (R4, raz na dobę).
+
+Rozstrzygnięcie: **PORAŻKA na mierze, która była dostępna** (różnica 11–13 pp
+> 10 pp) — kryterium mówi wtedy „model wypełnień do korekty (nowa hipoteza)",
+i tak się dzieje (H-10). Zastrzeżenie zapisane wprost: miara była mieszana, a
+próba demo z innej reguły; od tego PR log podaje wypełnialność WEJŚĆ osobno
+(`train.opis_wypelnialnosci_wejsc`, `PODSUMOWANIE_JSON.wypelnialnosc_wejsc`).
+Jeśli samo dotknięcie da w symulacji ≤ 65,6% wejść, kalibracja H-10 zwróci
+przebicie 0 i model zostanie bez zmian — kod nie potrafi go poluzować.
+
+### H-10: przebicie limitu kalibrowane do wypełnialności demo
+
+- **Wada.** Model H-5 wypełnia wejście, gdy `low` godziny po wysyłce dotknie
+  limitu. Dotknięcie nie jest wypełnieniem: PostOnly na bidzie stoi na końcu
+  kolejki, a świece 1h pochodzą z księgi globalnej (~1000× wolumen unijnej),
+  więc `low` równy naszemu limitowi znaczy tylko, że ktoś gdzieś handlował po
+  tej cenie.
+- **Zmiana** (`portfolio.Egzekucja.przebicie_bps`, `portfolio.kalibruj_przebicie`,
+  `train.kalibracja_wypelnien`): wejście wypełnia się, gdy świeca przeszła za
+  limit o co najmniej `przebicie` pb. Przebicie NIE jest wybierane ręcznie:
+  przed właściwym walk-forwardem trener liczy przebieg kalibracyjny (ta sama
+  siatka, samo dotknięcie, bez zapisów), zbiera głębokość każdej próby wejścia
+  i wybiera najmniejsze przebicie ≥ 0, przy którym wypełnialność wejść nie
+  przekracza `--wypelnialnosc-docelowa` (chart: 0,656 = 42/64 z E-1).
+  Wyjścia bez zmian: na produkcji po dwóch odrzuceniach PostOnly idą takerem.
+- **Kalibruje się WYPEŁNIALNOŚĆ, nie P&L.** Funkcja kalibrująca dostaje
+  wyłącznie głębokości prób i ich liczbę — zwrotów nie widzi (test
+  `test_kalibracja_nie_widzi_zwrotow`). Przebicie dobrane pod wynik byłoby
+  strojeniem strategii.
+- **Skutek dla wyników**: mniej wypełnionych wejść i wejścia po cenach, przy
+  których rynek przeszedł głębiej przeciw nam — wyniki symulacji spadną
+  (selekcja negatywna mocniejsza). Na panelu syntetycznym testów
+  (`ic_pesymistyczna` → `ic_kalibracja`): 75,5% → 65,1% wejść przy celu
+  65,6% (przebicie 15,2 pb), 131 → 102 transakcje. Panel syntetyczny nie jest
+  rynkiem — liczby pokazują mechanikę, nie wielkość skutku na produkcji.
+- **Uwagi uczciwości**: (1) zgodność wypełnialności symulacji z celem jest
+  po tej zmianie **własnością kalibracji**, nie testem — test to porównanie
+  z wejściami demo zebranymi PO wdrożeniu (kryterium w tabeli); (2) cel 65,6%
+  ma przedział 53,4–76,1% (n = 64) i pochodzi z reguły R4; zmiana liczby po
+  nowym pomiarze to nowa hipoteza, nie poprawka; (3) przebicie liczone jest
+  na całej historii 1400 dni, a demo zmierzono w październiku 2026 —
+  płynność się zmienia, więc przebicie jest średnią, nie stałą rynku;
+  (4) drugi przebieg ma inne próby (wejście, które nie weszło, ponawia się),
+  więc wypełnialność po kalibracji ląduje w okolicy celu, zwykle trochę
+  niżej — log podaje obie liczby; (5) seria H-4 (`w_przod.py`, miara
+  `H-4/m1`) **zostaje bez przebicia** — zmiana miary w trakcie serii
+  przerwałaby ją.
+- **Struktura**: `params["wypelnialnosc_docelowa"]` → `candidate`, nowa próba
+  w N; samo przebicie nie jest kluczem `params` (wychodzi z danych co przebieg,
+  jak wagi). Metryka okna `wypelnialnosc_docelowa` → dozór traktuje przebiegi
+  z kalibracją jako inną klasę miary.
+
+### D-2: kryterium demo zaostrzone (zastępuje punkty 1–3 D-1)
+
+**Dlaczego.** Test znaków ≥ 8/12 ma błąd I rodzaju **0,194** — przepuszcza szum
+raz na pięć prób. Przy realistycznym Sharpe/transakcję ≤ 0,1 i ~1,6 transakcji
+na dobę sześć miesięcy demo nie ma mocy, by potwierdzić przewagę; ma ją tylko,
+by ją obalić. Kryterium ma więc przynajmniej nie przepuszczać szumu.
+
+Model może przejść bramkę live dopiero wtedy, gdy oprócz wszystkich warunków
+z docs/08 spełnia **wszystkie** poniższe:
+
+1. **≥ 16 tygodni** gry na demo modelem tej samej struktury `params`
+   (`train.zmiana_struktury` zeruje licznik; tygodniowe wagi i progi nie);
+2. **test znaków jednostronny p ≤ 0,05**: ≥ 12 z 16 tygodni dodatnich
+   (p = 0,038; 11/16 daje p = 0,105 i NIE przechodzi). Tydzień = kalendarzowy
+   UTC, zwrot po prowizjach z giełdy (`exec.fill.fee`, `realized_pnl −
+   fees_paid`); tydzień bez transakcji to remis — raportowany, nie liczony;
+3. **skumulowany zwrot** demo po prowizjach z giełdy **> 0** i **≥ 0,9 ×**
+   zwrot symulacji **tych samych decyzji** (realizacja);
+4. **≥ 150 rozstrzygniętych wejść** (wypełnione + przepadłe) w serii;
+5. **tygodnie 2026-10-07 … 2026-10-11 POZA serią** jawnie: zero wejść, stara
+   para v171 liczona przy prowizji 0,20%.
+
+Początek serii: poniedziałek po wejściu na demo pierwszej wersji struktury
+liczonej po H-10 (jeśli H-10 wchodzi przed 18.10: najwcześniej 2026-10-19).
+Każda późniejsza zmiana struktury zaczyna serię od nowa. Miara tygodnia
+i porównanie z symulacją nadal nie są zaimplementowane (jak przy D-1) —
+do zbudowania przed pierwszym werdyktem, najwcześniej 16 tygodni od startu
+serii. Zapytanie do ręcznego liczenia tygodni: docs/08, „Zapytania SQL".
+
+### Z-1: zamrożenie struktury do przejścia Bramy 0
+
+**Decyzja właściciela (2026-10-11).** Do przejścia Bramy 0 (docs/08: runda ≤ 12
+pb na koncie docelowym) **żadnych nowych hipotez strategii**: H-7 krok 2,
+warianty R4, zmiana uniwersum, horyzontu, sygnałów, metody progów. Każda podnosi
+N (i tak niedoszacowane) i żadna nie zmienia bilansu kosztów, który rozstrzyga
+wynik niezależnie od modelu. Dozwolone: hipotezy POMIARU (egzekucja, koszty,
+wypełnienia — jak H-10), poprawki błędów, H-9 i H-4 bez zmian.
+
+**Wyjątek — korekta survivorship (pomiar, nie strategia).** Uniwersum
+walk-forwardu to 10 par `tradeable` na bybit.eu **dziś**, zastosowane wstecz na
+1400 dni. Część „instrumentu jeszcze nie notowano" jest już obsłużona:
+`train.okna_wf` pomija instrument bez świec w oknie (`aktywne`). Nieobsłużona
+część to instrumenty, które **były** płynne w chwili okna, a dziś ich w
+uniwersum nie ma (delisting, spadek płynności) — tych w bazie nie ma wcale, bo
+ingest zbiera tylko obecne listingi. Korekta nie jest więc prosta i w tym PR
+jej nie ma. Plan:
+
+1. migracja: `ref.instrument_listing(instrument_id, venue, od, do)` —
+   historia listingu zamiast jednej flagi `tradeable`;
+2. backfill świec 1h i 4h dla par, które w latach 2022–2026 były w top-N
+   wolumenu spot (USDT/USDC) na hoście globalnym, także zdjętych z obrotu
+   (do sprawdzenia, czy `/v5/market/kline` oddaje historię zdjętych symboli —
+   [N]); bez tego korekty nie da się zrobić uczciwie;
+3. `train._uniwersum` z odciskiem **w chwili okna**: top-N po wolumenie
+   z 30 dni przed `train_from`, wyłącznie z danych sprzed okna;
+4. pomiar: przebieg `--sucho --hipoteza H-11` (wpis przed pomiarem) na obu
+   uniwersach, ta sama siatka; raport różnicy zwrotu/rundę dla ensemble i R4.
+   Wynik zmienia odczyt historii, nie strategię — dlatego nie łamie Z-1.

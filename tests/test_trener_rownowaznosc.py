@@ -45,6 +45,16 @@ transakcji, wiec DSR przy ujemnym Sharpe lekko ROSNIE (mniejsze T = mniejsza
 pewnosc, ze przewaga jest ujemna), a przy dodatnim (`ic_stock`) SPADA
 0,7051 -> 0,6816.
 
+PRZEGENEROWANY PIATY RAZ, 2026-10-11 (H-10 i Brama 0, docs/hipotezy.md):
+w siedmiu starych wariantach `PODSUMOWANIE_JSON` dostaje trzy nowe klucze
+(`wypelnialnosc_wejsc`, `przebicie_pb`, `wypelnialnosc_docelowa`), a wydruk -
+sekcje BRAMA 0 (tory crypto z limitem) oraz, w `ic_pesymistyczna`, linie
+wypelnialnosci WEJSC zamiast „Produkcja demo: ok. 65%". Sprawdzone przed
+zapisem: JSON bez tych trzech kluczy przechodzi `_bliskie` ze zrzutem z 09.10,
+a poza tymi liniami wydruk jest identyczny - zadne okno, transakcja ani miara
+sie nie zmienia, bo przebicie domyslne to 0. Doszedl wariant `ic_kalibracja`
+(przebieg kalibracyjny + przebicie > 0) - ten zmienia wynik z definicji.
+
 Zmiana wyniku zamierzona (nowa miara, poprawka) oznacza swiadome
 przegenerowanie zrzutu:
 
@@ -87,6 +97,12 @@ WARIANTY = {
                        progi_per_rezim=False),
     "ic_pesymistyczna": dict(egzekucja=Egzekucja(limit=True, opoznienie_min=20,
                                                  pesymistyczna=True), wybor="ic"),
+    # H-10: przebieg kalibracyjny i przebicie dobrane do wypelnialnosci wejsc.
+    # Cel z chartu (0,656) lezy ponizej wypelnialnosci wariantu wyzej (75,5%),
+    # wiec kalibracja naprawde zaostrza model, a nie konczy sie przebiciem 0.
+    "ic_kalibracja": dict(egzekucja=Egzekucja(limit=True, opoznienie_min=20,
+                                              pesymistyczna=True,
+                                              wypelnialnosc_docelowa=0.656), wybor="ic"),
     # Rynek Z SHORTAMI (H-6): uczenie dwustronne jak przed 2026-10-07.
     "ic_stock": dict(egzekucja=Egzekucja(limit=True), wybor="ic", kind="stock"),
     # Siatka produkcji (T4): kotwica w kalendarzu i piec przesuniec. `days`

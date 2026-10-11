@@ -300,7 +300,8 @@ SELECT l.status, l.windows_total, l.windows_positive, l.positive_ci_low,
        COALESCE({_metryka_okien('opoznienie_min')},
                 (SELECT (mv.params->>'opoznienie_min')::numeric
                    FROM learn.model_version mv
-                  WHERE mv.id = l.model_version_id)) AS opoznienie_min
+                  WHERE mv.id = l.model_version_id)) AS opoznienie_min,
+       {_metryka_okien('wypelnialnosc_docelowa')} AS wypelnialnosc_docelowa
 FROM learn.learning_state_log l
 WHERE l.engine = %s AND l.bar = %s
 ORDER BY l.run_at DESC LIMIT %s
@@ -351,6 +352,11 @@ def _opis_kosztu(wiersz: dict) -> str:
     opoznienie = wiersz.get("opoznienie_min")
     if opoznienie:
         czesci.append(f"opóźnienie {float(opoznienie):g} min")
+    # H-10 (2026-10-11): przebicie limitu kalibrowane do wypelnialnosci wejsc
+    # demo to inny model wypelnien niz samo dotkniecie. 0/NULL = bez kalibracji.
+    docelowa = wiersz.get("wypelnialnosc_docelowa")
+    if docelowa:
+        czesci.append(f"wypełnienia kalibrowane do {float(docelowa):.1%} wejść demo")
     return ", ".join(czesci)
 
 
