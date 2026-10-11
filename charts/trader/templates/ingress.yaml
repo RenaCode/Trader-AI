@@ -44,7 +44,7 @@ metadata:
     {{- end }}
     {{- /* SSO (`sso` w values.yaml) przed basicAuth: najpierw 2FA Authelii. */}}
     {{- $mw := list }}
-    {{- if .Values.sso.enabled }}{{ $mw = append $mw .Values.sso.middleware }}{{ end }}
+    {{- if .Values.sso.enabled }}{{ $mw = concat $mw .Values.sso.middlewares }}{{ end }}
     {{- if .Values.ingress.basicAuth.enabled }}{{ $mw = append $mw (printf "%s-%s-basicauth@kubernetescrd" .Release.Namespace (include "trader.fullname" .)) }}{{ end }}
     {{- with $mw }}
     traefik.ingress.kubernetes.io/router.middlewares: {{ join "," . }}
@@ -110,7 +110,7 @@ metadata:
     {{- /* Limit per adres PRZED Authelia: zalew z jednego adresu dostaje 429
     od Traefika i nie dochodzi ani do Authelii, ani do aplikacji. */}}
     traefik.ingress.kubernetes.io/router.middlewares: {{ .Release.Namespace }}-{{ include "trader.fullname" . }}-limit-logowania@kubernetescrd
-      {{- if .Values.sso.enabled }},{{ .Values.sso.middleware }}{{ end }}
+      {{- if .Values.sso.enabled }},{{ join "," .Values.sso.middlewares }}{{ end }}
       {{- if .Values.ingress.basicAuth.enabled }},{{ .Release.Namespace }}-{{ include "trader.fullname" . }}-basicauth@kubernetescrd{{ end }}
 spec:
   ingressClassName: {{ .Values.ingress.className }}

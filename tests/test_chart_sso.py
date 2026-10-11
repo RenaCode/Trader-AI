@@ -17,6 +17,7 @@ import yaml
 KORZEN = Path(__file__).resolve().parents[1]
 pytestmark = pytest.mark.skipif(shutil.which("helm") is None, reason="helm niedostępny")
 SSO = "default-authelia-sso@kubernetescrd"
+NAGLOWKI = "default-authelia-naglowki@kubernetescrd"
 MW = "traefik.ingress.kubernetes.io/router.middlewares"
 
 
@@ -49,7 +50,9 @@ def test_sso_na_KAZDYM_routerze_HTTPS():
     https = {n: i for n, i in ingressy.items() if _wejscie(i) == "websecure"}
     assert set(https) == {"trader", "trader-auth"}
     for nazwa, ing in https.items():
-        assert SSO in _middleware(ing), nazwa
+        mw = _middleware(ing)
+        # Najpierw usunięcie Remote-* od klienta, potem forwardAuth.
+        assert NAGLOWKI in mw and SSO in mw and mw.index(NAGLOWKI) < mw.index(SSO), nazwa
 
 
 def test_limit_logowania_PRZED_sso():
@@ -67,5 +70,5 @@ def test_router_HTTP_tylko_przekierowuje():
 
 def test_sso_razem_z_awaryjnym_basicauth():
     ingressy = _ingressy("sso.enabled=true", "ingress.basicAuth.enabled=true")
-    assert _middleware(ingressy["trader"]) == [SSO, "default-trader-basicauth@kubernetescrd"]
+    assert _middleware(ingressy["trader"]) == [NAGLOWKI, SSO, "default-trader-basicauth@kubernetescrd"]
     assert _middleware(ingressy["trader-auth"])[-1] == "default-trader-basicauth@kubernetescrd"

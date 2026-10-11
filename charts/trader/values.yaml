@@ -187,8 +187,14 @@ ingress:
 # docs/zadania-wlasciciela.md, sekcja 6).
 sso:
   enabled: false
-  # <namespace>-<nazwa>@kubernetescrd middleware'u forwardAuth w klastrze.
-  middleware: default-authelia-sso@kubernetescrd
+  # Middleware'y z renacode-infra, W TEJ KOLEJNOSCI: najpierw usuniecie
+  # naglowkow tozsamosci podanych przez klienta (`Remote-User` itd.), potem
+  # forwardAuth, ktory wstawia je od Authelii. Kontrakt tozsamosci (jak
+  # aplikacja moze rozpoznac uzytkownika po `Remote-User` bez drugiego
+  # logowania): renacode-infra docs/sso-tozsamosc.md.
+  middlewares:
+    - default-authelia-naglowki@kubernetescrd
+    - default-authelia-sso@kubernetescrd
 
 # NETWORKPOLICY - KTO MOZE OTWORZYC POLACZENIE DO PODOW TEGO CHARTU
 # (templates/networkpolicy.yaml, 2026-10-03).
