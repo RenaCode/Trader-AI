@@ -30,6 +30,8 @@ automatycznej promocji `learning` → `active` już nie ma.
 | H-10 | 2026-10-11 | Po porażce H-5: przebicie limitu wejścia kalibrowane do wypełnialności wejść demo (`--wypelnialnosc-docelowa 0.656`, `portfolio.kalibruj_przebicie`) odtwarza egzekucję demo | wypełnialność WEJŚĆ symulacji (przebieg trenera po wdrożeniu) różni się o ≤ 10 pp od wypełnialności wejść ensemble na demo z ≥ 100 rozstrzygniętych wejść zebranych PO wdrożeniu; > 10 pp = nowy pomiar celu jako nowa hipoteza | w toku | **zmiana struktury → `candidate`** (klucz `wypelnialnosc_docelowa`); bramka live bez zmian |
 | D-2 | 2026-10-11 | Decyzja właściciela (przyjęcie audytu strategii 10.10): kryterium demo D-1 zaostrzone, bo test 8/12 ma α = 0,194 | wszystkie naraz: ≥ 16 tygodni tej samej struktury `params`; test znaków ≥ 12/16 tygodni dodatnich (jednostronny p = 0,038); skumulowany zwrot po prowizjach z giełdy > 0 **i** ≥ 0,9 × symulacja tych samych decyzji; ≥ 150 rozstrzygniętych wejść; tygodnie 07–11.10 POZA serią | w toku — seria zaczyna się w poniedziałek po wejściu na demo pierwszej wersji struktury liczonej po tej zmianie | warunek DODATKOWY do bramki live (docs/08), nie zastępuje żadnego |
 | Z-1 | 2026-10-11 | Decyzja właściciela: zamrożenie struktury strategii do przejścia Bramy 0 | — (decyzja, nie test): **zero nowych hipotez strategii** (H-7 krok 2, warianty R4, uniwersum, horyzont, sygnały, progi); wyjątek: korekta POMIARU survivorship (uniwersum z instrumentów listowanych w chwili okna) | obowiązuje | `--hipoteza` dla hipotezy strategii odmawiana przez właściciela, nie przez kod — patrz sekcja Z-1 |
+| B-0 | 2026-10-11 | **Pomiar kosztu, nie hipoteza przewagi.** Brama 0 na giełdzie DOCELOWEJ: istnieje giełda dostępna rezydentowi PL, na której runda (2 × maker z konta + spread 30 dni własnej księgi + niewypełnienie z ≥ 100 wejść PostOnly) ≤ 12 pb. Analiza cenników 11.10 (docs/brama-0-gieldy.md): każdy spot w UE ZAMKNIĘTY na samej prowizji (≥ 15 pb); jedyny zapas to perpetual long-only pod MiFID (Kraken CY: 4 pb + 2 pb spreadu, zostaje 6 pb) | krok 1 (decyzja właściciela, **do 2026-10-25**): demo na Kraken Futures (`demo-futures.kraken.com`, bez pieniędzy, adapter tylko do pomiaru) ALBO koniec toru crypto; krok 2 (pomiar, **do 2026-11-29**): `koszty.brama_0` z kompletem: stawka z konta docelowego, spread z 30 dni własnych snapshotów, niewypełnienie z ≥ 100 rozstrzygniętych wejść PostOnly po cenie makera (ten sam algorytm wysyłki co `gielda_exec`), `max(0, x)`; **GO = OTWARTA**, STOP = każdy inny stan, także brak kompletu w terminie | — | GO otwiera wyłącznie H-12 (walk-forward na tym cenniku), nie live; STOP = tor crypto (spot i perp) zamknięty jako **wynik negatywny projektu** |
+| H-12 | 2026-10-11 | **Zarezerwowana, nie uruchamiać przed B-0 = OTWARTA.** Ensemble 4h long-only na perpetualach giełdy z B-0, przy stawce z jej konta, spreadzie z jej księgi, modelu pesymistycznym z przebiciem H-10 i finansowaniu z jej stawek (nie z Bybit global) | jak H-9: zwrot/rundę po dopłacie > 0 w ≥ 4/5 przesunięć **i** DSR ≥ 0,95 na minimum z przesunięć, N liczone od tej daty razem z B-0; przebieg `--sucho --hipoteza H-12 --kind perp --limit --egzekucja-pesymistyczna` | — | GO → nowa seria D-2 (16 tygodni, ≥ 150 wejść) na demo tej giełdy; STOP → wynik negatywny, koniec toru crypto |
 
 ---
 
@@ -1038,3 +1040,63 @@ jej nie ma. Plan:
 4. pomiar: przebieg `--sucho --hipoteza H-11` (wpis przed pomiarem) na obu
    uniwersach, ta sama siatka; raport różnicy zwrotu/rundę dla ensemble i R4.
    Wynik zmienia odczyt historii, nie strategię — dlatego nie łamie Z-1.
+
+## B-0: Brama 0 na giełdzie docelowej (zapisane 2026-10-11, przed jakimkolwiek pomiarem)
+
+**Skąd.** Rekomendacja 2 audytu z 10.10 („decyzja o rynku/giełdzie — jedyna
+dźwignia o właściwej skali"), przyjęta przez właściciela. Analiza cenników i
+ksiąg 18 giełd/brokerów: `docs/brama-0-gieldy.md`; tablica i werdykty liczone
+w `koszty.KANDYDACI_BRAMY_0` (test `tests/test_brama_0_kandydaci.py`).
+
+**Co już wiadomo (i czego nie trzeba mierzyć):**
+
+- każdy spot dostępny rezydentowi PL pod MiCA kosztuje ≥ 15 pb samej prowizji
+  (crypto.com 0,075 %; OKX 0,08 % tylko z kontem MiFID; Bitvavo 0,15 %;
+  bybit.eu 0,25 %; Kraken Pro 0,40 %; Coinbase 0,60 %) — Brama 0 **ZAMKNIĘTA**
+  dla toru spot na każdej z nich, zanim doliczy się spread i niewypełnienie.
+  To jest wynik negatywny toru `ensemble 4h / spot` i nie wymaga H-9, choć
+  H-9 go 18.10 niezależnie potwierdzi albo nie;
+- jedyny cennik z zapasem: maker 0,02 % na perpetualach pod MiFID (Kraken,
+  Payward Europe Digital Solutions CY; OKX X-Perps MT jako rezerwa):
+  4 pb + spread 1,99 pb (mediana snapshotu 11.10) = 6 pb, **zostaje 6 pb na
+  niewypełnienie**;
+- niewypełnienia na obcej giełdzie nie da się zmierzyć z zewnątrz. Jedyna
+  liczba, jaką mamy, to 40 pb z symulacji pesymistycznej na świecach globalnych
+  (log 11.10) — gdyby była choć w połowie prawdziwa dla Krakena, brama jest
+  zamknięta; demo bybit.eu (n = 12, rynek spadał) dało znak ujemny, czyli 0.
+
+**Kryterium (zapisane z góry).**
+
+1. **Krok 1 — decyzja właściciela do 2026-10-25.** Brak decyzji = STOP.
+   Decyzja „tak" oznacza: osobne konto demo `demo-futures.kraken.com`
+   (bez pieniędzy, bez KYC), adapter **wyłącznie do pomiaru**: odczyt księgi
+   `PF_*USD` dla 10 aktywów co 60 s do `market.book_snapshot` (venue osobne)
+   i wysyłka zleceń PostOnly po cenie makera z tego samego algorytmu co
+   `gielda_exec` na sygnałach silnika demo **bez pozycji i bez modelu nowego**
+   — pomiar wypełnialności i ruchu, który przepadł. Zero zmian w strategii (Z-1).
+2. **Krok 2 — pomiar do 2026-11-29** (4 tygodnie od startu najpóźniej 1.11):
+   `koszty.brama_0(maker_z_konta, stawka_konta_docelowego=True, spread_pb=30 dni
+   własnych snapshotów, spread_nasza_ksiega=True, niewypelnienie_pb=z ≥ 100
+   rozstrzygniętych wejść)`. Stawka: z endpointu opłat konta demo Krakena
+   **i** z cennika publicznego dla poziomu Level 1 — jeśli się różnią, stawką
+   jest wyższa; konto live potwierdza ją dopiero przy D-2.
+3. **GO = `OTWARTA`** (komplet pomiarów i suma ≤ 12 pb). GO nie otwiera live
+   ani promocji — otwiera wyłącznie H-12 (walk-forward na tym cenniku i tej
+   księdze, N od tej daty).
+4. **STOP = każdy inny stan**, także `NIEROZSTRZYGNIETA` po terminie
+   (brak kompletu to brak dowodu, nie „prawie"). STOP = tor crypto (spot i perp)
+   zamknięty jako **wynik negatywny projektu**; dalej zostaje tor equity ze
+   swoją bramą (przewaga przed kosztami, dziś −41,5 pb) albo zakończenie.
+
+**Czego ten pomiar nie rozstrzyga.** Finansowania (poza wzorem bramy; 2–3 pb
+bazowo [A], w hossie do 25 pb — naliczane w symulacji H-12 ze stawek giełdy
+docelowej), basis perp–spot, ryzyka reklasyfikacji perpetuali jako CFD (ESMA
+24.02.2026) i tego, czy przewaga brutto 10–13 pb w ogóle przeżyje na innej
+księdze — to pytanie H-12, nie B-0.
+
+**Uwagi uczciwości.** (1) Spready w `docs/brama-0-gieldy.md` to jeden odczyt
+z niedzieli wieczór — podłoga, nie pomiar; w bramie wchodzą jako obca księga.
+(2) Stawki poza bybit.eu są deklaracjami cenników (część przez źródła wtórne,
+bo strony giełd odmówiły robotowi) — żadna nie jest odczytem z konta.
+(3) Numer H-11 zostaje dla korekty survivorship (sekcja Z-1); B-0 nie jest
+hipotezą strategii i nie podnosi N; H-12 podnosi.
