@@ -129,9 +129,11 @@ def _render(*ustaw: str) -> dict:
 @pytest.mark.skipif(shutil.which("helm") is None, reason="helm niedostępny")
 def test_chart_flaga_aplikacji_tylko_razem_z_middlewareami():
     """Jeden przelacznik: middleware'y SSO (test_chart_sso.py) i zaufanie do
-    naglowka. Domyslnie zadnej zmiennej SSO w podzie."""
+    naglowka. Domyslnie jawne `SSO_NAGLOWKI=0` i nic wiecej z SSO."""
     bez = _render()
-    assert not [k for k in bez if k.startswith("SSO_")]
+    assert [k for k in bez if k.startswith("SSO_")] == ["SSO_NAGLOWKI"]
+    # Jawna wartosc z chartu ma pierwszenstwo przed kluczem z Sekretu (envFrom).
+    assert bez["SSO_NAGLOWKI"] == "0"
     z = _render("sso.enabled=true")
     assert z["SSO_NAGLOWKI"] == "1"
     # Grupa z Sekretu, nie z values - repo jest publiczne.
@@ -143,9 +145,12 @@ def test_chart_flaga_aplikacji_tylko_razem_z_middlewareami():
 def test_chart_flaga_pod_warunkiem_sso_statycznie():
     """To samo bez helma: zmienna stoi WEWNATRZ `if .Values.sso.enabled`."""
     tekst = (KORZEN / "charts/trader/templates/api.yaml").read_text(encoding="utf-8")
-    blok = re.search(r"\{\{-? if \.Values\.sso\.enabled \}\}(.*?)\{\{-? end \}\}", tekst, re.S)
-    assert blok and "SSO_NAGLOWKI" in blok.group(1)
-    assert tekst.count("SSO_NAGLOWKI") == 1
+    blok = re.search(r"\{\{-? if \.Values\.sso\.enabled \}\}(.*?)\{\{-? else \}\}(.*?)\{\{-? end \}\}",
+                     tekst, re.S)
+    assert blok and re.search(r'SSO_NAGLOWKI\s*value: "1"', blok.group(1))
+    # Poza galezia SSO wylacznie jawne "0".
+    assert re.search(r'SSO_NAGLOWKI\s*value: "0"', blok.group(2))
+    assert tekst.count("- name: SSO_NAGLOWKI") == 2
 
 
 # ------------------------------------------------------------ cale API + Postgres

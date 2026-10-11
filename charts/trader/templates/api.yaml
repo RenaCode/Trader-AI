@@ -97,6 +97,12 @@ spec:
                 secretKeyRef: { name: {{ .Values.secretName }}, key: SSO_GRUPA, optional: true }
             - name: SSO_WYLOGUJ_URL
               value: "{{ .Values.sso.wylogujUrl }}?rd=https://{{ .Values.ingress.host }}/"
+            {{- else }}
+            # Jawne "0" takze bez SSO: `env` ma pierwszenstwo przed `envFrom`, wiec
+            # gdyby pod dostal kiedys Sekret przez envFrom, klucz SSO_NAGLOWKI
+            # z Sekretu nie wlaczy zaufania do naglowkow bez middleware'u Authelii.
+            - name: SSO_NAGLOWKI
+              value: "0"
             {{- end }}
           ports:
             - containerPort: 8000
