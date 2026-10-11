@@ -162,6 +162,28 @@ async def _send_webhook(config: dict, payload: dict) -> None:
 _w_tle: set[asyncio.Task] = set()
 
 
+async def dokoncz_w_tle(limit_s: float = 10.0) -> None:
+    """Przy zamykaniu API: dokoncz wysylki w tle, ZANIM zamknie sie pula bazy.
+
+    Do 2026-10-11 `lifespan` zamykal pule od razu. Zadanie wysylki, ktore
+    jeszcze nie zdazylo zapisac zdarzenia, wolalo wtedy `open_pool()` - i to
+    otwieralo NOWA, globalna pule na zamykanej petli. Przy wylaczaniu poda
+    alarm o nowym logowaniu przepadal; w testach (TestClient na petle) petla
+    wisiala w `_cancel_all_tasks`, a CI stalo 4,5 h bez slowa.
+    Po `limit_s` reszta jest anulowana - zamkniecie poda nie moze czekac na
+    martwy kanal (timeouty kanalow to 15-20 s).
+    """
+    if not _w_tle:
+        return
+    _, zalegle = await asyncio.wait(set(_w_tle), timeout=limit_s)
+    for zadanie in zalegle:
+        zadanie.cancel()
+    if zalegle:
+        print(f"[powiadomienie] {len(zalegle)} wysyłek przerwanych przy zamykaniu API",
+              flush=True)
+        await asyncio.wait(zalegle, timeout=1.0)
+
+
 async def _powiadom_bez_wyjatku(user_id: int, event_code: str, title: str,
                                 body: str, kw: dict) -> None:
     try:

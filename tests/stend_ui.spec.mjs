@@ -119,8 +119,10 @@ const srv = http.createServer((req, res) => {
       res.writeHead(500, { 'content-type': 'application/json' });
       return res.end(JSON.stringify({ detail: SYGNATURA }));
     }
-    res.writeHead(200, { 'content-type': 'application/json' });
-    return res.end(JSON.stringify(dane));
+    // `{ __status, ...reszta }` - odpowiedz z innym kodem niz 200 (scenariusz 5).
+    const { __status: kod = 200, ...tresc } = dane;
+    res.writeHead(kod, { 'content-type': 'application/json' });
+    return res.end(JSON.stringify(Array.isArray(dane) ? dane : tresc));
   }
   const plik = path.join(DIST, sciezka === '/' ? '/index.html' : sciezka);
   if (!plik.startsWith(DIST) || !fs.existsSync(plik)) { res.writeHead(404); return res.end(); }
@@ -341,10 +343,32 @@ const niepelny = puty4.find((p) => !('quiet_to' in p) || !('digest_at' in p));
 ok(!niepelny, 'Cisza bez odczytu: zaden PUT nie jest niepelny',
    niepelny ? JSON.stringify(niepelny) : '');
 
+// ================================== 5: sesja SSO (Authelia, docs/sso-tozsamosc.md)
+console.log('\n--- SCENARIUSZ 5: SSO - wylogowanie przez portal, odmowa konta ---');
+const PORTAL = `http://localhost:${PORT}/portal-wylogowania`;
+TRASY = { ...BRZEGI,
+  '/api/auth/me': { login: 'uzytkownik1', role: 'owner', totp_enabled: true, sso: true },
+  '/api/auth/logout': { ok: true, wyloguj_url: PORTAL } };
+await page.reload({ waitUntil: 'networkidle' });
+await page.waitForSelector('.nav-tab', { timeout: 20000 });
+jest(await page.locator('.user-chip').innerText(), 'SSO', 'SSO: znacznik sesji z Authelii');
+await Promise.all([
+  page.waitForURL(PORTAL, { timeout: 5000 }).catch(() => {}),
+  page.getByRole('button', { name: 'Wyloguj' }).click(),
+]);
+ok(page.url() === PORTAL, 'SSO: "Wyloguj" przechodzi na portal Authelii', page.url());
+
+TRASY = { ...BRZEGI, '/api/auth/me': { __status: 403,
+  detail: 'Brak konta w Traderze dla użytkownika „uzytkownik2” — poproś administratora' } };
+await page.goto(`http://localhost:${PORT}/`, { waitUntil: 'networkidle' });
+t = await page.locator('body').innerText();
+jest(t, 'Brak konta w Traderze dla użytkownika „uzytkownik2”', 'SSO: odmowa konta jest na ekranie');
+jest(t, 'Zaloguj się', 'SSO: formularz awaryjny (haslo aplikacji) zostaje');
+
 /* ------------------------------------------------------------------------
  * MIEJSCE NA KOLEJNE SCENARIUSZE
  *
- * 5: /learning/walk-forward - okna posortowane po `test_from` i pochodzace
+ * 6: /learning/walk-forward - okna posortowane po `test_from` i pochodzace
  *    z JEDNEGO przebiegu treningowego (czeka na poprawke po stronie API).
  *    Podstawic odpowiedz w `stend_ui_dane.mjs`, wejsc na "Stopień nauki".
  * ------------------------------------------------------------------------ */

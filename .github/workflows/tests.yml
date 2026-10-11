@@ -41,6 +41,8 @@ permissions:
 jobs:
   pytest:
     runs-on: ubuntu-latest
+    # LIMIT CZASU (2026-10-11): pelny przebieg trwa ~5 min, a zawieszony test SSO (petla TestClienta czekajaca na zadanie w tle) palil 4,5 h minut runnera bez slowa w logu - `tee` nie dostal ani linii.
+    timeout-minutes: 20
     # BAZA W CI, BO 26 TESTOW NIGDY SIE NIE URUCHAMIALO.
     #
     # Do 2026-09-26 ten przebieg chodzil bez bazy, a komentarz nizej mowil, ze

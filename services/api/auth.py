@@ -8,38 +8,81 @@ from __future__ import annotations
 
 import hmac
 import ipaddress
+import secrets
 from datetime import datetime, timezone
 
 from fastapi import Cookie, Depends, Header, HTTPException, Request, Response
 from psycopg.types.json import Jsonb
 
+from . import sso
 from .db import fetch_one, execute
-from .security import (SESSION_COOKIE, SESSION_IDLE, SESSION_TOUCH_EVERY,
-                       session_token_hash)
+from .security import (SESSION_COOKIE, SESSION_IDLE, SESSION_TOUCH_EVERY, SESSION_TTL,
+                       new_session_token, session_expiry, session_token_hash)
 
 # `__Host-` jak SESSION_COOKIE (security.py); front czyta te nazwe w utils/api.js.
 CSRF_COOKIE = "__Host-trader_csrf"
 CSRF_HEADER = "x-csrf-token"
 
 
+SQL_SESJA_Z_TOKENU = """
+    SELECT s.id AS session_id, s.expires_at, s.mfa_satisfied, s.last_seen_at, s.sso,
+           u.id, u.login, u.role, u.is_active
+    FROM app.session s
+    JOIN app.user u ON u.id = s.user_id
+    WHERE s.token_hash = %s AND s.revoked_at IS NULL
+"""
+
+
 async def current_user(
     request: Request,
+    # Domyslne None tylko dla wolajacych wprost (testy); FastAPI wstrzykuje
+    # odpowiedz po samym typie.
+    response: Response = None,
     trader_session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
 ) -> dict:
-    """Zwraca uzytkownika albo 401. Uzywane jako Depends na chronionych routerach."""
+    """Zwraca uzytkownika albo 401. Uzywane jako Depends na chronionych routerach.
+
+    Przy `SSO_NAGLOWKI=1` i obecnym `Remote-User` (services/api/sso.py) sesja
+    aplikacji musi nalezec do TEGO loginu. Brak sesji, sesja martwa albo
+    cudza = nowa sesja `sso` bez hasla i bez TOTP aplikacji (Authelia wymusila
+    2FA, zanim zadanie tu doszlo). Bez naglowka - sesja z hasla jak dotad,
+    takze przy wlaczonej fladze: to jest droga awaryjna przez `kubectl
+    port-forward`, gdy Authelia lezy. Sesja `sso` bez naglowka - 401.
+    """
+    sso_login = sso.login_z_naglowka(request)
+    if sso_login is None:
+        row = await _uzytkownik_z_sesji(request, trader_session)
+        if row.get("sso"):
+            # Sesja `sso` nie przeszla hasla ani TOTP aplikacji - jej jedynym
+            # dowodem jest naglowek Authelii. Bez niego (port-forward, flaga
+            # wylaczona po wycofaniu SSO) to token na okaziciela: skopiowane
+            # ciasteczko nie moze ominac hasla i TOTP drogi awaryjnej.
+            raise HTTPException(status_code=401,
+                                detail="Sesja SSO jest wazna tylko przez portal logowania")
+        return row
+    if trader_session:
+        try:
+            row = await _uzytkownik_z_sesji(request, trader_session)
+        except HTTPException as e:
+            if e.status_code != 401:
+                raise
+        else:
+            if row["login"] == sso_login:
+                return row
+            # W tej przegladarce Authelia ma juz kogo innego. Sesja poprzedniej
+            # osoby nie ma prawa przezyc w ciasteczku obok - uniewazniona, nie
+            # tylko pominieta.
+            await execute("UPDATE app.session SET revoked_at = now()"
+                          " WHERE id = %s AND revoked_at IS NULL", (row["session_id"],))
+            await audit("auth.sso_zmiana_uzytkownika", user_id=row["id"], request=request)
+    return await _sesja_sso(sso_login, request, response)
+
+
+async def _uzytkownik_z_sesji(request: Request, trader_session: str | None) -> dict:
     if not trader_session:
         raise HTTPException(status_code=401, detail="Wymagane zalogowanie")
 
-    row = await fetch_one(
-        """
-        SELECT s.id AS session_id, s.expires_at, s.mfa_satisfied, s.last_seen_at,
-               u.id, u.login, u.role, u.is_active
-        FROM app.session s
-        JOIN app.user u ON u.id = s.user_id
-        WHERE s.token_hash = %s AND s.revoked_at IS NULL
-        """,
-        (session_token_hash(trader_session),),
-    )
+    row = await fetch_one(SQL_SESJA_Z_TOKENU, (session_token_hash(trader_session),))
     if not row:
         raise HTTPException(status_code=401, detail="Sesja nieznana lub uniewazniona")
     teraz = datetime.now(timezone.utc)
@@ -62,6 +105,64 @@ async def current_user(
         await execute("UPDATE app.session SET last_seen_at = now() WHERE id = %s",
                       (row["session_id"],))
 
+    request.state.user_id = row["id"]
+    request.state.session_id = row["session_id"]
+    return row
+
+
+async def _sesja_sso(login: str, request: Request, response: Response) -> dict:
+    """Nowa sesja `sso` dla ISTNIEJACEGO konta o loginie == `Remote-User`.
+
+    Bez zakladania kont w locie (kontrakt, pkt 3): konto niesie role, klucze
+    gield i kanaly powiadomien, wiec brak dopasowania to 403 z komunikatem,
+    a nie puste konto `owner`.
+
+    BLOKADA KONTA OBOWIAZUJE TAKZE TUTAJ. Piec zlych hasel przy ponownym
+    potwierdzeniu (`potwierdz_haslo`) blokuje konto i uniewaznia sesje,
+    z ktorej zgadywano. Bez tej kontroli nastepne zadanie z naglowkiem
+    zakladaloby od razu nowa sesje i blokada nie odcinalaby niczego.
+
+    Ciasteczka ida przez `response` zaleznosci - FastAPI dokleja je do
+    odpowiedzi endpointu. Pierwsze zadanie panelu to `GET /api/auth/me`, wiec
+    sesja i token CSRF sa na miejscu, zanim cokolwiek zostanie zapisane.
+    """
+    konto = await fetch_one(
+        "SELECT id, is_active, locked_until FROM app.user WHERE login = %s", (login,))
+    if not konto:
+        await audit("auth.sso_brak_konta", entity="user", entity_id=login, request=request)
+        raise HTTPException(
+            status_code=403,
+            detail=f"Brak konta w Traderze dla użytkownika „{login}” — poproś "
+                   "administratora o konto z tym samym loginem co w Authelii.")
+    if not konto["is_active"]:
+        raise HTTPException(status_code=403, detail="Konto nieaktywne")
+    teraz = datetime.now(timezone.utc)
+    if konto["locked_until"] and konto["locked_until"] > teraz:
+        left = int((konto["locked_until"] - teraz).total_seconds())
+        raise HTTPException(status_code=429,
+                            detail=f"Konto zablokowane po nieudanych probach. Sprobuj za {left} s.")
+
+    token, token_hash = new_session_token()
+    csrf = secrets.token_urlsafe(32)
+    await execute(
+        "INSERT INTO app.session (user_id, token_hash, expires_at, mfa_satisfied, sso, ip, user_agent)"
+        " VALUES (%s,%s,%s,true,true,%s,%s)",
+        (konto["id"], token_hash, session_expiry(), adres_klienta(request),
+         request.headers.get("user-agent")))
+    set_session_cookies(response, token, csrf, int(SESSION_TTL.total_seconds()))
+    await audit("auth.sso_login", user_id=konto["id"], request=request)
+    # Alarm `always_on` o nowym urzadzeniu takze dla SSO - inaczej wlaczenie
+    # SSO wylaczaloby go po cichu (ta sama wada co kiedys przy TOTP, patrz
+    # `routers/auth.py:/mfa`). Oslona jak tam: blad wykrywania nie wywraca
+    # logowania. Import leniwy: routers.auth importuje ten modul.
+    from .routers.auth import _zglos_nowe_urzadzenie
+    try:
+        await _zglos_nowe_urzadzenie(konto["id"], request)
+    except Exception as e:                                    # noqa: BLE001
+        print(f"[powiadomienie] wykrywanie nowego urządzenia zawiodło: "
+              f"{type(e).__name__}: {e}", flush=True)
+
+    row = await fetch_one(SQL_SESJA_Z_TOKENU, (token_hash,))
     request.state.user_id = row["id"]
     request.state.session_id = row["session_id"]
     return row

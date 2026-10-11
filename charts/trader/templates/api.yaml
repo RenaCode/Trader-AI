@@ -86,6 +86,24 @@ spec:
             {{- include "trader.llmEnv" . | nindent 12 }}
             - name: CORS_ORIGINS
               value: "https://{{ .Values.ingress.host }}"
+            {{- if .Values.sso.enabled }}
+            # Zaufanie do `Remote-User` - tylko razem z middleware'ami SSO
+            # z ingress.yaml (ten sam przelacznik, values.yaml `sso`).
+            - name: SSO_NAGLOWKI
+              value: "1"
+            # Nazwa grupy Authelii - z Sekretu, nie z values (repo publiczne).
+            - name: SSO_GRUPA
+              valueFrom:
+                secretKeyRef: { name: {{ .Values.secretName }}, key: SSO_GRUPA, optional: true }
+            - name: SSO_WYLOGUJ_URL
+              value: "{{ .Values.sso.wylogujUrl }}?rd=https://{{ .Values.ingress.host }}/"
+            {{- else }}
+            # Jawne "0" takze bez SSO: `env` ma pierwszenstwo przed `envFrom`, wiec
+            # gdyby pod dostal kiedys Sekret przez envFrom, klucz SSO_NAGLOWKI
+            # z Sekretu nie wlaczy zaufania do naglowkow bez middleware'u Authelii.
+            - name: SSO_NAGLOWKI
+              value: "0"
+            {{- end }}
           ports:
             - containerPort: 8000
           # DWIE SONDY, DWA PYTANIA - i one nie moga pytac o to samo.
