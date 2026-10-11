@@ -2155,7 +2155,13 @@ def nowe_stats(**flagi) -> dict:
              # na bramce, regula nie czyta modelu albo modelu nie bylo
              # (zalozenia poczatkowe). Zmiana id miedzy cyklami = przeladowanie
              # po nowym treningu, logowane w `main`.
-             "model_status": None, "model_version_id": None, "model_wersja": None}
+             "model_status": None, "model_version_id": None, "model_wersja": None,
+             # CZY TEN SILNIK PO KILL-SWITCHU ZAMYKA POZYCJE RYNKOWO
+             # (`--likwiduj-po-killswitchu` przy egzekucji gieldowej). API czyta
+             # to z pulsu, zeby przycisk recznego zatrzymania mowil, co NAPRAWDE
+             # sie stanie (audyt 2026-10-10, S2-3): "wstrzymam wejscia" i "sprzedam
+             # wszystko zleceniem rynkowym" to rozne decyzje. None: nie podano.
+             "likwiduj_po_killswitchu": None}
     stats.update(flagi)
     return stats
 
@@ -2303,6 +2309,10 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
     # wejscia 0" znaczylaby jednoczesnie "rynek spi", "nie ma modelu"
     # i "sygnaly nie przekroczyly progu" - czyli nie znaczylaby nic.
 
+    # Ten sam warunek, ktory nizej uruchamia `likwiduj_po_killswitchu`: flaga
+    # bez egzekucji gieldowej niczego nie zamyka.
+    likwidacja_czynna = bool(likwiduj and gielda is not None)
+
     # BRAMKA 1: SESJA GIELDY.
     #
     # `stan_sesji` zwraca trzy stany, nie dwa, i `None` NIE jest otwarciem -
@@ -2311,7 +2321,8 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
     # wiec silnik crypto nie placi za nia niczym.
     if sesja is not None and not sesja.wolno_decydowac:
         stats = nowe_stats(poza_sesja=True, sesja_zrodlo=sesja.zrodlo,
-                           sesja_znana=sesja.otwarta is not None)
+                           sesja_znana=sesja.otwarta is not None,
+                           likwiduj_po_killswitchu=likwidacja_czynna)
         if verbose:
             print(f"  {sesja.opis()} — cykl bez decyzji")
         zapisz_puls(cur, engine, mode, stats)
@@ -2336,7 +2347,7 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
         m = active_model(cur, engine, h, status=model_status, mode=mode)
         if not m.get("version"):
             stats = nowe_stats(
-                bez_modelu=True,
+                bez_modelu=True, likwiduj_po_killswitchu=likwidacja_czynna,
                 model_nazwa=f"{engine}_signal_weighting_{h.bar}",
                 model_status=model_status)
             if verbose:
@@ -2495,7 +2506,7 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
     # ZERO wierszy) ma być decyzją wpisaną w chart, a nie skutkiem wdrożenia
     # obrazu. Domyślne `False` znaczy: kill-switch zachowuje się dokładnie tak,
     # jak zachowywał się do 2026-09-27.
-    if likwiduj and gielda is not None:
+    if likwidacja_czynna:
         from services.engine.likwidacja import likwiduj_po_killswitchu
         likwidacja_stat = await likwiduj_po_killswitchu(
             cur, gielda, engine=engine, mode=mode, kategoria=kategoria,
@@ -2534,7 +2545,7 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
               f"{model['enter']:.4f} dla wszystkich reżimów — zamierzone 12% "
               f"najsilniejszych sygnałów NIE JEST dotrzymane w żadnym z nich. "
               f"Naprawia to dopiero kolejny trening.")
-    stats = nowe_stats()
+    stats = nowe_stats(likwiduj_po_killswitchu=likwidacja_czynna)
     # WYNIK LIKWIDACJI IDZIE DO PULSU. Bez tego jedynym sladem po zamknieciu
     # calej ekspozycji zleceniem rynkowym bylaby linia w logu poda, a logu poda
     # nikt nie czyta o trzeciej w nocy. `None` zostaje, gdy likwidacja nie

@@ -419,3 +419,47 @@ def test_interfejs_zatrzymuje_bez_hasla_a_zwalnia_z_haslem():
     assert 'type="password"' in zwolnij_ui
     assert "{ note: note.trim(), haslo, kod: kod.trim() || null }" in zwolnij_ui
     assert "triggered_by" in zrodlo, "historia ma mówić, kto zatrzymał ręcznie"
+
+
+# ---------------------------------------------- co zatrzymanie zrobi z pozycjami
+
+class AtrapaPulsu(Atrapa):
+    def __init__(self, likwiduje, **kw):
+        super().__init__(**kw)
+        self.likwiduje = likwiduje
+
+    async def fetch_one(self, sql, params=None):
+        if "risk.engine_heartbeat" in sql:
+            assert "likwiduj_po_killswitchu" in sql, "puls czytany bez ustawienia likwidacji"
+            return {"mode": self.puls, "likwiduje": self.likwiduje,
+                    "last_beat_at": __import__("datetime").datetime(2026, 10, 10)}
+        return await super().fetch_one(sql, params)
+
+
+@pytest.mark.parametrize("z_pulsu,oczekiwane", [("true", True), ("false", False),
+                                                (None, None), ("null", None)])
+def test_SKUTEK_kill_switcha_z_pulsu_silnika(monkeypatch, z_pulsu, oczekiwane):
+    """Audyt 2026-10-10, S2-3: przy `--likwiduj-po-killswitchu` ręczne zatrzymanie
+    sprzedaje całą ekspozycję rynkowo, a panel mówił tylko o wstrzymaniu wejść."""
+    a = AtrapaPulsu(z_pulsu)
+    _podstaw(monkeypatch, a)
+    odp = asyncio.run(risk.skutek_killswitcha("crypto"))
+    assert odp["likwiduje"] is oczekiwane
+    if oczekiwane is True:
+        assert "ZLECENIEM RYNKOWYM" in odp["opis"]
+    elif oczekiwane is False:
+        assert "ZOSTAJĄ" in odp["opis"]
+    else:
+        assert "Nie wiadomo" in odp["opis"]
+
+
+def test_ZATRZYMANIE_przy_likwidacji_mowi_o_sprzedazy_w_odpowiedzi_i_alarmie(monkeypatch):
+    a = AtrapaPulsu("true")
+    odp = wlacz(monkeypatch, a)
+    assert odp["likwiduje"] is True
+    assert "ZLECENIEM RYNKOWYM" in odp["message"]
+    assert all("ZLECENIEM RYNKOWYM" in tresc for _, _, _, tresc, _ in a.alarmy)
+
+    b = AtrapaPulsu("false")
+    odp = wlacz(monkeypatch, b)
+    assert odp["likwiduje"] is False and "ZOSTAJĄ" in odp["message"]

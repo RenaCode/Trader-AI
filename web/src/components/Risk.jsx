@@ -131,7 +131,18 @@ function ZwolnijKillSwitch({ engine, zdarzenie, regula, recznePrzytrzymuje, onZw
    Formularz jest zwiniety za przyciskiem z powodem: zatrzymanie handlu nie moze
    byc jednym przypadkowym kliknieciem. Tryb (demo/live) wybiera serwer z pulsu
    silnika. */
-function WlaczKillSwitch({ engine, automatTrzyma, reczneJuz, onWlaczony }) {
+/* CO ZATRZYMANIE ZROBI Z OTWARTYMI POZYCJAMI - z pulsu silnika (audyt
+   2026-10-10, S2-3). Przy `--likwiduj-po-killswitchu` reczne zatrzymanie
+   sprzedaje cala ekspozycje zleceniem rynkowym; napis "zatrzyma otwieranie
+   pozycji" byl wtedy nieprawda o rzeczy nieodwracalnej. `likwiduje === null`
+   (puls bez tej informacji) NIE jest renderowane jako lagodniejsza wersja. */
+function opisSkutku(skutek) {
+  if (skutek?.likwiduje === true) return 'zatrzymuje wejścia i ZAMYKA wszystkie pozycje rynkowo';
+  if (skutek?.likwiduje === false) return 'zatrzymuje otwieranie pozycji; otwarte zostają';
+  return 'zatrzymuje otwieranie pozycji; nie wiadomo, czy zamknie otwarte';
+}
+
+function WlaczKillSwitch({ engine, automatTrzyma, reczneJuz, skutek, onWlaczony }) {
   const [otwarty, setOtwarty] = useState(false);
   const [powod, setPowod] = useState('');
   const [busy, setBusy] = useState(false);
@@ -144,7 +155,7 @@ function WlaczKillSwitch({ engine, automatTrzyma, reczneJuz, onWlaczony }) {
       <div className="glass-card">
         <div className="card-title">
           Ręczny kill-switch
-          <span className="hint">zatrzymuje otwieranie pozycji do ręcznego zwolnienia</span>
+          <span className="hint">{opisSkutku(skutek)} — do ręcznego zwolnienia</span>
         </div>
         {reczneJuz ? (
           <p className="hint" style={{ marginTop: 0 }}>
@@ -156,16 +167,23 @@ function WlaczKillSwitch({ engine, automatTrzyma, reczneJuz, onWlaczony }) {
             zatrzymanie ma pierwszeństwo: automat nie wznowi handlu, dopóki je zwolnisz.
           </p>
         ) : null}
-        <button className="btn" onClick={() => setOtwarty(true)}>Zatrzymaj handel…</button>
+        <button className="btn btn-danger" onClick={() => setOtwarty(true)}>Zatrzymaj handel…</button>
       </div>
     );
   }
 
   return (
     <div className="notice">
-      <strong>Zatrzymanie handlu ({engine}).</strong> Silnik przestanie otwierać pozycje przy
-      najbliższym cyklu, tak jak po zadziałaniu limitu. Wróci dopiero po ręcznym zwolnieniu
-      z powodem. Alarm pójdzie do panelu i przez bramkę (WhatsApp).
+      <strong>Zatrzymanie handlu ({engine}).</strong> Przy najbliższym cyklu, tak jak po
+      zadziałaniu limitu:{' '}
+      {skutek?.likwiduje === true ? (
+        <strong className="kill-likwidacja">{skutek.opis}</strong>
+      ) : (
+        <>{skutek?.opis || 'Silnik przestanie otwierać pozycje. Nie wiadomo, czy zamknie też '
+          + 'otwarte pozycje zleceniem rynkowym — nie udało się odczytać ustawienia silnika.'}</>
+      )}{' '}
+      Wróci dopiero po ręcznym zwolnieniu z powodem. Alarm pójdzie do panelu i przez
+      bramkę (WhatsApp).
       <form style={{ marginTop: 12 }}
             onSubmit={async (e) => {
               e.preventDefault();
@@ -185,9 +203,11 @@ function WlaczKillSwitch({ engine, automatTrzyma, reczneJuz, onWlaczony }) {
                  placeholder="np. podejrzany ruch na rachunku, sprawdzam przed dalszym handlem"
                  onChange={(e) => { setPowod(e.target.value); setErr(null); }} />
         </label>
-        <button className="btn" type="submit"
+        <button className="btn btn-danger" type="submit"
                 disabled={busy || powod.trim().length < 10}>
-          {busy ? 'Zatrzymuję…' : 'Włącz kill-switch'}
+          {busy ? 'Zatrzymuję…'
+            : skutek?.likwiduje === true ? 'Włącz kill-switch i zamknij pozycje'
+            : 'Włącz kill-switch'}
         </button>
         <button className="btn" type="button" style={{ marginLeft: 8 }}
                 disabled={busy} onClick={zamknij}>
@@ -209,6 +229,7 @@ export default function Risk({ engine }) {
   const viol = useApi(`/api/engines/${engine}/risk/violations?limit=30`, [engine], { refreshMs: 30000 });
   const ks = useApi(`/api/engines/${engine}/risk/killswitch?limit=${KS_LIMIT}`, [engine], { refreshMs: 30000 });
   const doz = useApi(`/api/engines/${engine}/risk/dozorca`, [engine], { refreshMs: 30000 });
+  const skutek = useApi(`/api/engines/${engine}/risk/killswitch/skutek`, [engine], { refreshMs: 30000 });
 
   const ksLista = ks.data || [];
   const active = ksLista.filter((k) => k.active);
@@ -246,7 +267,8 @@ export default function Risk({ engine }) {
           pierwszenstwem, a API przyjmuje je takze przy nieudanym odczycie
           historii (drugie reczne nie dopisuje wiersza). */}
       <WlaczKillSwitch engine={engine} automatTrzyma={active.length > 0 && !reczneAktywne}
-                       reczneJuz={reczneAktywne} onWlaczony={() => ks.reload?.()} />
+                       reczneJuz={reczneAktywne} skutek={skutek.data}
+                       onWlaczony={() => ks.reload?.()} />
 
       {active.length === 0 && ksUciete && (
         <div className="notice">

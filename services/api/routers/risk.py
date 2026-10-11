@@ -125,6 +125,50 @@ async def killswitch(engine: Silnik, limit: int = Query(10, le=100)):
 LIMIT_RECZNY = "reczny"
 
 
+# CO ZROBI KILL-SWITCH Z OTWARTYMI POZYCJAMI (audyt 2026-10-10, S2-3).
+#
+# Silnik z `--likwiduj-po-killswitchu` (przy egzekucji gieldowej) zamyka po
+# KAZDYM czynnym zatrzymaniu - takze recznym - cala ekspozycje zleceniem
+# rynkowym (`likwidacja.py`). Panel mowil wylacznie "zatrzyma otwieranie
+# pozycji", wiec wlasciciel chcacy wstrzymac handel do przegladu placil pelna
+# runde takera i niezmierzony poslizg. Ustawienie zna tylko proces silnika -
+# API czyta je z jego pulsu (`detail.likwiduj_po_killswitchu`, `loop.nowe_stats`).
+# None: puls bez tej informacji (stara wersja silnika albo brak pulsu) - i to
+# mowimy wprost, zamiast zgadywac lagodniejszej wersji.
+OPIS_SKUTKU = {
+    True: ("Silnik przestanie otwierać pozycje i ZAMKNIE WSZYSTKIE OTWARTE POZYCJE "
+           "ZLECENIEM RYNKOWYM (stawka taker + niezmierzony poślizg). Tej "
+           "sprzedaży nie da się cofnąć."),
+    False: ("Silnik przestanie otwierać pozycje. Otwarte pozycje ZOSTAJĄ — wyjścia "
+            "idą dalej zwykłą drogą (PostOnly) i mogą się nie wypełnić."),
+    None: ("Silnik przestanie otwierać pozycje. Nie wiadomo, czy zamknie też otwarte "
+           "pozycje zleceniem rynkowym — jego puls nie podaje tego ustawienia."),
+}
+
+SQL_PULS = ("SELECT mode::text AS mode, last_beat_at,"
+            "       detail->>'likwiduj_po_killswitchu' AS likwiduje"
+            "  FROM risk.engine_heartbeat WHERE engine::text = %s")
+
+
+def likwiduje_z_pulsu(puls: dict | None) -> bool | None:
+    """`detail->>'...'` oddaje tekst JSON-a: 'true' / 'false' / 'null' / brak."""
+    v = (puls or {}).get("likwiduje")
+    if isinstance(v, bool):
+        return v
+    return {"true": True, "false": False}.get(v)
+
+
+@router.get("/killswitch/skutek")
+async def skutek_killswitcha(engine: Silnik):
+    """Co zrobi zatrzymanie z otwartymi pozycjami - wedlug pulsu silnika."""
+    puls = await fetch_one(SQL_PULS, (engine,))
+    lik = likwiduje_z_pulsu(puls)
+    return {"likwiduje": lik, "opis": OPIS_SKUTKU[lik],
+            "mode": puls["mode"] if puls else None,
+            "as_of": (puls["last_beat_at"].isoformat()
+                      if puls and puls.get("last_beat_at") else None)}
+
+
 class RecznyKillSwitchBody(BaseModel):
     # Powod z tego samego powodu co przy zwolnieniu: zostaje w bazie na
     # pytanie "dlaczego system przestal handlowac".
@@ -182,13 +226,12 @@ async def wlacz_killswitch(engine: Silnik, body: RecznyKillSwitchBody, request: 
     (`sprawdz_ryzyko`) za pierwsze zgloszenie, wiec nie wysle drugiego
     "Kill-switch zadzialal", tylko przypomnienia w swoim rytmie.
     """
-    puls = await fetch_one(
-        "SELECT mode::text AS mode FROM risk.engine_heartbeat WHERE engine::text = %s",
-        (engine,))
+    puls = await fetch_one(SQL_PULS, (engine,))
     if not puls:
         raise HTTPException(409, "Silnik nie zgłosił jeszcze pulsu — nie wiadomo, "
                                  "w jakim trybie handluje, więc nie ma czego zatrzymać")
     tryb = puls["mode"]
+    skutek = OPIS_SKUTKU[likwiduje_z_pulsu(puls)]
     powod = body.powod.strip()
     reason = f"Ręczne zatrzymanie z panelu ({user['login']}): {powod}"
 
@@ -208,6 +251,7 @@ async def wlacz_killswitch(engine: Silnik, body: RecznyKillSwitchBody, request: 
             (engine, tryb, LIMIT_RECZNY))
         if juz:
             return {"ok": True, "id": juz["id"], "mode": tryb, "juz_aktywne": True,
+                    "likwiduje": likwiduje_z_pulsu(puls),
                     "triggered_at": juz["triggered_at"].isoformat(),
                     "message": "Ręczne zatrzymanie już trzyma silnik — nic nie "
                                "zmieniono. Zwolnienie: zakładka Ryzyko."}
@@ -225,17 +269,17 @@ async def wlacz_killswitch(engine: Silnik, body: RecznyKillSwitchBody, request: 
             u["id"], "killswitch.triggered",
             f"Kill-switch włączony ręcznie ({engine})",
             f"Handel zatrzymany z panelu ({tryb}), konto {user['login']}.\n\n"
-            f"Powód: {powod}\n\nSilnik NIE WEJDZIE w żadną pozycję do czasu "
-            f"ręcznego zwolnienia (zakładka Ryzyko). Automatyczne wznowienie "
-            f"jest wstrzymane, dopóki to zatrzymanie trwa.",
+            f"Powód: {powod}\n\n{skutek}\n\nSilnik NIE WEJDZIE w żadną pozycję "
+            f"do czasu ręcznego zwolnienia (zakładka Ryzyko). Automatyczne "
+            f"wznowienie jest wstrzymane, dopóki to zatrzymanie trwa.",
             engine=engine, severity="critical",
             data={"event_id": z["id"], "reczny": True, "kto": user["login"],
                   "mode": tryb})
 
     return {"ok": True, "id": z["id"], "mode": tryb,
             "triggered_at": z["triggered_at"].isoformat(),
-            "message": "Kill-switch włączony. Silnik przestanie otwierać pozycje "
-                       "przy najbliższym cyklu decyzyjnym."}
+            "likwiduje": likwiduje_z_pulsu(puls),
+            "message": f"Kill-switch włączony. Przy najbliższym cyklu: {skutek}"}
 
 
 class ZwolnienieBody(BaseModel):

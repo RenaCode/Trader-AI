@@ -350,6 +350,22 @@ def test_likwidacja_po_killswitchu_tylko_za_przelacznikiem(swiat):
     assert stats["likwidacja"] == {"zamkniete": 0}
 
 
+def test_PULS_mowi_czy_kill_switch_ZAMKNIE_pozycje_rynkowo(swiat):
+    """Audyt 2026-10-10, S2-3: panel mówił „zatrzyma otwieranie pozycji", a przy
+    `--likwiduj-po-killswitchu` ręczne zatrzymanie sprzedaje całą ekspozycję
+    zleceniem rynkowym. API czyta to ustawienie z pulsu - puls musi je nieść,
+    i to w postaci, która faktycznie zadziała (flaga bez giełdy nie zamyka nic).
+    """
+    stats, cur = cykl(swiat, gielda=object(), likwiduj=True)
+    assert stats["likwiduj_po_killswitchu"] is True
+    assert '"likwiduj_po_killswitchu": true' in puls(cur)
+
+    stats, _ = cykl(swiat, gielda=object())
+    assert stats["likwiduj_po_killswitchu"] is False
+    stats, _ = cykl(swiat, likwiduj=True)          # bez giełdy: nie ma czym zamknąć
+    assert stats["likwiduj_po_killswitchu"] is False
+
+
 # ------------------------------------------------------------------ bramki cyklu
 
 def test_sesja_zamknieta_konczy_cykl_PULSEM_po_pomiarze_ryzyka(swiat):
@@ -370,7 +386,11 @@ def test_sesja_zamknieta_konczy_cykl_PULSEM_po_pomiarze_ryzyka(swiat):
     assert swiat.wywolania == {}, "poza sesją pętla dotknęła giełdy"
     assert '"poza_sesja": true' in puls(cur)
     pelny = loop.nowe_stats()
-    assert all(stats[k] == pelny[k] for k in pelny), "bramka zmyśliła licznik"
+    # `likwiduj_po_killswitchu` to ustawienie procesu, nie licznik - puls
+    # niesie je także poza sesją (panel czyta je do opisu kill-switcha).
+    assert all(stats[k] == pelny[k] for k in pelny
+               if k != "likwiduj_po_killswitchu"), "bramka zmyśliła licznik"
+    assert stats["likwiduj_po_killswitchu"] is False
 
 
 def test_sesja_czytana_PONOWNIE_przed_wysylka_i_ten_obiekt_idzie_do_zloz(swiat,
