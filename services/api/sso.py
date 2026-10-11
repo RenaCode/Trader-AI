@@ -17,8 +17,10 @@ CZEGO TU NIE MA, CELOWO:
   - wariantow `Remote_User` / `X-Remote-User` - czytamy jeden, dokladny naglowek;
   - rol z `Remote-Groups`: o wejsciu na host decyduje Authelia, o roli
     w aplikacji (`owner`/`viewer`) baza. Grupa jest tu tylko druga, niezalezna
-    bramka (`SSO_GRUPA`) na wypadek reguly Authelii poluzowanej dla calej
-    domeny - rodzina ma konta w Authelii dla Kidwatcha, nie dla tradera;
+    bramka (`SSO_GRUPA`, domyslnie `wlasciciel`) na wypadek reguly Authelii
+    poluzowanej dla calej domeny. Decyzja wlasciciela 2026-10-11: do Tradera
+    wchodzi WYLACZNIE konto codzienne z grupy `wlasciciel`; konto
+    administracyjne Authelii (`admin`, grupa `admins`) i rodzina - nie;
   - zakladania kont: brak konta = 403, nie nowe puste konto (kontrakt, pkt 3).
 """
 from __future__ import annotations
@@ -43,7 +45,7 @@ def wlaczone() -> bool:
 
 
 def wymagana_grupa() -> str:
-    return os.environ.get("SSO_GRUPA", "admins")
+    return os.environ.get("SSO_GRUPA", "wlasciciel")
 
 
 def adres_wylogowania() -> str | None:

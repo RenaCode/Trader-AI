@@ -201,7 +201,9 @@ sso:
   # tych dwoch rzeczy na dwa przelaczniki pozwoliloby wlaczyc zaufanie bez
   # ochrony - wtedy kazdy, kto zna login wlasciciela, bylby wlascicielem.
   # Grupa Authelii wymagana do sesji (druga bramka obok reguly Authelii).
-  grupa: admins
+  # `wlasciciel` = konto codzienne; konto `admin` (grupa `admins`) do Tradera
+  # NIE wchodzi - decyzja wlasciciela 2026-10-11.
+  grupa: wlasciciel
   # Portal konczy sesje Authelii; `rd` wraca na ten host. Ustawiany tylko
   # przy `enabled` - bez SSO "Wyloguj" kasuje sama sesje aplikacji.
   wylogujUrl: https://auth.renacode.com/logout

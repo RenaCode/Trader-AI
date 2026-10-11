@@ -48,7 +48,7 @@ def _zadanie(*pary: tuple[str, str]):
 
 def test_flaga_wylaczona_naglowek_nic_nie_znaczy(monkeypatch):
     monkeypatch.delenv("SSO_NAGLOWKI", raising=False)
-    z = _zadanie(("Remote-User", "marcin"), ("Remote-Groups", "admins"))
+    z = _zadanie(("Remote-User", "marcin"), ("Remote-Groups", "wlasciciel"))
     assert sso.login_z_naglowka(z) is None
     # Tylko dokladne "1" wlacza zaufanie - "true", "yes" itd. to wylaczone.
     for wartosc in ("true", "0", "", "yes"):
@@ -58,21 +58,23 @@ def test_flaga_wylaczona_naglowek_nic_nie_znaczy(monkeypatch):
 
 def test_flaga_wlaczona_poprawny_naglowek(monkeypatch):
     monkeypatch.setenv("SSO_NAGLOWKI", "1")
-    z = _zadanie(("Remote-User", "marcin"), ("Remote-Groups", "rodzina, admins"))
+    z = _zadanie(("Remote-User", "marcin"), ("Remote-Groups", "rodzina, wlasciciel"))
     assert sso.login_z_naglowka(z) == "marcin"
     assert sso.login_z_naglowka(_zadanie()) is None
 
 
 @pytest.mark.parametrize("pary,kod", [
-    ([("Remote-User", "marcin"), ("Remote-User", "intruz"), ("Remote-Groups", "admins")], 400),
-    ([("Remote-User", "Marcin"), ("Remote-Groups", "admins")], 400),
-    ([("Remote-User", "a b"), ("Remote-Groups", "admins")], 400),
-    ([("Remote-User", ""), ("Remote-Groups", "admins")], 400),
-    ([("Remote-User", "marcin,root"), ("Remote-Groups", "admins")], 400),
+    ([("Remote-User", "marcin"), ("Remote-User", "intruz"), ("Remote-Groups", "wlasciciel")], 400),
+    ([("Remote-User", "Marcin"), ("Remote-Groups", "wlasciciel")], 400),
+    ([("Remote-User", "a b"), ("Remote-Groups", "wlasciciel")], 400),
+    ([("Remote-User", ""), ("Remote-Groups", "wlasciciel")], 400),
+    ([("Remote-User", "marcin,root"), ("Remote-Groups", "wlasciciel")], 400),
     ([("Remote-User", "marcin")], 403),
     ([("Remote-User", "marcin"), ("Remote-Groups", "rodzina")], 403),
-    ([("Remote-User", "marcin"), ("Remote-Groups", "administratorzy")], 403),
-    ([("Remote-User", "marcin"), ("Remote-Groups", "admins"), ("Remote-Groups", "x")], 400),
+    ([("Remote-User", "marcin"), ("Remote-Groups", "wlasciciele")], 403),
+    # Konto administracyjne Authelii nie wchodzi do Tradera (decyzja 2026-10-11).
+    ([("Remote-User", "admin"), ("Remote-Groups", "admins")], 403),
+    ([("Remote-User", "marcin"), ("Remote-Groups", "wlasciciel"), ("Remote-Groups", "x")], 400),
 ])
 def test_odmowy_naglowka(monkeypatch, pary, kod):
     monkeypatch.setenv("SSO_NAGLOWKI", "1")
@@ -86,7 +88,7 @@ def test_nie_czyta_wariantow_naglowka(monkeypatch):
     monkeypatch.setenv("SSO_NAGLOWKI", "1")
     for nazwa in ("Remote_User", "X-Remote-User"):
         assert sso.login_z_naglowka(
-            _zadanie((nazwa, "marcin"), ("Remote-Groups", "admins"))) is None
+            _zadanie((nazwa, "marcin"), ("Remote-Groups", "wlasciciel"))) is None
 
 
 # ------------------------------------------------------------ chart
@@ -112,7 +114,7 @@ def test_chart_flaga_aplikacji_tylko_razem_z_middlewareami():
     assert not [k for k in bez if k.startswith("SSO_")]
     z = _render("sso.enabled=true")
     assert z["SSO_NAGLOWKI"] == "1"
-    assert z["SSO_GRUPA"] == "admins"
+    assert z["SSO_GRUPA"] == "wlasciciel"
     assert z["SSO_WYLOGUJ_URL"] == WYLOGUJ
 
 
@@ -173,7 +175,7 @@ def _klient():
     return TestClient(app, base_url="https://testserver")
 
 
-def _authelia(login: str, grupy: str = "admins") -> dict:
+def _authelia(login: str, grupy: str = "wlasciciel") -> dict:
     return {"Remote-User": login, "Remote-Groups": grupy,
             "Remote-Email": "contact@renacode.com", "X-Forwarded-For": ADRES}
 
@@ -249,13 +251,13 @@ def test_nieznany_login_403_z_komunikatem_i_bez_konta(konta, monkeypatch):
 
 
 @bazodanowy
-@pytest.mark.parametrize("grupy", ["", "rodzina", "rodzina,goscie"])
+@pytest.mark.parametrize("grupy", ["", "rodzina", "rodzina,goscie", "admins"])
 def test_bez_grupy_403(konta, monkeypatch, grupy):
     monkeypatch.setenv("SSO_NAGLOWKI", "1")
     wl = konta()
     with _klient() as k:
         r = k.get("/api/auth/me", headers=_authelia(wl["login"], grupy))
-    assert r.status_code == 403 and "admins" in r.json()["detail"]
+    assert r.status_code == 403 and "wlasciciel" in r.json()["detail"]
     assert _sesje(wl["id"]) == []
 
 
@@ -266,7 +268,7 @@ def test_podwojny_remote_user_400(konta, monkeypatch):
     with _klient() as k:
         r = k.get("/api/auth/me", headers=[("Remote-User", wl["login"]),
                                            ("Remote-User", "intruz"),
-                                           ("Remote-Groups", "admins")])
+                                           ("Remote-Groups", "wlasciciel")])
     assert r.status_code == 400
     assert _sesje(wl["id"]) == []
 
