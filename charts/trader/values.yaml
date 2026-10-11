@@ -199,11 +199,11 @@ sso:
   # w podzie API `SSO_NAGLOWKI=1`: aplikacja ufa `Remote-User` WYLACZNIE
   # wtedy, gdy powyzsze middleware'y kasuja naglowki od klienta. Rozdzielenie
   # tych dwoch rzeczy na dwa przelaczniki pozwoliloby wlaczyc zaufanie bez
-  # ochrony - wtedy kazdy, kto zna login wlasciciela, bylby wlascicielem.
-  # Grupa Authelii wymagana do sesji (druga bramka obok reguly Authelii).
-  # `wlasciciel` = konto codzienne; konto `admin` (grupa `admins`) do Tradera
-  # NIE wchodzi - decyzja wlasciciela 2026-10-11.
-  grupa: wlasciciel
+  # ochrony - wtedy kazdy, kto zna login konta, moglby sie pod nie podszyc.
+  # Grupa Authelii wymagana do sesji (druga bramka obok reguly Authelii) NIE
+  # stoi tutaj: repo jest publiczne, wiec nazwa idzie z Sekretu aplikacji
+  # (`secretName`, klucz `SSO_GRUPA`). Brak klucza = SSO odmawia kazdemu,
+  # logowanie haslem aplikacji dziala dalej.
   # Portal konczy sesje Authelii; `rd` wraca na ten host. Ustawiany tylko
   # przy `enabled` - bez SSO "Wyloguj" kasuje sama sesje aplikacji.
   wylogujUrl: https://auth.renacode.com/logout

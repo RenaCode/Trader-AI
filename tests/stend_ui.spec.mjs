@@ -347,7 +347,7 @@ ok(!niepelny, 'Cisza bez odczytu: zaden PUT nie jest niepelny',
 console.log('\n--- SCENARIUSZ 5: SSO - wylogowanie przez portal, odmowa konta ---');
 const PORTAL = `http://localhost:${PORT}/portal-wylogowania`;
 TRASY = { ...BRZEGI,
-  '/api/auth/me': { login: 'marcin', role: 'owner', totp_enabled: true, sso: true },
+  '/api/auth/me': { login: 'uzytkownik1', role: 'owner', totp_enabled: true, sso: true },
   '/api/auth/logout': { ok: true, wyloguj_url: PORTAL } };
 await page.reload({ waitUntil: 'networkidle' });
 await page.waitForSelector('.nav-tab', { timeout: 20000 });
@@ -359,10 +359,10 @@ await Promise.all([
 ok(page.url() === PORTAL, 'SSO: "Wyloguj" przechodzi na portal Authelii', page.url());
 
 TRASY = { ...BRZEGI, '/api/auth/me': { __status: 403,
-  detail: 'Brak konta w Traderze dla użytkownika „ania” — poproś administratora' } };
+  detail: 'Brak konta w Traderze dla użytkownika „uzytkownik2” — poproś administratora' } };
 await page.goto(`http://localhost:${PORT}/`, { waitUntil: 'networkidle' });
 t = await page.locator('body').innerText();
-jest(t, 'Brak konta w Traderze dla użytkownika „ania”', 'SSO: odmowa konta jest na ekranie');
+jest(t, 'Brak konta w Traderze dla użytkownika „uzytkownik2”', 'SSO: odmowa konta jest na ekranie');
 jest(t, 'Zaloguj się', 'SSO: formularz awaryjny (haslo aplikacji) zostaje');
 
 /* ------------------------------------------------------------------------

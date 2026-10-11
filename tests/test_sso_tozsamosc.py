@@ -7,7 +7,7 @@ Authelii dostaje sesje aplikacji dla ISTNIEJACEGO konta o tym loginie - bez
 hasla i bez TOTP aplikacji, bo 2FA wymusila juz Authelia. Bez flagi naglowek
 nie znaczy NIC: router bez middleware'u Authelii przepuszcza `Remote-User`
 od klienta (sprawdzone w probie infra), wiec zaufanie bez flagi = kazdy, kto
-zna login wlasciciela, jest wlascicielem. Pierwszy test w sekcji bazodanowej
+zna login konta, moze sie pod nie podszyc. Pierwszy test w sekcji bazodanowej
 pilnuje dokladnie tego.
 
 Testy bazodanowe ida przez cale API (TestClient + prawdziwy Postgres po
@@ -40,6 +40,16 @@ HASLO = "haslo-awaryjne-2026"
 ADRES = "203.0.113.7"
 
 
+GRUPA = "grupa-testowa"
+
+
+@pytest.fixture(autouse=True)
+def _grupa_z_sekretu(monkeypatch):
+    """W podzie `SSO_GRUPA` przychodzi z Sekretu aplikacji (repo publiczne -
+    nazw grup i kont Authelii nie ma w kodzie ani w values)."""
+    monkeypatch.setenv("SSO_GRUPA", GRUPA)
+
+
 # ------------------------------------------------------------ bez bazy
 def _zadanie(*pary: tuple[str, str]):
     return SimpleNamespace(headers=Headers(raw=[(k.lower().encode(), v.encode())
@@ -48,7 +58,7 @@ def _zadanie(*pary: tuple[str, str]):
 
 def test_flaga_wylaczona_naglowek_nic_nie_znaczy(monkeypatch):
     monkeypatch.delenv("SSO_NAGLOWKI", raising=False)
-    z = _zadanie(("Remote-User", "marcin"), ("Remote-Groups", "wlasciciel"))
+    z = _zadanie(("Remote-User", "uzytkownik1"), ("Remote-Groups", "grupa-testowa"))
     assert sso.login_z_naglowka(z) is None
     # Tylko dokladne "1" wlacza zaufanie - "true", "yes" itd. to wylaczone.
     for wartosc in ("true", "0", "", "yes"):
@@ -58,23 +68,23 @@ def test_flaga_wylaczona_naglowek_nic_nie_znaczy(monkeypatch):
 
 def test_flaga_wlaczona_poprawny_naglowek(monkeypatch):
     monkeypatch.setenv("SSO_NAGLOWKI", "1")
-    z = _zadanie(("Remote-User", "marcin"), ("Remote-Groups", "rodzina, wlasciciel"))
-    assert sso.login_z_naglowka(z) == "marcin"
+    z = _zadanie(("Remote-User", "uzytkownik1"), ("Remote-Groups", "inna-grupa, grupa-testowa"))
+    assert sso.login_z_naglowka(z) == "uzytkownik1"
     assert sso.login_z_naglowka(_zadanie()) is None
 
 
 @pytest.mark.parametrize("pary,kod", [
-    ([("Remote-User", "marcin"), ("Remote-User", "intruz"), ("Remote-Groups", "wlasciciel")], 400),
-    ([("Remote-User", "Marcin"), ("Remote-Groups", "wlasciciel")], 400),
-    ([("Remote-User", "a b"), ("Remote-Groups", "wlasciciel")], 400),
-    ([("Remote-User", ""), ("Remote-Groups", "wlasciciel")], 400),
-    ([("Remote-User", "marcin,root"), ("Remote-Groups", "wlasciciel")], 400),
-    ([("Remote-User", "marcin")], 403),
-    ([("Remote-User", "marcin"), ("Remote-Groups", "rodzina")], 403),
-    ([("Remote-User", "marcin"), ("Remote-Groups", "wlasciciele")], 403),
-    # Konto administracyjne Authelii nie wchodzi do Tradera (decyzja 2026-10-11).
-    ([("Remote-User", "admin"), ("Remote-Groups", "admins")], 403),
-    ([("Remote-User", "marcin"), ("Remote-Groups", "wlasciciel"), ("Remote-Groups", "x")], 400),
+    ([("Remote-User", "uzytkownik1"), ("Remote-User", "intruz"), ("Remote-Groups", "grupa-testowa")], 400),
+    ([("Remote-User", "Uzytkownik1"), ("Remote-Groups", "grupa-testowa")], 400),
+    ([("Remote-User", "a b"), ("Remote-Groups", "grupa-testowa")], 400),
+    ([("Remote-User", ""), ("Remote-Groups", "grupa-testowa")], 400),
+    ([("Remote-User", "uzytkownik1,root"), ("Remote-Groups", "grupa-testowa")], 400),
+    ([("Remote-User", "uzytkownik1")], 403),
+    ([("Remote-User", "uzytkownik1"), ("Remote-Groups", "inna-grupa")], 403),
+    ([("Remote-User", "uzytkownik1"), ("Remote-Groups", "grupa-testowa2")], 403),
+    # Inne konto Authelii (np. administracyjne) z inna grupa - nie wchodzi.
+    ([("Remote-User", "uzytkownik2"), ("Remote-Groups", "grupa-administracyjna")], 403),
+    ([("Remote-User", "uzytkownik1"), ("Remote-Groups", "grupa-testowa"), ("Remote-Groups", "x")], 400),
 ])
 def test_odmowy_naglowka(monkeypatch, pary, kod):
     monkeypatch.setenv("SSO_NAGLOWKI", "1")
@@ -83,12 +93,22 @@ def test_odmowy_naglowka(monkeypatch, pary, kod):
     assert e.value.status_code == kod
 
 
+def test_bez_grupy_w_sekrecie_odmowa_dla_kazdego(monkeypatch):
+    """Brak klucza `SSO_GRUPA` to blokada SSO, nie wpuszczenie kazdego."""
+    monkeypatch.setenv("SSO_NAGLOWKI", "1")
+    monkeypatch.delenv("SSO_GRUPA")
+    with pytest.raises(HTTPException) as e:
+        sso.login_z_naglowka(_zadanie(("Remote-User", "uzytkownik1"),
+                                      ("Remote-Groups", GRUPA)))
+    assert e.value.status_code == 403 and "SSO_GRUPA" in e.value.detail
+
+
 def test_nie_czyta_wariantow_naglowka(monkeypatch):
     """Kontrakt, pkt 2: `Remote_User` i `X-Remote-User` nie sa tozsamoscia."""
     monkeypatch.setenv("SSO_NAGLOWKI", "1")
     for nazwa in ("Remote_User", "X-Remote-User"):
         assert sso.login_z_naglowka(
-            _zadanie((nazwa, "marcin"), ("Remote-Groups", "wlasciciel"))) is None
+            _zadanie((nazwa, "uzytkownik1"), ("Remote-Groups", "grupa-testowa"))) is None
 
 
 # ------------------------------------------------------------ chart
@@ -102,7 +122,7 @@ def _render(*ustaw: str) -> dict:
         if d and d["kind"] == "Deployment" and d["metadata"]["name"].endswith("api"):
             kontener = next(c for c in d["spec"]["template"]["spec"]["containers"]
                             if c["name"] == "api")
-            return {e["name"]: e.get("value") for e in kontener["env"]}
+            return {e["name"]: e.get("value", e.get("valueFrom")) for e in kontener["env"]}
     raise AssertionError("brak Deploymentu api w renderze")
 
 
@@ -114,7 +134,9 @@ def test_chart_flaga_aplikacji_tylko_razem_z_middlewareami():
     assert not [k for k in bez if k.startswith("SSO_")]
     z = _render("sso.enabled=true")
     assert z["SSO_NAGLOWKI"] == "1"
-    assert z["SSO_GRUPA"] == "wlasciciel"
+    # Grupa z Sekretu, nie z values - repo jest publiczne.
+    assert z["SSO_GRUPA"]["secretKeyRef"]["key"] == "SSO_GRUPA"
+    assert z["SSO_GRUPA"]["secretKeyRef"]["optional"] is True
     assert z["SSO_WYLOGUJ_URL"] == WYLOGUJ
 
 
@@ -140,7 +162,6 @@ def konta(monkeypatch):
     monkeypatch.setenv("DATABASE_URL", DB)
     monkeypatch.setenv("SECRETS_KEY", base64.b64encode(os.urandom(32)).decode())
     monkeypatch.setenv("SSO_WYLOGUJ_URL", WYLOGUJ)
-    monkeypatch.delenv("SSO_GRUPA", raising=False)
     utworzone: list[int] = []
 
     def zaloz(*, totp: bool = False, aktywne: bool = True, zablokowane: bool = False) -> dict:
@@ -175,9 +196,9 @@ def _klient():
     return TestClient(app, base_url="https://testserver")
 
 
-def _authelia(login: str, grupy: str = "wlasciciel") -> dict:
+def _authelia(login: str, grupy: str = "grupa-testowa") -> dict:
     return {"Remote-User": login, "Remote-Groups": grupy,
-            "Remote-Email": "contact@renacode.com", "X-Forwarded-For": ADRES}
+            "Remote-Email": "uzytkownik1@example.org", "X-Forwarded-For": ADRES}
 
 
 def _sesje(uid: int) -> list[dict]:
@@ -251,13 +272,13 @@ def test_nieznany_login_403_z_komunikatem_i_bez_konta(konta, monkeypatch):
 
 
 @bazodanowy
-@pytest.mark.parametrize("grupy", ["", "rodzina", "rodzina,goscie", "admins"])
+@pytest.mark.parametrize("grupy", ["", "inna-grupa", "inna-grupa,goscie", "grupa-administracyjna"])
 def test_bez_grupy_403(konta, monkeypatch, grupy):
     monkeypatch.setenv("SSO_NAGLOWKI", "1")
     wl = konta()
     with _klient() as k:
         r = k.get("/api/auth/me", headers=_authelia(wl["login"], grupy))
-    assert r.status_code == 403 and "wlasciciel" in r.json()["detail"]
+    assert r.status_code == 403 and "grupa-testowa" in r.json()["detail"]
     assert _sesje(wl["id"]) == []
 
 
@@ -268,7 +289,7 @@ def test_podwojny_remote_user_400(konta, monkeypatch):
     with _klient() as k:
         r = k.get("/api/auth/me", headers=[("Remote-User", wl["login"]),
                                            ("Remote-User", "intruz"),
-                                           ("Remote-Groups", "wlasciciel")])
+                                           ("Remote-Groups", "grupa-testowa")])
     assert r.status_code == 400
     assert _sesje(wl["id"]) == []
 

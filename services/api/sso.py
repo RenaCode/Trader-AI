@@ -17,10 +17,9 @@ CZEGO TU NIE MA, CELOWO:
   - wariantow `Remote_User` / `X-Remote-User` - czytamy jeden, dokladny naglowek;
   - rol z `Remote-Groups`: o wejsciu na host decyduje Authelia, o roli
     w aplikacji (`owner`/`viewer`) baza. Grupa jest tu tylko druga, niezalezna
-    bramka (`SSO_GRUPA`, domyslnie `wlasciciel`) na wypadek reguly Authelii
-    poluzowanej dla calej domeny. Decyzja wlasciciela 2026-10-11: do Tradera
-    wchodzi WYLACZNIE konto codzienne z grupy `wlasciciel`; konto
-    administracyjne Authelii (`admin`, grupa `admins`) i rodzina - nie;
+    bramka (`SSO_GRUPA`) na wypadek reguly Authelii poluzowanej dla calej
+    domeny: do Tradera wchodzi wylacznie jedna grupa, a inne konta Authelii
+    (administracyjne, rodzina) - nie;
   - zakladania kont: brak konta = 403, nie nowe puste konto (kontrakt, pkt 3).
 """
 from __future__ import annotations
@@ -44,8 +43,16 @@ def wlaczone() -> bool:
     return os.environ.get("SSO_NAGLOWKI") == "1"
 
 
-def wymagana_grupa() -> str:
-    return os.environ.get("SSO_GRUPA", "wlasciciel")
+def wymagana_grupa() -> str | None:
+    """Nazwa grupy z Sekretu aplikacji (chart: klucz `SSO_GRUPA`).
+
+    BEZ WARTOSCI DOMYSLNEJ W KODZIE. Repozytorium jest publiczne, a nazwy kont
+    i grup Authelii sa konfiguracja wlasciciela, nie kodu. Brak klucza przy
+    wlaczonej fladze = odmowa dla kazdego (`login_z_naglowka`), nie
+    wpuszczenie kazdego - droga awaryjna (haslo aplikacji bez naglowka)
+    dziala dalej.
+    """
+    return os.environ.get("SSO_GRUPA") or None
 
 
 def adres_wylogowania() -> str | None:
@@ -79,9 +86,15 @@ def login_z_naglowka(request: Request) -> str | None:
     if not _LOGIN.fullmatch(login):
         raise HTTPException(status_code=400, detail="Niepoprawny naglowek Remote-User")
     grupy = _jedna_wartosc(request, NAGLOWEK_GRUP) or ""
-    if wymagana_grupa() not in {g.strip() for g in grupy.split(",")}:
+    grupa = wymagana_grupa()
+    if grupa is None:
         raise HTTPException(
             status_code=403,
-            detail=f"Użytkownik „{login}” nie należy do grupy „{wymagana_grupa()}” "
+            detail="SSO jest włączone, ale grupa Authelii (klucz SSO_GRUPA w Sekrecie "
+                   "aplikacji) nie jest ustawiona — logowanie przez SSO zablokowane.")
+    if grupa not in {g.strip() for g in grupy.split(",")}:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Użytkownik „{login}” nie należy do grupy „{grupa}” "
                    "w Authelii — Trader jest tylko dla niej.")
     return login
