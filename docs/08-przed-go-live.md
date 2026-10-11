@@ -1,6 +1,8 @@
 # Trader-AI przed go-live
 
-Stan na 2026-09-24. Dokument zywy — odpowiednik strony
+Stan na 2026-09-24, aktualizacja 2026-10-11 (audyt strategii z 10.10 przyjety:
+nowa postac Bramy 0, kryterium demo D-2, checklista warunkow live, zapytania SQL
+na koncu). Dokument zywy — odpowiednik strony
 https://claude.ai/code/artifact/2e0282c6-4ad2-42cf-b864-3ead3e76901a
 
 Horyzont: rok. Decyzja wlasciciela z 2026-09-24: "lepiej zeby bylo dobrze niz szybko".
@@ -87,15 +89,56 @@ z `--model-status candidate --wymagaj-modelu`: handluje najnowsza wersja
 MA PRAWA na live: petla odmawia startu z ta flaga poza `--mode demo`, a funkcja
 ladujaca model odmawia niezaleznie od parsera. Szczegoly: docs/hipotezy.md, D-1.
 
-DODATKOWY WARUNEK WEJSCIA NA LIVE (nie zastepuje zadnej bramki ponizej):
-- [ ] model gral na demo >= 12 tygodni (ta sama struktura `params`),
-- [ ] test znakow: >= 8 z 12 tygodni dodatnich po kosztach z gieldy,
-- [ ] realizacja wobec symulacji tych samych decyzji w granicy doplaty karty
-      (`Karta.doplata_poza_symulacja`) na runde.
+DODATKOWY WARUNEK WEJSCIA NA LIVE (nie zastepuje zadnej bramki ponizej).
+Od 2026-10-11 **D-2** (docs/hipotezy.md) zamiast D-1 - test 8/12 mial blad
+I rodzaju 0,194, czyli przepuszczal szum raz na piec prob:
+- [ ] model gral na demo >= 16 tygodni (ta sama struktura `params`),
+- [ ] test znakow jednostronny p <= 0,05: >= 12 z 16 tygodni dodatnich po
+      prowizjach z gieldy (p = 0,038; 11/16 to p = 0,105 - NIE przechodzi),
+- [ ] skumulowany zwrot po prowizjach z gieldy > 0 ORAZ >= 0,9 x symulacja
+      tych samych decyzji,
+- [ ] >= 150 rozstrzygnietych wejsc w serii,
+- [x] tygodnie 2026-10-07 .. 2026-10-11 (zero wejsc, para v171 liczona przy
+      prowizji 0,20%) jawnie POZA seria.
 
-Miara tygodnia i porownanie z symulacja: do zbudowania przed pierwszym werdyktem.
+Miara tygodnia i porownanie z symulacja: do zbudowania przed pierwszym werdyktem;
+do tego czasu tygodnie liczy wlasciciel zapytaniem nr 3 na koncu dokumentu.
 
 ## Brama 0 — czy jest po co isc
+
+### Nowa postac (2026-10-11): twardy warunek dalszej pracy nad strategia
+
+**Runda = 2 x maker + spread wlasnej ksiegi z 30 dni + koszt niewypelnienia
+z demo <= 12 pb**, stawka maker z `/v5/account/fee-rate` KONTA DOCELOWEGO
+(nie demo). Dopoki ten warunek nie jest spelniony, nie ma pracy nad strategia:
+zadnej nowej hipotezy strategii (docs/hipotezy.md, Z-1), zadnego strojenia
+progow, horyzontu ani uniwersum. Uzasadnienie progu: przy IC 0,03-0,04
+i odchyleniu zwrotu 12 h 3,2% przewaga brutto to ok. 10-13 pb na runde (docs/03),
+wiec runda drozsza zjada ja w calosci, niezaleznie od modelu.
+
+Gdzie jest liczona: `services/engine/koszty.py`, `brama_0` (czysta funkcja,
+test `tests/test_brama_0.py`). Kazdy przebieg trenera crypto z limitem wypisuje
+w logu sekcje `BRAMA 0` ze stawka z cennika i spreadem z karty; koszt
+niewypelnienia z DEMO zostaje tam NIEZMIERZONY (trener ma tylko symulacje),
+a `max(0, x)` pilnuje, zeby brame otworzyl koszt, a nie spadajacy rynek.
+
+**STAN 2026-10-11: ZAMKNIETA. bybit.eu tego warunku nie spelnia i spelnic nie
+moze**: sam maker 0,25% to 50 pb na runde, ponad czterokrotnosc progu, zanim
+doliczy sie spread (7,0 pb z karty 11.10, czesciowo obca ksiega) i niewypelnienie
+(ok. 30-40 pb). Jedyna droga przez te brame to inny cennik: inna gielda dostepna
+z UE, perpetuale long-only z makerem rzedu 0,02% albo spot z rabatem maker -
+decyzja wlasciciela, nie zadanie inzynierskie. Przy zmianie gieldy zegar demo
+(D-2) i walk-forward startuja od nowa.
+
+- [ ] stawka maker odczytana z konta DOCELOWEGO (nie api-demo)
+- [ ] spread z 30 dni `book_snapshot` wlasnej ksiegi (zapytanie nr 5)
+- [ ] koszt niewypelnienia z demo, n >= 100 rozstrzygnietych wejsc
+      (czujka `trader-zywotnosc`, sekcja selekcji negatywnej)
+- [ ] suma <= 12 pb
+
+Ponizej historia tej bramy sprzed 2026-10-11 - liczby przy prowizji 0,20%.
+
+### Historia (do 2026-10-11)
 
 Cala zmierzona przewaga to **13,76 punktu bazowego na runde**. Sama prowizja
 spotu to 20 pb — wiecej niz caly zapas. Ta brama rozstrzyga wszystkie
@@ -578,3 +621,84 @@ blad z tej listy.**
 Horyzont roczny jest tu zaleta, nie ograniczeniem: wiekszosc tych pozycji to
 pomiary, ktore musza sie nazbierac — poslizg wymaga nowych wypelnien, a tych
 nie da sie przyspieszyc.
+
+## Warunki live — checklista (audyt strategii 2026-10-10, zapisane 2026-10-11)
+
+WSZYSTKIE NARAZ, zapisane PRZED pomiarem. Zadna z ponizszych pozycji nie
+zastepuje bramek -1..5 wyzej; to jest lista, przy ktorej w ogole wolno zaczac
+rozmowe o live. Realistycznie pierwsza pozycja nie jest spelnialna na bybit.eu,
+a zmiana gieldy zeruje pozycje 2 i 3 (nowy cennik, nowa ksiega, nowe 16 tygodni).
+
+| # | warunek | gdzie jest mierzony | stan 2026-10-11 |
+| --- | --- | --- | --- |
+| 1 | Koszt rundy na koncie DOCELOWYM <= 12 pb (2 x maker + spread wlasnej ksiegi + niewypelnienie z demo) | `koszty.brama_0`, sekcja `BRAMA 0` w logu trenera, stawka: `mozliwosci.py --stawki` (`trader-zywotnosc`), spread: zapytanie nr 5, niewypelnienie: czujka selekcji negatywnej w `trader-zywotnosc` | **NIE** — 50 pb samej prowizji |
+| 2 | Walk-forward na TYM cenniku i modelu pesymistycznym (H-10): zwrot/runde po doplacie > 0 w 5/5 przesuniec, DSR >= 0,95 z T = swiece wejscia, N ze WSZYSTKIMI decyzjami projektowymi od tej daty | `PODSUMOWANIE_JSON` toru 4h (`przesuniecia.*.zwrot_na_runde_pb`, `.dsr`), `statystyka.przewaga_dsr`; N: `n_selekcji` to dolna granica - pelne N z zapytania nr 4 plus rejestr hipotez | **NIE** — 11.10: −56…−68 pb, DSR 0 na 5/5 |
+| 3a | Demo >= 16 tygodni tym samym `params`, >= 150 wejsc, test znakow tygodni p <= 0,05, realizacja >= 0,9 x symulacja (D-2) | docs/hipotezy.md D-2; tygodnie: zapytanie nr 3 (miara w kodzie do zbudowania) | seria jeszcze nie ruszyla |
+| 3b | \|wypelnialnosc wejsc sim − demo\| <= 10 pp na wejsciach zebranych PO wdrozeniu H-10 | linia „Wypełnialność WEJŚĆ" w logu trenera, `PODSUMOWANIE_JSON.wypelnialnosc_wejsc`; demo: `poslizg.py --strategia ensemble`, zapytanie nr 2 | H-5 PORAZKA (76-79% mieszane vs 65,6%), H-10 w toku |
+| 3c | Poslizg takera zmierzony na n >= 30 wyjsciach takerem | `poslizg.py` (`udzial_wyjsc_takerem`, poslizg wg rodzaju), czujka `trader-zywotnosc` | n = 0 |
+| 4a | Dryf cech < 1,0 przez 4 kolejne przebiegi trenera | linia „dryf cech" w logu trenera (`train.dryf_cech`), `dozor.py --co dryf` | **NIE** — 11.10: ret_long 2,54 |
+| 4b | Newsy dzialaja od >= 5 zywych okien ALBO `news_shock` usuniety ze struktury | czujka ciszy potoku newsow (`trader-zywotnosc`), `features.py` cecha `news_sent` | **NIE** — analiza stoi od 09.09 |
+| 5a | Uzgodnienie sald z rejestrem gieldy (host live je wystawia) | Brama 4, `uzgodnienie.py` | otwarte (host demo sald nie wystawia) |
+| 5b | `can_withdraw` klucza API sprawdzone (klucz bez prawa wyplaty) | `services/exchanges/bybit.py` (`can_withdraw`), `services/api/routers/credentials.py` | do sprawdzenia na kluczu live |
+| 5c | Proba pozarowa kill-switcha z ogniwami 3-5 | `proba_killswitcha.py`, CronJob `proba-cron` | otwarte |
+| 5d | Kanal alarmow poza panel (whatsapp/webhook) dla `critical` | Brama -1, `dozor.py --co kanaly` | **NIE** |
+| 6 | Oczekiwany zwrot przy limicie 15% > 4% p.a. (B0, gotowka) | linia „B0 (gotówka)" w logu trenera, `PODSUMOWANIE_JSON.b0_dodatnie` | **NIE** — 0/30 okien ponad 4% p.a. |
+
+## Zapytania SQL dla wlasciciela (tylko SELECT, uruchamia wlasciciel)
+
+Nazwy kolumn sprawdzone ze schematem w `db/migrations` (0005, 0006, 0091).
+Zapytanie z raportu audytu o `learn.wf_trade` odpada: takiej tabeli nie ma,
+transakcje OOS nie sa zapisywane. T do DSR jest w logu trenera, w linii
+„Deflowany Sharpe ... na N różnych świecach wejścia" (11.10: 507 swiec przy
+681 transakcjach).
+
+```sql
+-- 2. Egzekucja WEJSC ensemble od D-1: wypelnialnosc i opoznienie wysylki
+--    (minuty od zamkniecia swiecy 4h do wyslania zlecenia). Do H-10 / D-2.
+SELECT count(*) FILTER (WHERE o.status = 'filled')                         AS wypelnione,
+       count(*) FILTER (WHERE o.status IN ('cancelled','rejected','expired')) AS przepadle,
+       count(*) FILTER (WHERE o.status IN ('new','partial','unknown'))      AS w_toku,
+       percentile_cont(0.5) WITHIN GROUP (ORDER BY extract(epoch FROM
+           o.submitted_at - date_bin('4 hours', d.decided_at,
+                                     TIMESTAMPTZ '2000-01-01 00:00+00')) / 60)
+                                                                           AS mediana_opoznienia_min
+FROM exec.order o
+JOIN journal.decision d ON d.id = o.decision_id
+WHERE o.mode = 'demo' AND o.engine = 'crypto' AND o.side = 'buy'
+  AND d.strategia = 'ensemble' AND o.submitted_at >= '2026-10-07';
+
+-- 3. Tygodnie demo po prowizjach z gieldy (do D-2). Tygodnie przed
+--    2026-10-12 sa POZA seria; tydzien bez pozycji to remis.
+SELECT date_trunc('week', p.closed_at)            AS tydzien,
+       count(*)                                    AS pozycji,
+       sum(p.realized_pnl)                         AS brutto,
+       sum(p.fees_paid)                            AS prowizje,
+       sum(p.realized_pnl - p.fees_paid)           AS netto
+FROM exec.position p
+JOIN journal.decision d ON d.id = p.open_decision_id
+WHERE p.mode = 'demo' AND p.engine = 'crypto' AND p.closed_at >= '2026-10-12'
+  AND d.strategia = 'ensemble'
+GROUP BY 1 ORDER BY 1;
+
+-- 4. Ile ROZNYCH struktur params mial model 4h (zbior kluczy, bez wartosci)
+--    - przyblizenie liczby decyzji projektowych, ktorych N nie widzi.
+SELECT count(DISTINCT klucze) AS struktur, count(*) AS wersji
+FROM (SELECT (SELECT array_agg(k ORDER BY k) FROM jsonb_object_keys(mv.params) k) AS klucze
+        FROM learn.model_version mv
+        JOIN learn.model m ON m.id = mv.model_id
+       WHERE m.name = 'crypto_signal_weighting_4h') s;
+
+-- 5. Spread WLASNEJ ksiegi z ostatnich 30 dni (do Bramy 0): pelny spread
+--    w pb na runde, per instrument tradeable. Ksiega egzekucji od 2026-09-24.
+SELECT i.symbol, count(*) AS swiec, avg(fv.value) AS spread_pb,
+       percentile_cont(0.9) WITHIN GROUP (ORDER BY fv.value) AS p90_pb
+FROM feat.feature_value fv
+JOIN feat.feature_def fd ON fd.id = fv.feature_def_id
+JOIN ref.instrument i ON i.id = fv.instrument_id
+WHERE fd.active AND fd.params->>'role' = 'book_spread_bps' AND fd.params->>'bar' = '4h'
+  AND i.tradeable AND i.engine = 'crypto'
+  AND fv.event_time >= greatest(now() - interval '30 days', TIMESTAMPTZ '2026-09-24 00:00+00')
+GROUP BY i.symbol ORDER BY spread_pb DESC;
+```
+
+Brak zapytania nr 1 jest zamierzony (numeracja jak w raporcie audytu).
