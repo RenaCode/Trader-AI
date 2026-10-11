@@ -171,6 +171,31 @@ ingress:
     period: 1m
     burst: 20
 
+# SSO: logowanie z wymuszonym 2FA (Authelia, renacode-infra
+# k3s/platforma/authelia.yaml) PRZED wlasnym logowaniem aplikacji. Middleware
+# forwardAuth na OBU routerach HTTPS (`/` i `/api/auth`) - caly host, bez
+# wyjatkow: sondy kubeleta ida wprost do podow, a z zewnatrz nic maszynowego
+# tego hosta nie woła (sprawdzone 2026-10-11: brak webhookow, CI testuje
+# kontener lokalnie, czujka czyta API klastra). Router HTTP (`trader-http`)
+# tylko przekierowuje na HTTPS, nie dochodzi do aplikacji.
+#
+# WYLACZONE DOMYSLNIE i to celowe: wlacza sie `valuesObject` w argocd-apps.yaml
+# (renacode-infra) dopiero po rejestracji 2FA wlasciciela w Authelii.
+# Wlaczone bez dzialajacej Authelii = 500 na calym hoscie (fail-closed); bez
+# middleware'u w klastrze = 404. Wlasne logowanie (haslo + TOTP) zostaje.
+# Wylacznik awaryjny: `sso.enabled: false` w argocd-apps.yaml (renacode-infra,
+# docs/zadania-wlasciciela.md, sekcja 6).
+sso:
+  enabled: false
+  # Middleware'y z renacode-infra, W TEJ KOLEJNOSCI: najpierw usuniecie
+  # naglowkow tozsamosci podanych przez klienta (`Remote-User` itd.), potem
+  # forwardAuth, ktory wstawia je od Authelii. Kontrakt tozsamosci (jak
+  # aplikacja moze rozpoznac uzytkownika po `Remote-User` bez drugiego
+  # logowania): renacode-infra docs/sso-tozsamosc.md.
+  middlewares:
+    - default-authelia-naglowki@kubernetescrd
+    - default-authelia-sso@kubernetescrd
+
 # NETWORKPOLICY - KTO MOZE OTWORZYC POLACZENIE DO PODOW TEGO CHARTU
 # (templates/networkpolicy.yaml, 2026-10-03).
 #
