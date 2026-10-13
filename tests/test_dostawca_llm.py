@@ -266,6 +266,46 @@ def test_blad_klienta_NIE_jest_ponawiany(monkeypatch):
     assert licznik["n"] == 1, f"401 ma isc bez ponawiania, prob bylo {licznik['n']}"
 
 
+def _gemini_bez_odpowiedzi(wyjatek=httpx.ReadTimeout):
+    licznik = {"n": 0}
+
+    def handler(req):
+        licznik["n"] += 1
+        raise wyjatek("brak odpowiedzi", request=req)
+
+    d = DostawcaGemini("klucz-testowy",
+                       http=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    d.ODSTEP_S = 0.0
+    return d, licznik
+
+
+@pytest.mark.parametrize("wyjatek", [httpx.ReadTimeout, httpx.ConnectError])
+def test_BRAK_ODPOWIEDZI_jest_Przeciazony_i_NIE_jest_ponawiany(monkeypatch, wyjatek):
+    """Produkcja 2026-10-13: `ReadTimeout` wylatywal z `_poslij` w surowej
+    postaci, wiec mieszanka nie wlaczala ani zejscia, ani bezpiecznika. Kazdy
+    zalegly artykul czekal 90 s klienta, cykl przekraczal 600 s i przepadal."""
+    bez_czekania(monkeypatch)
+    d, licznik = _gemini_bez_odpowiedzi(wyjatek)
+    with pytest.raises(Przeciazony, match="brak odpowiedzi"):
+        uruchom(d)
+    assert licznik["n"] == 1, "timeout kosztowal juz pelny limit klienta - bez ponowien"
+
+
+def test_triaz_po_TIMEOUCIE_Gemini_idzie_do_zapasowego_i_zwiera(monkeypatch):
+    """Kanarek na ten sam przypadek od strony mieszanki: po PROG_ZWARCIA
+    timeoutach z rzedu Gemini przestaje byc pytany, a triaz robi zapasowy."""
+    from services.ingest.llm import DostawcaMieszany
+    bez_czekania(monkeypatch)
+    g, licznik = _gemini_bez_odpowiedzi()
+    zapas = _Fałszywy("drogi", "haiku", "opus", (5.0, 25.0))
+    m = DostawcaMieszany(triaz=g, analiza=zapas)
+    for _ in range(5):
+        asyncio.run(m.zapytaj(model=m.model_triazu, system="", user="",
+                              schema={}, max_tokens=1))
+    assert zapas.pytania == ["haiku"] * 5
+    assert licznik["n"] == m.PROG_ZWARCIA
+
+
 def test_ZLY_SCHEMAT_zostaje_glosny_a_nie_udaje_awarii_dostawcy(monkeypatch):
     """Druga granica do poprzedniego testu. 400 dostajemy ZAROWNO za martwy
     klucz, JAK I za nasz wlasny blad w schemacie (`additionalProperties`).
