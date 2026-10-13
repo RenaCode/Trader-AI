@@ -914,9 +914,26 @@ class DostawcaGemini(Dostawca):
             # jeden wiersz. Liczymy PRZED wyslaniem, bo zadanie zakonczone
             # timeoutem tez zjada prog, a `post` wtedy rzuca.
             self.zanotuj_zadanie()
-            r = await self._http.post(f"{self.BAZA}/{model}:generateContent",
-                                      json=body,
-                                      headers={"x-goog-api-key": self._klucz})
+            # BRAK ODPOWIEDZI TO `Przeciazony`, jak u Anthropica - i BEZ PONAWIANIA.
+            #
+            # Do 2026-10-13 `httpx.ReadTimeout` wylatywal stad w surowej postaci.
+            # Mieszanka zamienia na zejscie awaryjne i bezpiecznik WYLACZNIE
+            # `Przeciazony`, wiec timeout nie wlaczal ani jednego, ani drugiego:
+            # kazdy zalegly artykul czekal pelne 90 s klienta, az caly cykl
+            # przekroczyl `--limit-cyklu` (600 s) i przepadl w calosci. Na
+            # produkcji: cykl 12:03 UTC 237 s z dwoma ReadTimeout, cykl 12:12
+            # uciety TimeoutError, alarm engine.down #198.
+            #
+            # Ponawiac nie ma sensu: jedna proba juz kosztowala 90 s, piec
+            # to 7,5 minuty na JEDEN artykul. Dwa takie z rzedu zwieraja
+            # dostawce (`_zanotuj_odmowe`) i triaz idzie do zapasowego.
+            try:
+                r = await self._http.post(f"{self.BAZA}/{model}:generateContent",
+                                          json=body,
+                                          headers={"x-goog-api-key": self._klucz})
+            except httpx.TransportError as e:
+                raise Przeciazony(f"{self.nazwa}: brak odpowiedzi na zapytanie "
+                                  f"o model {model} ({type(e).__name__})") from e
             if r.status_code not in self.PONAWIALNE:
                 self._odmowa_trwala(r, model)
                 r.raise_for_status()
