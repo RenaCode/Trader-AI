@@ -15,6 +15,9 @@ const PATHS = {
   bell: <><path d="M6 16V11a6 6 0 1 1 12 0v5l1.5 2h-15Z" /><path d="M10 20.5a2.2 2.2 0 0 0 4 0" /></>,
   logout: <><path d="M14 4h4a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-4" /><path d="M10 16l-4-4 4-4" /><path d="M6 12h10" /></>,
   equity: <><path d="M4 18 9 12l3.5 3L20 7" /><path d="M15 7h5v5" /></>,
+  /* Siatka 3x3 przelacznika aplikacji - kropki wypelnione, nie obrys. */
+  apps: <>{[5, 12, 19].flatMap((y) => [5, 12, 19].map((x) => (
+    <circle key={`${x}-${y}`} cx={x} cy={y} r="1.9" fill="currentColor" stroke="none" />)))}</>,
 };
 
 export default function Icon({ name, size = 18 }) {
