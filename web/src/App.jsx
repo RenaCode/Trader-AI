@@ -8,6 +8,7 @@ import Risk from './components/Risk';
 import Settings from './components/Settings';
 import Profile from './components/Profile';
 import Bell from './components/Bell';
+import AppSwitcher from './components/AppSwitcher';
 import Icon from './components/Icon';
 import { ApiError, get, post, useApi, setSessionExpiredHandler, setSsoSession } from './utils/api';
 import { fmtMoney, fmtPct } from './utils/format';
@@ -211,6 +212,7 @@ export default function App() {
 
       <div className="main">
         <header className="topbar">
+          <AppSwitcher />
           <div className="brand brand-compact">
             <div className="logo-icon" aria-hidden="true">◈</div>
             <div className="logo-text">Trader AI</div>

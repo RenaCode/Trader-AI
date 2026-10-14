@@ -369,10 +369,68 @@ t = await page.locator('body').innerText();
 jest(t, 'Brak konta w Traderze dla użytkownika „uzytkownik2”', 'SSO: odmowa konta jest na ekranie');
 jest(t, 'Zaloguj się', 'SSO: formularz awaryjny (haslo aplikacji) zostaje');
 
+// ========================== 6: przelacznik aplikacji RenaCode (siatka w pasku)
+console.log('\n--- SCENARIUSZ 6: przelacznik aplikacji ---');
+TRASY = BRZEGI;
+await page.goto(`http://localhost:${PORT}/`, { waitUntil: 'networkidle' });
+await page.waitForSelector('.nav-tab', { timeout: 20000 });
+const siatka = page.getByRole('button', { name: 'Przełącz aplikację' });
+ok(await siatka.getAttribute('aria-haspopup') === 'menu', 'Aplikacje: przycisk ma aria-haspopup');
+ok(await siatka.getAttribute('aria-expanded') === 'false', 'Aplikacje: zamkniety na starcie');
+ok(await siatka.evaluate((b) => b.closest('.topbar') !== null), 'Aplikacje: przycisk jest w pasku gornym');
+await siatka.click();
+ok(await siatka.getAttribute('aria-expanded') === 'true', 'Aplikacje: klik otwiera (aria-expanded)');
+const menu = page.getByRole('menu', { name: 'Aplikacje RenaCode' });
+ok(await menu.isVisible(), 'Aplikacje: panel "Aplikacje RenaCode" widoczny');
+const linki = await menu.locator('a[role="menuitem"]')
+  .evaluateAll((xs) => xs.map((a) => `${a.getAttribute('href')}|${a.getAttribute('target') ?? ''}`));
+ok(linki.join(',') === 'https://kidwatch.renacode.com/|,https://dietetyk.renacode.com/|',
+   'Aplikacje: Kidwatch i Dietetyk jako linki w tej samej karcie', linki.join(','));
+const biez = menu.locator('[aria-current="page"]');
+ok(await biez.count() === 1 && (await biez.innerText()).includes('Trader')
+   && await biez.evaluate((x) => x.tagName !== 'A'),
+   'Aplikacje: Trader oznaczony jako biezacy i nie jest linkiem');
+t = await menu.innerText();
+jest(t, 'Czas ekranowy dzieci', 'Aplikacje: opis Kidwatcha');
+jest(t, 'Dieta i zdrowie', 'Aplikacje: opis Dietetyka');
+jest(t, 'Handel i ryzyko', 'Aplikacje: opis Tradera');
+ok(await page.evaluate(() => document.activeElement?.getAttribute('role') === 'menuitem'),
+   'Aplikacje: po otwarciu fokus na pierwszej pozycji');
+await page.keyboard.press('ArrowDown');
+ok(await page.evaluate(() => document.activeElement?.getAttribute('href')) === 'https://kidwatch.renacode.com/',
+   'Aplikacje: strzalka w dol przesuwa fokus');
+await page.keyboard.press('Escape');
+ok(!(await menu.isVisible()) && await siatka.getAttribute('aria-expanded') === 'false',
+   'Aplikacje: Escape zamyka');
+ok(await siatka.evaluate((b) => b === document.activeElement), 'Aplikacje: Escape oddaje fokus przyciskowi');
+await page.keyboard.press('Enter');
+ok(await menu.isVisible(), 'Aplikacje: Enter na przycisku otwiera z klawiatury');
+await page.mouse.click(1200, 900);
+ok(!(await menu.isVisible()), 'Aplikacje: klik poza panelem zamyka');
+const zewn = await page.evaluate(() => Array.from(document.querySelectorAll('.apps-wrap img, .apps-wrap use'))
+  .length);
+ok(zewn === 0, 'Aplikacje: tylko inline SVG, bez obrazkow z zewnatrz');
+
+// Telefon: panel miesci sie w szerokosci ekranu.
+await page.setViewportSize({ width: 375, height: 800 });
+await siatka.click();
+const r = await page.locator('.apps-panel').boundingBox();
+ok(r && r.x >= 0 && r.x + r.width <= 375, 'Aplikacje: panel miesci sie na 375 px',
+   r ? `${Math.round(r.x)}..${Math.round(r.x + r.width)}` : 'brak panelu');
+await page.keyboard.press('Escape');
+for (const szer of [375, 360]) {
+  await page.setViewportSize({ width: szer, height: 800 });
+  const g = await siatka.boundingBox();
+  const w = await page.locator('.btn-logout').boundingBox();
+  ok(g && w && Math.abs(g.y - w.y) < 8, `Aplikacje: na ${szer} px siatka i konto w jednym wierszu`,
+     g && w ? `siatka y=${Math.round(g.y)}, wyloguj y=${Math.round(w.y)}` : 'brak przycisku');
+}
+await page.setViewportSize({ width: 1440, height: 1200 });
+
 /* ------------------------------------------------------------------------
  * MIEJSCE NA KOLEJNE SCENARIUSZE
  *
- * 6: /learning/walk-forward - okna posortowane po `test_from` i pochodzace
+ * 7: /learning/walk-forward - okna posortowane po `test_from` i pochodzace
  *    z JEDNEGO przebiegu treningowego (czeka na poprawke po stronie API).
  *    Podstawic odpowiedz w `stend_ui_dane.mjs`, wejsc na "Stopień nauki".
  * ------------------------------------------------------------------------ */
