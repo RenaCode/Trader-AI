@@ -384,8 +384,9 @@ const menu = page.getByRole('menu', { name: 'Aplikacje RenaCode' });
 ok(await menu.isVisible(), 'Aplikacje: panel "Aplikacje RenaCode" widoczny');
 const linki = await menu.locator('a[role="menuitem"]')
   .evaluateAll((xs) => xs.map((a) => `${a.getAttribute('href')}|${a.getAttribute('target') ?? ''}`));
-ok(linki.join(',') === 'https://kidwatch.renacode.com/|,https://dietetyk.renacode.com/|',
-   'Aplikacje: Kidwatch i Dietetyk jako linki w tej samej karcie', linki.join(','));
+ok(linki.join(',') === 'https://kidwatch.renacode.com/|,https://dietetyk.renacode.com/|,'
+   + 'https://argocd.renacode.com/|',
+   'Aplikacje: wlasciciel - Kidwatch, Dietetyk i Argo CD jako linki w tej samej karcie', linki.join(','));
 const biez = menu.locator('[aria-current="page"]');
 ok(await biez.count() === 1 && (await biez.innerText()).includes('Trader')
    && await biez.evaluate((x) => x.tagName !== 'A'),
@@ -394,6 +395,7 @@ t = await menu.innerText();
 jest(t, 'Czas ekranowy dzieci', 'Aplikacje: opis Kidwatcha');
 jest(t, 'Dieta i zdrowie', 'Aplikacje: opis Dietetyka');
 jest(t, 'Handel i ryzyko', 'Aplikacje: opis Tradera');
+jest(t, 'Wdrożenia i klaster', 'Aplikacje: wlasciciel widzi opis Argo CD');
 ok(await page.evaluate(() => document.activeElement?.getAttribute('role') === 'menuitem'),
    'Aplikacje: po otwarciu fokus na pierwszej pozycji');
 await page.keyboard.press('ArrowDown');
@@ -410,6 +412,22 @@ ok(!(await menu.isVisible()), 'Aplikacje: klik poza panelem zamyka');
 const zewn = await page.evaluate(() => Array.from(document.querySelectorAll('.apps-wrap img, .apps-wrap use'))
   .length);
 ok(zewn === 0, 'Aplikacje: tylko inline SVG, bez obrazkow z zewnatrz');
+
+// Podglad (rola `viewer`, takze obcieta przez grupe podgladu SSO): bez Argo CD.
+TRASY = { ...BRZEGI,
+  '/api/auth/me': { login: 'uzytkownik2', role: 'viewer', totp_enabled: true, sso: true } };
+await page.reload({ waitUntil: 'networkidle' });
+await page.waitForSelector('.nav-tab', { timeout: 20000 });
+await siatka.click();
+const linkiPodgladu = await menu.locator('a[role="menuitem"]')
+  .evaluateAll((xs) => xs.map((a) => a.getAttribute('href')));
+ok(linkiPodgladu.join(',') === 'https://kidwatch.renacode.com/,https://dietetyk.renacode.com/',
+   'Aplikacje: viewer - bez Argo CD', linkiPodgladu.join(','));
+ok(!(await menu.innerText()).includes('Argo CD'), 'Aplikacje: viewer nie widzi nazwy Argo CD');
+await page.keyboard.press('Escape');
+TRASY = BRZEGI;
+await page.reload({ waitUntil: 'networkidle' });
+await page.waitForSelector('.nav-tab', { timeout: 20000 });
 
 // Telefon: panel miesci sie w szerokosci ekranu.
 await page.setViewportSize({ width: 375, height: 800 });

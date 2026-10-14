@@ -212,7 +212,7 @@ export default function App() {
 
       <div className="main">
         <header className="topbar">
-          <AppSwitcher />
+          <AppSwitcher rola={user?.role} />
           <div className="brand brand-compact">
             <div className="logo-icon" aria-hidden="true">◈</div>
             <div className="logo-text">Trader AI</div>

@@ -3,12 +3,13 @@
    z aria-haspopup/aria-expanded, po otwarciu fokus na pierwszej pozycji,
    strzalki/Home/End przesuwaja fokus, Escape zamyka i oddaje fokus
    przyciskowi, klikniecie poza panelem albo Tab poza niego - zamyka.
-   Biezaca aplikacja nie jest linkiem (aria-current, aria-disabled). */
+   Biezaca aplikacja nie jest linkiem (aria-current, aria-disabled).
+   `rola` z /api/auth/me decyduje o pozycjach tylko dla wlasciciela. */
 import React, { useCallback, useEffect, useId, useRef, useState } from 'react';
-import { APLIKACJE, BIEZACA } from '../aplikacje';
+import { aplikacjeDla, BIEZACA } from '../aplikacje';
 import Icon from './Icon';
 
-export default function AppSwitcher() {
+export default function AppSwitcher({ rola }) {
   const [open, setOpen] = useState(false);
   const ref = useRef(null);
   const btnRef = useRef(null);
@@ -69,7 +70,7 @@ export default function AppSwitcher() {
           <div className="apps-title" id={tytulId}>Aplikacje RenaCode</div>
           <div className="apps-list" role="menu" id={menuId} aria-labelledby={tytulId} ref={menuRef}
                onKeyDown={onMenuKey}>
-            {APLIKACJE.map((a) => {
+            {aplikacjeDla(rola).map((a) => {
               const biezaca = a.klucz === BIEZACA;
               const tresc = (
                 <>
