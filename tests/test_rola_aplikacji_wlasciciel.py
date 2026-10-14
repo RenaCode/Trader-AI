@@ -17,10 +17,10 @@ a `/auth/me` i `Profile` pokazują rolę tak, jakby niosła uprawnienia.
 
 UCZCIWE ZASTRZEŻENIE, KTÓRE TU POWTARZAMY
 
-Dziś takiego konta nie da się założyć — `scripts/create_admin.py` wpisuje na
-sztywno `'owner'`, a żaden endpoint nie tworzy użytkowników. Luka jest więc
-UTAJONA, a nie czynna. Zadziała w dniu, w którym ktoś doda drugie konto
-ręcznym SQL-em, i wtedy nic o tym nie powie: `viewer` zwolniłby kill-switcha,
+Do 14.10 takiego konta nie dało się założyć — `scripts/create_admin.py`
+wpisywał na sztywno `'owner'`. Od 14.10 `create_admin.py --rola viewer`
+zakłada je naprawdę (podgląd dla rodziny przez SSO), więc bez tego strażnika
+luka byłaby CZYNNA: `viewer` zwolniłby kill-switcha,
 podmienił klucz Anthropica, usunął klucz API giełdy i zapisał przepływ
 kapitału.
 
@@ -43,12 +43,14 @@ from services.api.auth import wymagaj_wlasciciela
 KORZEN = Path(__file__).resolve().parents[1]
 ROUTERY = KORZEN / "services/api/routers"
 
-# Routery, które zmieniają stan systemu albo jego poświadczenia. `auth`
-# i `account` NIE są na tej liście świadomie: tam każdy użytkownik obsługuje
-# WŁASNE konto — hasło, drugi składnik, własne sesje. `notifications` też nie:
-# preferencje powiadomień są per użytkownik i nie ruszają ani pieniędzy, ani
-# kluczy.
-CHRONIONE = ("risk.py", "settings.py", "credentials.py", "kapital.py")
+# Wyjątki, nie lista chronionych (przegląd Trader #27, 14.10): odkąd konto
+# `viewer` da się założyć, nowy router z zapisem ma być chroniony z urzędu,
+# a nie dopiero po dopisaniu go tutaj. `auth` i `account`: każdy użytkownik
+# obsługuje WŁASNE konto — hasło, drugi składnik, własne sesje.
+# `notifications`: preferencje i kanały są per użytkownik (`user_id` w każdym
+# zapytaniu) i nie ruszają ani pieniędzy, ani kluczy.
+WLASNE_KONTO = {"__init__.py", "auth.py", "account.py", "notifications.py"}
+CHRONIONE = tuple(sorted(p.name for p in ROUTERY.glob("*.py") if p.name not in WLASNE_KONTO))
 
 DEKORATOR = re.compile(
     r"@router\.(post|put|delete|patch)\((.*?)\)\s*\nasync def (\w+)", re.S)
@@ -126,3 +128,28 @@ def test_odczyty_zostaja_otwarte_dla_viewera():
         for m in re.finditer(r"@router\.get\((.*?)\)\s*\nasync def", tresc, re.S):
             assert "wymagaj_wlasciciela" not in m.group(1), (
                 f"{nazwa}: odczyt wymaga roli właściciela")
+
+
+# ======================================= alarmy tylko do kont, które mogą działać
+
+ODBIORCY = re.compile(r"""SELECT id FROM app\.\\?"user\\?" WHERE is_active(?! AND role = 'owner')""")
+
+
+def test_alarmy_nie_ida_do_podgladu():
+    """Konto `viewer` niczego nie zwolni ani nie poprawi, więc alarmy
+    operacyjne (dozór, kill-switch, kapitał) idą tylko do kont `owner`
+    (przegląd Trader #27). Inaczej podgląd dla rodziny dostawałby każdy
+    alarm, na który nie może zareagować."""
+    braki = []
+    for plik in (KORZEN / "services").rglob("*.py"):
+        for nr, linia in enumerate(plik.read_text(encoding="utf-8").splitlines(), 1):
+            if ODBIORCY.search(linia):
+                braki.append(f"{plik.relative_to(KORZEN)}:{nr}")
+    assert not braki, f"odbiorcy alarmów bez filtra roli: {braki}"
+
+
+def test_wzorzec_odbiorcow_cos_lapie():
+    """Kanarek dla wyrażenia wyżej: stare zapytanie musi zostać złapane."""
+    assert ODBIORCY.search("""fetch_all('SELECT id FROM app."user" WHERE is_active')""")
+    assert not ODBIORCY.search(
+        """fetch_all("SELECT id FROM app.\\"user\\" WHERE is_active AND role = 'owner'")""")

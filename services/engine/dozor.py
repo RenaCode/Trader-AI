@@ -604,7 +604,7 @@ async def sprawdz_tor_niegotowy(fetch_all, notify, sucho: bool = False, *,
     if sucho:
         print("Tryb suchy — powiadomienie nie wysyłane.")
         return 0
-    odbiorcy = await fetch_all('SELECT id FROM app."user" WHERE is_active')
+    odbiorcy = await fetch_all("SELECT id FROM app.\"user\" WHERE is_active AND role = 'owner'")
     if not odbiorcy:
         print("Brak odbiorców — powiadomienie nie ma do kogo pójść.")
         return 0
@@ -662,7 +662,7 @@ async def sprawdz_zmiane_struktury(fetch_all, notify, sucho: bool = False, *,
     if sucho:
         print("Tryb suchy — powiadomienie nie wysyłane.")
         return 1
-    odbiorcy = await fetch_all('SELECT id FROM app."user" WHERE is_active')
+    odbiorcy = await fetch_all("SELECT id FROM app.\"user\" WHERE is_active AND role = 'owner'")
     tresc = (f"{powod}.\n\nWersja została kandydatem, produkcja handluje dalej "
              f"aktywną. Promocja: wpis w docs/hipotezy.md i ręczny przebieg "
              f"`train.py --zatwierdz-promocje`.")
@@ -933,7 +933,7 @@ async def sprawdz_zywotnosc(fetch_all, notify, sucho: bool = False,
         print("Tryb suchy — powiadomienie nie wysyłane.")
         return 1
 
-    odbiorcy = await fetch_all('SELECT id FROM app."user" WHERE is_active')
+    odbiorcy = await fetch_all("SELECT id FROM app.\"user\" WHERE is_active AND role = 'owner'")
     zgloszone = trwale = 0
     for s in martwe:
         # TLUMIENIE PYTA O ETYKIETE, NIE O KOLUMNE. Dla silnika etykieta siedzi
@@ -1375,7 +1375,7 @@ async def sprawdz_cisze_pomiaru(fetch_all, notify, sucho: bool = False) -> int:
             continue
 
         if odbiorcy is None:
-            odbiorcy = await fetch_all('SELECT id FROM app."user" WHERE is_active')
+            odbiorcy = await fetch_all("SELECT id FROM app.\"user\" WHERE is_active AND role = 'owner'")
         tytul = f"Bezpiecznik przestał raportować ({w['engine']})"
         tresc = (
             f"{werdykt['powod']}.\n\n"
@@ -1451,7 +1451,7 @@ async def sprawdz_porzucona_probe(fetch_all, notify, sucho: bool = False) -> int
     if not porzucone:
         return 0
 
-    odbiorcy = await fetch_all('SELECT id FROM app."user" WHERE is_active')
+    odbiorcy = await fetch_all("SELECT id FROM app.\"user\" WHERE is_active AND role = 'owner'")
     zgloszone = trwale = 0
     for p in porzucone:
         print(f"  PORZUCONA PRÓBA POŻAROWA {p['engine']}/{p['mode']}: limit "
@@ -1600,7 +1600,7 @@ async def sprawdz_ryzyko(fetch_all, notify, sucho: bool = False) -> int:
         print("kill-switch: brak aktywnych zdarzeń")
         return zgloszone
 
-    odbiorcy = await fetch_all('SELECT id FROM app."user" WHERE is_active')
+    odbiorcy = await fetch_all("SELECT id FROM app.\"user\" WHERE is_active AND role = 'owner'")
     for z in zdarzenia:
         wiek_min = float(z["wiek_min"])
         # SKUTEK PROBY POZAROWEJ - POWIADAMIAMY, ALE NIE ALARMUJEMY.
@@ -2110,7 +2110,7 @@ async def sprawdz_swiezosc(fetch_all, notify, sucho: bool = False,
     # `sprawdz_instrumenty` przy wycofaniu instrumentu.
     ostatni_wpis = {w["co"]: w.get("ostatni") for w in wiersze}
     zgloszone = trwale = 0
-    odbiorcy = await fetch_all('SELECT id FROM app."user" WHERE is_active')
+    odbiorcy = await fetch_all("SELECT id FROM app.\"user\" WHERE is_active AND role = 'owner'")
     for zrodlo, tytul, tresc in powody:
         print(f"  {tytul}")
         if sucho:
@@ -2426,7 +2426,7 @@ async def sprawdz_egzekucje(fetch_all, notify, sucho: bool = False,
         "engine.down": (zawieszone[0]["ostatni"] if zawieszone else None),
         "order.rejected": (znaczniki[0]["ostatnie_zlecenie"] if znaczniki else None),
     }
-    odbiorcy = await fetch_all('SELECT id FROM app."user" WHERE is_active')
+    odbiorcy = await fetch_all("SELECT id FROM app.\"user\" WHERE is_active AND role = 'owner'")
     zgloszone = trwale = 0
     for kod, tytul, tresc in powody:
         print(f"  {tytul}")
@@ -2525,7 +2525,7 @@ async def sprawdz_kopie(fetch_all, notify, sucho: bool = False) -> int:
         "SELECT plik, bajtow, finished_at,"
         " round(extract(epoch from (now() - finished_at))/3600, 1) AS wiek_h"
         " FROM app.backup_run ORDER BY finished_at DESC LIMIT 2")
-    odbiorcy = await fetch_all('SELECT id FROM app."user" WHERE is_active')
+    odbiorcy = await fetch_all("SELECT id FROM app.\"user\" WHERE is_active AND role = 'owner'")
 
     async def zglos(tytul: str, tresc: str) -> None:
         print(f"  {tytul}: {tresc.splitlines()[0]}")
@@ -2771,7 +2771,7 @@ async def sprawdz_instrumenty(fetch_all, notify, sucho: bool = False, *,
         "SELECT 1 FROM notify.notification WHERE event_code = 'instrument.delisted'"
         "   AND created_at > now() - make_interval(hours => 24) LIMIT 1")
 
-    odbiorcy = await fetch_all('SELECT id FROM app."user" WHERE is_active')
+    odbiorcy = await fetch_all("SELECT id FROM app.\"user\" WHERE is_active AND role = 'owner'")
     zgloszone = trwale = 0
     for kod, tytul, tresc in powody:
         print(f"  {tytul}")
@@ -3031,7 +3031,7 @@ async def sprawdz_puls_workerow(fetch_all, notify, sucho: bool = False,
         print("Tryb suchy — powiadomienie nie wysyłane.")
         return len(powody)
 
-    odbiorcy = await fetch_all('SELECT id FROM app."user" WHERE is_active')
+    odbiorcy = await fetch_all("SELECT id FROM app.\"user\" WHERE is_active AND role = 'owner'")
     zgloszone = trwale = 0
     for worker, tytul, tresc in powody:
         # TLUMIENIE BEZ DODATKOWEJ KOLUMNY, tak samo jak przy zywotnosci
@@ -3189,7 +3189,8 @@ async def sprawdz_kanaly(fetch_all, notify, sucho: bool = False) -> int:
         "  CROSS JOIN app.\"user\" u"
         "  LEFT JOIN notify.preference p"
         "         ON p.event_code = et.code AND p.user_id = u.id AND p.enabled"
-        " WHERE u.is_active AND et.always_on AND et.default_severity = 'critical'"
+        " WHERE u.is_active AND u.role = 'owner'"
+        "   AND et.always_on AND et.default_severity = 'critical'"
         " ORDER BY et.code, u.login")
     if not wiersze:
         print("kanaly: brak krytycznych zdarzen always_on albo brak aktywnych "
@@ -3247,7 +3248,7 @@ async def sprawdz_kanaly(fetch_all, notify, sucho: bool = False) -> int:
     # dobowego przypomnienia. Przy stanie, ktory nie mija sam, to jest wlasciwy
     # rytm - a zbieznosc do zielonego Joba jest warunkiem, zeby czerwony cokolwiek
     # znaczyl.
-    odbiorcy = await fetch_all('SELECT id FROM app."user" WHERE is_active')
+    odbiorcy = await fetch_all("SELECT id FROM app.\"user\" WHERE is_active AND role = 'owner'")
     juz = await fetch_all(
         "SELECT 1 FROM notify.notification"
         " WHERE event_code = 'notify.no_channel'"
@@ -3437,7 +3438,7 @@ async def sprawdz_odlozone_decyzje(fetch_all, notify, sucho: bool = False, *,
         "   AND created_at > now() - interval '24 hours' LIMIT 1")
     if juz:
         return kod_wyjscia(0, len(braki), "swieca odlozona bez decyzji")
-    odbiorcy = await fetch_all('SELECT id FROM app."user" WHERE is_active')
+    odbiorcy = await fetch_all("SELECT id FROM app.\"user\" WHERE is_active AND role = 'owner'")
     for u in odbiorcy:
         await notify(u["id"], "engine.decyzje_odlozone", tytul, tresc,
                      engine=engine, severity="critical",
@@ -3591,7 +3592,7 @@ async def sprawdz_decyzje(fetch_all, notify, sucho: bool = False, *,
         "   AND created_at > now() - interval '24 hours' LIMIT 1", (engine,))
     if juz:
         return kod_wyjscia(0, 1, "brak decyzji dla części uniwersum")
-    odbiorcy = await fetch_all('SELECT id FROM app."user" WHERE is_active')
+    odbiorcy = await fetch_all("SELECT id FROM app.\"user\" WHERE is_active AND role = 'owner'")
     for u in odbiorcy:
         await notify(u["id"], "engine.brak_decyzji", tytul, tresc,
                      engine=engine, severity="warning",
@@ -3869,7 +3870,7 @@ async def sprawdz_zadania(fetch_all, notify, sucho: bool = False, *,
             trwale += 1
             continue
         if odbiorcy is None:
-            odbiorcy = await fetch_all('SELECT id FROM app."user" WHERE is_active')
+            odbiorcy = await fetch_all("SELECT id FROM app.\"user\" WHERE is_active AND role = 'owner'")
         nazwa = klucz.split(":", 1)[0]
         wyslane = 0
         for u in odbiorcy:
@@ -4010,7 +4011,7 @@ async def sprawdz_dryf(fetch_all, notify, sucho: bool = False, *,
         print("Tryb suchy — powiadomienie nie wysyłane.")
         return 1
 
-    odbiorcy = await fetch_all('SELECT id FROM app."user" WHERE is_active')
+    odbiorcy = await fetch_all("SELECT id FROM app.\"user\" WHERE is_active AND role = 'owner'")
     if not odbiorcy:
         print("Brak odbiorców — powiadomienie nie ma do kogo pójść.")
         return 1
@@ -4237,7 +4238,7 @@ async def main() -> int:
             print("Tryb suchy — powiadomienie nie wysylane.")
             return 0
 
-        odbiorcy = await fetch_all('SELECT id FROM app."user" WHERE is_active')
+        odbiorcy = await fetch_all("SELECT id FROM app.\"user\" WHERE is_active AND role = 'owner'")
         if not odbiorcy:
             print("Brak odbiorcow — powiadomienie nie ma do kogo pojsc.")
             return 0

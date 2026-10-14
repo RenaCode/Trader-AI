@@ -879,7 +879,7 @@ async def uzgodnij(fetch_all, notify, adapter, engine: str = "crypto",
         # WLASNY KOD ZDARZENIA (migracja 0071). Do 2026-10-03 szlo to jako
         # `killswitch.triggered`, choc zaden kill-switch nie zadzialal - i alarm
         # uzgodnienia tlumil w dozorze przypomnienie o PRAWDZIWYM kill-switchu.
-        for u in await fetch_all('SELECT id FROM app."user" WHERE is_active'):
+        for u in await fetch_all("SELECT id FROM app.\"user\" WHERE is_active AND role = 'owner'"):
             await notify(
                 u["id"], KOD_ZDARZENIA,
                 f"Nasz stan nie zgadza się z giełdą ({engine})",

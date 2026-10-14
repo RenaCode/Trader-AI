@@ -95,6 +95,10 @@ spec:
             - name: SSO_GRUPA
               valueFrom:
                 secretKeyRef: { name: {{ .Values.secretName }}, key: SSO_GRUPA, optional: true }
+            # Grupy tylko do podgladu (rola obcieta do `viewer`), tez z Sekretu.
+            - name: SSO_GRUPA_PODGLAD
+              valueFrom:
+                secretKeyRef: { name: {{ .Values.secretName }}, key: SSO_GRUPA_PODGLAD, optional: true }
             - name: SSO_WYLOGUJ_URL
               value: "{{ .Values.sso.wylogujUrl }}?rd=https://{{ .Values.ingress.host }}/"
             {{- else }}

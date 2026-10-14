@@ -303,7 +303,7 @@ async def wznow(fetch_all, fetch_one, execute, notify, engine: str = "crypto",
                 "   AND data->>'event_id' = %s AND data->>'rodzaj' = 'licznik'"
                 " LIMIT 1", (str(z["id"]),))
             if not sucho and not juz:
-                for u in await fetch_all('SELECT id FROM app."user" WHERE is_active'):
+                for u in await fetch_all("SELECT id FROM app.\"user\" WHERE is_active AND role = 'owner'"):
                     await notify(
                         u["id"], "killswitch.triggered",
                         f"Kill-switch wraca w kółko ({engine})",
@@ -357,7 +357,7 @@ async def wznow(fetch_all, fetch_one, execute, notify, engine: str = "crypto",
         # `warning` lezala tylko w dzwonku, a wlasciciel po alarmie
         # o zatrzymaniu uwazal, ze handel stoi.
         wznowien = int((ile or {}).get("n", 0)) + 1
-        for u in await fetch_all('SELECT id FROM app."user" WHERE is_active'):
+        for u in await fetch_all("SELECT id FROM app.\"user\" WHERE is_active AND role = 'owner'"):
             await notify(
                 u["id"], "killswitch.released",
                 f"Kill-switch zwolniony AUTOMATYCZNIE ({engine}) — {nazwa}",

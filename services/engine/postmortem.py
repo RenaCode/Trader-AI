@@ -408,7 +408,7 @@ async def powiadom(engine: str, pid: int, s: dict, hipotez: int) -> None:
     try:
         await open_pool()
         traf = "—" if s["trafnosc"] is None else f"{s['trafnosc']:.1%}"
-        for u in await fetch_all('SELECT id FROM app."user" WHERE is_active'):
+        for u in await fetch_all("SELECT id FROM app.\"user\" WHERE is_active AND role = 'owner'"):
             await notify(
                 u["id"], "postmortem.ready", f"Nowa analiza post-mortem ({engine})",
                 f"{s['pozycji']} zamkniętych pozycji, trafność {traf}, "

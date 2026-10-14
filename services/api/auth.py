@@ -68,14 +68,22 @@ async def current_user(
                 raise
         else:
             if row["login"] == sso_login:
-                return row
+                return _rola_wedlug_grupy(row, request)
             # W tej przegladarce Authelia ma juz kogo innego. Sesja poprzedniej
             # osoby nie ma prawa przezyc w ciasteczku obok - uniewazniona, nie
             # tylko pominieta.
             await execute("UPDATE app.session SET revoked_at = now()"
                           " WHERE id = %s AND revoked_at IS NULL", (row["session_id"],))
             await audit("auth.sso_zmiana_uzytkownika", user_id=row["id"], request=request)
-    return await _sesja_sso(sso_login, request, response)
+    return _rola_wedlug_grupy(await _sesja_sso(sso_login, request, response), request)
+
+
+def _rola_wedlug_grupy(row: dict, request: Request) -> dict:
+    """Sesja wpuszczona tylko przez grupe podgladu: rola `viewer` niezaleznie
+    od bazy (sso.py, `tylko_podglad`). Kopia, nie zmiana `row`."""
+    if row.get("role") != "viewer" and sso.tylko_podglad(request):
+        return {**row, "role": "viewer"}
+    return row
 
 
 async def _uzytkownik_z_sesji(request: Request, trader_session: str | None) -> dict:
@@ -171,7 +179,7 @@ async def _sesja_sso(login: str, request: Request, response: Response) -> dict:
 async def wymagaj_wlasciciela(user: dict = Depends(current_user)) -> dict:
     """Operacje zmieniajace stan sa dla roli `owner`, nie dla kazdej waznej sesji.
 
-    DLACZEGO TO ISTNIEJE, SKORO KONTA `viewer` DZIS NIE MA
+    DLACZEGO TO ISTNIEJE
 
     Rola jest w schemacie od migracji 0007 (`CHECK (role IN ('owner','viewer'))`),
     jest pobierana w `current_user`, zwracana przez `/auth/me` i pokazywana
@@ -180,10 +188,10 @@ async def wymagaj_wlasciciela(user: dict = Depends(current_user)) -> dict:
     Ochrona byla deklarowana raz, jako `Depends(current_user)` na calym
     routerze, a `current_user` sprawdza wylacznie waznosc sesji.
 
-    Konta `viewer` faktycznie dzis nie da sie zalozyc - `scripts/create_admin.py`
-    wpisuje na sztywno `'owner'`, a zaden endpoint nie tworzy uzytkownikow.
-    Luka jest wiec UTAJONA, a nie czynna: zadziala w dniu, w ktorym ktos doda
-    drugie konto recznym SQL-em, i wtedy nic o tym nie powie. Tamtego dnia
+    Do 14.10 konta `viewer` nie dalo sie zalozyc - `scripts/create_admin.py`
+    wpisywal na sztywno `'owner'`. Od 14.10 `create_admin.py --rola viewer`
+    zaklada je naprawde (podglad dla rodziny przez SSO), wiec bez tej funkcji
+    luka bylaby CZYNNA:
     `viewer` zwolnilby kill-switcha (`risk.py`), podmienil klucz Anthropica
     (`settings.py`), usunal klucz API gieldy (`credentials.py`) i zapisal
     przeplyw kapitalu (`kapital.py`).

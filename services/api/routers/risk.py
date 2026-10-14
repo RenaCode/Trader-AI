@@ -264,7 +264,7 @@ async def wlacz_killswitch(engine: Silnik, body: RecznyKillSwitchBody, request: 
                 after={"engine": engine, "mode": tryb, "reason": reason},
                 request=request)
 
-    for u in await fetch_all('SELECT id FROM app."user" WHERE is_active'):
+    for u in await fetch_all("SELECT id FROM app.\"user\" WHERE is_active AND role = 'owner'"):
         await powiadom_o_bezpieczenstwie(
             u["id"], "killswitch.triggered",
             f"Kill-switch włączony ręcznie ({engine})",
@@ -370,7 +370,7 @@ async def zwolnij_killswitch(engine: Silnik, event_id: int, body: ZwolnienieBody
     # 2026-10-09, N-1) - ta sama funkcja co audyt i sesje.
     ip = (adres_klienta(request) if request is not None else None) or "?"
     notatka = body.note.strip()
-    for u in await fetch_all('SELECT id FROM app."user" WHERE is_active'):
+    for u in await fetch_all("SELECT id FROM app.\"user\" WHERE is_active AND role = 'owner'"):
         await powiadom_o_bezpieczenstwie(
             u["id"], "killswitch.released",
             f"Kill-switch ZWOLNIONY ręcznie ({engine})",
