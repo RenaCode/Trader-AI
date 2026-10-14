@@ -171,7 +171,7 @@ async def _sesja_sso(login: str, request: Request, response: Response) -> dict:
 async def wymagaj_wlasciciela(user: dict = Depends(current_user)) -> dict:
     """Operacje zmieniajace stan sa dla roli `owner`, nie dla kazdej waznej sesji.
 
-    DLACZEGO TO ISTNIEJE, SKORO KONTA `viewer` DZIS NIE MA
+    DLACZEGO TO ISTNIEJE
 
     Rola jest w schemacie od migracji 0007 (`CHECK (role IN ('owner','viewer'))`),
     jest pobierana w `current_user`, zwracana przez `/auth/me` i pokazywana
@@ -180,10 +180,10 @@ async def wymagaj_wlasciciela(user: dict = Depends(current_user)) -> dict:
     Ochrona byla deklarowana raz, jako `Depends(current_user)` na calym
     routerze, a `current_user` sprawdza wylacznie waznosc sesji.
 
-    Konta `viewer` faktycznie dzis nie da sie zalozyc - `scripts/create_admin.py`
-    wpisuje na sztywno `'owner'`, a zaden endpoint nie tworzy uzytkownikow.
-    Luka jest wiec UTAJONA, a nie czynna: zadziala w dniu, w ktorym ktos doda
-    drugie konto recznym SQL-em, i wtedy nic o tym nie powie. Tamtego dnia
+    Do 14.10 konta `viewer` nie dalo sie zalozyc - `scripts/create_admin.py`
+    wpisywal na sztywno `'owner'`. Od 14.10 `create_admin.py --rola viewer`
+    zaklada je naprawde (podglad dla rodziny przez SSO), wiec bez tej funkcji
+    luka bylaby CZYNNA:
     `viewer` zwolnilby kill-switcha (`risk.py`), podmienil klucz Anthropica
     (`settings.py`), usunal klucz API gieldy (`credentials.py`) i zapisal
     przeplyw kapitalu (`kapital.py`).

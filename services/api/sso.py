@@ -18,8 +18,10 @@ CZEGO TU NIE MA, CELOWO:
   - rol z `Remote-Groups`: o wejsciu na host decyduje Authelia, o roli
     w aplikacji (`owner`/`viewer`) baza. Grupa jest tu tylko druga, niezalezna
     bramka (`SSO_GRUPA`) na wypadek reguly Authelii poluzowanej dla calej
-    domeny: do Tradera wchodzi wylacznie jedna grupa, a inne konta Authelii
-    (administracyjne, rodzina) - nie;
+    domeny: do Tradera wchodza wylacznie grupy z tej listy (wlasciciela i,
+    od 14.10, rodziny - do konta `viewer`), a inne konta Authelii
+    (np. administracyjne) - nie. To, ze rodzina tylko patrzy, wynika z roli
+    jej konta w bazie, nie z grupy;
   - zakladania kont: brak konta = 403, nie nowe puste konto (kontrakt, pkt 3).
 """
 from __future__ import annotations
@@ -43,16 +45,18 @@ def wlaczone() -> bool:
     return os.environ.get("SSO_NAGLOWKI") == "1"
 
 
-def wymagana_grupa() -> str | None:
-    """Nazwa grupy z Sekretu aplikacji (chart: klucz `SSO_GRUPA`).
+def dopuszczone_grupy() -> frozenset[str]:
+    """Grupy z Sekretu aplikacji (chart: klucz `SSO_GRUPA`, nazwy po przecinku).
 
     BEZ WARTOSCI DOMYSLNEJ W KODZIE. Repozytorium jest publiczne, a nazwy kont
     i grup Authelii sa konfiguracja wlasciciela, nie kodu. Brak klucza przy
     wlaczonej fladze = odmowa dla kazdego (`login_z_naglowka`), nie
     wpuszczenie kazdego - droga awaryjna (haslo aplikacji bez naglowka)
-    dziala dalej.
+    dziala dalej. Puste pozycje (`a,,b`, sam przecinek) sa pomijane, wiec
+    literowka nie otwiera drogi grupie o pustej nazwie.
     """
-    return os.environ.get("SSO_GRUPA") or None
+    return frozenset(g.strip() for g in os.environ.get("SSO_GRUPA", "").split(",")
+                     if g.strip())
 
 
 def adres_wylogowania() -> str | None:
@@ -86,15 +90,16 @@ def login_z_naglowka(request: Request) -> str | None:
     if not _LOGIN.fullmatch(login):
         raise HTTPException(status_code=400, detail="Niepoprawny naglowek Remote-User")
     grupy = _jedna_wartosc(request, NAGLOWEK_GRUP) or ""
-    grupa = wymagana_grupa()
-    if grupa is None:
+    dopuszczone = dopuszczone_grupy()
+    if not dopuszczone:
         raise HTTPException(
             status_code=403,
             detail="SSO jest włączone, ale grupa Authelii (klucz SSO_GRUPA w Sekrecie "
                    "aplikacji) nie jest ustawiona — logowanie przez SSO zablokowane.")
-    if grupa not in {g.strip() for g in grupy.split(",")}:
+    if not dopuszczone & {g.strip() for g in grupy.split(",")}:
         raise HTTPException(
             status_code=403,
-            detail=f"Użytkownik „{login}” nie należy do grupy „{grupa}” "
-                   "w Authelii — Trader jest tylko dla niej.")
+            detail=f"Użytkownik „{login}” nie należy do żadnej z grup "
+                   f"„{', '.join(sorted(dopuszczone))}” w Authelii — Trader jest "
+                   "tylko dla nich.")
     return login

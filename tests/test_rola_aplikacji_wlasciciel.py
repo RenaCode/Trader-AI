@@ -17,10 +17,10 @@ a `/auth/me` i `Profile` pokazują rolę tak, jakby niosła uprawnienia.
 
 UCZCIWE ZASTRZEŻENIE, KTÓRE TU POWTARZAMY
 
-Dziś takiego konta nie da się założyć — `scripts/create_admin.py` wpisuje na
-sztywno `'owner'`, a żaden endpoint nie tworzy użytkowników. Luka jest więc
-UTAJONA, a nie czynna. Zadziała w dniu, w którym ktoś doda drugie konto
-ręcznym SQL-em, i wtedy nic o tym nie powie: `viewer` zwolniłby kill-switcha,
+Do 14.10 takiego konta nie dało się założyć — `scripts/create_admin.py`
+wpisywał na sztywno `'owner'`. Od 14.10 `create_admin.py --rola viewer`
+zakłada je naprawdę (podgląd dla rodziny przez SSO), więc bez tego strażnika
+luka byłaby CZYNNA: `viewer` zwolniłby kill-switcha,
 podmienił klucz Anthropica, usunął klucz API giełdy i zapisał przepływ
 kapitału.
 

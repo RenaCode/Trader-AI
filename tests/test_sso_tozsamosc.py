@@ -22,6 +22,7 @@ import re
 import secrets
 import shutil
 import subprocess
+import sys
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
@@ -103,6 +104,27 @@ def test_bez_grupy_w_sekrecie_odmowa_dla_kazdego(monkeypatch):
     assert e.value.status_code == 403 and "SSO_GRUPA" in e.value.detail
 
 
+@pytest.mark.parametrize("sekret, grupy, wynik", [
+    # Lista grup: wlasciciel i rodzina wchodza, administracyjna nie.
+    ("grupa-testowa,grupa-rodzina", "grupa-rodzina", "uzytkownik1"),
+    ("grupa-testowa, grupa-rodzina", "inna-grupa,grupa-testowa", "uzytkownik1"),
+    ("grupa-testowa,grupa-rodzina", "grupa-administracyjna", 403),
+    # Puste pozycje nie dopuszczaja grupy o pustej nazwie ani pustego naglowka.
+    ("grupa-testowa,,", "", 403),
+    (" , ", "grupa-testowa", 403),
+])
+def test_lista_grup_w_sekrecie(monkeypatch, sekret, grupy, wynik):
+    monkeypatch.setenv("SSO_NAGLOWKI", "1")
+    monkeypatch.setenv("SSO_GRUPA", sekret)
+    z = _zadanie(("Remote-User", "uzytkownik1"), ("Remote-Groups", grupy))
+    if wynik == 403:
+        with pytest.raises(HTTPException) as e:
+            sso.login_z_naglowka(z)
+        assert e.value.status_code == 403
+    else:
+        assert sso.login_z_naglowka(z) == wynik
+
+
 def test_nie_czyta_wariantow_naglowka(monkeypatch):
     """Kontrakt, pkt 2: `Remote_User` i `X-Remote-User` nie sa tozsamoscia."""
     monkeypatch.setenv("SSO_NAGLOWKI", "1")
@@ -169,14 +191,15 @@ def konta(monkeypatch):
     monkeypatch.setenv("SSO_WYLOGUJ_URL", WYLOGUJ)
     utworzone: list[int] = []
 
-    def zaloz(*, totp: bool = False, aktywne: bool = True, zablokowane: bool = False) -> dict:
+    def zaloz(*, totp: bool = False, aktywne: bool = True, zablokowane: bool = False,
+              rola: str = "owner") -> dict:
         login = f"sso-{uuid.uuid4().hex[:10]}"
         with psycopg.connect(DB, autocommit=True) as c:
             uid = c.execute(
-                'INSERT INTO app."user" (login, password_hash, is_active, locked_until)'
-                " VALUES (%s, %s, %s, CASE WHEN %s THEN now() + interval '10 minutes' END)"
+                'INSERT INTO app."user" (login, password_hash, is_active, locked_until, role)'
+                " VALUES (%s, %s, %s, CASE WHEN %s THEN now() + interval '10 minutes' END, %s)"
                 " RETURNING id",
-                (login, hash_password(HASLO), aktywne, zablokowane)).fetchone()[0]
+                (login, hash_password(HASLO), aktywne, zablokowane, rola)).fetchone()[0]
             if totp:
                 c.execute("INSERT INTO app.totp_secret (user_id, secret_enc, confirmed_at)"
                           " VALUES (%s, %s, now())",
@@ -446,3 +469,58 @@ def test_zamkniecie_api_czeka_na_wysylki_w_tle_przed_pula(monkeypatch):
 
     asyncio.run(przebieg())
     assert kolejnosc == ["open", "wysylka", "close"]
+
+
+# ------------------------------------------------------------ podglad dla rodziny (14.10)
+@bazodanowy
+def test_rodzina_przez_sso_widzi_ale_nie_zmienia(konta, monkeypatch):
+    """Druga grupa z `SSO_GRUPA` wchodzi na konto `viewer`: czyta, a zapis
+    (tu kill-switch) dostaje 403 z roli - grupa nie daje uprawnien."""
+    monkeypatch.setenv("SSO_NAGLOWKI", "1")
+    monkeypatch.setenv("SSO_GRUPA", "grupa-testowa,grupa-rodzina")
+    podglad = konta(rola="viewer")
+    with _klient() as k:
+        r = k.get("/api/auth/me", headers=_authelia(podglad["login"], "grupa-rodzina"))
+        assert r.status_code == 200, r.text
+        assert r.json()["role"] == "viewer"
+        r = k.post("/api/engines/crypto/risk/killswitch",
+                   json={"powod": "test podgladu rodziny"},
+                   headers={**_authelia(podglad["login"], "grupa-rodzina"),
+                            "X-CSRF-Token": k.cookies.get("__Host-trader_csrf")})
+        assert r.status_code == 403, r.text
+        assert "właściciela" in r.json()["detail"]
+
+
+def _create_admin(*argumenty: str, haslo: str) -> subprocess.CompletedProcess:
+    env = {**os.environ, "DATABASE_URL": DB}
+    return subprocess.run([sys.executable, "-B", str(KORZEN / "scripts" / "create_admin.py"),
+                           *argumenty, "--stdin"], input=haslo, capture_output=True,
+                          text=True, env=env)
+
+
+@bazodanowy
+def test_create_admin_rola_viewer_i_brak_cichej_zmiany_roli():
+    import psycopg
+
+    login = f"sso-{uuid.uuid4().hex[:10]}"
+    try:
+        w = _create_admin(login, "--rola", "viewer", haslo="haslo-startowe-1")
+        assert w.returncode == 0, w.stderr
+        assert "rola: viewer" in w.stdout
+        with psycopg.connect(DB) as c:
+            rola, hash1 = c.execute('SELECT role, password_hash FROM app."user" WHERE login = %s',
+                                    (login,)).fetchone()
+        assert rola == "viewer"
+        # Inna rola niz obecna: odmowa i ZERO zmian (haslo tez zostaje).
+        w = _create_admin(login, "--rola", "owner", haslo="haslo-startowe-2")
+        assert w.returncode != 0 and "nic nie zmieniono" in w.stderr
+        # Reset hasla bez --rola nie rusza roli.
+        w2 = _create_admin(login, haslo="haslo-startowe-3")
+        assert w2.returncode == 0, w2.stderr
+        with psycopg.connect(DB) as c:
+            rola, hash2 = c.execute('SELECT role, password_hash FROM app."user" WHERE login = %s',
+                                    (login,)).fetchone()
+        assert rola == "viewer" and hash2 != hash1
+    finally:
+        with psycopg.connect(DB, autocommit=True) as c:
+            c.execute('DELETE FROM app."user" WHERE login = %s', (login,))
