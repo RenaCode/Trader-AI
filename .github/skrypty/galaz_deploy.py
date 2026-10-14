@@ -60,11 +60,10 @@ import time
 import urllib.error
 import urllib.request
 
-# SCIEZKI, Z KTORYCH POWSTAJE OBRAZ - te same co filtr `changes` w
-# docker-publish.yml (bez samego pliku workflow, ktorego obraz nie zawiera).
-# Rozjazd pilnuje tests/test_galaz_deploy.py: sciezka w obrazie, ktorej nie ma
-# w filtrze, nie przebudowuje obrazu, a tu blokowalaby `deploy` do nastepnego
-# buildu.
+# SCIEZKI, Z KTORYCH POWSTAJE OBRAZ (COPY w Dockerfile). Z tej samej listy
+# korzysta job `changes` w docker-publish.yml (obrazy_do_budowy.py): obraz
+# buduje sie, gdy ta regula odmowilaby mu `deploy`. Kompletnosc wzgledem
+# Dockerfile pilnuje tests/test_galaz_deploy.py.
 SCIEZKI_OBRAZU = {
     "api": ["services", "db", "scripts", "docker/api.Dockerfile"],
     "web": ["web", "docker/web.Dockerfile", "docker/nginx.conf",
@@ -136,23 +135,39 @@ def obraz_w_rejestrze(obraz: str, tag: str) -> bool:
         raise
 
 
+def niezgodnosc_obrazu(usluga: str, values: str, glowa: str, w_rejestrze=obraz_w_rejestrze,
+                       sciezki: list[str] | None = None) -> str | None:
+    """None = obraz `usluga` z `values` zbudowano z kodu, ktory zawiera `glowa`;
+    inaczej powod, dla ktorego nie.
+
+    JEDNA REGULA DLA DWOCH PYTAN: "czy `deploy` moze isc na `glowa`"
+    (`powod_odmowy`) i "czy ten obraz trzeba zbudowac" (obrazy_do_budowy.py).
+    Gdyby build pytal o co innego niz `deploy`, obraz moglby zostac niezbudowany
+    przy kodzie, na ktory `deploy` czeka - dokladnie 14.10 (patrz tamten plik)."""
+    sciezki = SCIEZKI_OBRAZU[usluga] if sciezki is None else sciezki
+    tag = tag_z_values(values, usluga)
+    m = re.fullmatch(r"sha-([0-9a-f]{7,40})", tag or "")
+    if not m:
+        return f"{usluga}: tag {tag!r} nie wskazuje commita"
+    zrodlo = m.group(1)
+    if git("cat-file", "-e", f"{zrodlo}^{{commit}}", sprawdz=False).returncode:
+        return f"{usluga}: commit {zrodlo} z tagu nie istnieje w repozytorium"
+    if git("diff", "--quiet", zrodlo, glowa, "--", *sciezki,
+           sprawdz=False).returncode:
+        return (f"{usluga}: kod rozni sie od {zrodlo}, z ktorego zbudowano obraz "
+                f"{tag} - build tego kodu jeszcze nie podbil tagu")
+    if not w_rejestrze(OBRAZY[usluga], tag):
+        return f"{usluga}: obrazu {OBRAZY[usluga]}:{tag} nie ma w rejestrze"
+    return None
+
+
 def powod_odmowy(glowa: str, w_rejestrze=obraz_w_rejestrze) -> str | None:
     """None = `glowa` jest wdrazalna; inaczej powod, dla ktorego nie jest."""
     values = git("show", f"{glowa}:{VALUES}").stdout
-    for usluga, sciezki in SCIEZKI_OBRAZU.items():
-        tag = tag_z_values(values, usluga)
-        m = re.fullmatch(r"sha-([0-9a-f]{7,40})", tag or "")
-        if not m:
-            return f"{usluga}: tag {tag!r} nie wskazuje commita"
-        zrodlo = m.group(1)
-        if git("cat-file", "-e", f"{zrodlo}^{{commit}}", sprawdz=False).returncode:
-            return f"{usluga}: commit {zrodlo} z tagu nie istnieje w repozytorium"
-        if git("diff", "--quiet", zrodlo, glowa, "--", *sciezki,
-               sprawdz=False).returncode:
-            return (f"{usluga}: kod rozni sie od {zrodlo}, z ktorego zbudowano obraz "
-                    f"{tag} - build tego kodu jeszcze nie podbil tagu")
-        if not w_rejestrze(OBRAZY[usluga], tag):
-            return f"{usluga}: obrazu {OBRAZY[usluga]}:{tag} nie ma w rejestrze"
+    for usluga in SCIEZKI_OBRAZU:
+        powod = niezgodnosc_obrazu(usluga, values, glowa, w_rejestrze)
+        if powod:
+            return powod
     return None
 
 

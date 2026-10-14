@@ -5,7 +5,8 @@ name: Build and publish Docker images
 # obrazy istnieja - ArgoCD na VPS sledzi `deploy` (NIE `main`) i sam synchronizuje
 # klaster. Nie ma tu kroku SSH ani deployu, bo to GitOps.
 #
-# Filtr sciezek sprawia, ze zmiana wylacznie we froncie nie przebudowuje API i odwrotnie.
+# Job `changes` buduje tylko obrazy, ktorych kod rozni sie od kodu ich obecnego
+# tagu: zmiana wylacznie we froncie nie przebudowuje API i odwrotnie.
 
 on:
   push:
@@ -24,8 +25,25 @@ permissions:
   contents: read
 
 jobs:
+  # KTORE OBRAZY BUDOWAC - po TRESCI, nie po ostatnim pushu (2026-10-14).
+  #
+  # Do 14.10 decydowal filtr sciezek ostatniego pushu. PR #28 (web) padl na
+  # tescie dymnym, wiec obrazu web nie zbudowano; nastepny push (#29, samo CI)
+  # nie dotykal web, filtr go pominal i web zostal na sha-7ecd3ba przy nowszym
+  # kodzie. `deploy` czekal na obraz, ktorego nikt nie budowal - pomogl reczny
+  # workflow_dispatch.
+  #
+  # Teraz obraz buduje sie, gdy jego kod pod tym commitem rozni sie od commita,
+  # z ktorego zbudowano tag w values.yaml - ta sama funkcja, ktora odmawia
+  # `deploy` (.github/skrypty/obrazy_do_budowy.py -> galaz_deploy.py). Zmiana
+  # samego workflow lub jego skryptow nadal przebudowuje api, zeby edycja CI
+  # byla przez CI sprawdzona.
   changes:
     runs-on: ubuntu-latest
+    # Odczyt rejestru: obraz, ktorego tagu nie ma w GHCR, tez trzeba zbudowac.
+    permissions:
+      contents: read
+      packages: read
     # Limit czasu: zawieszenie nie moze palic godzin minut runnera (GitHub Free).
     timeout-minutes: 5
     outputs:
@@ -33,31 +51,18 @@ jobs:
       web: ${{ steps.filter.outputs.web }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-      - id: filter
-        uses: dorny/paths-filter@0e4a8c6effa4802afeda77dc8d303f8176d7dfad # v3
         with:
-          filters: |
-            # Te same sciezki, z ktorych powstaje obraz (COPY w Dockerfile) -
-            # `galaz_deploy.py` porownuje kod commita z kodem obrazu na tej
-            # samej liscie. Rozjazd pilnuje tests/test_galaz_deploy.py.
-            api:
-              - 'services/**'
-              - 'db/**'
-              - 'scripts/**'
-              - 'docker/api.Dockerfile'
-              # Zmiana samego workflow MUSI go uruchomic.
-              #
-              # Bez tego wpisu edycja definicji CI nie jest przez CI sprawdzana:
-              # przebieg konczy sie zielono, bo wszystkie joby sa pomijane przez
-              # filtr sciezek. Tak wlasnie przezyl 11 dni krok wolajacy usuniety
-              # plik - a takze poprawka tego kroku, ktora sama nie zostala
-              # zweryfikowana i wymagala recznego workflow_dispatch.
-              - '.github/workflows/docker-publish.yml'
-            web:
-              - 'web/**'
-              - 'docker/web.Dockerfile'
-              - 'docker/nginx.conf'
-              - 'docker/naglowki-bezpieczenstwa.conf'
+          # Pelna historia: commit z tagu bywa dowolnie stary, a plytki klon
+          # go nie ma (wtedy skrypt i tak buduje, ale niepotrzebnie).
+          fetch-depth: 0
+      - id: filter
+        name: Obrazy niezgodne z kodem
+        env:
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 .github/skrypty/obrazy_do_budowy.py --glowa "${{ github.sha }}" \
+            ${{ github.event_name == 'workflow_dispatch' && '--wszystkie' || '' }}
 
   # Migracje sa niemutowalne z zalozenia (runner sprawdza sumy kontrolne).
   # Ten job wykrywa edycje zastosowanego pliku ZANIM trafi na produkcje, gdzie
