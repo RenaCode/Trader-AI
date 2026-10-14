@@ -155,7 +155,7 @@ jobs:
       - name: Migracje i konto testowe
         run: |
           python db/migrate.py
-          printf '%s' "$TEST_PASSWORD" | python scripts/create_admin.py "$TEST_LOGIN" --stdin
+          printf '%s' "$TEST_PASSWORD" | python scripts/create_admin.py "$TEST_LOGIN" --rola owner --stdin
 
       - name: Start API
         run: |
