@@ -68,14 +68,22 @@ async def current_user(
                 raise
         else:
             if row["login"] == sso_login:
-                return row
+                return _rola_wedlug_grupy(row, request)
             # W tej przegladarce Authelia ma juz kogo innego. Sesja poprzedniej
             # osoby nie ma prawa przezyc w ciasteczku obok - uniewazniona, nie
             # tylko pominieta.
             await execute("UPDATE app.session SET revoked_at = now()"
                           " WHERE id = %s AND revoked_at IS NULL", (row["session_id"],))
             await audit("auth.sso_zmiana_uzytkownika", user_id=row["id"], request=request)
-    return await _sesja_sso(sso_login, request, response)
+    return _rola_wedlug_grupy(await _sesja_sso(sso_login, request, response), request)
+
+
+def _rola_wedlug_grupy(row: dict, request: Request) -> dict:
+    """Sesja wpuszczona tylko przez grupe podgladu: rola `viewer` niezaleznie
+    od bazy (sso.py, `tylko_podglad`). Kopia, nie zmiana `row`."""
+    if row.get("role") != "viewer" and sso.tylko_podglad(request):
+        return {**row, "role": "viewer"}
+    return row
 
 
 async def _uzytkownik_z_sesji(request: Request, trader_session: str | None) -> dict:

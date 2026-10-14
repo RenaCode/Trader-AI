@@ -18,10 +18,13 @@ CZEGO TU NIE MA, CELOWO:
   - rol z `Remote-Groups`: o wejsciu na host decyduje Authelia, o roli
     w aplikacji (`owner`/`viewer`) baza. Grupa jest tu tylko druga, niezalezna
     bramka (`SSO_GRUPA`) na wypadek reguly Authelii poluzowanej dla calej
-    domeny: do Tradera wchodza wylacznie grupy z tej listy (wlasciciela i,
-    od 14.10, rodziny - do konta `viewer`), a inne konta Authelii
-    (np. administracyjne) - nie. To, ze rodzina tylko patrzy, wynika z roli
-    jej konta w bazie, nie z grupy;
+    domeny: do Tradera wchodza wylacznie grupy z `SSO_GRUPA` (pelny dostep
+    wedlug roli konta) i `SSO_GRUPA_PODGLAD` (tylko podglad), a inne konta
+    Authelii - nie;
+  - podgladu tylko z roli konta: sesja wpuszczona WYLACZNIE przez grupe
+    `SSO_GRUPA_PODGLAD` ma role obcieta do `viewer` przy kazdym zadaniu
+    (`tylko_podglad`), nawet gdy konto w bazie ma `owner` - pomylka przy
+    zakladaniu konta albo reczny UPDATE nie daje jej zapisu;
   - zakladania kont: brak konta = 403, nie nowe puste konto (kontrakt, pkt 3).
 """
 from __future__ import annotations
@@ -45,6 +48,17 @@ def wlaczone() -> bool:
     return os.environ.get("SSO_NAGLOWKI") == "1"
 
 
+def _lista(zmienna: str) -> frozenset[str]:
+    return frozenset(g.strip() for g in os.environ.get(zmienna, "").split(",")
+                     if g.strip())
+
+
+def grupy_podgladu() -> frozenset[str]:
+    """Grupy tylko do podgladu (chart: klucz `SSO_GRUPA_PODGLAD`, po przecinku).
+    Brak klucza = nikt nie wchodzi w tym trybie."""
+    return _lista("SSO_GRUPA_PODGLAD")
+
+
 def dopuszczone_grupy() -> frozenset[str]:
     """Grupy z Sekretu aplikacji (chart: klucz `SSO_GRUPA`, nazwy po przecinku).
 
@@ -55,8 +69,7 @@ def dopuszczone_grupy() -> frozenset[str]:
     dziala dalej. Puste pozycje (`a,,b`, sam przecinek) sa pomijane, wiec
     literowka nie otwiera drogi grupie o pustej nazwie.
     """
-    return frozenset(g.strip() for g in os.environ.get("SSO_GRUPA", "").split(",")
-                     if g.strip())
+    return _lista("SSO_GRUPA")
 
 
 def adres_wylogowania() -> str | None:
@@ -89,17 +102,28 @@ def login_z_naglowka(request: Request) -> str | None:
         return None
     if not _LOGIN.fullmatch(login):
         raise HTTPException(status_code=400, detail="Niepoprawny naglowek Remote-User")
-    grupy = _jedna_wartosc(request, NAGLOWEK_GRUP) or ""
-    dopuszczone = dopuszczone_grupy()
+    dopuszczone = dopuszczone_grupy() | grupy_podgladu()
     if not dopuszczone:
         raise HTTPException(
             status_code=403,
             detail="SSO jest włączone, ale grupa Authelii (klucz SSO_GRUPA w Sekrecie "
                    "aplikacji) nie jest ustawiona — logowanie przez SSO zablokowane.")
-    if not dopuszczone & {g.strip() for g in grupy.split(",")}:
+    if not dopuszczone & _grupy(request):
         raise HTTPException(
             status_code=403,
             detail=f"Użytkownik „{login}” nie należy do żadnej z grup "
                    f"„{', '.join(sorted(dopuszczone))}” w Authelii — Trader jest "
                    "tylko dla nich.")
     return login
+
+
+def _grupy(request: Request) -> set[str]:
+    return {g.strip() for g in (_jedna_wartosc(request, NAGLOWEK_GRUP) or "").split(",")}
+
+
+def tylko_podglad(request: Request) -> bool:
+    """Czy te zadanie wpuscila WYLACZNIE grupa podgladu. Wolac po
+    `login_z_naglowka` (ta odrzucila juz zadanie bez zadnej dopuszczonej
+    grupy)."""
+    grupy = _grupy(request)
+    return not (dopuszczone_grupy() & grupy) and bool(grupy_podgladu() & grupy)

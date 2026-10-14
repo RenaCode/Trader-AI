@@ -478,7 +478,7 @@ async def zglos_rozjazd_stawek(fetch_all, notify, kind: str, zmierzone: dict,
              + "\n\nRachunek papierowy, backtest i trening liczą po stawce z "
                "`services/engine/koszty.py` (CENNIK). Popraw cennik albo "
                "sprawdź, czy zmiana po stronie giełdy jest trwała.")
-    odbiorcy = await fetch_all('SELECT id FROM app."user" WHERE is_active')
+    odbiorcy = await fetch_all("SELECT id FROM app.\"user\" WHERE is_active AND role = 'owner'")
     for u in odbiorcy:
         await notify(u["id"], "koszty.rozjazd", tytul, tresc,
                      data={"kind": kind, **stawki})

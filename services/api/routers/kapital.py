@@ -144,7 +144,7 @@ async def dodaj_przeplyw(engine: Silnik, body: PrzeplywBody, request: Request,
     ip = (adres_klienta(request) if request is not None else None) or "?"
     rodzaj = "Wpłata" if body.amount > 0 else "Wypłata"
     netto = wplaty + body.amount
-    for u in await fetch_all('SELECT id FROM app."user" WHERE is_active'):
+    for u in await fetch_all("SELECT id FROM app.\"user\" WHERE is_active AND role = 'owner'"):
         await powiadom_o_bezpieczenstwie(
             u["id"], "kapital.przeplyw",
             f"{rodzaj} {abs(body.amount):.2f} zapisana ({engine}/{body.mode})",

@@ -349,7 +349,7 @@ async def zastosuj_dostepnosc(w_bazie: list[dict], z_gieldy: dict[str, dict],
         return 0
 
     odbiorcy = [] if sucho else await fetch_all(
-        'SELECT id FROM app."user" WHERE is_active')
+        "SELECT id FROM app.\"user\" WHERE is_active AND role = 'owner'")
     pilne = 0
     for w in werdykty:
         print(f"  [{w['klasa']}] {w['tytul']}")

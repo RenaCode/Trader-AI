@@ -106,9 +106,9 @@ def test_bez_grupy_w_sekrecie_odmowa_dla_kazdego(monkeypatch):
 
 @pytest.mark.parametrize("sekret, grupy, wynik", [
     # Lista grup: wlasciciel i rodzina wchodza, administracyjna nie.
-    ("grupa-testowa,grupa-rodzina", "grupa-rodzina", "uzytkownik1"),
-    ("grupa-testowa, grupa-rodzina", "inna-grupa,grupa-testowa", "uzytkownik1"),
-    ("grupa-testowa,grupa-rodzina", "grupa-administracyjna", 403),
+    ("grupa-testowa,grupa-druga", "grupa-druga", "uzytkownik1"),
+    ("grupa-testowa, grupa-druga", "inna-grupa,grupa-testowa", "uzytkownik1"),
+    ("grupa-testowa,grupa-druga", "grupa-administracyjna", 403),
     # Puste pozycje nie dopuszczaja grupy o pustej nazwie ani pustego naglowka.
     ("grupa-testowa,,", "", 403),
     (" , ", "grupa-testowa", 403),
@@ -123,6 +123,29 @@ def test_lista_grup_w_sekrecie(monkeypatch, sekret, grupy, wynik):
         assert e.value.status_code == 403
     else:
         assert sso.login_z_naglowka(z) == wynik
+
+
+@pytest.mark.parametrize("pelne, podglad, grupy, wpuszczony, tylko", [
+    ("grupa-testowa", "grupa-podgladu", "grupa-podgladu", True, True),
+    # W obu grupach: pelna wygrywa (rola z bazy).
+    ("grupa-testowa", "grupa-podgladu", "grupa-podgladu,grupa-testowa", True, False),
+    ("grupa-testowa", "grupa-podgladu", "grupa-testowa", True, False),
+    ("grupa-testowa", "grupa-podgladu", "inna-grupa", False, None),
+    # Sam podglad w Sekrecie, bez SSO_GRUPA: wpuszcza tylko do podgladu.
+    ("", "grupa-podgladu", "grupa-podgladu", True, True),
+])
+def test_grupa_podgladu(monkeypatch, pelne, podglad, grupy, wpuszczony, tylko):
+    monkeypatch.setenv("SSO_NAGLOWKI", "1")
+    monkeypatch.setenv("SSO_GRUPA", pelne)
+    monkeypatch.setenv("SSO_GRUPA_PODGLAD", podglad)
+    z = _zadanie(("Remote-User", "uzytkownik1"), ("Remote-Groups", grupy))
+    if not wpuszczony:
+        with pytest.raises(HTTPException) as e:
+            sso.login_z_naglowka(z)
+        assert e.value.status_code == 403
+        return
+    assert sso.login_z_naglowka(z) == "uzytkownik1"
+    assert sso.tylko_podglad(z) is tylko
 
 
 def test_nie_czyta_wariantow_naglowka(monkeypatch):
@@ -473,22 +496,29 @@ def test_zamkniecie_api_czeka_na_wysylki_w_tle_przed_pula(monkeypatch):
 
 # ------------------------------------------------------------ podglad dla rodziny (14.10)
 @bazodanowy
-def test_rodzina_przez_sso_widzi_ale_nie_zmienia(konta, monkeypatch):
-    """Druga grupa z `SSO_GRUPA` wchodzi na konto `viewer`: czyta, a zapis
-    (tu kill-switch) dostaje 403 z roli - grupa nie daje uprawnien."""
+@pytest.mark.parametrize("rola_w_bazie", ["viewer", "owner"])
+def test_grupa_podgladu_czyta_ale_nie_zmienia(konta, monkeypatch, rola_w_bazie):
+    """Grupa z `SSO_GRUPA_PODGLAD` czyta, a zapis (tu kill-switch) dostaje
+    403. Takze gdy konto w bazie ma `owner` (pomylka przy zakladaniu, reczny
+    UPDATE): rola jest obcinana przy kazdym zadaniu, nie tylko przy logowaniu."""
     monkeypatch.setenv("SSO_NAGLOWKI", "1")
-    monkeypatch.setenv("SSO_GRUPA", "grupa-testowa,grupa-rodzina")
-    podglad = konta(rola="viewer")
+    monkeypatch.setenv("SSO_GRUPA", "grupa-testowa")
+    monkeypatch.setenv("SSO_GRUPA_PODGLAD", "grupa-podgladu")
+    konto = konta(rola=rola_w_bazie)
+    naglowki = _authelia(konto["login"], "grupa-podgladu")
     with _klient() as k:
-        r = k.get("/api/auth/me", headers=_authelia(podglad["login"], "grupa-rodzina"))
+        r = k.get("/api/auth/me", headers=naglowki)
         assert r.status_code == 200, r.text
         assert r.json()["role"] == "viewer"
         r = k.post("/api/engines/crypto/risk/killswitch",
-                   json={"powod": "test podgladu rodziny"},
-                   headers={**_authelia(podglad["login"], "grupa-rodzina"),
-                            "X-CSRF-Token": k.cookies.get("__Host-trader_csrf")})
+                   json={"powod": "test grupy podgladu"},
+                   headers={**naglowki, "X-CSRF-Token": k.cookies.get("__Host-trader_csrf")})
         assert r.status_code == 403, r.text
         assert "właściciela" in r.json()["detail"]
+        # Kanarek: ta sama sesja z grupa pelna - wlasciciel z bazy przechodzi.
+        if rola_w_bazie == "owner":
+            r = k.get("/api/auth/me", headers=_authelia(konto["login"], "grupa-testowa"))
+            assert r.json()["role"] == "owner"
 
 
 def _create_admin(*argumenty: str, haslo: str) -> subprocess.CompletedProcess:
@@ -504,6 +534,9 @@ def test_create_admin_rola_viewer_i_brak_cichej_zmiany_roli():
 
     login = f"sso-{uuid.uuid4().hex[:10]}"
     try:
+        # Nowe konto bez --rola: odmowa (literowka nie zaklada `owner`).
+        w = _create_admin(login, haslo="haslo-startowe-0")
+        assert w.returncode != 0 and "wymaga --rola" in w.stderr
         w = _create_admin(login, "--rola", "viewer", haslo="haslo-startowe-1")
         assert w.returncode == 0, w.stderr
         assert "rola: viewer" in w.stdout
@@ -511,6 +544,10 @@ def test_create_admin_rola_viewer_i_brak_cichej_zmiany_roli():
             rola, hash1 = c.execute('SELECT role, password_hash FROM app."user" WHERE login = %s',
                                     (login,)).fetchone()
         assert rola == "viewer"
+        # Nieznany argument, literowka w opcji, login spoza wzorca: odmowa.
+        for zle in ((login, "--role", "viewer"), (login, "--rola=viewer"),
+                    (login.upper(), "--rola", "viewer")):
+            assert _create_admin(*zle, haslo="haslo-startowe-9").returncode != 0, zle
         # Inna rola niz obecna: odmowa i ZERO zmian (haslo tez zostaje).
         w = _create_admin(login, "--rola", "owner", haslo="haslo-startowe-2")
         assert w.returncode != 0 and "nic nie zmieniono" in w.stderr
