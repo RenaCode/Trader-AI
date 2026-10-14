@@ -20,6 +20,7 @@ dopisujacej nastepny `location`, bo nastepny raz wyglada dokladnie tak samo.
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -117,3 +118,15 @@ def test_naglowki_sa_w_JEDNYM_miejscu_a_nie_powtorzone_recznie():
         assert f"add_header {naglowek} " not in _bez_komentarzy(NGINX), (
             f"{naglowek} wpisany wprost w nginx.conf - ma byc wylacznie "
             f"w docker/naglowki-bezpieczenstwa.conf")
+
+
+def test_index_html_bez_pamieci_podrecznej():
+    """index.html zawsze z serwera (2026-10-14, SSO): strona z pamieci
+    przegladarki omija forwardAuth i pokazuje logowanie aplikacji zamiast
+    portalu. `expires epoch`, nie add_header - inaczej blok zerwalby
+    dziedziczenie naglowkow bezpieczenstwa."""
+    tresc = (KORZEN / "docker" / "nginx.conf").read_text(encoding="utf-8")
+    blok = re.search(r"location = /index\.html \{(.*?)\}", tresc, re.S)
+    assert blok, "brak bloku location = /index.html"
+    assert "expires epoch;" in blok.group(1)
+    assert "add_header" not in blok.group(1)
