@@ -156,7 +156,7 @@ def test_podbicie_tagu_idzie_na_deploy(repo):
 
 
 def test_commit_samego_chartu_idzie_na_deploy_bez_buildu(repo):
-    """Filtr sciezek pomija build - a zmiana chartu i tak musi dojsc."""
+    """Job `changes` nie buduje niczego - a zmiana chartu i tak musi dojsc."""
     c = repo.chart(', "--interval", "300"')
     assert przesun(c) == 0 and repo.deploy() == c
 
@@ -223,23 +223,6 @@ def test_tag_z_values_czyta_to_samo_co_sed_update_git():
 
 def _wf():
     return yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
-
-
-def _filtr():
-    tekst = _wf()["jobs"]["changes"]["steps"][1]["with"]["filters"]
-    return yaml.safe_load(tekst)
-
-
-def _bez_glob(sciezki):
-    return sorted(s.removesuffix("/**") for s in sciezki
-                  if s != ".github/workflows/docker-publish.yml")
-
-
-@pytest.mark.parametrize("usluga", ["api", "web"])
-def test_sciezki_obrazu_to_filtr_builda(usluga):
-    """Sciezka w obrazie, ktorej nie ma w filtrze, nie przebudowuje obrazu -
-    a `galaz_deploy` zablokowalby `deploy` do nastepnego buildu."""
-    assert _bez_glob(_filtr()[usluga]) == sorted(gd.SCIEZKI_OBRAZU[usluga])
 
 
 @pytest.mark.parametrize("usluga,dockerfile", [("api", "docker/api.Dockerfile"),

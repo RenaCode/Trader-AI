@@ -87,13 +87,14 @@ def test_proxy_api_dziala_takze_w_preview():
 
 
 def test_zmiana_workflow_uruchamia_workflow():
-    """Filtr ścieżek musi obejmować sam plik workflow.
+    """Zmiana samego workflow musi przebudowac obraz (api).
 
     Bez tego edycja definicji CI kończy się zielonym przebiegiem, w którym
     wszystkie joby zostały pominięte — czyli poprawka CI nie jest przez CI
     sprawdzana. Tak przeżył 11 dni krok wołający usunięty plik.
+    Od 2026-10-14 decyduje .github/skrypty/obrazy_do_budowy.py (WYZWALACZE_CI).
     """
-    tresc = (KORZEN / ".github/workflows/docker-publish.yml").read_text()
-    filtr = tresc[tresc.index("filters: |"):tresc.index("verify-migrations")]
-    assert ".github/workflows/docker-publish.yml" in filtr, \
+    tresc = (KORZEN / ".github/skrypty/obrazy_do_budowy.py").read_text()
+    wyzwalacze = tresc[tresc.index("WYZWALACZE_CI = {"):tresc.index("def do_budowy")]
+    assert ".github/workflows/docker-publish.yml" in wyzwalacze, \
         "zmiana workflow nie uruchamia workflow — jego własna poprawka nie będzie sprawdzona"
