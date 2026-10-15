@@ -33,6 +33,8 @@ spec:
   startingDeadlineSeconds: 300
   jobTemplate:
     spec:
+      # Sprzatanie zakonczonych Jobow - `sprzatanieZadan` w values.yaml.
+      ttlSecondsAfterFinished: {{ .Values.sprzatanieZadan.instrumenty }}
       # Zadanie, ktore nie domknie sie w dziesiec minut, samo dostanie warunek
       # Failed. Bez tego zawieszone polaczenie z gielda blokuje `Forbid`
       # w nieskonczonosc, a kolejne przebiegi po cichu przepadaja.

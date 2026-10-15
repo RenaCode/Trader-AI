@@ -50,6 +50,8 @@ spec:
   startingDeadlineSeconds: 300
   jobTemplate:
     spec:
+      # Sprzatanie zakonczonych Jobow - `sprzatanieZadan` w values.yaml.
+      ttlSecondsAfterFinished: {{ .Values.sprzatanieZadan.diagnostyka }}
       # Bez ponawiania: pomiar, ktory sie nie policzyl, ma zostac nieudany.
       # Powtorzenie dalo by druga liczbe z tego samego przebiegu i nikt by nie
       # wiedzial, ktora jest ta wlasciwa.

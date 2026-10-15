@@ -78,6 +78,8 @@ spec:
   startingDeadlineSeconds: 300
   jobTemplate:
     spec:
+      # Sprzatanie zakonczonych Jobow - `sprzatanieZadan` w values.yaml.
+      ttlSecondsAfterFinished: {{ .Values.sprzatanieZadan.zywotnosc }}
       # Bez ponawiania: awaria silnika nie naprawi sie przez powtorzenie
       # sprawdzenia, a kazde powtorzenie wyslaloby to samo powiadomienie.
       #

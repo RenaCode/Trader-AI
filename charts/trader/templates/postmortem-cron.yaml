@@ -53,6 +53,8 @@ spec:
   startingDeadlineSeconds: 600
   jobTemplate:
     spec:
+      # Sprzatanie zakonczonych Jobow - `sprzatanieZadan` w values.yaml.
+      ttlSecondsAfterFinished: {{ .Values.sprzatanieZadan.postmortem }}
       # BEZ PONAWIANIA. Odmowa dostawcy i pusty limit dobowy nie mijaja przez
       # powtorzenie za minute, a kazda proba kosztuje tokeny. Awaria ma byc
       # widoczna raz, a nie odbita szesc razy w dzienniku wydatkow.

@@ -1118,3 +1118,23 @@ diagnostykaCron:
   resources:
     limits:   { cpu: 2000m, memory: 2Gi }
     requests: { cpu: 200m,  memory: 512Mi }
+
+# SPRZATANIE ZAKONCZONYCH JOBOW (`ttlSecondsAfterFinished`, 2026-10-15), sekundy.
+# `failedJobsHistoryLimit: 1` trzyma nieudany Job, dopoki nie padnie nastepny -
+# czyli bez konca, takze gdy kazdy pozniejszy przebieg sie udal (15.10 w Lensie
+# czerwone: trener z 04.10, postmortem z 10.10, choc od tamtej pory przechodzily).
+# TTL = odstep miedzy przebiegami + zapas: nieudany Job jest widoczny, az
+# nastepny przebieg mial szanse sie odbyc; jesli tez padnie, pojawi sie nowy.
+# Bez wplywu na alarmy: czujka renacode-infra ignoruje porazke, po ktorej przyszedl
+# nowszy przebieg, a "CronJob przestal sie uruchamiac" czyta `lastScheduleTime`
+# CronJoba, nie Joby; `zywotnosc` Tradera liczy przebiegi z bazy. Logi podow
+# zostaja 30 dni w VictoriaLogs (aplikacja Argo `logi`).
+sprzatanieZadan:
+  zywotnosc: 3600        # co 10 min
+  instrumenty: 25200     # co 6 h -> 7 h
+  kurs: 25200            # co 6 h -> 7 h
+  backup: 93600          # codziennie -> 26 h
+  proba: 93600           # codziennie -> 26 h
+  postmortem: 93600      # codziennie -> 26 h
+  trainer: 691200        # co tydzien -> 8 dni
+  diagnostyka: 604800    # reczne (`--from=cronjob`) -> 7 dni na przejrzenie

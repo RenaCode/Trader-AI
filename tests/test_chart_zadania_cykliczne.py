@@ -136,3 +136,36 @@ def test_trener_tygodniowy_ma_JEDNA_powtorke_w_limicie_czasu():
     job = yaml.safe_load(wynik.stdout)["spec"]["jobTemplate"]["spec"]
     assert job["backoffLimit"] == 1
     assert job["activeDeadlineSeconds"] <= 3 * 3600
+
+
+# SPRZATANIE ZAKONCZONYCH JOBOW (2026-10-15). Bez TTL nieudany Job wisial
+# czerwony tygodniami mimo udanych pozniejszych przebiegow; za krotki TTL
+# kasowalby porazke, zanim nastepny przebieg mial szanse jej zaprzeczyc.
+_ODSTEP_S = {"*/10 * * * *": 600, "7 */6 * * *": 6 * 3600, "13 */6 * * *": 6 * 3600,
+             "40 4 * * 0": 7 * 86400}
+
+
+def _odstep_s(harmonogram: str) -> int:
+    if harmonogram in _ODSTEP_S:
+        return _ODSTEP_S[harmonogram]
+    if harmonogram == "0 0 31 2 *":  # nigdy - zadania uruchamiane recznie
+        return 0
+    minuta, godzina, dzien, miesiac, tydzien = harmonogram.split()
+    assert (dzien, miesiac, tydzien) == ("*", "*", "*") and minuta.isdigit() and godzina.isdigit(), (
+        f"nieznany harmonogram {harmonogram!r} - dopisz odstep do _ODSTEP_S")
+    return 86400
+
+
+@pytest.mark.parametrize("plik", CRONY)
+def test_kazdy_cronjob_sprzata_po_nastepnym_przebiegu(plik):
+    t = _tekst(plik)
+    m = re.search(r"^      ttlSecondsAfterFinished: \{\{ \.Values\.sprzatanieZadan\.(\w+) \}\}", t, re.M)
+    assert m, f"{plik}: brak ttlSecondsAfterFinished w jobTemplate.spec"
+    ttl = VALUES["sprzatanieZadan"][m.group(1)]
+    harmonogram = re.search(r'^  schedule: "?([^"\n]+)"?', t, re.M).group(1).strip()
+    if "Values." in harmonogram:
+        klucz = re.search(r"\.Values\.(\w+)\.schedule", harmonogram).group(1)
+        harmonogram = VALUES[klucz]["schedule"]
+    odstep = _odstep_s(harmonogram)
+    assert ttl > odstep, f"{plik}: TTL {ttl} s <= odstep {odstep} s - porazka zniknie przed nastepnym przebiegiem"
+    assert ttl <= max(odstep * 2, 7 * 86400), f"{plik}: TTL {ttl} s - stara porazka wisi za dlugo"

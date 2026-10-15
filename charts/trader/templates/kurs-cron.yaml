@@ -80,6 +80,8 @@ spec:
   startingDeadlineSeconds: 300
   jobTemplate:
     spec:
+      # Sprzatanie zakonczonych Jobow - `sprzatanieZadan` w values.yaml.
+      ttlSecondsAfterFinished: {{ .Values.sprzatanieZadan.kurs }}
       # Zawieszone polaczenie z gielda nie moze blokowac `Forbid` w
       # nieskonczonosc - kolejne przebiegi po cichu by przepadaly.
       activeDeadlineSeconds: 600
