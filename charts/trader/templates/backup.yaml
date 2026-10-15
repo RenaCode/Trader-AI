@@ -47,6 +47,8 @@ spec:
   startingDeadlineSeconds: 600
   jobTemplate:
     spec:
+      # Sprzatanie zakonczonych Jobow - `sprzatanieZadan` w values.yaml.
+      ttlSecondsAfterFinished: {{ .Values.sprzatanieZadan.backup }}
       backoffLimit: 2
       # TWARDY LIMIT CZASU - 90 minut na CALE zadanie, razem z ponowieniami.
       #

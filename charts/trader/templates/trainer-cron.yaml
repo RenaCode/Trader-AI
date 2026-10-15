@@ -26,6 +26,8 @@ spec:
   failedJobsHistoryLimit: 1
   jobTemplate:
     spec:
+      # Sprzatanie zakonczonych Jobow - `sprzatanieZadan` w values.yaml.
+      ttlSecondsAfterFinished: {{ .Values.sprzatanieZadan.trainer }}
       # JEDNA POWTORKA (audyt 2026-10-09, W-4). Przy `backoffLimit: 0` planowy
       # przebieg 04.10 padl na `connection refused` w pierwszej sekundzie poda
       # (opoznienie kube-routera; bramka migracji z 05.10 czeka na baze, ale

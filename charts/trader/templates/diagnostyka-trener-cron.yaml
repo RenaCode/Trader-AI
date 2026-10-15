@@ -39,6 +39,8 @@ spec:
   startingDeadlineSeconds: 300
   jobTemplate:
     spec:
+      # Sprzatanie zakonczonych Jobow - `sprzatanieZadan` w values.yaml.
+      ttlSecondsAfterFinished: {{ .Values.sprzatanieZadan.diagnostyka }}
       backoffLimit: 0
       activeDeadlineSeconds: 5400
       template:

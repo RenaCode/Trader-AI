@@ -58,6 +58,8 @@ spec:
   startingDeadlineSeconds: 600
   jobTemplate:
     spec:
+      # Sprzatanie zakonczonych Jobow - `sprzatanieZadan` w values.yaml.
+      ttlSecondsAfterFinished: {{ .Values.sprzatanieZadan.proba }}
       # Bez ponawiania. Powtorzenie proby po niepowodzeniu podnioslo by prog
       # jeszcze raz, a przy trwajacej awarii lancucha zatrzymywaloby silnik
       # w kolko - czyli samo stalo by sie ta awaria, ktorej szuka.
