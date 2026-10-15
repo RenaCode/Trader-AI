@@ -2573,14 +2573,14 @@ def brak_odczytu_statusu(wiersze: list[dict],
     nie wolno ich zglaszac tak samo.
 
     `sprawdz_instrumenty` mierzy wiek kolumny `status_sprawdzony_at`. Dla
-    krypto pusta data znaczy "zadanie `services/ingest/instrumenty.py`
-    przestalo chodzic" - czyli awarie do naprawienia. Dla toru `equity`
-    znaczy co innego: tamto zadanie pyta WYLACZNIE Bybita
-    (`ref.venue WHERE code = 'bybit'`, `instrumenty.main`) i chart wola je bez
-    `--engine`, wiec dla zadnej akcji nie odczytalo statusu nigdy i nie
-    odczyta, dopoki ktos nie napisze odswiezacza dla Alpaki. Zmierzone na
+    silnika z odswiezaczem pusta data znaczy "zadanie
+    `services/ingest/instrumenty.py` przestalo chodzic" - czyli awarie do
+    naprawienia. Dla silnika bez odswiezacza znaczy co innego: nikt o to nie
+    pyta i nie zapyta. Tak bylo z torem `equity` do 2026-10-15 - zmierzone na
     produkcji 2026-09-27: 20 handlowalnych instrumentow equity, z tego
     `status_sprawdzony_at` ustawione dla ZERA; dla krypto dla wszystkich 34.
+    Od 2026-10-15 Alpaka jest w `instrumenty.VENUE_ODSWIEZANE`, wiec ta
+    funkcja ucisza dzis tylko silnik, ktorego tam nie ma.
 
     Alarm o tym stanie przychodzilby przy kazdym przebiegu zadania (co 10 min),
     a `instrument.suspended` ma katalogowy cooldown 3600 s, czyli 24 maile na
@@ -2595,7 +2595,7 @@ def brak_odczytu_statusu(wiersze: list[dict],
     CZEGO TA FUNKCJA NIE UCISZA - i to sa DWIE osobne granice, obie konieczne.
 
     PIERWSZA: `bez_odswiezacza` musi byc prawda, czyli gieldy tego silnika nie
-    pyta o status ZADEN proces (`instrumenty.VENUE_ODSWIEZANY`). Dla krypto pusta
+    pyta o status ZADEN proces (`instrumenty.VENUE_ODSWIEZANE`). Dla krypto pusta
     data znaczy "zadanie `trader-instrumenty` przestalo chodzic" - i to jest
     awaria do obudzenia czlowieka, dokladnie ta, ktora 2026-09-24 przelezala
     10 godzin za `|| true`. Domysl parametru to `False`, czyli "odswiezacz
@@ -2704,21 +2704,27 @@ async def venue_bez_odswiezacza(fetch_all, engine: str) -> bool:
     """Czy gieldy TEGO silnika nie pyta o status zaden proces.
 
     `services/ingest/instrumenty.py` - jedyny odswiezacz statusu w repozytorium -
-    pyta wylacznie gieldy `VENUE_ODSWIEZANY` i chodzi bez `--engine`. Silnik,
-    ktorego gielda nie jest ta gielda, nie ma wiec ani jednego procesu
-    ustawiajacego `ref.instrument.status_sprawdzony_at`, a jego pusta kolumna nie
-    jest awaria - jest brakiem mechanizmu.
+    pyta wylacznie gield z `VENUE_ODSWIEZANE`, po jednej na silnik. Silnik bez
+    wpisu tam (albo z wpisem, ktorego gieldy nie ma w `ref.venue` dla tego
+    silnika) nie ma ani jednego procesu ustawiajacego
+    `ref.instrument.status_sprawdzony_at`, a jego pusta kolumna nie jest awaria
+    - jest brakiem mechanizmu.
 
-    NAZWA GIELDY IDZIE Z MODULU ODSWIEZACZA, nie jest przepisana. Druga kopia
-    tego napisu rozjechalaby sie w dniu, w ktorym ktos dopisze adapter statusu
-    dla Alpaki - i to wlasnie ta czujka twierdzilaby wtedy dalej, ze pomiaru nie
-    ma, czyli MILCZALABY o pierwszej awarii nowego odswiezacza.
+    NAZWY GIELD IDA Z MODULU ODSWIEZACZA, nie sa przepisane. Druga kopia
+    rozjechalaby sie w dniu, w ktorym ktos dopisze adapter statusu - i to
+    wlasnie ta czujka twierdzilaby wtedy dalej, ze pomiaru nie ma, czyli
+    MILCZALABY o pierwszej awarii nowego odswiezacza. Tak bylo do 2026-10-15
+    z Alpaka: od dopisania jej do `VENUE_ODSWIEZANE` pusta data sprawdzenia
+    akcji jest awaria, nie brakiem pomiaru.
     """
-    from services.ingest.instrumenty import VENUE_ODSWIEZANY
+    from services.ingest.instrumenty import VENUE_ODSWIEZANE
 
+    venue = VENUE_ODSWIEZANE.get(engine)
+    if venue is None:
+        return True
     return not await fetch_all(
         "SELECT 1 FROM ref.venue WHERE engine::text = %s AND code = %s LIMIT 1",
-        (engine, VENUE_ODSWIEZANY))
+        (engine, venue))
 
 
 async def sprawdz_instrumenty(fetch_all, notify, sucho: bool = False, *,
@@ -2754,7 +2760,7 @@ async def sprawdz_instrumenty(fetch_all, notify, sucho: bool = False, *,
         print(f"  BRAK POMIARU: statusu u giełdy nie odczytano dla ANI JEDNEGO "
               f"z {len(wiersze)} instrumentów tego silnika — dla `{engine}` nie "
               f"istnieje proces, który by o to pytał (services/ingest/"
-              f"instrumenty.py pyta wyłącznie Bybita i chodzi bez --engine). "
+              f"instrumenty.py nie ma giełdy tego silnika w VENUE_ODSWIEZANE). "
               f"To nie jest potwierdzenie handlu: delisting w tym stanie "
               f"przeszedłby niezauważony. Powiadomienia NIE wysyłam — stan jest "
               f"trwały i nie zmieni się bez nowego odświeżacza.")

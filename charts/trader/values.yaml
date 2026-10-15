@@ -851,6 +851,11 @@ instrumentyCron:
   enabled: true
   schedule: "7 */6 * * *"
   mode: demo
+  # Silniki, ktorych status odswiezamy - KAZDY z `instrumenty.VENUE_ODSWIEZANE`.
+  # Wpis tam mowi czujce "pusta data sprawdzenia to awaria"; silnik, ktory tam
+  # jest, a nie ma go tutaj, zapalalby alarm "nie sprawdzano" po 26 h przy
+  # kazdym przebiegu. Zgodnosc obu list pilnuje test.
+  silniki: [crypto, equity]
 
 # Proba pozarowa kill-switcha. Doprowadza do PRAWDZIWEGO zadzialania i sprawdza
 # caly lancuch: zadanie -> wiersz w bazie -> wstrzymanie wejsc -> powiadomienie.

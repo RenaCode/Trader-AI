@@ -187,6 +187,28 @@ def _status_alpaki(status: str) -> str:
     return _STATUSY.get(status, f"nieznany:{status}")
 
 
+# STATUS AKTYWA W SLOWNIKU `instrumenty.klasyfikuj_status`.
+#
+# Alpaca podaje dwie rzeczy osobno: `status` (`active` | `inactive`, nic wiecej
+# wg dokumentacji `/v2/assets`) i `tradable`. Bybit podaje jedno slowo. Do
+# `ref.instrument.status_gieldy` idzie JEDNO slowo, wiec skladamy je tutaj:
+#
+#   active + tradable      -> "active"               (handel)
+#   active + NIE tradable  -> "active_not_tradable"  (zawieszenie)
+#   inactive               -> "inactive"             (wycofanie)
+#
+# `tradable = false` przy aktywnym aktywie to "Alpaca teraz tym nie handluje"
+# bez stwierdzenia, ze papier zniknal - wiec przerwa, ktora moze minac sama.
+# Wygaszenie Alpaca oglasza `inactive`, i wtedy automat juz nie przywraca.
+# Kazde inne slowo przechodzi BEZ ZMIANY, a klasyfikator czyta nieznane slowo
+# jako wycofanie - nowa wartosc u Alpaki nie moze przejsc jako handel.
+def status_aktywa(a: dict) -> str | None:
+    status = a.get("status")
+    if status == "active" and not a.get("tradable"):
+        return "active_not_tradable"
+    return status
+
+
 def _dec(v) -> Decimal:
     return Decimal(str(v)) if v is not None else Decimal(0)
 
@@ -603,11 +625,23 @@ class AlpacaAdapter:
         poza 1 USD dla ulamkow - oddajemy to w tym samym ksztalcie, co Bybit."""
         out: dict[str, dict] = {}
         for s in symbole or []:
-            a = await self._get(f"/v2/assets/{s}")
+            try:
+                a = await self._get(f"/v2/assets/{s}")
+            except ExchangeError as e:
+                # 404 TO ODPOWIEDZ, NIE AWARIA: Alpaca tego symbolu nie zna.
+                # Brak klucza w slowniku znaczy tu to samo, co brak pary
+                # w odpowiedzi Bybita - `instrumenty.ocen_dostepnosc` czyta to
+                # jako "gielda go nie zna". Kazdy inny blad (401, 5xx, transport)
+                # idzie dalej: nieudane pytanie nie moze wygladac jak odpowiedz.
+                if e.code == "404":
+                    continue
+                raise
             out[s] = {"tradable": bool(a.get("tradable")),
                       "fractionable": bool(a.get("fractionable")),
                       "shortable": bool(a.get("shortable")),
+                      "status": status_aktywa(a),
                       "krok_ilosci": Decimal("0.000000001") if a.get("fractionable") else Decimal(1),
+                      "min_ilosc": None,
                       "krok_ceny": Decimal("0.01"), "min_wartosc": Decimal(1)}
         return out
 
