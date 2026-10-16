@@ -318,12 +318,11 @@ spec:
                   # PER TOR. Uniwersum equity to 20 handlowalnych instrumentow
                   # od migracji 0060 i zadne wywolanie ich nie obejmowalo.
                   #
-                  # UWAGA: dla `equity` to sprawdzenie melduje BRAK POMIARU, nie
-                  # zgodnosc, i nie wysyla powiadomienia - bo odswiezacza statusu
-                  # dla Alpaki nie ma (`services/ingest/instrumenty.py` pyta
-                  # wylacznie Bybita). Alarm co noc o stanie, ktory nie zmieni sie
-                  # bez nowego procesu, uczylby odklikiwac cala kategorie - w tym
-                  # alarmy o wycofaniu pary, ktora naprawde handlujemy. Powod
+                  # Od 2026-10-15 status equity odswieza `trader-instrumenty`
+                  # (Alpaca, `/v2/assets`), wiec pusta albo stara data
+                  # sprawdzenia jest tu AWARIA tak samo jak dla krypto. BRAK
+                  # POMIARU bez powiadomienia zostaje tylko dla silnika, ktorego
+                  # gieldy nie ma w `instrumenty.VENUE_ODSWIEZANE` - powod
                   # i liczby: `dozor.brak_odczytu_statusu`.
                   {{- range $tor := $tory }}
                   python services/engine/dozor.py --co instrumenty --engine {{ $tor.engine | quote }} || RC=$?

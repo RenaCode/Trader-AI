@@ -437,7 +437,7 @@ def test_czujka_ODROZNIA_rynek_z_sesjami_i_BRAK_odswiezacza():
 
     `rynek_z_sesjami` czyta `ref.venue.is_24_7`, czyli TĘ SAMĄ kolumnę, którą
     rozstrzyga `sesja.stan_sesji`. `venue_bez_odswiezacza` porównuje giełdę
-    silnika z `instrumenty.VENUE_ODSWIEZANY`. Gdyby którakolwiek z nich kłamała,
+    silnika z `instrumenty.VENUE_ODSWIEZANE`. Gdyby którakolwiek z nich kłamała,
     poprawka zamieniłaby alarm co noc na ciszę albo odwrotnie — a oba te stany
     wyglądają z zewnątrz tak samo jak zdrowie.
 
@@ -456,7 +456,9 @@ def test_czujka_ODROZNIA_rynek_z_sesjami_i_BRAK_odswiezacza():
             bez = _uruchom(venue_bez_odswiezacza(fetch_all, engine))
             odpowiedzi[engine] = (sesje, bez)
     assert odpowiedzi["crypto"] == (False, False), odpowiedzi
-    assert odpowiedzi["equity"] == (True, True), odpowiedzi
+    # Od 2026-10-15 equity MA odswiezacz (Alpaca w `VENUE_ODSWIEZANE`), wiec
+    # jego pusta data sprawdzenia jest awaria, a nie brakiem pomiaru.
+    assert odpowiedzi["equity"] == (True, False), odpowiedzi
 
 
 def _stend_swiezosci(wiek_min, is_24_7):
@@ -563,11 +565,11 @@ def _instrument(symbol, sprawdzony_h):
 
 
 def test_instrumenty_BEZ_odswiezacza_mowia_BRAK_POMIARU():
-    """Tor equity: 20 instrumentów, zero odczytów statusu, ZERO powiadomień.
+    """Silnik bez odświeżacza: zero odczytów statusu, ZERO powiadomień.
 
-    `services/ingest/instrumenty.py` pyta wyłącznie giełdy `VENUE_ODSWIEZANY`
-    i chodzi bez `--engine`, więc dla żadnej akcji nie odczytał statusu nigdy
-    i nie odczyta, dopóki ktoś nie napisze odświeżacza dla Alpaki. Zmierzone
+    Tak było z torem equity do 2026-10-15: `services/ingest/instrumenty.py`
+    pytał wyłącznie Bybita, więc dla żadnej akcji nie odczytał statusu nigdy
+    i nie odczytałby, dopóki nie powstał odświeżacz dla Alpaki. Zmierzone
     2026-09-27: `status_sprawdzony_at` ustawione dla 0 z 20 instrumentów equity
     i dla 34 z 34 instrumentów crypto.
 
@@ -596,7 +598,7 @@ def test_KANAREK_instrumenty_Z_odswiezaczem_NADAL_alarmuja():
     assert brak_odczytu_statusu(wiersze, False) is False
     powody = ocen_instrumenty(wiersze, bez_odswiezacza=False)
     assert len(powody) == 1, powody
-    assert powody[0][0] == "instrument.suspended"
+    assert powody[0][0] == "instrument.status_nieswiezy"
     assert "nie był sprawdzany" in powody[0][1]
 
 

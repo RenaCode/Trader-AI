@@ -51,20 +51,52 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 
-# GIELDA, KTOREJ TEN PROCES PYTA O STATUS - I JEDYNA, KTOREJ PYTA.
+# GIELDY, KTORYCH TEN PROCES PYTA O STATUS - PO JEDNEJ NA SILNIK.
 #
-# Do 2026-09-27 ten napis stal w SQL-u wewnatrz `main()`, wiec z zewnatrz nie
-# dalo sie odpowiedziec na pytanie "czy status instrumentow silnika X ma kto
+# Do 2026-09-27 napis "bybit" stal w SQL-u wewnatrz `main()`, wiec z zewnatrz
+# nie dalo sie odpowiedziec na pytanie "czy status instrumentow silnika X ma kto
 # odswiezac". Odpowiedz jest potrzebna czujce: `dozor.py --co instrumenty`
 # mierzy WIEK kolumny `status_sprawdzony_at`, a pusta data znaczy dwie rozne
 # rzeczy - "odswiezacz stanal" (awaria) albo "odswiezacza dla tej gieldy nie
 # ma" (brak pomiaru). Patrz `dozor.brak_odczytu_statusu`.
 #
-# Stala, a nie argument: rozszerzenie na Alpake to nie podmiana hosta, tylko
-# drugi adapter statusu (inne slowniki stanu, inny endpoint, inne reguly
-# `Filtry`). Dopoki go nie ma, ta nazwa ma byc CZYTELNA Z ZEWNATRZ, zeby brak
-# pokrycia nie udawal zgodnosci.
-VENUE_ODSWIEZANY = "bybit"
+# Od 2026-10-15 (decyzja wlasciciela) `equity` ma odswiezacz: Alpaca,
+# `GET /v2/assets/{symbol}`. To NIE jest endpoint danych rynkowych - swieca albo
+# kurs potrafia przyjsc dla papieru, ktorego Alpaca juz nie pozwala handlowac;
+# o dopuszczeniu do handlu mowi tylko rejestr aktywow.
+#
+# Wpis tutaj jest OBIETNICA dla czujki: od chwili, gdy silnik ma tu gielde,
+# pusta data sprawdzenia jest dla niego awaria, a nie brakiem pomiaru. Dlatego
+# wpis i wywolanie w `charts/trader/templates/instrumenty-cron.yaml` musza isc
+# razem - pilnuje tego test.
+VENUE_ODSWIEZANE = {"crypto": "bybit", "equity": "alpaca"}
+
+# OD KIEDY ODSWIEZACZ SILNIKA ISTNIEJE NA PRODUKCJI - wersja migracji, ktorej
+# `schema_migrations.applied_at` jest chwila wdrozenia obrazu z tym odswiezaczem.
+#
+# Miedzy wdrozeniem a pierwszym przebiegiem `trader-instrumenty` (do 6 h,
+# `instrumentyCron.schedule`) daty sprawdzenia akcji sa puste, bo nikt jeszcze
+# nie pytal - nie dlatego, ze odswiezacz padl. Czujka traktuje wiec "wszystkie
+# daty puste" jako BRAK POMIARU przez `dozor.PRZEGLAD_STATUSU_H` od tej chwili,
+# a potem jako AWARIE (np. brak albo odrzucony klucz Alpaki).
+#
+# MIGRACJA, A NIE DATA W KODZIE. Stala data musialaby zgadnac dzien scalenia:
+# za wczesna - alarm o 20 pustych datach tuz po wdrozeniu; za pozna - dni ciszy
+# o realnej awarii. Migracje stosuje migrator przy wdrozeniu, wiec jej
+# `applied_at` jest ta chwila co do minuty, w kazdym srodowisku osobno. Brak
+# wiersza (nie powinien sie zdarzyc) znaczy "okna nie ma" - czyli alarm.
+#
+# Krypto nie ma wpisu: jego odswiezacz chodzi od dawna i pusta data zawsze jest
+# u niego awaria.
+ODSWIEZACZ_OD = {"equity": "0097_instrument_status_nieswiezy"}
+
+# GIELDY, Z KTORYCH PRZEPISUJEMY TAKZE REGULY ZLECEN (krok ilosci, krok ceny,
+# minimum). Dla Alpaki - NIE, tylko status. Jej "reguly" w adapterze to stale
+# (grosz, 1 USD), a krok ilosci zalezy od `fractionable`: przepisanie go
+# zamieniloby `lot_size = 1` (migracja 0047) na 0.000000001 i po cichu wlaczylo
+# zlecenia ULAMKOWE - a tych Alpaca nie przyjmuje przy krotkiej sprzedazy i tylko
+# jako `day`. To jest decyzja o handlu, nie odswiezenie danych.
+VENUE_Z_REGULAMI = frozenset({"bybit"})
 
 
 def rozbieznosci(w_bazie: list[dict], z_gieldy: dict[str, dict]) -> list[dict]:
@@ -108,14 +140,19 @@ def rozbieznosci(w_bazie: list[dict], z_gieldy: dict[str, dict]) -> list[dict]:
 # Zlanie ich w jedno "nie Trading" znaczyloby, ze albo przerwa techniczna
 # wyrzuca instrument z uniwersum na stale, albo delisting wraca do uniwersum
 # sam - i obie pomylki sa drogie.
-STATUS_HANDLOWY = "trading"
+#
+# ALPACA MA WLASNE SLOWA (`alpaca.status_aktywa`): `active`, `active_not_tradable`,
+# `inactive`. Slownik jest JEDEN dla obu gield, bo czyta go takze czujka - druga
+# lista dla Alpaki bylaby druga prawda, ktora rozjedzie sie przy pierwszej zmianie.
+# Slowa sie nie zderzaja: Bybit v5 nie uzywa zadnego z nich.
+STATUSY_HANDLOWE = frozenset({"trading", "active"})
 STATUSY_ZAWIESZENIA = frozenset({
     "prelaunch", "prelisting", "prelist", "halt", "halted", "suspended",
-    "paused", "break", "maintenance",
+    "paused", "break", "maintenance", "active_not_tradable",
 })
 STATUSY_WYCOFANIA = frozenset({
     "delivering", "settling", "settled", "closed", "close", "delisted",
-    "delist", "delisting", "terminated",
+    "delist", "delisting", "terminated", "inactive",
 })
 
 
@@ -136,7 +173,7 @@ def klasyfikuj_status(status: str | None, *, obecny_u_gieldy: bool = True) -> st
     if not obecny_u_gieldy:
         return "wycofanie"
     slowo = (status or "").strip().lower()
-    if slowo == STATUS_HANDLOWY:
+    if slowo in STATUSY_HANDLOWE:
         return "handel"
     if slowo in STATUSY_ZAWIESZENIA:
         return "zawieszenie"
@@ -440,6 +477,58 @@ def niekompletne(w_bazie: list[dict]) -> list[str]:
     return sorted(braki)
 
 
+def masowe_wycofanie(w_bazie: list[dict], z_gieldy: dict[str, dict]
+                     ) -> tuple[int, int] | None:
+    """Czy WIECEJ NIZ POLOWA handlowalnych instrumentow dostalaby w tym przebiegu
+    klase "wycofanie". CZYSTA FUNKCJA. Zwraca (wycofanych, handlowalnych) albo None.
+
+    Jeden delisting to odpowiedz gieldy ("ten papier zniknal"). Polowa uniwersum
+    naraz to prawie na pewno ZLE PYTANIE albo ZLE ODCZYTANA ODPOWIEDZ: zly host,
+    klucz innego srodowiska, zmieniona sciezka (u Alpaki 404 na kazdym symbolu),
+    nowe slowo statusu, ktorego `klasyfikuj_status` nie zna (nieznane = wycofanie),
+    albo pole `status` zgubione przez zmiane formatu (None = wycofanie). Bez tej
+    bramki taki blad zdjalby `tradeable` z uniwersum i oznaczyl je jako wycofane,
+    a powrot po wycofaniu jest RECZNY.
+
+    MIERZY TO, PRZED CZYM CHRONI. Poprzednia bramka (`nikogo_nie_zna`, do
+    2026-10-16) lapala wylacznie 404 na WSZYSTKICH symbolach - jeden poprawny
+    wpis w odpowiedzi albo jedno nowe slowo statusu na calym uniwersum
+    przepuszczaly masowe wycofanie bez slowa.
+
+    LICZY TYLKO HANDLOWALNE (`tradeable`), bo tylko im zapis cos odbiera.
+    Pary wylaczone swiadomie (0020: 14 par USDT, ktorych podmiot unijny nie
+    oferuje) nigdy nie sa w odpowiedzi gieldy i rozwadnialyby mianownik.
+    """
+    handlowalne = [r for r in w_bazie if r.get("tradeable")]
+    wycofanych = 0
+    for r in handlowalne:
+        g = z_gieldy.get(r["symbol"])
+        if klasyfikuj_status(g["status"] if g else None,
+                             obecny_u_gieldy=g is not None) == "wycofanie":
+            wycofanych += 1
+    if wycofanych * 2 > len(handlowalne):
+        return wycofanych, len(handlowalne)
+    return None
+
+
+async def _z_alpaki(engine: str, mode: str, venue: str,
+                    symbole: list[str]) -> dict[str, dict]:
+    """Status aktywow z Alpaki, kluczem i hostem z bazy (`fabryka.adapter_danych`)."""
+    import psycopg
+
+    from services.exchanges.fabryka import adapter_danych
+
+    with psycopg.connect(os.environ["DATABASE_URL"]) as conn:
+        adapter = adapter_danych(conn, engine, mode)
+    try:
+        if getattr(adapter, "venue_code", None) != venue:
+            raise RuntimeError(f"adapter danych silnika {engine} to "
+                               f"{getattr(adapter, 'venue_code', '?')}, a nie {venue}")
+        return await adapter.filtry_instrumentow(symbole=symbole)
+    finally:
+        await adapter.close()
+
+
 # KODY WYJSCIA - ROZDZIELONE, bo mieszaly dwie rozne rzeczy.
 #
 # Do 2026-09-08 wszystko niezerowe bylo jedynka: i "instrument nie ma kompletu
@@ -463,7 +552,9 @@ KOD_WYCOFANIE = 4
 
 async def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--engine", default="crypto")
+    # `choices` z `VENUE_ODSWIEZANE`: literowka w chartcie ma wywrocic parser
+    # (test_chart_flagi_cli), a nie dojsc do "nie wiadomo, kogo pytac".
+    ap.add_argument("--engine", default="crypto", choices=tuple(VENUE_ODSWIEZANE))
     ap.add_argument("--mode", default="demo", choices=("demo", "live"),
                     help="ktorego podmiotu regul uzywamy")
     ap.add_argument("--sucho", action="store_true",
@@ -484,6 +575,11 @@ async def main() -> int:
 
     await open_pool()
     try:
+        venue = VENUE_ODSWIEZANE.get(args.engine)
+        if venue is None:
+            sys.exit(f"silnik {args.engine} nie ma gieldy w VENUE_ODSWIEZANE"
+                     " - nie wiadomo, kogo pytac")
+
         # HOST PODMIOTU, NIE GLOBALNY. Reguly zlecen obowiazuja tam, gdzie
         # zlecenie ladzie, a podmiot unijny ma je INNE: ADAUSDC ma u niego krok
         # ilosci 0.1 zamiast 0.01. Zapisanie regul globalnych konczy sie
@@ -491,35 +587,63 @@ async def main() -> int:
         # wskazuje na nasze zaokraglanie zamiast na zrodlo reguly.
         host = await fetch_one(
             "SELECT demo_host, live_host FROM ref.venue WHERE code = %s",
-            (VENUE_ODSWIEZANY,))
+            (venue,))
         if not host:
-            sys.exit(f"brak wpisu ref.venue dla {VENUE_ODSWIEZANY}"
+            sys.exit(f"brak wpisu ref.venue dla {venue}"
                      " - nie wiadomo, kogo pytac")
         adres = host["demo_host"] if args.mode == "demo" else host["live_host"]
 
-        # BEZ KLUCZA. Endpoint instrumentow jest publiczny, wiec adapter
-        # powstaje z pustymi poswiadczeniami - i to jest cecha, nie brak:
-        # uzupelnienie regul nie zalezy od tego, czy klucz w ogole istnieje.
-        adapter = BybitAdapter(api_key="", api_secret="", mode=args.mode, host=adres)
-        try:
-            z_gieldy = await adapter.filtry_instrumentow("spot")
-        finally:
-            await adapter.close()
-        print(f"reguły z {adres} (podmiot trybu {args.mode})")
+        # INSTRUMENTY TEJ GIELDY, nie calego silnika. Wiersz silnika na innej
+        # gieldzie (placeholdery `ibkr` z 0008) dostalby tu odpowiedz o cudzym
+        # papierze; zostaje bez daty sprawdzenia, a czujka widzi mieszanke dat
+        # i alarmuje - czyli dokladnie to, co powinna.
+        w_bazie = await fetch_all(
+            "SELECT i.id, i.symbol, i.lot_size, i.tick_size, i.min_notional,"
+            "       i.tradeable, i.status_gieldy, i.wylaczony_przez_status,"
+            "       (i.meta->>'min_ilosc') AS min_ilosc_meta"
+            "  FROM ref.instrument i JOIN ref.venue v ON v.id = i.venue_id"
+            " WHERE i.active AND i.engine::text = %s AND v.code = %s"
+            " ORDER BY i.symbol",
+            (args.engine, venue))
+
+        if venue == "bybit":
+            # BEZ KLUCZA. Endpoint instrumentow jest publiczny, wiec adapter
+            # powstaje z pustymi poswiadczeniami - i to jest cecha, nie brak:
+            # uzupelnienie regul nie zalezy od tego, czy klucz w ogole istnieje.
+            adapter = BybitAdapter(api_key="", api_secret="", mode=args.mode, host=adres)
+            try:
+                z_gieldy = await adapter.filtry_instrumentow("spot")
+            finally:
+                await adapter.close()
+        else:
+            # Z KLUCZEM. Rejestr aktywow Alpaki nie jest publiczny. Klucz
+            # bierzemy tak samo jak workery danych equity (najnowszy aktywny
+            # z `app.api_credential`, odszyfrowany `SECRETS_KEY`) - brak klucza
+            # albo 401 konczy przebieg KODEM 1, zanim cokolwiek zapiszemy.
+            # Cichy pusty przebieg zostawilby date sprawdzenia pusta, a to
+            # czujka slusznie nazwalaby awaria dopiero po 26 h.
+            z_gieldy = await _z_alpaki(args.engine, args.mode, venue,
+                                       [r["symbol"] for r in w_bazie])
+        print(f"{'reguły' if venue in VENUE_Z_REGULAMI else 'status'} z {adres}"
+              f" (podmiot trybu {args.mode})")
 
         if args.udawaj_status:
             z_gieldy = podmien_odpowiedz(z_gieldy, args.udawaj_status)
             print(f"UDAWANIE: {', '.join(args.udawaj_status)} — odpowiedź giełdy "
                   f"podmieniona w pamięci")
 
-        w_bazie = await fetch_all(
-            "SELECT id, symbol, lot_size, tick_size, min_notional, tradeable,"
-            "       status_gieldy, wylaczony_przez_status,"
-            "       (meta->>'min_ilosc') AS min_ilosc_meta"
-            " FROM ref.instrument WHERE active AND engine::text = %s ORDER BY symbol",
-            (args.engine,))
         print(f"giełda zna {len(z_gieldy)} instrumentów; w bazie {len(w_bazie)} "
               f"aktywnych ({args.engine})")
+        masowe = masowe_wycofanie(w_bazie, z_gieldy)
+        if masowe:
+            # PRZED ZAPISEM (takze regul zlecen). Patrz `masowe_wycofanie`.
+            # `sys.exit(tekst)` = kod 1, czyli AWARIA w rozumieniu KODOW WYJSCIA.
+            sys.exit(f"giełda {venue}: {masowe[0]} z {masowe[1]} handlowalnych "
+                     f"instrumentów silnika {args.engine} wyszłoby jako WYCOFANE "
+                     f"(brak u giełdy albo status spoza słownika) — więcej niż "
+                     f"połowa naraz to błąd zapytania albo odczytu (host, klucz, "
+                     f"tryb, nowe słowo statusu), nie wycofanie uniwersum. "
+                     f"Nic nie zapisano.")
 
         # POZYCJE TEGO PODMIOTU, KTOREGO REGULY WLASNIE CZYTAMY. Lista
         # instrumentow rozni sie miedzy podmiotem globalnym a unijnym, wiec
@@ -533,7 +657,9 @@ async def main() -> int:
                 (args.engine, args.mode)):
             pozycje.setdefault(p["symbol"], []).append(p)
 
-        do_zmiany = rozbieznosci(w_bazie, z_gieldy)
+        # Reguly zlecen tylko z gield, ktore je naprawde podaja - patrz
+        # `VENUE_Z_REGULAMI`. Status idzie nizej dla kazdej gieldy.
+        do_zmiany = rozbieznosci(w_bazie, z_gieldy) if venue in VENUE_Z_REGULAMI else []
         for z in do_zmiany:
             if z["brak_u_gieldy"]:
                 print(f"  BRAK U GIEŁDY {z['symbol']} — reguł nie ma skąd wziąć")

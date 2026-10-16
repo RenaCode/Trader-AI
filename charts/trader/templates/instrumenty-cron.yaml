@@ -18,6 +18,12 @@
 # przebiegu dobowym JEDNA nieudana proba od razu przekracza prog i budzi
 # czlowieka. Co szesc godzin daje trzy podejscia zanim to nastapi, a koszt jest
 # zerowy: endpoint instrumentow jest publiczny i nie wymaga klucza.
+#
+# DWA SILNIKI OD 2026-10-15: `crypto` (Bybit, publicznie) i `equity` (Alpaca,
+# `GET /v2/assets/{symbol}`, kluczem z `app.api_credential` odszyfrowanym
+# `SECRETS_KEY` - stad ta zmienna nizej; rola `silnik` ma SELECT na
+# `app.api_credential` z migracji 0034). Egress do Alpaki daje
+# `trader-egress-zadania` (internet poza siecia domowa), bez zmian.
 apiVersion: batch/v1
 kind: CronJob
 metadata:
@@ -73,19 +79,28 @@ spec:
                 - sh
                 - -c
                 - |
-                  python services/ingest/instrumenty.py --mode {{ .Values.instrumentyCron.mode }}
-                  RC=$?
                   # KOD 3 = "sa instrumenty bez kompletu regul". To jest stan
                   # BRAMKI EGZEKUCJI, nie awaria odswiezania - i na podmiocie
                   # unijnym stan NORMALNY, bo 24 pary USDT u niego nie istnieja.
                   # Zadanie wiecznie czerwone przestaje cokolwiek znaczyc.
                   #
                   # Kazdy inny kod niezerowy zostaje: 1 to awaria (wyjatek, brak
-                  # uprawnien, gielda milczy), 4 to wycofanie instrumentu -
-                  # drugi sygnal obok powiadomienia, celowo widoczny jako
-                  # nieudane zadanie.
-                  [ "$RC" = 3 ] && exit 0
-                  exit $RC
+                  # uprawnien, gielda milczy, brak klucza Alpaki), 4 to wycofanie
+                  # instrumentu - drugi sygnal obok powiadomienia, celowo
+                  # widoczny jako nieudane zadanie.
+                  #
+                  # PER SILNIK, KAZDY DO KONCA. Awaria jednego toru nie moze
+                  # zatrzymac odswiezenia drugiego - padniecie Alpaki nie ma
+                  # zamrazac statusu krypto. Wynik zadania to PIERWSZY niezerowy
+                  # kod, wiec czerwien jednego toru nie ginie za zielenia drugiego.
+                  KOD=0
+                  {{- range .Values.instrumentyCron.silniki }}
+                  python services/ingest/instrumenty.py --engine {{ . | quote }} --mode {{ $.Values.instrumentyCron.mode }}
+                  RC=$?
+                  [ "$RC" = 3 ] && RC=0
+                  [ "$KOD" = 0 ] && KOD=$RC
+                  {{- end }}
+                  exit $KOD
               env:
                 {{- include "trader.bramkaEnv" $ | nindent 16 }}
                 # ROLA Z PRAWEM ZAPISU DO `ref` - tu jest to uzasadnione, bo to

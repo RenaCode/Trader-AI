@@ -481,7 +481,7 @@ def test_odswiezenie_instrumentow_ODROZNIA_stan_bramki_od_AWARII():
         w for w in Path("charts/trader/templates/instrumenty-cron.yaml")
         .read_text(encoding="utf-8").splitlines()
         if w.strip() and not w.strip().startswith("#"))
-    assert '[ "$RC" = 3 ] && exit 0' in zadanie, (
+    assert '[ "$RC" = 3 ] && RC=0' in zadanie, (
         "zadanie nie odsiewa stanu bramki — będzie wiecznie czerwone")
     assert "|| true" not in zadanie, (
         "maskowanie wszystkiego jest dokładnie tą wadą, która ukryła brak "

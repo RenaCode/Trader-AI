@@ -288,7 +288,9 @@ def test_dozor_zglasza_ze_NIKT_NIE_SPRAWDZAL_statusu():
     from services.engine.dozor import ocen_instrumenty
 
     (kod, tytul, _), = ocen_instrumenty([_wiersz(sprawdzony_h=48)])
-    assert kod == "instrument.suspended" and "nie był sprawdzany" in tytul
+    # Wlasny kod, nie `instrument.suspended` (przeglad PR #34): wspolny
+    # cooldown polykal powiadomienia odswiezacza o zawieszeniu pary.
+    assert kod == "instrument.status_nieswiezy" and "nie był sprawdzany" in tytul
     # Nigdy niesprawdzony to ten sam problem, nie osobny przypadek brzegowy.
     assert ocen_instrumenty([_wiersz(sprawdzony_h=None)])
 
@@ -328,7 +330,7 @@ def test_dozor_odroznia_NIEZNANY_GIELDZIE_od_niesprawdzonego():
     # Bez daty sprawdzenia zostaje wylacznie zarzut o brak odczytu.
     kody = {k for k, _, _ in ocen_instrumenty(
         [_wiersz(status=None, sprawdzony_h=None, pozycji=1)])}
-    assert kody == {"instrument.suspended"}
+    assert kody == {"instrument.status_nieswiezy"}
 
 
 def test_prog_swiezosci_statusu_zostawia_zapas_na_dobowy_harmonogram():
