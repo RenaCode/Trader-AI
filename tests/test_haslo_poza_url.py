@@ -1,6 +1,6 @@
 """Hasło roli bazy idzie w `PGPASSWORD`, nie w łańcuchu połączenia.
 
-CO BYŁO ZŁE (docs/08 brama 3, audyt Fable F-9.4)
+CO BYŁO ZŁE (renacode-infra: docs/projekty/trader/08-przed-go-live.md brama 3, audyt Fable F-9.4)
 
 `DATABASE_URL` składał się w charcie podstawieniem Kubernetesa:
 `postgresql://user:$(ROLA_DB_PASSWORD)@host:5432/db`. Kodowanie procentowe jest

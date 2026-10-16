@@ -343,7 +343,7 @@ const niepelny = puty4.find((p) => !('quiet_to' in p) || !('digest_at' in p));
 ok(!niepelny, 'Cisza bez odczytu: zaden PUT nie jest niepelny',
    niepelny ? JSON.stringify(niepelny) : '');
 
-// ================================== 5: sesja SSO (Authelia, docs/sso-tozsamosc.md)
+// ================================== 5: sesja SSO (Authelia, renacode-infra docs/sso-tozsamosc.md)
 console.log('\n--- SCENARIUSZ 5: SSO - wylogowanie przez portal, odmowa konta ---');
 // Front przechodzi na portal tylko pod adresem https: (audyt 2026-10-11) - portal
 // jest atrapa pod zmyslonym hostem https, obslugiwana przez page.route.

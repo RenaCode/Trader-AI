@@ -2,7 +2,7 @@
 
 DLACZEGO ALPACA, A NIE INTERACTIVE BROKERS
 
-README mowi o IBKR, research (docs/00-research.md, 2.3) rekomendowal Alpace
+README mowi o IBKR, research (renacode-infra: docs/projekty/trader/00-research.md, 2.3) rekomendowal Alpace
 na start i wlasciciel to potwierdzil 2026-09-22. Roznica jest operacyjna,
 nie strategiczna: IBKR wymaga stale dzialajacego IB Gateway (Java, sesja
 logowania, okresowe 2FA) - w klastrze k3s to osobny proces do pilnowania,

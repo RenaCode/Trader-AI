@@ -1,4 +1,4 @@
-"""Model wypełnień kalibrowany do wypełnialności WEJŚĆ z demo (docs/hipotezy.md H-10).
+"""Model wypełnień kalibrowany do wypełnialności WEJŚĆ z demo (renacode-infra: docs/projekty/trader/hipotezy.md H-10).
 
 SKĄD TEN PLIK
 

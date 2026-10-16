@@ -1,4 +1,4 @@
-"""Trening na demo przed live: zmiany C, D, E (docs/hipotezy.md H-5, H-6, H-7).
+"""Trening na demo przed live: zmiany C, D, E (renacode-infra: docs/projekty/trader/hipotezy.md H-5, H-6, H-7).
 
   * H-5: `--egzekucja-pesymistyczna --opoznienie N` w przebiegu produkcyjnym
     (bez `--sucho`), WYLACZNIE jako pelny model; `params` to rozrozniaja,
@@ -262,7 +262,10 @@ def test_H7_flaga_horyzontu_etykiety(monkeypatch):
 
 
 # ============================================================ rejestr
-
-@pytest.mark.parametrize("numer", ["H-5", "H-6", "H-7"])
-def test_hipotezy_zapisane_w_rejestrze_przed_pomiarem(numer):
-    assert tr.sprawdz_hipoteze(numer) is None
+#
+# Test "H-5, H-6, H-7 maja wiersz w rejestrze" usuniety 2026-10-16: rejestr
+# hipotez przeniesiono do prywatnego repo (renacode-infra:
+# docs/projekty/trader/hipotezy.md), ktorego CI nie widzi. Bez pliku
+# `sprawdz_hipoteze` sprawdza tylko format, wiec test przechodzilby na pusto.
+# Sama bramka rejestru ma test na rejestrze tymczasowym
+# (tests/test_hipoteza_wymagana.py).

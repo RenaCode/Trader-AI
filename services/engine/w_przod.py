@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Test w przód „czy trening się uczy" (H-4, docs/hipotezy.md).
+"""Test w przód „czy trening się uczy" (H-4, renacode-infra: docs/projekty/trader/hipotezy.md).
 
     python services/engine/w_przod.py [--engine crypto] [--bar 4h] [--kind spot_eu]
     python services/engine/w_przod.py --sucho --od 2026-08-03   # podgląd wstecz
@@ -75,7 +75,7 @@ TOR_H4 = ("crypto", "4h")
 # rwalaby sie co tydzien bez powodu. Ta etykieta zmienia sie RECZNIE, razem
 # z kazda zmiana tego, co liczy `miara_okna` albo `wczytaj_okno` (koszty, model
 # wypelnien, rozgrzewka, uniwersum, odniesienie). Zmiana etykiety = nowa seria =
-# nowa hipoteza (docs/hipotezy.md, H-4: „zmiana kodu miary przerywa serie").
+# nowa hipoteza (renacode-infra: docs/projekty/trader/hipotezy.md, H-4: „zmiana kodu miary przerywa serie").
 # `git_sha` idzie obok, zeby dalo sie odtworzyc, z czego policzono kazde okno.
 DEFINICJA_MIARY = "H-4/m1"
 

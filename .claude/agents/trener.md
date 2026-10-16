@@ -11,7 +11,7 @@ ufności i zdanie, czego ona NIE dowodzi.
 ## Jak uruchamiasz trening
 
 Nigdy lokalnie — dane są na VPS-ie. Przebieg porównawczy zawsze w trybie suchym
-(`renacode` to alias hosta klastra w `~/.ssh/config`, ten sam co w README):
+(`renacode` to alias hosta klastra w `~/.ssh/config`):
 
 ```bash
 ssh renacode 'sudo kubectl create job <nazwa> --from=cronjob/trader-trainer'

@@ -7,7 +7,7 @@
 
 PO CO PIEC PRZESUNIEC. Werdykt pojedynczego przebiegu zalezy od tego, gdzie
 wypadly granice okien: 27.09 piec przesuniec o dobe dalo trzy razy
-`validated` i dwa razy `learning` przy identycznych nastawach (`docs/03`).
+`validated` i dwa razy `learning` przy identycznych nastawach (renacode-infra: `docs/projekty/trader/03-wynik-walk-forward.md`).
 Wynik, ktory nie przetrwa przesuniecia siatki o dobe, nie jest wynikiem.
 
 OD 2026-10-03 (audyt Fable T4) przesuniecia liczy SAM TRENER: siatka okien
@@ -22,7 +22,7 @@ pomiar z 27.09 i H-1 (`--days` 1400 z przesunieciami -2..+2 = dawne
 Plik czytany raz, zero polaczen z baza. Pelny wydruk trenera trafia do
 `--logi` (jesli podane), tabela i werdykt STOP/GO 1 na ekran.
 
-KRYTERIUM STOP/GO 1 (docs/hipotezy.md, H-1) jest tu wypisane, nie wybrane:
+KRYTERIUM STOP/GO 1 (renacode-infra: docs/projekty/trader/hipotezy.md, H-1) jest tu wypisane, nie wybrane:
 zwrot na runde po doplacie > 0 w >= 3/5 przesuniec I bije B2 przy tej samej
 ekspozycji w >= 60% okien (zbiorczo).
 
@@ -127,7 +127,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--spread-bps", type=float, default=None, dest="spread_bps")
     ap.add_argument("--logi", default="", help="katalog na pelne wydruki trenera")
     ap.add_argument("--hipoteza", required=True,
-                    help="numer z docs/hipotezy.md, ktory ten pomiar rozstrzyga")
+                    help="numer z renacode-infra: docs/projekty/trader/hipotezy.md, ktory ten pomiar rozstrzyga")
     ap.add_argument("--r4", action="store_true",
                     help="tor R4 (H-3) zamiast trenera ensemble")
     ap.add_argument("--permutacje", type=int, default=r4_momentum.N_PERMUTACJI)

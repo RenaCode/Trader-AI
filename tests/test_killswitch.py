@@ -436,7 +436,7 @@ def test_nieznany_limit_NIE_jest_wznawiany():
 
 def test_prog_kapitalu_ma_regule_RECZNA_i_to_jest_decyzja():
     """Przekroczenie progu kapitału znaczy, że system złamał jedyną obietnicę,
-    która była warunkiem wpłaty (docs/05). Wznowienie tego automatem czyniłoby
+    która była warunkiem wpłaty (renacode-infra: docs/projekty/trader/05-ochrona-kapitalu.md). Wznowienie tego automatem czyniłoby
     próg ozdobą."""
     migracja = Path("db/migrations/0029_wznowienie_killswitcha.sql").read_text(encoding="utf-8")
     assert "po_ustaniu" in migracja and "max_daily_loss" in migracja

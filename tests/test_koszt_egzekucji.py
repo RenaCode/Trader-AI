@@ -4,7 +4,7 @@ DLACZEGO OSOBNY PLIK
 
 Ten rozjazd zdarzył się dwa razy. Za pierwszym razem stała `FEE = 0,055%` —
 stawka taker kontraktów wieczystych — siedziała w symulacji portfelowej, choć
-handlujemy spotem; naprawione 2026-08-31 (docs/03). Poprawka poszła do
+handlujemy spotem; naprawione 2026-08-31 (renacode-infra: docs/projekty/trader/03-wynik-walk-forward.md). Poprawka poszła do
 `koszty.py` i `portfolio.py`, a `loop.py` — czyli to, co faktycznie prowadzi
 rachunek papierowy — zostało ze starą stałą na kolejny tydzień.
 

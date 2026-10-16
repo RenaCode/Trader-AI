@@ -14,7 +14,7 @@ helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version }}
 {{- end -}}
 
 {{/*
-HASLO NIGDY W URL-U - IDZIE W `PGPASSWORD` (2026-10-03, docs/08 brama 3, F-9.4).
+HASLO NIGDY W URL-U - IDZIE W `PGPASSWORD` (2026-10-03, renacode-infra: docs/projekty/trader/08-przed-go-live.md brama 3, F-9.4).
 
 URL skladal sie podstawieniem Kubernetesa (`user:$(HASLO)@host`), gdzie
 kodowanie procentowe jest niemozliwe: haslo ze znakiem `/`, `@`, `?` albo `#`

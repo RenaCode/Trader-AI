@@ -156,7 +156,7 @@ spec:
                   RC_EQUITY=0
                   NIEGOTOWE=""
                   # MODEL WYPELNIEN PESYMISTYCZNY (`trainerCron.pesymistyczna`,
-                  # docs/hipotezy.md H-5): `--egzekucja-pesymistyczna
+                  # renacode-infra: docs/projekty/trader/hipotezy.md H-5): `--egzekucja-pesymistyczna
                   # --opoznienie N` dla KAZDEGO toru, crypto i equity. Pierwsza
                   # wersja po wlaczeniu ma nowe klucze `params`, wiec zostaje
                   # `candidate` - flaga nie promuje niczego sama.

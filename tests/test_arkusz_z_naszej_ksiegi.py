@@ -13,7 +13,7 @@ jako nieczytaną przez żaden sygnał) oraz składnik „spread" w `koszty.karta
 Kosztu nie opisuje księga, na której model się uczył — opisuje go księga, na
 którą idą zlecenia.
 
-`docs/08` nazywał to najdroższym otwartym pytaniem projektu: spready mierzono
+renacode-infra: `docs/projekty/trader/08-przed-go-live.md` nazywał to najdroższym otwartym pytaniem projektu: spready mierzono
 na księdze globalnej, a zlecenia idą na bybit.eu, podmiot o rzędu 0,1% tamtego
 wolumenu. `karta_rundy` oznaczała tę liczbę jako INNY_RYNEK i traktowała jako
 PODŁOGĘ kosztu, nie jego pomiar.

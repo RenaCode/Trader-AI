@@ -10,7 +10,7 @@ kosztują:
 
   * próg `ret <= -1.5 * taker` przepuszcza zwrot, w którym brakuje POŁOWY
     jednej nogi i całego poślizgu — a różnica między 0,200% a 0,580% rundy
-    decyduje o znaku mediany Sharpe (docs/03);
+    decyduje o znaku mediany Sharpe (renacode-infra: docs/projekty/trader/03-wynik-walk-forward.md);
   * `pytest.skip` przy braku transakcji: dzień, w którym bramka przestanie
     generować wejścia na płaskiej cenie, zamienia ten kanarek w wydruk „skipped".
 

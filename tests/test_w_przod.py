@@ -1,6 +1,6 @@
 """H-4: test w przód „czy trening się uczy" — pary okien, miara okna, werdykt.
 
-Kryterium jest zapisane w docs/hipotezy.md PRZED pomiarem; ten plik pilnuje,
+Kryterium jest zapisane w renacode-infra: docs/projekty/trader/hipotezy.md PRZED pomiarem; ten plik pilnuje,
 że kod liczy dokładnie to, co tam stoi: okna rozłączne, wersje zamrożone przed
 oknem, n = liczba okien, werdykt z pierwszych N_OKIEN i ani jednego więcej,
 miara na danych sprzed decyzji, remis = różnica dokładnie zero, okno

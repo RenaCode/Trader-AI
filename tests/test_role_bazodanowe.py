@@ -5,7 +5,7 @@ DLACZEGO OSOBNY PLIK
 
 Do migracji 0034 silnik, dozorca ryzyka, czujka żywotności i próba pożarowa
 łączyły się do bazy jedną rolą `trader_app`. Cała architektura bezpiecznika
-(docs/06) stoi na zdaniu „nadzorca nie może dzielić losu z nadzorowanym" —
+(renacode-infra: docs/projekty/trader/06-architektura-bezpiecznika.md) stoi na zdaniu „nadzorca nie może dzielić losu z nadzorowanym" —
 a dopóki nadzorowany ma poświadczenia nadzorcy, to zdanie jest komentarzem,
 nie własnością systemu. Dokumentacja mówiła o tym wprost:
 
@@ -311,7 +311,7 @@ def test_silnik_NIE_MOZE_zwolnic_killswitcha(nadania):
 
 def test_silnik_NADAL_moze_zazadac_zatrzymania(nadania):
     """Kanarek do poprzedniego: odebranie wszystkiego też przeszłoby tamten
-    test, a silnik ocenia limity w każdym cyklu (obrona w głąb, docs/06)
+    test, a silnik ocenia limity w każdym cyklu (obrona w głąb, renacode-infra: docs/projekty/trader/06-architektura-bezpiecznika.md)
     i musi umieć zażądać zatrzymania. Rola bez INSERT-u zamieniłaby
     zabezpieczenie w wyjątek w logu."""
     prawa = nadania.na_tabeli("trader_silnik", "risk.killswitch_event")
@@ -438,7 +438,7 @@ def test_dozorca_NIE_MOZE_handlowac(sql):
 
 
 def test_dozorca_NIE_MA_dostepu_do_kluczy_gieldy(sql):
-    """docs/06 odrzuca awaryjne domykanie pozycji przez dozorcę, bo „wymaga
+    """renacode-infra: docs/projekty/trader/06-architektura-bezpiecznika.md odrzuca awaryjne domykanie pozycji przez dozorcę, bo „wymaga
     kluczy giełdy w kolejnym procesie, co poszerza powierzchnię ataku". Skoro
     taka jest decyzja, egzekwuje ją baza, a nie dokumentacja."""
     assert not re.search(
@@ -834,7 +834,7 @@ def test_BAZA_dozorca_nie_zapisze_zlecenia_ani_pozycji(jako):
 
 @wymaga_bazy
 def test_BAZA_dozorca_nie_widzi_kluczy_gieldy(jako, ma_prawo):
-    """docs/06 odrzuca awaryjne domykanie pozycji przez dozorcę, bo wymagałoby
+    """renacode-infra: docs/projekty/trader/06-architektura-bezpiecznika.md odrzuca awaryjne domykanie pozycji przez dozorcę, bo wymagałoby
     kluczy giełdy w kolejnym procesie. Baza egzekwuje tę decyzję."""
     assert not ma_prawo("trader_dozorca", "app.api_credential", "SELECT")
     assert jako("trader_dozorca", "SELECT key_enc FROM app.api_credential") \

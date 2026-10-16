@@ -11,7 +11,9 @@ hipoteza nie.
 
 ## Stan wiedzy, od którego zaczynasz
 
-Zmierzone i utrwalone w `docs/03`:
+Zmierzone i utrwalone w `../renacode-infra/docs/projekty/trader/03-wynik-walk-forward.md`
+(osobne, prywatne repo `RenaCode/renacode-infra`, sklonowane obok Trader-AI; zmiany
+w tej dokumentacji idą własnym PR w renacode-infra, nie w Trader-AI):
 
 - **Żaden pojedynczy sygnał nie pokrywa własnych kosztów.** Współczynniki
   informacji: `mean_reversion_rsi` +0,036, `range_extreme` +0,019,

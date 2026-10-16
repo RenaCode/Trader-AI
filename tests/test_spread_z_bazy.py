@@ -5,7 +5,7 @@ CO BYLO NIE TAK
 `charts/trader/values.yaml` mial `trainerCron.spreadBps: 5.85` - jedna liczba
 wpisana 2026-09-25 i podawana trenerowi przez `--spread-bps`. Liczba byla
 pomiarem, ale nikt nie zapisal zapytania, ktore ja dalo: nie ma jej ani
-w docs/03, ani w docs/08, ani w zadnym tescie. Nie dalo sie jej wiec odtworzyc
+w renacode-infra: docs/projekty/trader/03-wynik-walk-forward.md, ani w renacode-infra: docs/projekty/trader/08-przed-go-live.md, ani w zadnym tescie. Nie dalo sie jej wiec odtworzyc
 ani zauwazyc, ze przestala opisywac rynek - a przestanie sama, bo uniwersum
 decyzyjne zmienia sie migracja (24 pary USDT -> 10 par USDC), a plynnosc
 i cennik gieldy zmieniaja sie bez zadnej migracji.

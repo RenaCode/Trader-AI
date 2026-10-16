@@ -1,6 +1,6 @@
 """Tor R4: momentum przekrojowe na decyzji dobowej z filtrem trendu. KOD BADAWCZY.
 
-DLACZEGO (audyt Fable R4 / sekcja 12, hipoteza H-3 w docs/hipotezy.md)
+DLACZEGO (audyt Fable R4 / sekcja 12, hipoteza H-3 w renacode-infra: docs/projekty/trader/hipotezy.md)
 
 H-1 zamknelo kalibracje ensemble 4h: pod pesymistycznym modelem wypelnien
 -11,2 pb na runde, 0/5 przesuniec ponad zerem. Jedyna klasa sygnalu z realnym
@@ -53,7 +53,7 @@ from services.engine.portfolio import Egzekucja, wycena_wysylki
 from services.engine.risk_rules import START_EQUITY
 from services.engine.statystyka import deflowany_sharpe, liczba_niezaleznych, wilson
 
-# PARAMETRY H-3 - USTALONE PRZED POMIAREM (docs/hipotezy.md). Te same liczby co
+# PARAMETRY H-3 - USTALONE PRZED POMIAREM (renacode-infra: docs/projekty/trader/hipotezy.md). Te same liczby co
 # B2 poza rebalansem: B2 zmienia sklad co tydzien, R4 codziennie.
 PARAMETRY_R4 = {
     "okno_momentum_dni": 30,

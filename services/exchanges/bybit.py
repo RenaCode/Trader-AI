@@ -77,7 +77,7 @@ PUBLIC_HOST = "https://api.bybit.com"
 # ksiega, na ktorej model sie uczyl - opisuje go ksiega, NA KTOREJ SKLADAMY
 # ZLECENIA.
 #
-# Do tej daty bylo odwrotnie i docs/08 nazywa to najdrozszym otwartym pytaniem
+# Do tej daty bylo odwrotnie i renacode-infra: docs/projekty/trader/08-przed-go-live.md nazywa to najdrozszym otwartym pytaniem
 # projektu: spready zmierzono na ksiedze globalnej, a zlecenia ida na bybit.eu
 # o okolo 0,1% tamtego wolumenu. `karta_rundy` oznaczala te liczbe jako
 # INNY_RYNEK i traktowala jako PODLOGE kosztu, nie jego pomiar.

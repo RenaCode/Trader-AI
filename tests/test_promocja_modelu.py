@@ -9,7 +9,7 @@ innego, niż jest.
 
   * trener stawiał każdą nowo wytrenowaną wersję na `status='active'`
     (poza `degraded`), a `active_model` handluje aktywną wersją od razu.
-    Liczby z docs/05-ochrona-kapitalu.md opisywały więc wagi, którymi system
+    Liczby z renacode-infra: docs/projekty/trader/05-ochrona-kapitalu.md opisywały więc wagi, którymi system
     mógł nie handlować tydzień później;
   * `zbuduj_adapter` wybierał klucz API przez `ORDER BY c.id LIMIT 1`, czyli
     po rotacji NAJSTARSZY z aktywnych. Objaw pojawia się dopiero w dniu
@@ -362,7 +362,7 @@ def test_bez_aktywnej_wersji_nie_ma_z_czym_porownac():
 def test_zmiana_struktury_zatrzymuje_promocje_TAKZE_w_demo():
     docelowy, powod = status_nowej_wersji("validated", "demo", zmiana="próg range +25%")
     assert docelowy == "candidate"
-    assert "zmiana struktury" in powod and "docs/hipotezy.md" in powod
+    assert "zmiana struktury" in powod and "renacode-infra: docs/projekty/trader/hipotezy.md" in powod
 
 
 def test_zgoda_czlowieka_przepuszcza_zmiane_struktury():

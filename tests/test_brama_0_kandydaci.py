@@ -1,4 +1,4 @@
-"""Kandydatki Bramy 0 (docs/brama-0-gieldy.md, 2026-10-11) liczone z tablicy, nie
+"""Kandydatki Bramy 0 (renacode-infra: docs/projekty/trader/brama-0-gieldy.md, 2026-10-11) liczone z tablicy, nie
 przepisane.
 
 Trzy rzeczy, ktore ten plik pilnuje:
@@ -16,8 +16,6 @@ Zero wywolan sieci: spready w tablicy to zapis odczytu z 2026-10-11.
 """
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 
 from services.engine.koszty import (
@@ -25,7 +23,16 @@ from services.engine.koszty import (
     KANDYDACI_BRAMY_0, brama_0_kandydatki, koszty, zapas_na_niewypelnienie_pb,
 )
 
-DOKUMENT = Path(__file__).resolve().parents[1] / "docs" / "brama-0-gieldy.md"
+# Gieldy wymienione w dokumencie Bramy 0 (renacode-infra:
+# docs/projekty/trader/brama-0-gieldy.md, stan 2026-10-11). Dokument jest
+# w prywatnym repo, ktorego CI nie widzi, wiec lista jest przepisana tutaj -
+# nowa kandydatka wymaga najpierw wiersza w dokumencie, potem wpisu tutaj.
+W_DOKUMENCIE = frozenset({
+    "bybit_eu", "okx_eu_usdc", "okx_eu_eur", "bitvavo", "kraken_pro",
+    "coinbase_advanced", "bitstamp", "kucoin_eu", "cryptocom_exchange", "binance",
+    "bitget", "kraken_perp", "okx_xperps", "coinbase_futures_eu",
+    "one_trading_perp", "gemini_perp", "deribit", "alpaca_stock",
+})
 # Koszt niewypelnienia z symulacji pesymistycznej na swiecach globalnych
 # (log trenera 2026-10-11, tor 4h: "niewypelnienie: 0.400% (pomiar)").
 # Liczba z INNEGO rynku - sluzy tu jako scenariusz, nie jako pomiar.
@@ -40,10 +47,14 @@ def test_nazwy_kandydatek_sa_unikalne():
 
 @pytest.mark.parametrize("k", KANDYDACI_BRAMY_0, ids=lambda k: k.nazwa)
 def test_dokument_wymienia_kazda_kandydatke(k):
-    tresc = DOKUMENT.read_text(encoding="utf-8")
-    assert f"`{k.nazwa}`" in tresc, (
-        f"docs/brama-0-gieldy.md nie wymienia `{k.nazwa}` - liczba w tablicy "
-        f"bez wiersza w dokumencie nie ma pochodzenia")
+    assert k.nazwa in W_DOKUMENCIE, (
+        f"dokument Bramy 0 (renacode-infra: docs/projekty/trader/brama-0-gieldy.md) "
+        f"nie wymienia `{k.nazwa}` - liczba w tablicy bez wiersza w dokumencie "
+        f"nie ma pochodzenia")
+
+
+def test_kazda_gielda_z_dokumentu_jest_w_tablicy():
+    assert W_DOKUMENCIE == set(KANDYDATKI)
 
 
 @pytest.mark.parametrize("k", KANDYDACI_BRAMY_0, ids=lambda k: k.nazwa)
@@ -122,7 +133,7 @@ def test_kandydatki_bez_stawki_albo_spreadu_nie_maja_zapasu():
 
 def test_alpaca_prowizja_zero_jest_liczba_a_nie_brakiem():
     """Zero prowizji to 0 pb w skladniku, a brama i tak nierozstrzygnieta:
-    spread equity nikt nie zmierzyl (feed IEX, docs/08), oplaty regulacyjne
+    spread equity nikt nie zmierzyl (feed IEX, renacode-infra: docs/projekty/trader/08-przed-go-live.md), oplaty regulacyjne
     sa poza symetrycznym ulamkiem ceny."""
     b = brama_0_kandydatki(KANDYDATKI["alpaca_stock"])
     assert b.skladniki["prowizja"] == 0.0

@@ -1,8 +1,8 @@
-"""Brama 0 jako liczba z danych, nie zdanie w dokumencie (docs/08, 2026-10-11).
+"""Brama 0 jako liczba z danych, nie zdanie w dokumencie (renacode-infra: docs/projekty/trader/08-przed-go-live.md, 2026-10-11).
 
 Runda = 2 × maker (konto DOCELOWE) + spread własnej księgi z 30 dni +
 koszt niewypełnienia z demo; próg 12 pb, bo przy IC 0,03–0,04 i σ zwrotu
-12 h 3,2% przewaga brutto to ~10–13 pb. Do 11.10 brama stała w docs/08 jako
+12 h 3,2% przewaga brutto to ~10–13 pb. Do 11.10 brama stała w renacode-infra: docs/projekty/trader/08-przed-go-live.md jako
 OTWARTA pozycja listy, a w kodzie nie było nic, co by ją liczyło — więc nic
 nie mogło jej zamknąć.
 

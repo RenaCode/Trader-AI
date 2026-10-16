@@ -62,7 +62,7 @@ def _zwroty(n: int = 1462, sr: float = 0.0823) -> list[float]:
 
     Naprzemienne +a/-a ma kurtoze 1, wiec zamiast tego bierzemy deterministyczna
     probe normalna - wazne jest, zeby Sharpe wyszedl dokladnie taki, jak w
-    docs/03, bo do tych liczb odnosi sie tabela DSR.
+    renacode-infra: docs/projekty/trader/03-wynik-walk-forward.md, bo do tych liczb odnosi sie tabela DSR.
     """
     import random
     import statistics

@@ -162,7 +162,7 @@ def main() -> int:
                     help="zlecenia z limitem (domyślnie); --no-limit dla rynkowych")
     ap.add_argument("--losowan", type=int, default=LOSOWAN)
     # KTORA STRATEGIA JEST TESTOWANA. `bazowe` = DEFAULT_WEIGHTS - wariant BEZ
-    # zmierzonej przewagi (docs/03: 20/40 okien, Sharpe +0,008). Produkcja
+    # zmierzonej przewagi (renacode-infra: docs/projekty/trader/03-wynik-walk-forward.md: 20/40 okien, Sharpe +0,008). Produkcja
     # i +6,8% pochodza z wag `ic`. Pomiar z 22.09.2026 na `bazowe` dal
     # percentyl ~50 i zostal odczytany jako "brak timingu" - a mowil tylko,
     # ze strategia bez przewagi nie ma timingu. Domysl zostaje `bazowe` dla

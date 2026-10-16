@@ -14,7 +14,7 @@ PRZEGENEROWANY RAZ, w T4 (progi na wagach IC, audyt Fable F-2.1): warianty
 wynik byl identyczny ze zrzutem z b08a2b5); `argmax` i `bazowe` bez zmian.
 Doszedl wariant `ic_siatka` - siatka zakotwiczona i piec przesuniec.
 
-PRZEGENEROWANY DRUGI RAZ, 2026-10-07 (H-5, H-6, H-7 w docs/hipotezy.md),
+PRZEGENEROWANY DRUGI RAZ, 2026-10-07 (H-5, H-6, H-7 w renacode-infra: docs/projekty/trader/hipotezy.md),
 SWIADOMIE, bo test pilnowal starej decyzji: na `spot_eu` (bez shortow) progi
 i wagi IC liczyly sie dwustronnie. Sprawdzone dwuetapowo przed zapisem:
   1. z H-6 wylaczonym (`strona_uczenia` -> None) KAZDY wariant dawal ten sam
@@ -45,7 +45,7 @@ transakcji, wiec DSR przy ujemnym Sharpe lekko ROSNIE (mniejsze T = mniejsza
 pewnosc, ze przewaga jest ujemna), a przy dodatnim (`ic_stock`) SPADA
 0,7051 -> 0,6816.
 
-PRZEGENEROWANY PIATY RAZ, 2026-10-11 (H-10 i Brama 0, docs/hipotezy.md):
+PRZEGENEROWANY PIATY RAZ, 2026-10-11 (H-10 i Brama 0, renacode-infra: docs/projekty/trader/hipotezy.md):
 w siedmiu starych wariantach `PODSUMOWANIE_JSON` dostaje trzy nowe klucze
 (`wypelnialnosc_wejsc`, `przebicie_pb`, `wypelnialnosc_docelowa`), a wydruk -
 sekcje BRAMA 0 (tory crypto z limitem) oraz, w `ic_pesymistyczna`, linie

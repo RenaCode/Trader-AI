@@ -7,7 +7,7 @@ którą handlujemy, dostawała mniej, niż wiedzieliśmy.
 
 Zmiana działa TYLKO DO PRZODU: `news.article_instrument` nie ma `ingested_at`,
 więc powiązania dopisane wstecz weszłyby do świec, w których tej wiedzy
-jeszcze nie było (docs/hipotezy.md).
+jeszcze nie było (renacode-infra: docs/projekty/trader/hipotezy.md).
 """
 from __future__ import annotations
 

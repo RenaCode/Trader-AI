@@ -768,7 +768,7 @@ def przewaga_dsr(zwroty: list[float], n_prob: int,
         (i tak twierdzil komentarz przy migracji 0006). Tamten licznik ma dla
         toru 4h 12 613 wierszy wobec N = 52, wiec pomylka nie jest kosmetyczna;
         powod, dla ktorego nie jest mianownikiem, stoi w `n_konfiguracji`.
-        CZEGO TEN LICZNIK NIE JEST, jest opisane w `docs/01-data-architecture.md`
+        CZEGO TEN LICZNIK NIE JEST, jest opisane w renacode-infra: `docs/projekty/trader/01-data-architecture.md`
         i warto to miec przed oczami przy czytaniu wyniku: tabela ma
         `UNIQUE (model_id, config_hash)` i INSERT `ON CONFLICT DO NOTHING`,
         wiec liczy ROZNE WEKTORY WAG, a nie proby. Dwa przebiegi tej samej
@@ -870,7 +870,7 @@ def odchylenie_prob_z_bazy(cur, model_id: int) -> tuple[float | None, int]:
 
       * INNA STATYSTYKA NIZ SR W BRAMCE. `median_oos_sharpe` to mediana po
         oknach, a `SR`, od ktorego odejmujemy poprzeczke, to Sharpe ZLACZONEJ
-        proby transakcji. To nie jest ta sama wielkosc (docs/03 podaje przypadek,
+        proby transakcji. To nie jest ta sama wielkosc (renacode-infra: docs/projekty/trader/03-wynik-walk-forward.md podaje przypadek,
         w ktorym mediana po oknach i wynik zlaczony rozjechaly sie o rzad).
         Zamkniecie wymaga zapisywania Sharpe'a zlaczonego per przebieg - dzis
         nie ma go w zadnej kolumnie.
@@ -1503,7 +1503,7 @@ def rezim_dominujacy(rezimy: list[str]) -> str | None:
 
 
 # PRZEWAGA NAD B2 (audyt Fable F-3.4 / T8, 2026-10-03). Momentum przekrojowe
-# z filtrem trendu (`baseline.b2_momentum`, parametry w docs/hipotezy.md H-B2)
+# z filtrem trendu (`baseline.b2_momentum`, parametry w renacode-infra: docs/projekty/trader/hipotezy.md H-B2)
 # to odniesienie o porownywalnej prostocie: strategia, ktora go nie bije przy
 # tej samej ekspozycji, nie uzasadnia swojej zlozonosci. Prog 60% okien to
 # kryterium STOP/GO 1 z planu audytu, zapisane przed pomiarem (H-1).
@@ -2122,7 +2122,7 @@ def random_weights(rng: random.Random) -> dict[str, dict[str, float]]:
 #
 # Do tej pory kazdy nocny przebieg, ktory nie wyszedl `degraded`, stawal sie
 # `active` - a `active_model` w petli decyzyjnej handluje aktywna wersja od
-# razu, bez pytania. Znaczylo to, ze liczby z docs/05-ochrona-kapitalu.md
+# razu, bez pytania. Znaczylo to, ze liczby z renacode-infra: docs/projekty/trader/05-ochrona-kapitalu.md
 # (najnizszy punkt 9 997 USD, najgorsze obsuniecie -2,85%) opisywaly wagi,
 # ktorymi system moze juz nie handlowac tydzien pozniej. Nic sie przy tym nie
 # psuje i nic nie krzyczy: po prostu handluje co innego niz to, co zmierzono.
@@ -2220,7 +2220,7 @@ def status_nowej_wersji(status: str, tryb: str, zgoda: bool = False,
     Do tej daty demo promowalo samo kazda wersje nie-`degraded`, z argumentem,
     ze zla wersja kosztuje tam jeden dzien papierowego wyniku. Diagnoza z 05.10
     pokazala, ze ten argument nie trzyma: wynik treningu nie ma pomiaru "czy
-    nowa wersja jest lepsza od poprzedniej" (H-4 w docs/hipotezy.md dopiero go
+    nowa wersja jest lepsza od poprzedniej" (H-4 w renacode-infra: docs/projekty/trader/hipotezy.md dopiero go
     zaklada), a status `learning` z walk-forwardu na 3,8 roku przy 0,5% nowych
     danych nie mowi o tym nic. Automatyczna promocja zamieniala wiec co tydzien
     model produkcyjny na niezmierzony - i robila to o 4:40 nad ranem, tak samo
@@ -2235,11 +2235,11 @@ def status_nowej_wersji(status: str, tryb: str, zgoda: bool = False,
         # nie promuje sie w zadnym trybie.
         return "candidate", "wynik degraded — wersja zostaje kandydatem"
     # ZMIANA STRUKTURY - w KAZDYM trybie, takze w demo (`zmiana_struktury`).
-    # Zgoda czlowieka (`--zatwierdz-promocje`, po wpisie w docs/hipotezy.md)
+    # Zgoda czlowieka (`--zatwierdz-promocje`, po wpisie w renacode-infra: docs/projekty/trader/hipotezy.md)
     # przepuszcza ja tak samo jak w live.
     if zmiana and not zgoda:
         return "candidate", (f"zmiana struktury modelu ({zmiana}) — wymaga wpisu "
-                             f"w docs/hipotezy.md i `--zatwierdz-promocje`")
+                             f"w renacode-infra: docs/projekty/trader/hipotezy.md i `--zatwierdz-promocje`")
     if not zgoda:
         return "candidate", (f"tryb {tryb} — nowa wersja czeka na zatwierdzenie "
                              f"człowieka (`--zatwierdz-promocje`)")
@@ -3364,7 +3364,7 @@ class Przebieg:
         #
         # PYTANIE, NA KTORE TO ODPOWIADA. Dwa uniwersa maja osobno mediane Sharpe
         # okolo +0,11, a ich suma +0,011. Cztery naturalne wyjasnienia zostaly
-        # obalone pomiarem (docs/03). Zostaje jedno miejsce: `Sharpe/transakcje`
+        # obalone pomiarem (renacode-infra: docs/projekty/trader/03-wynik-walk-forward.md). Zostaje jedno miejsce: `Sharpe/transakcje`
         # w oknie to SREDNIA DZIELONA PRZEZ ODCHYLENIE po wszystkich transakcjach
         # tego okna - a grupy o roznej zmiennosci wrzucone do jednej takiej
         # statystyki daja wynik, ktory nie jest srednia ich wynikow.
@@ -4386,7 +4386,7 @@ def wypisz_podsumowanie(z: Przebieg, w: Status, k: Koszty, *, kind: str, wybor: 
               f"{niewypelnione_oos} (wejścia + wyjścia, wszystkie okna). "
               f"Ich KOSZT nie jest w dopłacie — w karcie stoi jako NIEZMIERZONE.")
     if egzekucja.limit and kind in ("spot", "spot_eu", "perp"):
-        # BRAMA 0 (docs/08, 2026-10-11) w kazdym przebiegu crypto z limitem: stawka
+        # BRAMA 0 (renacode-infra: docs/projekty/trader/08-przed-go-live.md, 2026-10-11) w kazdym przebiegu crypto z limitem: stawka
         # z cennika (odczyt z konta DEMO), spread z tej samej karty. Koszt
         # niewypelnienia z DEMO trener nie ma - liczba z symulacji to inna
         # wielkosc - wiec stoi jako niezmierzony; przy prowizji 50 pb
@@ -4396,7 +4396,7 @@ def wypisz_podsumowanie(z: Przebieg, w: Status, k: Koszty, *, kind: str, wybor: 
                 spread_pb=spread_bps, spread_nasza_ksiega=spread_nasza_ksiega,
                 niewypelnienie_pb=None)):
             print(linia)
-    # ODNIESIENIA B0-B3 - zbiorczo. Kryterium STOP/GO 1 (docs/hipotezy.md):
+    # ODNIESIENIA B0-B3 - zbiorczo. Kryterium STOP/GO 1 (renacode-infra: docs/projekty/trader/hipotezy.md):
     # bije B2 przy tej samej ekspozycji w >= 60% okien.
     for nazwa in ("B1", "B2", "B3"):
         pob, por = bije_odn[nazwa]
@@ -4803,13 +4803,18 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
 # REJESTR HIPOTEZ (audyt Fable F-3.3 / T8). Kazdy `--sucho` mierzy jakas
 # hipoteze; bez numeru przebieg porownawczy nie zostawia sladu, PRZED ktorym
 # zapisano kryterium - a wtedy "wariant wygral" da sie powiedziec o dowolnym.
-REJESTR_HIPOTEZ = Path(__file__).resolve().parents[2] / "docs" / "hipotezy.md"
+# Rejestr zyje w prywatnym repo (renacode-infra: docs/projekty/trader/hipotezy.md);
+# szukany w kopii roboczej obok tego repo. Bez niej (obraz, CI) sprawdzany
+# jest tylko format numeru - tak jak dotad w obrazie.
+REJESTR_HIPOTEZ = (Path(__file__).resolve().parents[3] / "renacode-infra" / "docs"
+                   / "projekty" / "trader" / "hipotezy.md")
 WZOR_HIPOTEZY = r"H-[A-Za-z0-9]+(?:\.[0-9]+)?"
 
 
 def sprawdz_hipoteze(hipoteza: str, rejestr: Path = REJESTR_HIPOTEZ) -> str | None:
     """Blad do wypisania albo None. Numer musi miec postac `H-n` i - gdy
-    rejestr jest w obrazie - wiersz w tabeli `docs/hipotezy.md`."""
+    rejestr jest dostepny - wiersz w tabeli rejestru hipotez
+    (renacode-infra: docs/projekty/trader/hipotezy.md)."""
     import re
     if not re.fullmatch(WZOR_HIPOTEZY, hipoteza or ""):
         return f"--hipoteza: oczekiwano numeru w postaci H-n, dostałem {hipoteza!r}"
@@ -4922,7 +4927,7 @@ def main() -> int:
     # "stock" dolaczylo 2026-09-24 razem z torem equity. Cennik akcji na Alpace
     # to zero prowizji - patrz `koszty.CENNIK`. Trener MUSI kosztowac tyle, ile
     # kosztuje strategia, ktora kalibruje: tor equity liczony cennikiem Bybita
-    # (tak powstaly liczby w docs/08) mierzyl oplaty, ktorych to konto nie placi.
+    # (tak powstaly liczby w renacode-infra: docs/projekty/trader/08-przed-go-live.md) mierzyl oplaty, ktorych to konto nie placi.
     ap.add_argument("--kind", default="spot",
                     choices=("spot", "spot_eu", "perp", "stock"),
                     help="rodzaj instrumentu - wyznacza stawki prowizji; "
@@ -5041,7 +5046,7 @@ def main() -> int:
     # kazdym horyzoncie) - liczba NIE jest tu zmieniana na podstawie
     # przypuszczenia. Log przebiegu podaje mediane czasu trzymania w tych samych
     # swiecach (`opis_trzymania`); inna wartosc to decyzja po tym pomiarze,
-    # z wpisem w docs/hipotezy.md. Bez `--sucho` wolno, bo klucz
+    # z wpisem w renacode-infra: docs/projekty/trader/hipotezy.md. Bez `--sucho` wolno, bo klucz
     # `ic_horizon_bars` w `params` robi z takiej wersji `candidate`.
     ap.add_argument("--horyzont-etykiety", type=int, default=None,
                     dest="horyzont_etykiety",
@@ -5051,7 +5056,7 @@ def main() -> int:
                          "(ic_horizon_bars) - inna wartosc niz aktywna zostawia "
                          "wersje jako candidate")
     ap.add_argument("--hipoteza", default="",
-                    help="numer hipotezy z docs/hipotezy.md (np. H-1), ktora ten "
+                    help="numer hipotezy z renacode-infra: docs/projekty/trader/hipotezy.md (np. H-1), ktora ten "
                          "przebieg mierzy. WYMAGANY przy --sucho i --panel: "
                          "wiersz z kryterium zapisany PRZED przebiegiem")
     args = ap.parse_args()

@@ -138,7 +138,7 @@ def test_liczba_testow_w_README_zgadza_sie_z_POMIAREM(request):
     assert rozjazd <= TOLERANCJA, (
         f"README mówi „{deklarowane} testy jednostkowe”, a ten przebieg zebrał "
         f"{zebrane} — rozjazd {rozjazd:.0%} przy dopuszczalnych "
-        f"{TOLERANCJA:.0%}. Popraw liczbę w README (sekcja „Stan projektu”)")
+        f"{TOLERANCJA:.0%}. Popraw liczbę w README (sekcja „Testy”)")
 
 
 def test_README_podaje_TAKZE_date_pomiaru():

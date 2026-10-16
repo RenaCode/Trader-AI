@@ -104,7 +104,7 @@ async def add_credential(body: CredentialBody, request: Request,
         raise HTTPException(
             400,
             "Tryb live jest zablokowany do zakończenia fazy demonstracyjnej. "
-            "Odblokowanie wymaga spełnienia kryteriów opisanych w docs/00-research.md §9.2.",
+            "Odblokowanie wymaga spełnienia kryteriów opisanych w renacode-infra: docs/projekty/trader/00-research.md §9.2.",
         )
 
     box = SecretBox()

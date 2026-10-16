@@ -4,7 +4,7 @@ Kapitał był liczony jako STAŁA plus wynik handlu, więc każde dołożenie ś
 wyglądało jak zysk, a wypłata jak strata. Na rachunku papierowym różnicy nie
 było — przepływ jest jeden. Przy realnych środkach uderza to jednocześnie
 w cztery mechanizmy: szczyt (obsunięcie), kapitał sprzed doby (strata dzienna),
-próg kapitału z docs/05 i krzywą w interfejsie.
+próg kapitału z renacode-infra: docs/projekty/trader/05-ochrona-kapitalu.md i krzywą w interfejsie.
 
 Rozdzielenie: `equity` to PIENIĄDZE (rosną od wpłat), `nav` to WYNIK (zmienia
 się wyłącznie od handlu).
