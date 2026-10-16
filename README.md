@@ -14,132 +14,6 @@ z osobnymi modelami, osobnym ryzykiem i osobnymi zakładkami w UI.
 Dokumentacja wewnętrzna projektu (research, architektura danych, pomiary, rejestr
 hipotez, audyty) jest prowadzona w osobnym, prywatnym repozytorium.
 
-## Stan projektu
-
-- [x] Research i architektura
-- [x] Schemat bazy (11 schematów, 81 plików migracji, ostatnia 0093, hypertables + pgvector)
-- [x] API odczytu (FastAPI) i dashboard (React + Vite)
-- [x] Chart Helm, obrazy Docker, CI
-- [x] Wdrożenie na `trader.renacode.com` (TLS, Traefik, ArgoCD)
-- [x] Uwierzytelnianie: hasło Argon2id + TOTP + kody zapasowe, sesje serwerowe, CSRF
-- [x] Test dymny całej aplikacji w CI
-- [x] Szyfrowane klucze API giełd w UI
-- [x] Adapter Bybit + 4 lata historii: 24 instrumenty, 810 tys. świec godzinowych,
-      39 tys. stawek finansowania, 2,1 mln wartości cech
-- [x] Silnik cech, sygnałów i risk kernel — pętla decyzyjna na realnych danych
-- [x] Trener walk-forward z licznikiem hipotez; horyzont 4 h wybrany pomiarem
-      stosunku kosztu do amplitudy świecy (patrz dokumentacja wewnętrzna, wynik walk-forward)
-- [x] Symulacja **portfelowa** przez ten sam risk kernel co produkcja
-- [x] Rola bazy bez uprawnień superużytkownika + kontrola uprawnień
-- [x] Kopie zapasowe (weryfikowane), rotacja `SECRETS_KEY`, limit wydatków na API
-- [x] 3699 testów jednostkowych (reguły ryzyka, portfel, koszty, TOTP, kryptografia),
-      zmierzone 11.10.2026 — polecenie i sposób sprawdzenia w sekcji [Testy](#testy)
-- [x] Ustawienia, powiadomienia (w aplikacji / WhatsApp / webhook), profil konta
-- [x] **Alarmy krytyczne poza panel** — każdy alarm `critical` idzie też przez
-      bramkę RenaCode (WhatsApp, zapasowo mail), z tłumieniem powtórek
-      (`services/api/bramka.py`); ręczny kill-switch w zakładce Ryzyko
-- [x] Prowizja w mierze, a nie tylko w krzywej kapitału — odsetek dodatnich
-      okien i mediana Sharpe były liczone **przed kosztami** (patrz dokumentacja wewnętrzna, wynik walk-forward)
-- [x] Konto demo Bybit **EU** zweryfikowane; cennik odczytany z giełdy
-- [x] Skaner RSS — 10 kanałów sprawdzonych i zbierających (235 wpisów w pierwszym
-      cyklu, zero błędów); artykuły zapisują się **bez** klucza
-- [x] Porównanie z kup-i-trzymaj **przy tej samej ekspozycji** — warunek
-      w starej postaci mierzył znak rynku, nie strategię (patrz dokumentacja wewnętrzna, wynik walk-forward)
-- [x] Analiza wiadomości **działa na produkcji** (Gemini, ~0,5 USD/dobę)
-- [x] **Ekspozycja rozłożona na czynniki** — 1,29% = 43% świec w rynku × 2,57
-      pozycji × 1,16% na pozycję. Podniesienie jej zmierzone i **odrzucone**:
-      kupuje obsunięcie za zwrot nieodróżnialny od szumu (patrz dokumentacja wewnętrzna, wynik walk-forward)
-- [x] Limity ryzyka wyrażone **ułamkiem kapitału**, nie kwotą — te same trzy
-      limity na rachunku 10 000 znaczyły 50%, 150% i 15% zamiast 5%, 15% i 1,5%
-- [x] **Próg kapitału** (`min_equity`) — twarda podłoga kwotowa, osobna od
-      obsunięcia liczonego od szczytu
-- [ ] **Wąskie gardło to gęstość sygnału, nie wielkość pozycji.** Strategia stoi
-      poza rynkiem 57% czasu i znajduje 2,5 okazji na 10 możliwych; wynik ~3%
-      rocznie. Kryteria mierzą przewagę na jednostkę kapitału, nie skalę
-- [x] Dwa dostawcy analizy wiadomości: Anthropic (docelowy) i Google Gemini
-      (zapasowy). Wybiera się sam po tym, który klucz jest ustawiony
-- [ ] Analiza wiadomości włączona na produkcji; do tego czasu `news_shock`
-      jest wykluczany z kalibracji jako sygnał martwy
-- [x] Egzekucja zleceń na koncie **demo** (`--egzekucja gielda`, od września
-      2026): PostOnly z wyjściem takerem po odmowie, uzgodnienie z giełdą
-- [x] Silnik equity na **Alpaca** (konto paper, migracje 0046/0047) — nie IBKR
-- [x] Crypto/demo chodzi strategią **„momentum + filtr trendu"** (`--strategia
-      momentum`, od 04.10.2026, decyzja „A"): zamrożone parametry H-3, 15%
-      kapitału — **pomiar egzekucji, nie hipoteza przewagi**; equity zostaje
-      na ensemble
-- [ ] Tryb live — osobna decyzja (patrz niżej: ograniczenia podmiotu unijnego)
-
-## Ograniczenia podmiotu unijnego
-
-Po MiCA konto stoi na `bybit.eu` — to **inna giełda niż bybit.com**, nie inna
-domena tej samej. Zmierzone 2026-09-04:
-
-| | bybit.com | bybit.eu |
-|---|---|---|
-| pary spot / w tym `*USDT` | 541 / 399 | 140 / **4** |
-| kontrakty wieczyste | 859 | **0** |
-| prowizja spot maker / taker | 0,100% / 0,100% | 0,100% / **0,250%** |
-
-Trzy konsekwencje, każda twarda:
-
-1. **Zlecenia rynkowe są wykluczone.** Runda kosztuje tam 0,580% zamiast 0,280%,
-   przy czym mediana Sharpe schodzi poniżej zera. Trener modeluje więc
-   `--kind spot_eu --limit` (stawka maker jest identyczna jak globalnie).
-2. **Strategia dwustronna jest niewykonalna.** Wymaga kontraktów wieczystych
-   (`services/engine/koszty.py`), a podmiot unijny ich nie oferuje.
-3. **Uniwersum wymaga przebazowania na USDC.** Płynność unijna siedzi na parach
-   USDC; z 24 aktywów bazowych sensowny obrót ma tam 10, przy progu
-   `MIN_INSTRUMENTS = 8`.
-
-Dane publiczne — świece, arkusz zleceń, finansowanie — pochodzą nadal z hosta
-globalnego, bo to jego księga stoi za czterema latami historii.
-
-## Agenci
-
-Cztery definicje w `.claude/agents/`, każda z dyscypliną wypracowaną przez ten
-projekt wpisaną wprost w instrukcje:
-
-| Agent | Rola | Czego nie robi |
-|---|---|---|
-| `strateg` | hipotezy z góry określonym warunkiem obalenia | nie mierzy sam |
-| `trener` | walk-forward, ≥4 przesunięcia okien, tryb suchy | nie decyduje o wdrożeniu |
-| `analityk` | audyt pomiaru: czy mierzymy to, co się wydaje | nie proponuje sygnałów |
-| `koordynator` | kolejność, decyzja o wdrożeniu, raport | nie mierzy i nie proponuje |
-
-Definicje żyją w repozytorium. Claude Code szuka ich w `.claude/agents/`
-**katalogu sesji**, więc jeśli uruchamiasz sesję piętro wyżej:
-
-```bash
-scripts/sync-agents.sh            # kopiuje do ~/workspace/.claude/agents
-scripts/sync-agents.sh --sprawdz  # wykrywa rozjazd, kod wyjścia 1
-```
-
-Sesja uruchomiona z katalogu projektu nie potrzebuje niczego. Dowiązanie
-symboliczne zostało odrzucone: nie wiadomo, czy skaner za nim podąża, a
-„prawdopodobnie działa" to zła podstawa dla czegoś, czego awaria objawia się
-ciszą.
-
-Kolejność nie jest dowolna: **analityk idzie PO trenerze**. Najgroźniejszy błąd
-w historii projektu — prowizja liczona poza miarą, wynik zawyżony o 74% — był
-widoczny dopiero w liczbach: dwa przebiegi o dwukrotnie różnym koszcie dały
-identyczny wynik. Bez pomiaru nie było czego zauważyć.
-
-## Kontrola po zmianach w silniku
-
-```bash
-# Wykonuje wszystkie zapytania pętli decyzyjnej BEZ ZAPISU i kończy kodem 1,
-# gdy którekolwiek zawiedzie. Wyłapuje rozjazd między kodem a schematem bazy,
-# którego przenośne testy nie widzą.
-kubectl exec deploy/trader-api -c api -- python services/engine/loop.py --sprawdz
-
-# Uprawnienia roli aplikacji: sprawdza obie strony — że rola potrafi to, czego
-# potrzebuje, i że NIE potrafi tego, przed czym chroni.
-kubectl exec deploy/trader-api -c api -- python db/check_privileges.py
-```
-
-Kontrola pętli działa też automatycznie: proces silnika uruchamia ją przed
-wejściem w pętlę i nie startuje, gdy zawiedzie.
-
 ## Architektura w skrócie
 
 ```
@@ -300,101 +174,6 @@ klucza, więc `news_shock` jest martwy we wszystkich oknach historycznych. Wchod
 do wag produkcyjnych dopiero po `MIN_OKIEN_ZYWEGO = 5` oknach, w których żyje —
 przy kroku 30 dni to około pięciu miesięcy od dziś.
 
-## Kill-switch: próba pożarowa
-
-Kill-switch jest jedynym mechanizmem w tym systemie, którego awaria **nie
-objawia się niczym**. Silnik po jego zadziałaniu wygląda dokładnie tak samo jak
-silnik bez sygnału do wejścia: zero decyzji `enter`, żaden błąd w logu,
-heartbeat bije dalej.
-
-Łańcuch ma pięć ogniw i testy jednostkowe pokrywają tylko pierwsze:
-
-| ogniwo | co się dzieje | gdzie sprawdzane |
-|---|---|---|
-| 1 | limit przekroczony → werdykt żąda zatrzymania | `tests/test_killswitch.py` |
-| 2 | żądanie → wiersz w `risk.killswitch_event` | próba pożarowa |
-| 3 | aktywny → wejścia wstrzymane, **wyjścia nadal działają** | oba |
-| 4 | dozór → powiadomienie krytyczne | próba pożarowa |
-| 5 | człowiek → zwolnienie z powodem i śladem w audycie | interfejs |
-
-Próba to CronJob `trader-proba-killswitcha` (`services/engine/proba_killswitcha.py`,
-codziennie 03:20 UTC). Ręcznie, poza harmonogramem:
-
-```bash
-# Podnosi próg kapitału powyżej bieżącego stanu, czeka aż silnik SAM wykryje
-# przekroczenie, sprawdza wszystkie ogniwa i przywraca próg.
-ssh renacode 'sudo kubectl create job --from=cronjob/trader-proba-killswitcha \
-  proba-reczna-$(date +%m%d) -n default'
-```
-
-Job z `--from` dziedziczy szablon poda CronJobu, w tym etykietę
-`trader.renacode.com/component: job` — bez niej NetworkPolicy nie wpuści go do
-bazy. Nie uruchamiaj próby w oknie 23:30–00:30 UTC (wejście momentum).
-
-Próg wraca w `finally` i w handlerze SIGTERM, więc także po przerwaniu i po
-błędzie — zostawiony podniesiony zatrzymałby silnik na stałe, czyli
-spowodowałby dokładnie tę awarię, przed którą kill-switch ma chronić. Próba
-odmawia startu, gdy jakiś kill-switch jest już aktywny: nie odróżniłaby wtedy
-swojego zdarzenia od zastanego.
-
-**Brak powiadomienia to NIEZALICZONA próba**, nie drobiazg. Cichy kill-switch
-jest gorszy niż jego brak, bo daje złudzenie kontroli.
-
-Ogniwa 5 nie było do 2026-09-07: kolumny `released_at`, `released_by`
-i `release_note` istniały od migracji 0007, ale router ryzyka miał wyłącznie
-`GET`. Kill-switch działał, zatrzymywał silnik i nie dawało się go zwolnić
-inaczej niż ręcznym SQL-em — a powiadomienie odsyłało do zakładki, która
-pokazywała komunikat „odblokowanie wymaga ręcznego potwierdzenia" i nie dawała
-czym potwierdzić.
-
-### Ręczny kill-switch
-
-Zakładka Ryzyko → „Zatrzymaj handel…" (sam powód, **bez hasła** — zablokowane
-konto nie może odebrać hamulca). To ta sama ścieżka co
-automat: wiersz w `risk.killswitch_event` (`limit_name = 'reczny'`,
-`triggered_by` = konto), który silnik czyta w każdym cyklu, więc wejścia stają,
-a wyjścia działają. Tryb (`demo`/`live`) bierze serwer z pulsu silnika.
-Automat wznowienia go nie zwalnia — tylko człowiek, tym samym formularzem co
-po limicie. **Zwolnienie wymaga hasła** (wznawia handel; pomyłki liczą się
-razem z logowaniem). Alarm `killswitch.triggered` idzie do dzwonka i przez bramkę;
-dozór traktuje go jako pierwsze zgłoszenie i przypomina w swoim rytmie.
-
-### Alarmy przez bramkę RenaCode
-
-`notify()` przekazuje każde powiadomienie `critical` do
-`bramka.bramka.svc.cluster.local` z kluczem `BRAMKA_KLUCZ` z `trader-secret`
-(w bramce: `BRAMKA_KLUCZ_TRADER`). Ślad w `notify.delivery` (`kind =
-'bramka'`). Ten sam alarm najwyżej co 1 h, 2 h, 4 h, potem co 6 h; wszystkich
-najwyżej 10 na godzinę; reszta tylko w panelu. Wiadomość próbna (bez wpisu
-w dzwonku):
-
-```bash
-kubectl exec deploy/trader-api -- python services/api/bramka.py --test
-```
-
-## Dozór stanu nauki
-
-Po każdym nocnym treningu uruchamia się `services/engine/dozor.py`. Odzywa się
-**wyłącznie wtedy, gdy coś się zmieniło** — powiadomienie, które przychodzi
-zawsze, przestaje cokolwiek znaczyć.
-
-Próg jest wzięty z pomiaru, nie z przeczucia. Cztery przebiegi tego samego kodu,
-różniące się przesunięciem okna o dzień, dały 52,5% → 62,5%: dobowa różnica
-odsetka **nie jest zdarzeniem**. Zdarzeniem jest wyjście poza przedział ufności
-poprzedniego przebiegu.
-
-Przechodzi: zmiana statusu · odsetek poza przedziałem (w obie strony — poprawa
-też bywa błędem) · ubytek okien informatywnych o ćwierć · zmiana znaku mediany
-Sharpe · rosnący dryf powyżej progu · **awaria trenera**.
-
-Ten ostatni warunek jest osobny, bo przebieg zakończony błędem nie dopisuje
-wiersza do dziennika: bez niego dozór porównałby dwa stare wpisy, nie zobaczył
-różnicy i zamilkł — awaria wyglądałaby jak spokój.
-
-```bash
-kubectl exec deploy/trader-api -c api -- python services/engine/dozor.py --sucho
-```
-
 ## Baza danych
 
 | Schemat | Zawartość |
@@ -415,57 +194,6 @@ drugie źródło tej samej prawdy |
 Migracje są **niemutowalne** — runner porównuje sumy kontrolne i odmawia startu, jeśli
 zastosowany plik został zmieniony. Poprawki idą jako nowy plik.
 
-## Wdrożenie
-
-GitOps: push do `main` → GitHub Actions buduje obrazy do `ghcr.io` i podbija tagi
-w `charts/trader/values.yaml` → CI przesuwa gałąź **`deploy`** na commit, którego
-obrazy istnieją (`.github/skrypty/galaz_deploy.py`) → ArgoCD na VPS śledzi
-`deploy` (nie `main`) i synchronizuje klaster. Commit samego chartu albo
-dokumentacji też dochodzi do `deploy`, bez buildu. Gałęzi `deploy` nie
-przesuwa się ręcznie — CI odmawia, gdy przestaje być przodkiem `main`.
-
-Sekrety **nie** trafiają do repozytorium — tworzone raz, ręcznie:
-
-```bash
-kubectl create secret generic trader-secret \
-  --from-literal=POSTGRES_PASSWORD='...' \
-  --from-literal=SECRETS_KEY='...' \
-  --from-literal=ANTHROPIC_API_KEY='...'
-```
-
-`BRAMKA_KLUCZ` (alarmy przez bramkę) kopiuje się z `bramka/bramka-klucze`
-(`BRAMKA_KLUCZ_TRADER`) — procedura w README chartu bramki (renacode-infra).
-`trader-secret` trafia co noc do zaszyfrowanej kopii (`backup/kopia.sh`
-w renacode-infra): bez `SECRETS_KEY` odtworzona baza ma nieczytelne 2FA
-i klucze giełd.
-
-Każda synchronizacja z nowymi migracjami robi najpierw zrzut bazy (hook
-PreSync `kopia-przed-migracja`, 5 ostatnich w `/opt/trader-backups/
-trader-przedmigracja-*`); nieudany zrzut albo brak miejsca zatrzymuje
-synchronizację. Awaryjnie: `kopiaPrzedMigracja.enabled: false`.
-
-TLS: cert-manager (`letsencrypt-prod`) + Traefik, tak jak reszta usług na VPS.
-Kontener nginx serwuje czysty HTTP — certyfikat żyje wyłącznie na krawędzi.
-
-> **Obrazy buduje CI i pobiera je klaster z ghcr.io.** Push do `main` uruchamia
-> testy, build obu obrazów i — po ich powodzeniu — commit podbijający
-> `api.image.tag` / `web.image.tag`, który ArgoCD synchronizuje. Żaden krok nie
-> wymaga wejścia na serwer.
->
-> Repozytorium jest prywatne, więc pakiety też. Klaster uwierzytelnia się
-> sekretem `ghcr-pull`, który powstaje POZA repozytorium — token potrzebuje
-> wyłącznie `read:packages`:
->
-> ```bash
-> kubectl create secret docker-registry ghcr-pull \
->   --docker-server=ghcr.io \
->   --docker-username=<login-github> \
->   --docker-password=<token-z-read:packages>
-> ```
->
-> Bez tego sekretu każde wdrożenie nowego commita kończy się
-> `ImagePullBackOff` — obraz istnieje wtedy wyłącznie w rejestrze.
-
 ## Uwierzytelnianie
 
 | Warstwa | Rozwiązanie |
@@ -478,15 +206,6 @@ Kontener nginx serwuje czysty HTTP — certyfikat żyje wyłącznie na krawędzi
 | Blokada | 15 minut po pięciu nieudanych próbach — wspólny licznik dla logowania, drugiego składnika i ponownego podania hasła (`/password`, `/totp/*`, `revoke-others`); identyczna odpowiedź i ta sama weryfikacja Argon2 (atrapa) dla nieistniejącego loginu |
 | Webhook | tylko publiczne adresy po rozwiązaniu DNS, połączenie przypięte do sprawdzonego IP |
 | Audyt | Każda próba logowania, zmiana hasła i operacja na 2FA w `app.audit_log` |
-| SSO (Authelia) | Tylko przy `sso.enabled` w charcie (→ `SSO_NAGLOWKI=1` w podzie API, razem z middleware'ami usuwającymi `Remote-*` od klienta). `Remote-User` od Authelii = sesja `sso` dla **istniejącego** konta o tym loginie, bez hasła i TOTP aplikacji; wymagana jedna z grup Authelii z Sekretu aplikacji: `SSO_GRUPA` (rola według konta) albo `SSO_GRUPA_PODGLAD` (tylko podgląd — rola obcinana do `viewer` przy każdym żądaniu, nawet gdy konto w bazie ma `owner`); nazwy po przecinku, brak obu kluczy = SSO odmawia każdemu. Konto podglądu: `scripts/create_admin.py <login> --rola viewer`. `viewer` widzi silniki, pozycje, wyniki i ryzyko; klucze, portfele i kanały powiadomień są per konto, więc ich nie widzi; każda zmiana stanu (kill-switch, klucze, ustawienia, kapitał, eksport) odpowiada 403, a alarmy operacyjne idą tylko do kont `owner`. Login konta w Traderze musi być równy loginowi w Authelii (`<LOGIN>`). Nieznany login → 403, podwójny/niepoprawny nagłówek → 400, konto zablokowane → 429. Zdarzenie `auth.sso_login` w audycie (z adresem klienta) i alarm o nowym urządzeniu jak przy zwykłym logowaniu. „Wyloguj” kończy też sesję portalu (`auth.renacode.com/logout`). Czynności wrażliwe (kill-switch, hasło, TOTP, kanały powiadomień, przepływ kapitału, sesje) nadal wymagają hasła i TOTP **aplikacji** — sesja SSO nie jest świeżym uwierzytelnieniem. Bez nagłówka (np. `kubectl port-forward`, gdy Authelia leży) — zwykłe logowanie hasłem i TOTP. Kontrakt: renacode-infra `docs/sso-tozsamosc.md` |
-
-Konto zakładane poza repozytorium:
-
-```bash
-kubectl exec <pod-api> -- sh -c 'printf %s "<hasło>" | python scripts/create_admin.py <login> --rola owner --stdin'
-# reset hasła istniejącego konta (rola bez zmian):
-kubectl exec <pod-api> -- sh -c 'printf %s "<hasło>" | python scripts/create_admin.py <login> --stdin'
-```
 
 ## Testy
 
@@ -496,6 +215,9 @@ kubectl exec <pod-api> -- sh -c 'printf %s "<hasło>" | python scripts/create_ad
 pip install -r services/api/requirements.txt -r requirements-dev.txt
 python -B -m pytest
 ```
+
+Zestaw liczy 3699 testów jednostkowych (reguły ryzyka, portfel, koszty, TOTP,
+kryptografia), zmierzone 11.10.2026.
 
 **Potrzebne są OBA pliki zależności.** `requirements-dev.txt` zawiera wyłącznie
 to, czego obraz produkcyjny nie ma (sam `pytest`); testy importują `services/*`,
@@ -517,7 +239,7 @@ uruchomić, podaj `TEST_DB_URL` wskazujący na **jednorazową** bazę:
 TEST_DB_URL=postgresql://... python -B -m pytest tests/test_role_bazodanowe.py
 ```
 
-Liczba testów podana wyżej w [Stanie projektu](#stan-projektu) jest pilnowana testem
+Liczba testów podana wyżej jest pilnowana testem
 (`tests/test_dokumentacja_testow.py`): napis, który odjedzie od pomiaru, zapala
 zestaw, zamiast cicho zostać nieprawdą — tak jak stało się z „123 testy
 jednostkowe" przy faktycznych 1999.
