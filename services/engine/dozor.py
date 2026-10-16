@@ -148,7 +148,8 @@ def kod_wyjscia(zgloszone: int, trwale: int = 0, co: str = "") -> int:
     delisted` i `risk.pomiar_zamilkl` sa `always_on`, wiec katalogowy cooldown
     ich nie dotyczy i tlumienie po tej stronie jest jedynym, jakie istnieje.
     Jedynym wyjatkiem jest `instrument.suspended` (cooldown 3600 s) - patrz
-    komentarz w `sprawdz_instrumenty`.
+    komentarz w `sprawdz_instrumenty`. (`instrument.status_nieswiezy`, migracja
+    0097, jest `always_on` z powtorka liczona w czujce.)
     """
     if trwale:
         # Zero MUSI powiedziec, dlaczego jest zerem. Inaczej zielone zadanie przy
@@ -2566,7 +2567,8 @@ PRZEGLAD_STATUSU_H = 26
 
 
 def brak_odczytu_statusu(wiersze: list[dict],
-                         bez_odswiezacza: bool = False) -> bool:
+                         bez_odswiezacza: bool = False,
+                         okno_przejscia: bool = False) -> bool:
     """Czy dla TEGO silnika status nie zostal odczytany ANI RAZU. CZYSTA FUNKCJA.
 
     ROZNICA MIEDZY "ODSWIEZACZ STANAL" I "ODSWIEZACZA NIE MA" - i dlaczego
@@ -2583,8 +2585,9 @@ def brak_odczytu_statusu(wiersze: list[dict],
     funkcja ucisza dzis tylko silnik, ktorego tam nie ma.
 
     Alarm o tym stanie przychodzilby przy kazdym przebiegu zadania (co 10 min),
-    a `instrument.suspended` ma katalogowy cooldown 3600 s, czyli 24 maile na
-    dobe o rzeczy, ktora nie zmieni sie sama NIGDY. To jest dokladnie wzorzec
+    a `instrument.suspended` (ktorym szedl do 2026-10-16) mial katalogowy
+    cooldown 3600 s, czyli 24 maile na dobe o rzeczy, ktora nie zmieni sie sama
+    NIGDY. To jest dokladnie wzorzec
     zmierzony w tym pliku 2026-09-12 przy kill-switchu: sygnal, ktory przychodzi
     zawsze, uczy odklikiwac CALA kategorie - w tym te alarmy o wycofaniu, ktore
     dotycza pary naprawde handlowanej.
@@ -2606,13 +2609,79 @@ def brak_odczytu_statusu(wiersze: list[dict],
     instrument, nowa kategoria, zmieniony symbol), zostawia mieszanke - i wtedy
     alarm idzie jak dotad, bo wtedy jest to naprawde rozjazd, a nie brak
     mechanizmu.
+
+    OKNO PRZEJSCIA (`okno_przejscia`, przeglad PR #34 2026-10-16). Silnik, ktory
+    DOPIERO DOSTAL odswiezacz, ma puste daty takze wtedy, gdy wszystko dziala:
+    od wdrozenia do pierwszego przebiegu `trader-instrumenty` mija do 6 h. Przez
+    `PRZEGLAD_STATUSU_H` od wdrozenia (`instrumenty.ODSWIEZACZ_OD`,
+    `okno_przejscia_h`) "ani jednej daty" to wiec tez BRAK POMIARU. Po tym czasie
+    - juz nie: trwaly brak dat po wdrozeniu znaczy, ze odswiezacz tego silnika
+    nie dziala (brak albo odrzucony klucz Alpaki), i to jest awaria. Druga
+    granica (mieszanka dat alarmuje) obowiazuje takze w oknie.
     """
-    return (bez_odswiezacza and bool(wiersze)
+    return ((bez_odswiezacza or okno_przejscia) and bool(wiersze)
             and all(r["sprawdzony_h"] is None for r in wiersze))
 
 
+KOD_STATUS_NIESWIEZY = "instrument.status_nieswiezy"
+
+
+def nieswieze(wiersze: list[dict], prog_h: int = PRZEGLAD_STATUSU_H,
+              bez_odswiezacza: bool = False, okno_przejscia: bool = False
+              ) -> list[dict]:
+    """Wiersze, ktorych status nie byl potwierdzony w progu. CZYSTA FUNKCJA."""
+    if brak_odczytu_statusu(wiersze, bez_odswiezacza, okno_przejscia):
+        return []
+    return [r for r in wiersze
+            if r["sprawdzony_h"] is None or r["sprawdzony_h"] > prog_h]
+
+
+def poczatek_nieswiezosci_h(nieswiezy: list[dict]) -> int | None:
+    """Ile godzin temu zaczela sie awaria odswiezacza. CZYSTA FUNKCJA.
+
+    Najstarsze potwierdzenie wsrod nieswiezych wierszy: od tej chwili nikt nie
+    pytal. Kazde powiadomienie o TEJ awarii powstalo pozniej (najwczesniej po
+    progu), a kazde o POPRZEDNIEJ - wczesniej, bo jej koniec to przebieg, ktory
+    te daty ustawil. Dlatego powtorki liczone od tej chwili licza sie od
+    AWARII, a nie od objawu, i zeruja po naprawie.
+
+    None = ktorys wiersz nie byl sprawdzony NIGDY - poczatku nie znamy, wiec
+    liczymy cala historie tego kodu dla silnika. Najgorszy skutek: pierwsze
+    zgloszenie nowej awarii czeka na odstep po ostatnim zgloszeniu starej
+    (najwyzej tydzien), nigdy na odwrot - powtorka nie zgubi sie w ciszy.
+    """
+    if not nieswiezy or any(r["sprawdzony_h"] is None for r in nieswiezy):
+        return None
+    return max(r["sprawdzony_h"] for r in nieswiezy)
+
+
+def w_oknie_przejscia(wlaczony_h: float | None,
+                      prog_h: int = PRZEGLAD_STATUSU_H) -> bool:
+    """Czy odswiezacz silnika zostal wdrozony mniej niz `prog_h` temu. CZYSTA
+    FUNKCJA. None (silnik bez wpisu w `ODSWIEZACZ_OD` albo brak wiersza
+    migracji) = okna nie ma, czyli pusta data jest awaria."""
+    return wlaczony_h is not None and wlaczony_h < prog_h
+
+
+async def okno_przejscia_h(fetch_all, engine: str) -> float | None:
+    """Ile godzin temu wdrozono odswiezacz statusu TEGO silnika - z daty
+    zastosowania migracji `instrumenty.ODSWIEZACZ_OD[engine]`. None = brak
+    wpisu albo brak wiersza (wtedy okna nie ma). Rola czujki ma SELECT na
+    `public.schema_migrations` (migracja 0050)."""
+    from services.ingest.instrumenty import ODSWIEZACZ_OD
+
+    wersja = ODSWIEZACZ_OD.get(engine)
+    if wersja is None:
+        return None
+    w = await fetch_all(
+        "SELECT (extract(epoch from (now() - applied_at)) / 3600)::float8"
+        "         AS wlaczony_h"
+        "  FROM public.schema_migrations WHERE version = %s", (wersja,))
+    return float(w[0]["wlaczony_h"]) if w else None
+
+
 def ocen_instrumenty(wiersze: list[dict], prog_h: int = PRZEGLAD_STATUSU_H,
-                     bez_odswiezacza: bool = False
+                     bez_odswiezacza: bool = False, okno_przejscia: bool = False
                      ) -> list[tuple[str, str, str]]:
     """Czy uniwersum nadal istnieje u giełdy. CZYSTA FUNKCJA.
 
@@ -2643,15 +2712,18 @@ def ocen_instrumenty(wiersze: list[dict], prog_h: int = PRZEGLAD_STATUSU_H,
 
     powody: list[tuple[str, str, str]] = []
 
-    nieswiezy = [] if brak_odczytu_statusu(wiersze, bez_odswiezacza) else [
-        r for r in wiersze
-        if r["sprawdzony_h"] is None or r["sprawdzony_h"] > prog_h]
+    nieswiezy = nieswieze(wiersze, prog_h, bez_odswiezacza, okno_przejscia)
     if nieswiezy:
         opis = ", ".join(
             f"{r['symbol']} ({'nigdy' if r['sprawdzony_h'] is None else str(r['sprawdzony_h']) + ' h temu'})"
             for r in nieswiezy[:12])
+        # WLASNY KOD, nie `instrument.suspended` (przeglad PR #34). Tamten ma
+        # katalogowy cooldown per (odbiorca, kod), wiec ten meldunek o awarii
+        # odswiezacza polykal powiadomienia odswiezacza o zawieszeniu pary -
+        # takze pary innego silnika - a te ida tylko przy ZMIANIE stanu i nie
+        # wracaja. Powtorke tego kodu liczy `sprawdz_instrumenty` od awarii.
         powody.append((
-            "instrument.suspended",
+            KOD_STATUS_NIESWIEZY,
             f"Status {len(nieswiezy)} instrumentów nie był sprawdzany u giełdy",
             f"Próg to {prog_h} h (zadanie chodzi raz na dobę).\n\n{opis}\n\n"
             f"Kolumna `status_gieldy` pokazuje wtedy ostatnią znaną wartość i "
@@ -2729,7 +2801,8 @@ async def venue_bez_odswiezacza(fetch_all, engine: str) -> bool:
 
 async def sprawdz_instrumenty(fetch_all, notify, sucho: bool = False, *,
                               engine: str = "crypto", mode: str = "demo",
-                              prog_h: int | None = None) -> int:
+                              prog_h: int | None = None,
+                              teraz: datetime | None = None) -> int:
     """Czy któryś instrument uniwersum przestał istnieć u giełdy.
 
     ZAKRES: instrument w uniwersum decyzyjnym ALBO z otwartą pozycją. Migracja
@@ -2738,7 +2811,10 @@ async def sprawdz_instrumenty(fetch_all, notify, sucho: bool = False, *,
     akurat wtedy, gdy dotyczy pary, którą naprawdę handlujemy.
     """
     prog = PRZEGLAD_STATUSU_H if prog_h is None else prog_h
+    teraz = teraz or datetime.now(timezone.utc)
     bez_odswiezacza = await venue_bez_odswiezacza(fetch_all, engine)
+    wlaczony_h = None if bez_odswiezacza else await okno_przejscia_h(fetch_all, engine)
+    okno = w_oknie_przejscia(wlaczony_h, prog)
     wiersze = await fetch_all(
         "SELECT i.symbol, i.tradeable, i.status_gieldy,"
         "       round(extract(epoch from (now() - i.status_sprawdzony_at))/3600)::int"
@@ -2754,7 +2830,16 @@ async def sprawdz_instrumenty(fetch_all, notify, sucho: bool = False, *,
         " ORDER BY i.symbol",
         {"engine": engine, "mode": mode})
     print(f"instrumenty ({engine}/{mode}): {len(wiersze)} w uniwersum lub z pozycją")
-    if brak_odczytu_statusu(wiersze, bez_odswiezacza):
+    if okno and brak_odczytu_statusu(wiersze, False, okno):
+        # OKNO PRZEJSCIA - uzasadnienie w `brak_odczytu_statusu`. Linia idzie
+        # przy KAZDYM przebiegu i mowi, KIEDY cisza sie skonczy.
+        print(f"  BRAK POMIARU (okno przejścia): odświeżacz statusu dla `{engine}` "
+              f"wdrożono {wlaczony_h:.1f} h temu, a żaden z {len(wiersze)} "
+              f"instrumentów nie ma jeszcze daty sprawdzenia — pierwszy przebieg "
+              f"trader-instrumenty jeszcze nie przyszedł albo się nie udał. "
+              f"Powiadomienia NIE wysyłam do {prog} h od wdrożenia; potem ten "
+              f"stan jest AWARIĄ odświeżacza (np. klucz Alpaki).")
+    elif brak_odczytu_statusu(wiersze, bez_odswiezacza):
         # BRAK POMIARU, NIE ZGODNOSC. Uzasadnienie w `brak_odczytu_statusu`.
         # Linia idzie przy KAZDYM przebiegu, zeby stan nie stal sie cisza.
         print(f"  BRAK POMIARU: statusu u giełdy nie odczytano dla ANI JEDNEGO "
@@ -2765,7 +2850,7 @@ async def sprawdz_instrumenty(fetch_all, notify, sucho: bool = False, *,
               f"przeszedłby niezauważony. Powiadomienia NIE wysyłam — stan jest "
               f"trwały i nie zmieni się bez nowego odświeżacza.")
 
-    powody = ocen_instrumenty(wiersze, prog, bez_odswiezacza)
+    powody = ocen_instrumenty(wiersze, prog, bez_odswiezacza, okno)
     if not powody:
         print("  bez zastrzeżeń")
         return 0
@@ -2773,9 +2858,14 @@ async def sprawdz_instrumenty(fetch_all, notify, sucho: bool = False, *,
     # TLUMIENIE DOBOWE. `instrument.delisted` jest always_on, wiec omija zwykly
     # cooldown - a wycofanie trwa miesiacami. Bez wlasnego tlumienia czujka
     # krzyczalaby przy kazdym przebiegu i nauczylaby ignorowac wlasnie ten alarm.
+    #
+    # PER SILNIK (przeglad PR #34). Bez filtra wycofanie akcji zgloszone przez
+    # odswiezacz equity uciszalo na dobe przypomnienie o zamrozonej pozycji
+    # krypto - i odwrotnie.
     juz = await fetch_all(
         "SELECT 1 FROM notify.notification WHERE event_code = 'instrument.delisted'"
-        "   AND created_at > now() - make_interval(hours => 24) LIMIT 1")
+        "   AND engine::text = %s"
+        "   AND created_at > now() - make_interval(hours => 24) LIMIT 1", (engine,))
 
     odbiorcy = await fetch_all("SELECT id FROM app.\"user\" WHERE is_active AND role = 'owner'")
     zgloszone = trwale = 0
@@ -2784,6 +2874,29 @@ async def sprawdz_instrumenty(fetch_all, notify, sucho: bool = False, *,
         if sucho:
             zgloszone += 1
             continue
+        if kod == KOD_STATUS_NIESWIEZY:
+            # POWTORKA Z ROSNACYM ODSTEPEM, liczona od AWARII - tak jak dla
+            # `job.nieudany` (`odstep_powtorki_zadania`). Kod jest `always_on`
+            # (migracja 0097), wiec kazde zgloszenie zostawia wiersz, a ten
+            # rachunek jest jedynym tlumieniem. Poczatek awarii: patrz
+            # `poczatek_nieswiezosci_h`.
+            od_h = poczatek_nieswiezosci_h(
+                nieswieze(wiersze, prog, bez_odswiezacza, okno))
+            poprzednie = await fetch_all(
+                "SELECT count(DISTINCT date_trunc('minute', created_at)) AS n,"
+                "       max(created_at) AS ostatnie FROM notify.notification"
+                " WHERE event_code = %s AND engine::text = %s"
+                "   AND (%s::int IS NULL"
+                "        OR created_at > now() - make_interval(hours => %s::int))",
+                (KOD_STATUS_NIESWIEZY, engine, od_h, od_h))
+            n = (poprzednie[0]["n"] or 0) if poprzednie else 0
+            ostatnie = poprzednie[0]["ostatnie"] if poprzednie else None
+            if n and ostatnie is not None and teraz - ostatnie < odstep_powtorki_zadania(n):
+                nastepne = ostatnie + odstep_powtorki_zadania(n)
+                print(f"    (zgłoszone {n}×, ostatnio {ostatnie:%m-%d %H:%M} UTC; "
+                      f"następne przypomnienie najwcześniej {nastepne:%m-%d %H:%M} UTC)")
+                trwale += 1
+                continue
         if kod == "instrument.delisted" and juz:
             # Wycofanie trwa MIESIACAMI, a zadanie chodzi co 10 minut. Do
             # 2026-09-10 kod wyjscia nie znal tego tlumienia i przez caly ten
@@ -2801,11 +2914,11 @@ async def sprawdz_instrumenty(fetch_all, notify, sucho: bool = False, *,
     # CZEGO TA CZUJKA NADAL NIE UMIE, I DLACZEGO NIE ZALATWIA SIE TEGO TUTAJ.
     #
     # `instrument.suspended` jest jedynym zdarzeniem uzywanym w tym pliku, ktore
-    # NIE JEST `always_on`: ma katalogowy cooldown 3600 s, wiec z 144 wywolan
-    # `notify()` na dobe realnie wychodzi 24, a pozostale sa po cichu odrzucane
-    # w warstwie powiadomien. Kod wyjscia liczy tu wiec PROBY, a nie wyslania,
-    # i przy trwale zatrzymanym `services/ingest/instrumenty.py` zostaje
-    # niezerowy przy kazdym przebiegu.
+    # NIE JEST `always_on`: ma katalogowy cooldown 3600 s, wiec czesc wywolan
+    # `notify()` jest po cichu odrzucana w warstwie powiadomien. Od 2026-10-16
+    # idzie nim juz tylko instrument POZA HANDLEM (pozycja albo niezamknieta
+    # bramka); "status nie byl sprawdzany", czyli trwala awaria odswiezacza,
+    # ma wlasny kod `always_on` z powtorka liczona wyzej.
     #
     # Wlasne tlumienie po tej stronie byloby DRUGIM mechanizmem na to samo -
     # dokladnie tym, czego ten plik unika - a do tego globalnym tam, gdzie

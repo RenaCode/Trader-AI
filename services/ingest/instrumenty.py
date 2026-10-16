@@ -71,6 +71,25 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 # razem - pilnuje tego test.
 VENUE_ODSWIEZANE = {"crypto": "bybit", "equity": "alpaca"}
 
+# OD KIEDY ODSWIEZACZ SILNIKA ISTNIEJE NA PRODUKCJI - wersja migracji, ktorej
+# `schema_migrations.applied_at` jest chwila wdrozenia obrazu z tym odswiezaczem.
+#
+# Miedzy wdrozeniem a pierwszym przebiegiem `trader-instrumenty` (do 6 h,
+# `instrumentyCron.schedule`) daty sprawdzenia akcji sa puste, bo nikt jeszcze
+# nie pytal - nie dlatego, ze odswiezacz padl. Czujka traktuje wiec "wszystkie
+# daty puste" jako BRAK POMIARU przez `dozor.PRZEGLAD_STATUSU_H` od tej chwili,
+# a potem jako AWARIE (np. brak albo odrzucony klucz Alpaki).
+#
+# MIGRACJA, A NIE DATA W KODZIE. Stala data musialaby zgadnac dzien scalenia:
+# za wczesna - alarm o 20 pustych datach tuz po wdrozeniu; za pozna - dni ciszy
+# o realnej awarii. Migracje stosuje migrator przy wdrozeniu, wiec jej
+# `applied_at` jest ta chwila co do minuty, w kazdym srodowisku osobno. Brak
+# wiersza (nie powinien sie zdarzyc) znaczy "okna nie ma" - czyli alarm.
+#
+# Krypto nie ma wpisu: jego odswiezacz chodzi od dawna i pusta data zawsze jest
+# u niego awaria.
+ODSWIEZACZ_OD = {"equity": "0097_instrument_status_nieswiezy"}
+
 # GIELDY, Z KTORYCH PRZEPISUJEMY TAKZE REGULY ZLECEN (krok ilosci, krok ceny,
 # minimum). Dla Alpaki - NIE, tylko status. Jej "reguly" w adapterze to stale
 # (grosz, 1 USD), a krok ilosci zalezy od `fractionable`: przepisanie go
@@ -458,18 +477,38 @@ def niekompletne(w_bazie: list[dict]) -> list[str]:
     return sorted(braki)
 
 
-def nikogo_nie_zna(w_bazie: list[dict], z_gieldy: dict[str, dict]) -> bool:
-    """Czy gielda nie zna ANI JEDNEGO naszego instrumentu. CZYSTA FUNKCJA.
+def masowe_wycofanie(w_bazie: list[dict], z_gieldy: dict[str, dict]
+                     ) -> tuple[int, int] | None:
+    """Czy WIECEJ NIZ POLOWA handlowalnych instrumentow dostalaby w tym przebiegu
+    klase "wycofanie". CZYSTA FUNKCJA. Zwraca (wycofanych, handlowalnych) albo None.
 
-    Jeden brak to odpowiedz ("ten papier zniknal"), komplet brakow to prawie na
-    pewno ZLE PYTANIE: zly host, klucz innego srodowiska, zmieniona sciezka -
-    u Alpaki kazde z nich potrafi skonczyc sie 404 na kazdym symbolu, a 404 jest
-    tu czytane jako "gielda go nie zna". Bez tej bramki taki blad zdjalby
-    `tradeable` z calego uniwersum i oznaczyl je jako wycofane, a powrot po
-    wycofaniu jest RECZNY - jedna literowka w hoscie kosztowalaby reczne
-    przywracanie dwudziestu instrumentow.
+    Jeden delisting to odpowiedz gieldy ("ten papier zniknal"). Polowa uniwersum
+    naraz to prawie na pewno ZLE PYTANIE albo ZLE ODCZYTANA ODPOWIEDZ: zly host,
+    klucz innego srodowiska, zmieniona sciezka (u Alpaki 404 na kazdym symbolu),
+    nowe slowo statusu, ktorego `klasyfikuj_status` nie zna (nieznane = wycofanie),
+    albo pole `status` zgubione przez zmiane formatu (None = wycofanie). Bez tej
+    bramki taki blad zdjalby `tradeable` z uniwersum i oznaczyl je jako wycofane,
+    a powrot po wycofaniu jest RECZNY.
+
+    MIERZY TO, PRZED CZYM CHRONI. Poprzednia bramka (`nikogo_nie_zna`, do
+    2026-10-16) lapala wylacznie 404 na WSZYSTKICH symbolach - jeden poprawny
+    wpis w odpowiedzi albo jedno nowe slowo statusu na calym uniwersum
+    przepuszczaly masowe wycofanie bez slowa.
+
+    LICZY TYLKO HANDLOWALNE (`tradeable`), bo tylko im zapis cos odbiera.
+    Pary wylaczone swiadomie (0020: 14 par USDT, ktorych podmiot unijny nie
+    oferuje) nigdy nie sa w odpowiedzi gieldy i rozwadnialyby mianownik.
     """
-    return bool(w_bazie) and not any(r["symbol"] in z_gieldy for r in w_bazie)
+    handlowalne = [r for r in w_bazie if r.get("tradeable")]
+    wycofanych = 0
+    for r in handlowalne:
+        g = z_gieldy.get(r["symbol"])
+        if klasyfikuj_status(g["status"] if g else None,
+                             obecny_u_gieldy=g is not None) == "wycofanie":
+            wycofanych += 1
+    if wycofanych * 2 > len(handlowalne):
+        return wycofanych, len(handlowalne)
+    return None
 
 
 async def _z_alpaki(engine: str, mode: str, venue: str,
@@ -595,11 +634,16 @@ async def main() -> int:
 
         print(f"giełda zna {len(z_gieldy)} instrumentów; w bazie {len(w_bazie)} "
               f"aktywnych ({args.engine})")
-        if nikogo_nie_zna(w_bazie, z_gieldy):
-            # PRZED ZAPISEM. Patrz `nikogo_nie_zna`.
-            sys.exit(f"giełda {venue} nie zna ŻADNEGO z {len(w_bazie)} instrumentów "
-                     f"silnika {args.engine} — to błąd zapytania (host, klucz, "
-                     f"tryb), nie wycofanie całego uniwersum. Nic nie zapisano.")
+        masowe = masowe_wycofanie(w_bazie, z_gieldy)
+        if masowe:
+            # PRZED ZAPISEM (takze regul zlecen). Patrz `masowe_wycofanie`.
+            # `sys.exit(tekst)` = kod 1, czyli AWARIA w rozumieniu KODOW WYJSCIA.
+            sys.exit(f"giełda {venue}: {masowe[0]} z {masowe[1]} handlowalnych "
+                     f"instrumentów silnika {args.engine} wyszłoby jako WYCOFANE "
+                     f"(brak u giełdy albo status spoza słownika) — więcej niż "
+                     f"połowa naraz to błąd zapytania albo odczytu (host, klucz, "
+                     f"tryb, nowe słowo statusu), nie wycofanie uniwersum. "
+                     f"Nic nie zapisano.")
 
         # POZYCJE TEGO PODMIOTU, KTOREGO REGULY WLASNIE CZYTAMY. Lista
         # instrumentow rozni sie miedzy podmiotem globalnym a unijnym, wiec

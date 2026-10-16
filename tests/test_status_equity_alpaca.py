@@ -21,10 +21,12 @@ ze wyglada na zdrowie:
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 import shutil
 import subprocess
 import sys
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal as D
 from pathlib import Path
 
@@ -117,13 +119,31 @@ def test_slowa_Alpaki_w_JEDNYM_slowniku():
     assert klasyfikuj_status("Delivering") == "wycofanie"
 
 
-def test_nikogo_nie_zna_to_ZLE_PYTANIE():
-    from services.ingest.instrumenty import nikogo_nie_zna
+def test_masowe_wycofanie_MIERZY_polowe_HANDLOWALNYCH():
+    """Bramka liczy to, przed czym chroni: ile handlowalnych instrumentow
+    dostaloby klase "wycofanie" - 404, status None i slowo spoza slownika
+    tak samo. Do 2026-10-16 (`nikogo_nie_zna`) lapala tylko 404 na WSZYSTKICH
+    symbolach: jeden poprawny wpis przepuszczal reszte jako wycofanie."""
+    from services.ingest.instrumenty import masowe_wycofanie
 
-    w_bazie = [{"symbol": "AAPL"}, {"symbol": "MSFT"}]
-    assert nikogo_nie_zna(w_bazie, {}) is True
-    assert nikogo_nie_zna(w_bazie, {"MSFT": {"status": "active"}}) is False
-    assert nikogo_nie_zna([], {}) is False
+    w_bazie = [{"symbol": s, "tradeable": True} for s in ("A", "B", "C", "D")]
+    # 404 na trzech z czterech, jeden znany - stara bramka to przepuszczala.
+    assert masowe_wycofanie(w_bazie, {"A": {"status": "active"}}) == (3, 4)
+    # Wszyscy znani, ale slowo, ktorego slownik nie zna (= wycofanie), albo None.
+    nowe = {s: {"status": "nowe_slowo"} for s in "ABC"} | {"D": {"status": None}}
+    assert masowe_wycofanie(w_bazie, nowe) == (4, 4)
+    # Pojedynczy delisting (i polowa rowno) przechodzi normalnie.
+    jeden = {s: {"status": "active"} for s in "ABC"}
+    assert masowe_wycofanie(w_bazie, jeden) is None
+    assert masowe_wycofanie(w_bazie, {"A": {"status": "active"},
+                                      "B": {"status": "active"}}) is None
+    # Zawieszenie to nie wycofanie - nie liczy sie do bramki.
+    assert masowe_wycofanie(w_bazie, {s: {"status": "active_not_tradable"}
+                                      for s in "ABCD"}) is None
+    # Wylaczone swiadomie (0020) nie rozwadniaja ani nie zawyzaja mianownika.
+    z_wylaczonymi = w_bazie + [{"symbol": f"X{i}", "tradeable": False} for i in range(10)]
+    assert masowe_wycofanie(z_wylaczonymi, {"A": {"status": "active"}}) == (3, 4)
+    assert masowe_wycofanie([], {}) is None
 
 
 # --- main() na atrapie bazy ---------------------------------------------------
@@ -269,6 +289,18 @@ def test_main_equity_NIKOGO_NIE_ZNA_konczy_sie_bez_zapisu(monkeypatch):
         "zle pytanie zdjeloby tradeable z calego uniwersum jako wycofanie")
 
 
+def test_main_equity_WIEKSZOSC_WYCOFAN_konczy_sie_KODEM_1_bez_zapisu(monkeypatch):
+    """Gielda zna AAPL, ale podaje slowo spoza slownika, a MSFT daje 404: oba
+    wyszlyby jako wycofanie. Stara bramka (`nikogo_nie_zna`) widziala, ze
+    "ktos jest znany", i zdejmowala `tradeable` z calego uniwersum."""
+    instrumenty, zapisy, _, wyslane, _ = _stend(monkeypatch, {"AAPL": _g("nowe_slowo")})
+    with pytest.raises(SystemExit) as e:
+        _uruchom(instrumenty.main())
+    # `sys.exit(tekst)` = kod procesu 1, czyli AWARIA (KODY WYJSCIA).
+    assert isinstance(e.value.code, str) and "WYCOFANE" in e.value.code
+    assert zapisy == [] and wyslane == []
+
+
 def test_main_equity_po_ZAWIESZENIU_oddaje_tradeable(monkeypatch):
     """Ten test wymaga, zeby SELECT naprawde pobieral `tradeable`
     i `wylaczony_przez_status`: bez nich automat nie wie, ze to on zdjal flage,
@@ -304,6 +336,205 @@ def test_czujka_wie_o_odswiezaczu_equity():
     n = len(pytano)
     assert _uruchom(venue_bez_odswiezacza(gielda(True), "opcje")) is True
     assert len(pytano) == n
+
+
+# --- czujka: okno przejscia i osobny kod "nie sprawdzano" (przeglad 16.10) ----
+#
+# ATRAPA ODDAJE TYLKO KOLUMNY Z SELECT-a: kazdy klucz wiersza musi byc w SQL
+# jako `i.<kolumna>` albo `AS <alias>`, inaczej atrapa rzuca.
+
+TERAZ = datetime(2026, 10, 20, 12, 0, tzinfo=timezone.utc)
+
+
+def _wiersz_czujki(symbol, sprawdzony_h, status="active"):
+    return {"symbol": symbol, "tradeable": True, "status_gieldy": status,
+            "sprawdzony_h": sprawdzony_h, "pozycji": 0, "wartosc": 0}
+
+
+def _czujka(wiersze, *, wlaczony_h=None, historia=None):
+    """Atrapa bazy dla `sprawdz_instrumenty`. `wlaczony_h` None = brak wiersza
+    migracji; `historia` = (n, ostatnie) poprzednich zgloszen kodu."""
+    zapytania: list[tuple[str, object]] = []
+    wyslane: list[tuple[str, str]] = []
+
+    def tylko_z_selecta(sql, w):
+        for k in w:
+            assert re.search(rf"(\bi\.{k}\b|\bAS {k}\b)", sql), (k, sql)
+        return dict(w)
+
+    async def fetch_all(sql, params=None):
+        p = " ".join(sql.split())
+        zapytania.append((p, params))
+        if "FROM ref.venue" in p:
+            return [{"?column?": 1}]
+        if "schema_migrations" in p:
+            return [] if wlaczony_h is None else [
+                tylko_z_selecta(p, {"wlaczony_h": wlaczony_h})]
+        if "FROM ref.instrument" in p:
+            return [tylko_z_selecta(p, w) for w in wiersze]
+        if "'instrument.delisted'" in p:
+            return []
+        if 'app."user"' in p:
+            return [{"id": 7}]
+        if "notify.notification" in p:
+            n, ostatnie = historia or (0, None)
+            return [tylko_z_selecta(p, {"n": n, "ostatnie": ostatnie})]
+        raise AssertionError("atrapa nie zna zapytania: " + p)
+
+    async def notify(uid, kod, tytul, tresc, **kw):
+        wyslane.append((kod, kw.get("engine")))
+        return 1
+
+    return fetch_all, notify, zapytania, wyslane
+
+
+def _sprawdz(wiersze, engine="equity", **kw):
+    from services.engine.dozor import sprawdz_instrumenty
+
+    fetch_all, notify, zapytania, wyslane = _czujka(wiersze, **kw)
+    kod = _uruchom(sprawdz_instrumenty(fetch_all, notify, engine=engine,
+                                       teraz=TERAZ))
+    return kod, zapytania, wyslane
+
+
+PUSTE_EQUITY = [_wiersz_czujki("AAPL", None), _wiersz_czujki("MSFT", None)]
+
+
+def test_OKNO_PRZEJSCIA_puste_daty_tuz_po_wdrozeniu_to_BRAK_POMIARU():
+    """Do pierwszego przebiegu `trader-instrumenty` (do 6 h od wdrozenia) 20
+    pustych dat equity to brak przebiegu, nie awaria. Przed poprawka czujka
+    wysylala alarm od pierwszych 10 minut po wdrozeniu."""
+    kod, zapytania, wyslane = _sprawdz(PUSTE_EQUITY, wlaczony_h=3.0)
+    assert wyslane == [] and kod == 0
+
+    from services.ingest.instrumenty import ODSWIEZACZ_OD
+    # Kotwica okna to migracja z `ODSWIEZACZ_OD`, ktora naprawde istnieje.
+    pyt = next(a for p, a in zapytania if "schema_migrations" in p)
+    assert pyt == (ODSWIEZACZ_OD["equity"],)
+    assert (KORZEN / "db/migrations" / f"{ODSWIEZACZ_OD['equity']}.sql").is_file()
+
+
+@pytest.mark.parametrize("wlaczony_h", [30.0, None])
+def test_KANAREK_po_oknie_trwaly_brak_dat_JEST_awaria(wlaczony_h):
+    """Po `PRZEGLAD_STATUSU_H` od wdrozenia (albo bez wiersza migracji) puste
+    daty znacza, ze odswiezacz equity nie dziala - np. brak albo odrzucony
+    klucz Alpaki. Ten alarm ma isc, i to WLASNYM kodem."""
+    kod, _, wyslane = _sprawdz(PUSTE_EQUITY, wlaczony_h=wlaczony_h)
+    assert wyslane == [("instrument.status_nieswiezy", "equity")]
+    assert kod == 1
+
+
+def test_okno_przejscia_NIE_ucisza_MIESZANKI_dat():
+    """Druga granica ciszy obowiazuje takze w oknie: odswiezacz, ktory chodzi
+    i pomija czesc uniwersum, to rozjazd."""
+    from services.engine.dozor import (
+        brak_odczytu_statusu, ocen_instrumenty, w_oknie_przejscia)
+
+    assert w_oknie_przejscia(3.0) is True
+    assert w_oknie_przejscia(30.0) is False and w_oknie_przejscia(None) is False
+    assert brak_odczytu_statusu(PUSTE_EQUITY, False, True) is True
+    assert ocen_instrumenty(PUSTE_EQUITY, okno_przejscia=True) == []
+    mieszanka = [_wiersz_czujki("AAPL", None), _wiersz_czujki("MSFT", 2)]
+    assert [k for k, _, _ in ocen_instrumenty(mieszanka, okno_przejscia=True)] == [
+        "instrument.status_nieswiezy"]
+
+
+def test_krypto_NIE_MA_okna_przejscia():
+    from services.ingest.instrumenty import ODSWIEZACZ_OD
+
+    assert "crypto" not in ODSWIEZACZ_OD
+    kod, zapytania, wyslane = _sprawdz(
+        [_wiersz_czujki("BTCUSDC", None, "Trading")], engine="crypto")
+    assert not [p for p, _ in zapytania if "schema_migrations" in p]
+    assert wyslane == [("instrument.status_nieswiezy", "crypto")]
+
+
+def test_NIESWIEZY_status_ma_WLASNY_kod_i_nie_polyka_zawieszen_pary():
+    """Wspolny kod `instrument.suspended` dzielil cooldown 3600 s per
+    (odbiorca, kod) z powiadomieniami odswiezacza o zawieszeniu i wznowieniu
+    pary - a te ida tylko przy ZMIANIE stanu, wiec polkniete nie wracaja."""
+    from services.ingest.instrumenty import ocen_dostepnosc
+
+    _, _, wyslane = _sprawdz([_wiersz_czujki("AAPL", 40)], wlaczony_h=500.0)
+    assert [k for k, _ in wyslane] == ["instrument.status_nieswiezy"]
+    # Odswiezacz dalej mowi o zawieszeniu `instrument.suspended` - inny kod.
+    w = ocen_dostepnosc([{"id": 1, "symbol": "BTCUSDC", "tradeable": True,
+                          "status_gieldy": "Trading", "wylaczony_przez_status": None}],
+                        {"BTCUSDC": {"status": "Halt"}}, {})
+    assert w[0]["kod"] == "instrument.suspended"
+
+
+@pytest.mark.parametrize("n, temu_h, wyslac", [
+    (0, None, True),      # pierwsze zgloszenie awarii
+    (1, 2, False),        # 2 h po pierwszym - cisza (dawniej co godzine)
+    (1, 25, True),        # po dobie - przypomnienie
+    (2, 30, False),       # drugie przypomnienie po 48 h, nie po 24
+    (3, 50, False),       # trzecie po 96 h
+    (5, 169, True),       # potem raz w tygodniu, nie rzadziej
+])
+def test_powtorka_ROSNIE_od_AWARII(n, temu_h, wyslac):
+    ostatnie = None if temu_h is None else TERAZ - timedelta(hours=temu_h)
+    kod, zapytania, wyslane = _sprawdz(
+        [_wiersz_czujki("AAPL", 40), _wiersz_czujki("MSFT", 48)],
+        wlaczony_h=500.0, historia=(n, ostatnie))
+    assert bool(wyslane) is wyslac
+    assert kod == (1 if wyslac else 0)
+    # Historia liczona PER SILNIK i od poczatku awarii (najstarsze potwierdzenie
+    # wsrod nieswiezych = 48 h): po naprawie licznik startuje od zera.
+    sql, params = next((p, a) for p, a in zapytania
+                       if "notify.notification" in p and "date_trunc" in p)
+    assert params == ("instrument.status_nieswiezy", "equity", 48, 48), params
+
+
+def test_poczatek_awarii_NIEZNANY_gdy_ktos_nie_byl_sprawdzony_nigdy():
+    from services.engine.dozor import poczatek_nieswiezosci_h
+
+    assert poczatek_nieswiezosci_h([{"sprawdzony_h": 30}, {"sprawdzony_h": 50}]) == 50
+    assert poczatek_nieswiezosci_h([{"sprawdzony_h": 30}, {"sprawdzony_h": None}]) is None
+    assert poczatek_nieswiezosci_h([]) is None
+
+
+def test_tlumienie_wycofania_jest_PER_SILNIK():
+    """Wycofanie akcji zgloszone przez odswiezacz equity nie moze uciszac na
+    dobe przypomnienia o zamrozonej pozycji krypto."""
+    _, zapytania, _ = _sprawdz([_wiersz_czujki("AAPL", 2, "inactive")])
+    params = next(a for p, a in zapytania if "'instrument.delisted'" in p)
+    assert params == ("equity",)
+
+
+def test_migracja_0097_kod_ALWAYS_ON_idempotentna():
+    """Kod musi istniec w `notify.event_type` (inaczej `notify()` rzuca), byc
+    `always_on` (wiersz przy kazdym zgloszeniu - bez niego powtorka liczy od
+    zera i alarm idzie co 10 minut) i miec wlasna transakcje z lock_timeout."""
+    tresc = (KORZEN / "db/migrations/0097_instrument_status_nieswiezy.sql").read_text(
+        encoding="utf-8")
+    assert "SET LOCAL lock_timeout" in tresc and "\nBEGIN;" in tresc
+    assert tresc.rstrip().endswith("COMMIT;")
+    assert "'instrument.status_nieswiezy'" in tresc
+    assert tresc.count("ON CONFLICT (code) DO NOTHING") == 1
+    assert re.search(r"'warning',\s*true,\s*0\)", tresc), "always_on, cooldown 0"
+    numery = [p.name[:4] for p in (KORZEN / "db/migrations").glob("0097_*.sql")]
+    assert numery == ["0097"], "numer migracji zajety dwa razy"
+
+
+@pytest.mark.skipif(not os.environ.get("TEST_DB_URL"),
+                    reason="ustaw TEST_DB_URL na jednorazową bazę")
+def test_BAZA_0097_dwukrotne_zastosowanie_daje_ten_sam_stan():
+    import psycopg
+    from psycopg.rows import dict_row
+
+    tresc = (KORZEN / "db/migrations/0097_instrument_status_nieswiezy.sql").read_text(
+        encoding="utf-8")
+    with psycopg.connect(os.environ["TEST_DB_URL"], row_factory=dict_row,
+                         autocommit=True) as conn:
+        conn.execute(tresc)
+        conn.execute(tresc)
+        w = conn.execute(
+            "SELECT always_on, default_cooldown_s, default_severity::text AS sev"
+            "  FROM notify.event_type WHERE code = 'instrument.status_nieswiezy'"
+        ).fetchall()
+    assert [(r["always_on"], r["default_cooldown_s"], r["sev"]) for r in w] == [
+        (True, 0, "warning")]
 
 
 # --- chart --------------------------------------------------------------------

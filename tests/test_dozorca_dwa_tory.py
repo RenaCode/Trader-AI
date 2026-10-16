@@ -598,7 +598,7 @@ def test_KANAREK_instrumenty_Z_odswiezaczem_NADAL_alarmuja():
     assert brak_odczytu_statusu(wiersze, False) is False
     powody = ocen_instrumenty(wiersze, bez_odswiezacza=False)
     assert len(powody) == 1, powody
-    assert powody[0][0] == "instrument.suspended"
+    assert powody[0][0] == "instrument.status_nieswiezy"
     assert "nie był sprawdzany" in powody[0][1]
 
 
