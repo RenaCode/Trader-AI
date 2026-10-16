@@ -97,7 +97,7 @@ db:
       secretKey: SILNIK_DB_PASSWORD
     # Nadzorca ryzyka. Jedyny proces automatyczny, ktory ZWALNIA kill-switch -
     # i to wylacznie trzy kolumny zwolnienia, bez prawa przepisania powodu.
-    # Nie handluje i nie widzi kluczy gieldy (app.api_credential), bo docs/06
+    # Nie handluje i nie widzi kluczy gieldy (app.api_credential), bo renacode-infra: docs/projekty/trader/06-architektura-bezpiecznika.md
     # wprost odrzuca awaryjne domykanie pozycji z tego procesu.
     dozorca:
       user: trader_dozorca
@@ -494,7 +494,7 @@ workers:
     # a nie zatwierdzona wersja. Nowy trening wchodzi sam w kolejnym cyklu
     # (log "MODEL PRZELADOWANY", `model_version_id` w pulsie i w
     # `journal.decision`). To jest live-OOS kandydata: dane w przod o modelu,
-    # ktorego bramka promocji jeszcze nie przepuscila (docs/hipotezy.md, D-1).
+    # ktorego bramka promocji jeszcze nie przepuscila (renacode-infra: docs/projekty/trader/hipotezy.md, D-1).
     # Bramka przejscia na live NIE ZMIENIA SIE; kryterium z D-1 jest do niej
     # warunkiem DODATKOWYM. Petla odmawia startu z ta flaga poza `--mode demo`,
     # a `active_model` odmawia kandydata poza demo niezaleznie od parsera.
@@ -885,7 +885,7 @@ trainerCron:
   # licza te same okna, a werdykt idzie z MINIMUM po przesunieciach siatki
   # o -2..+2 dni (`train.PRZESUNIECIA_SIATKI`). Ta sama data co
   # `train.KOTWICA_SIATKI` (test `test_siatka_okien.py`); zmiana daty to nowa
-  # siatka, czyli inne okna - nie robic tego bez wpisu w docs/hipotezy.md.
+  # siatka, czyli inne okna - nie robic tego bez wpisu w renacode-infra: docs/projekty/trader/hipotezy.md.
   od: "2022-09-01"
   # SPREAD LICZY SIE Z BAZY, NIE STOI TUTAJ.
   #
@@ -925,11 +925,11 @@ trainerCron:
   # z 0,280% do 0,580%. Przy tej stawce mediana Sharpe schodzi ponizej zera:
   # zlecenia rynkowe na tej gieldzie nie maja sensu, zostaje egzekucja
   # z limitem, gdzie stawka maker jest identyczna jak globalnie. Pomiar
-  # w docs/03.
+  # w renacode-infra: docs/projekty/trader/03-wynik-walk-forward.md.
   kind: "spot_eu"
   limit: true
   # MODEL WYPELNIEN PESYMISTYCZNY W TRENINGU (2026-10-07, decyzja wlasciciela
-  # z 06-07.10: demo trenuje algorytm przed live; docs/hipotezy.md H-5).
+  # z 06-07.10: demo trenuje algorytm przed live; renacode-infra: docs/projekty/trader/hipotezy.md H-5).
   #
   # `--egzekucja-pesymistyczna --opoznienie 20`: limit z ceny 20 min po
   # zamknieciu swiecy decyzyjnej, pol spreadu instrumentu pod/nad cena,
@@ -947,7 +947,7 @@ trainerCron:
   # `candidate` i licznik N liczy ja osobno. Promocja tylko recznie.
   pesymistyczna: true
   opoznienie: 20
-  # PRZEBICIE KALIBROWANE DO WYPELNIALNOSCI DEMO (2026-10-11, docs/hipotezy.md
+  # PRZEBICIE KALIBROWANE DO WYPELNIALNOSCI DEMO (2026-10-11, renacode-infra: docs/projekty/trader/hipotezy.md
   # H-10). H-5 zawiodla: samo dotkniecie limitu dawalo w symulacji 76-79%
   # wypelnien wobec 65,6% wejsc na demo. `--wypelnialnosc-docelowa` uruchamia
   # przebieg kalibracyjny, ktory dobiera przebicie limitu (`portfolio.
@@ -984,7 +984,7 @@ trainerCron:
   # Horyzont, ktorego nie liczy potok cech, trener kalibrowalby na pustce.
   #
   # `kind: stock` - cennik Alpaki, czyli zero prowizji (services/engine/koszty.py).
-  # Liczby w docs/08 dla equity (23,1% okien dodatnich) powstaly przy cenniku
+  # Liczby w renacode-infra: docs/projekty/trader/08-przed-go-live.md dla equity (23,1% okien dodatnich) powstaly przy cenniku
   # BYBITA, bo innego wtedy nie bylo - mierzyly oplaty, ktorych to konto nie
   # placi. Po tej zmianie tor equity liczy sie wlasnym rachunkiem i tamte liczby
   # nie sa juz jego opisem.

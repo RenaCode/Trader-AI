@@ -57,7 +57,7 @@ def test_zero_nie_jest_wygrana():
 
 
 def test_wynik_brutto_pokazuje_ile_zjadly_prowizje():
-    """Liczba, która w tym projekcie rozstrzyga wszystko (docs/08, brama 0).
+    """Liczba, która w tym projekcie rozstrzyga wszystko (renacode-infra: docs/projekty/trader/08-przed-go-live.md, brama 0).
 
     Bez niej „wynik −0,12" nie mówi, czy strategia przegrała z rynkiem, czy
     z własnym kosztem — a to są dwa różne wnioski i dwie różne reakcje.

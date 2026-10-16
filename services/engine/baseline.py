@@ -15,7 +15,7 @@ co B1 - inaczej przewaga nad odniesieniem bylaby przewaga cennika.
     B1  koszyk rownych wag, kupiony na poczatku okna i trzymany do konca
         (`portfolio.kup_i_trzymaj`).
     B2  momentum przekrojowe z filtrem trendu - parametry w `PARAMETRY_B2`,
-        zapisane w docs/hipotezy.md (H-B2) PRZED pierwszym przebiegiem.
+        zapisane w renacode-infra: docs/projekty/trader/hipotezy.md (H-B2) PRZED pierwszym przebiegiem.
     B3  trend na BTC i ETH: long, gdy zamkniecie dobowe > EMA 50 dni, inaczej
         gotowka; stala ekspozycja na instrument.
 
@@ -43,7 +43,7 @@ from services.engine.koszty import POSLIZG_TAKER, koszty, zwroty_po_doplacie
 from services.engine.portfolio import kup_i_trzymaj
 from services.engine.risk_rules import START_EQUITY
 
-# PARAMETRY B2 - USTALONE Z GORY, Z LITERATURY, NIE STROJONE (docs/hipotezy.md,
+# PARAMETRY B2 - USTALONE Z GORY, Z LITERATURY, NIE STROJONE (renacode-infra: docs/projekty/trader/hipotezy.md,
 # H-B2). Kazda zmiana to nowa hipoteza z nowym wpisem, nie poprawka.
 PARAMETRY_B2 = {
     "okno_momentum_dni": 30,      # zwrot od T-30 d ...

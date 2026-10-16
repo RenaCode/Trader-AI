@@ -991,7 +991,7 @@ def mapa_instrumentow(wiersze: list[dict]) -> dict[str, tuple[int, ...]]:
     TYLKO DO PRZODU. Powiazania sprzed tej zmiany zostaja, jakie byly:
     `news.article_instrument` nie ma `ingested_at`, wiec dopisane wstecz
     weszlyby do cech swiec, w ktorych tej wiedzy jeszcze nie bylo
-    (docs/hipotezy.md, uwaga do H-4).
+    (renacode-infra: docs/projekty/trader/hipotezy.md, uwaga do H-4).
     """
     grupy: dict[tuple[str, str], list[int]] = {}
     for w in wiersze:

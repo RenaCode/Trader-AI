@@ -279,7 +279,7 @@ def test_wariant_inny_niz_argmax_wymaga_trybu_suchego(monkeypatch):
     """
     from services.engine import train as modul
 
-    # `argmax` przestal byc domyslny 2026-09-04 - patrz docs/03. Test celowo
+    # `argmax` przestal byc domyslny 2026-09-04 - patrz renacode-infra: docs/projekty/trader/03-wynik-walk-forward.md. Test celowo
     # uzywa nazwy wariantu, a nie stalej: gdyby domyslny znow sie zmienil,
     # ten test ma zaczac pilnowac nowego niedomyslnego.
     monkeypatch.setattr("sys.argv", ["train.py", "--wybor", "argmax"])

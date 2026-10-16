@@ -25,7 +25,7 @@ transakcji i Sharpe +0,0952:
 
 Liczba prob to nie szczegol rachunkowy: to rozdzial miedzy „wynik" a „najlepszy
 z jedenastu tysiecy losowan". 11 460 to liczba, ktora ten projekt zanotowal
-w `docs/03-wynik-walk-forward.md` (8 700 to liczba z sekcji „piata iteracja"
+w renacode-infra: `docs/projekty/trader/03-wynik-walk-forward.md` (8 700 to liczba z sekcji „piata iteracja"
 tego samego dokumentu).
 
 CZEGO TE TESTY PILNUJA

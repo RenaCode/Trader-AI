@@ -43,7 +43,7 @@ zatrute. Dlatego `--znacznik` sam sprawdza zgodnosc: przelicza cechy kodem
 `features.py` W TRANSAKCJI, KTORA WYCOFUJE, i porownuje z zapisanymi. Rozjazd
 oznacza odmowe postawienia znacznika.
 
-KOLEJNOSC CALEJ OPERACJI (te same polecenia w docs/08-przed-go-live.md)
+KOLEJNOSC CALEJ OPERACJI (te same polecenia w renacode-infra: docs/projekty/trader/08-przed-go-live.md)
 
     1. korekta_podzialow.py --sucho                (pomiar, nic nie pisze)
     2. korekta_podzialow.py --przepisz             (swiece, bez znacznika)

@@ -3,7 +3,7 @@
 Właściciel zdecydował 2026-10-07: demo służy do trenowania algorytmu przed
 live, więc silnik demo przestaje grać regułą momentum (R4, pomiar egzekucji
 E-1) i gra NAJNOWSZĄ wersją `candidate` (albo nowszą `active`), żeby zbierać
-dane w przód (docs/hipotezy.md, D-1). Bramka przejścia na live bez zmian.
+dane w przód (renacode-infra: docs/projekty/trader/hipotezy.md, D-1). Bramka przejścia na live bez zmian.
 
 Ten plik pilnuje obu połówek tej decyzji naraz:
   * WYBÓR: najnowsza wersja `candidate`/`active`, nigdy `training`/`retired`;

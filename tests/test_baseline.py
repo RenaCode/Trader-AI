@@ -108,14 +108,17 @@ def test_sygnal_b2_nie_zaglada_w_przyszlosc():
 
 
 def test_parametry_b2_zgodne_z_rejestrem_hipotez():
-    """Parametry B2 zapisane w docs/hipotezy.md (H-B2) przed pierwszym
-    przebiegiem - zmiana w kodzie bez wpisu to strojenie odniesienia."""
-    from pathlib import Path
+    """Parametry B2 zapisane w rejestrze hipotez (H-B2) przed pierwszym
+    przebiegiem - zmiana w kodzie bez wpisu to strojenie odniesienia.
 
-    rejestr = (Path(__file__).resolve().parents[1] / "docs" / "hipotezy.md").read_text(
-        encoding="utf-8")
-    assert "T−30 d do T−1 d" in rejestr and b.PARAMETRY_B2["okno_momentum_dni"] == 30
-    assert "top 3" in rejestr and b.PARAMETRY_B2["top"] == 3
-    assert "co 7 dni" in rejestr and b.PARAMETRY_B2["rebalans_dni"] == 7
-    assert "EMA 50 dni" in rejestr and b.PARAMETRY_B2["ema_filtra_dni"] == 50
+    Rejestr jest w prywatnym repo (renacode-infra:
+    docs/projekty/trader/hipotezy.md, sekcja H-B2), ktorego CI nie widzi, wiec
+    wartosci z niego sa przepisane tutaj: "zwrot od T−30 d do T−1 d", "top 3",
+    "co 7 dni", "EMA 50 dni". Zmiana ktorejkolwiek wymaga najpierw wpisu
+    w rejestrze, potem zmiany tej listy."""
+    assert b.PARAMETRY_B2["okno_momentum_dni"] == 30
+    assert b.PARAMETRY_B2["pominiete_dni"] == 1
+    assert b.PARAMETRY_B2["top"] == 3
+    assert b.PARAMETRY_B2["rebalans_dni"] == 7
+    assert b.PARAMETRY_B2["ema_filtra_dni"] == 50
     assert START_EQUITY > 0

@@ -200,7 +200,7 @@ def statystyki(pozycje: list[dict]) -> dict:
         "wynik_netto": round(suma - prowizje, 4),
         "prowizje": round(prowizje, 4),
         # Wynik PRZED kosztem. Zestawiony z `wynik_netto` mowi, czy strategia
-        # przegrala z rynkiem, czy z wlasnym kosztem (docs/08, brama 0).
+        # przegrala z rynkiem, czy z wlasnym kosztem (renacode-infra: docs/projekty/trader/08-przed-go-live.md, brama 0).
         "wynik_brutto": round(suma, 4),
         "godzin_mediana": round(sorted(godziny)[len(godziny) // 2], 1) if godziny else None,
     }

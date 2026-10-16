@@ -610,7 +610,7 @@ async def sprawdz_tor_niegotowy(fetch_all, notify, sucho: bool = False, *,
         return 0
     tresc = (f"{powod}.\n\nTo nie jest awaria trenera, tylko warunek wstępny, "
              f"którego nikt nie spełnił. Dla equity: procedura korekty podziałów "
-             f"(docs/08, „korekta podziałów”) i `korekta_podzialow.py --znacznik`.")
+             f"(renacode-infra: docs/projekty/trader/08-przed-go-live.md, „korekta podziałów”) i `korekta_podzialow.py --znacznik`.")
     for u in odbiorcy:
         await notify(u["id"], "learning.state_changed",
                      f"Tor niegotowy ({engine}/{bar})", tresc, engine=engine,
@@ -664,7 +664,7 @@ async def sprawdz_zmiane_struktury(fetch_all, notify, sucho: bool = False, *,
         return 1
     odbiorcy = await fetch_all("SELECT id FROM app.\"user\" WHERE is_active AND role = 'owner'")
     tresc = (f"{powod}.\n\nWersja została kandydatem, produkcja handluje dalej "
-             f"aktywną. Promocja: wpis w docs/hipotezy.md i ręczny przebieg "
+             f"aktywną. Promocja: wpis w renacode-infra: docs/projekty/trader/hipotezy.md i ręczny przebieg "
              f"`train.py --zatwierdz-promocje`.")
     for u in odbiorcy:
         await notify(u["id"], "learning.zmiana_struktury",

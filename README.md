@@ -5,20 +5,14 @@ Autonomiczny system tradingowy z własnym dashboardem, uruchamiany na VPS RenaCo
 z osobnymi modelami, osobnym ryzykiem i osobnymi zakładkami w UI.
 
 > **Faza demo.** System handluje wyłącznie na kontach demonstracyjnych. Przejście na
-> live wymaga spełnienia kryteriów opisanych w `docs/00-research.md` §9.2 i osobnego,
+> live wymaga spełnienia kryteriów opisanych w dokumentacji wewnętrznej (research, §9.2) i osobnego,
 > jawnego potwierdzenia w interfejsie. Projekt nie zakłada rentowności — sześć miesięcy
 > demo to test tej hipotezy, a wynik negatywny jest realnym rezultatem.
 
 ## Dokumentacja
 
-| Dokument | Zawartość |
-|---|---|
-| [`docs/00-research.md`](docs/00-research.md) | Wybór giełd, architektura, warstwa uczenia, ryzyko, plan wdrożenia |
-| [`docs/01-data-architecture.md`](docs/01-data-architecture.md) | Wybór bazy, bitemporalność, feature store, rejestr modeli, retencja |
-| [`docs/05-ochrona-kapitalu.md`](docs/05-ochrona-kapitalu.md) | **Czy rachunek może wyjść na minus** — go/no-go przed wpłatą realnych środków |
-| [`docs/06-architektura-bezpiecznika.md`](docs/06-architektura-bezpiecznika.md) | **Kto pilnuje pilnującego** — dlaczego dozorca ryzyka jest osobnym podem |
-| [`docs/07-czego-brakuje.md`](docs/07-czego-brakuje.md) | **Przegląd luk** wobec działających botów — co sprawdzone w kodzie, nie w dokumentacji |
-| [`docs/brama-0-gieldy.md`](docs/brama-0-gieldy.md) | **Brama 0 na giełdach dostępnych z UE** — cenniki, spready, niewypełnienie; tor spot zamknięty na prowizji, perp MiFID do zmierzenia (B-0) |
+Dokumentacja wewnętrzna projektu (research, architektura danych, pomiary, rejestr
+hipotez, audyty) jest prowadzona w osobnym, prywatnym repozytorium.
 
 ## Stan projektu
 
@@ -34,7 +28,7 @@ z osobnymi modelami, osobnym ryzykiem i osobnymi zakładkami w UI.
       39 tys. stawek finansowania, 2,1 mln wartości cech
 - [x] Silnik cech, sygnałów i risk kernel — pętla decyzyjna na realnych danych
 - [x] Trener walk-forward z licznikiem hipotez; horyzont 4 h wybrany pomiarem
-      stosunku kosztu do amplitudy świecy (patrz `docs/03`)
+      stosunku kosztu do amplitudy świecy (patrz dokumentacja wewnętrzna, wynik walk-forward)
 - [x] Symulacja **portfelowa** przez ten sam risk kernel co produkcja
 - [x] Rola bazy bez uprawnień superużytkownika + kontrola uprawnień
 - [x] Kopie zapasowe (weryfikowane), rotacja `SECRETS_KEY`, limit wydatków na API
@@ -45,16 +39,16 @@ z osobnymi modelami, osobnym ryzykiem i osobnymi zakładkami w UI.
       bramkę RenaCode (WhatsApp, zapasowo mail), z tłumieniem powtórek
       (`services/api/bramka.py`); ręczny kill-switch w zakładce Ryzyko
 - [x] Prowizja w mierze, a nie tylko w krzywej kapitału — odsetek dodatnich
-      okien i mediana Sharpe były liczone **przed kosztami** (patrz `docs/03`)
+      okien i mediana Sharpe były liczone **przed kosztami** (patrz dokumentacja wewnętrzna, wynik walk-forward)
 - [x] Konto demo Bybit **EU** zweryfikowane; cennik odczytany z giełdy
 - [x] Skaner RSS — 10 kanałów sprawdzonych i zbierających (235 wpisów w pierwszym
       cyklu, zero błędów); artykuły zapisują się **bez** klucza
 - [x] Porównanie z kup-i-trzymaj **przy tej samej ekspozycji** — warunek
-      w starej postaci mierzył znak rynku, nie strategię (patrz `docs/03`)
+      w starej postaci mierzył znak rynku, nie strategię (patrz dokumentacja wewnętrzna, wynik walk-forward)
 - [x] Analiza wiadomości **działa na produkcji** (Gemini, ~0,5 USD/dobę)
 - [x] **Ekspozycja rozłożona na czynniki** — 1,29% = 43% świec w rynku × 2,57
       pozycji × 1,16% na pozycję. Podniesienie jej zmierzone i **odrzucone**:
-      kupuje obsunięcie za zwrot nieodróżnialny od szumu (patrz `docs/03`)
+      kupuje obsunięcie za zwrot nieodróżnialny od szumu (patrz dokumentacja wewnętrzna, wynik walk-forward)
 - [x] Limity ryzyka wyrażone **ułamkiem kapitału**, nie kwotą — te same trzy
       limity na rachunku 10 000 znaczyły 50%, 150% i 15% zamiast 5%, 15% i 1,5%
 - [x] **Próg kapitału** (`min_equity`) — twarda podłoga kwotowa, osobna od

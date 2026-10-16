@@ -1,4 +1,4 @@
-"""Spread publicznych ksiag kandydatek Bramy 0 (docs/brama-0-gieldy.md).
+"""Spread publicznych ksiag kandydatek Bramy 0 (renacode-infra: docs/projekty/trader/brama-0-gieldy.md).
 
 Pelny spread (ask-bid)/mid w pb, mediana z N probek co 2 s, per gielda i aktywo
 uniwersum (10 aktywow tradeable na bybit.eu). TYLKO publiczne endpointy, tylko

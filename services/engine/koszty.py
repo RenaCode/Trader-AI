@@ -54,7 +54,7 @@ w mocy tym bardziej. Domkniecie luki jest warunkiem PONOWNEGO pomiaru, nie
 jego wynikiem.
 
 Praktyczny skutek: brak perpetualow na podmiocie unijnym nie jest wada, ktora
-trzeba obchodzic zmiana gieldy. Pomiar w docs/03.
+trzeba obchodzic zmiana gieldy. Pomiar w renacode-infra: docs/projekty/trader/03-wynik-walk-forward.md.
 """
 from __future__ import annotations
 
@@ -92,7 +92,7 @@ CENNIK = {
     # Taker jest wiec DWA I POL RAZA drozszy niz na podmiocie globalnym,
     # a runda zleceniem rynkowym rosnie z 0,280% do 0,580%.
     #
-    # Konsekwencja jest jednoznaczna i wynika wprost z docs/03: przy 0,280%
+    # Konsekwencja jest jednoznaczna i wynika wprost z renacode-infra: docs/projekty/trader/03-wynik-walk-forward.md: przy 0,280%
     # zaden sygnal nie pokrywal wlasnych kosztow. Przy 0,580% zlecenia rynkowe
     # na tym podmiocie nie maja sensu w ogole - zostaje wylacznie egzekucja
     # z limitem, gdzie stawka maker jest identyczna jak globalnie (0,100%).
@@ -101,7 +101,7 @@ CENNIK = {
     # 135 par (USDC, USDT i EUR jednakowo): maker 0,250%, taker 0,250%. Wykryla
     # to `mozliwosci.py --stawki` w `trader-zywotnosc`. Ostatni akapit wyzej juz
     # nie obowiazuje: limit nie daje rabatu prowizji, a runda kosztuje 0,500%
-    # zamiast 0,200% - wiecej niz cala zmierzona przewaga (docs/08, Brama 0).
+    # zamiast 0,200% - wiecej niz cala zmierzona przewaga (renacode-infra: docs/projekty/trader/08-przed-go-live.md, Brama 0).
     "spot_eu": Koszty(maker=0.0025, taker=0.0025, krotka_pozycja=False,
                       prowizja_w_bazowej=True),
     "perp": Koszty(maker=0.0002, taker=0.00055, krotka_pozycja=True,
@@ -126,7 +126,7 @@ CENNIK = {
     #     ceny, ktorym jest ta tabela. Wpisanie ich tutaj jako sredniej
     #     zamienioby rachunek gieldy w nasze zalozenie,
     #   * spread, ktorego na equity nikt jeszcze nie zmierzyl - dokladnie ta
-    #     sama luka co na krypto (docs/08, brama 0).
+    #     sama luka co na krypto (renacode-infra: docs/projekty/trader/08-przed-go-live.md, brama 0).
     #
     # FINANSOWANIA NIE MA: krotka sprzedaz akcji kosztuje odsetki od pozyczki
     # papieru, ale to inna wielkosc, z innego zrodla i naliczana inaczej -
@@ -669,9 +669,9 @@ def opis_karty(k: Karta) -> list[str]:
 # ----------------------------------------------------------------- Brama 0
 #
 # TWARDY WARUNEK DOPUSZCZENIA DALSZEJ PRACY NAD STRATEGIA (2026-10-11,
-# docs/08-przed-go-live.md, Brama 0; docs/hipotezy.md, Z-1).
+# renacode-infra: docs/projekty/trader/08-przed-go-live.md, Brama 0; renacode-infra: docs/projekty/trader/hipotezy.md, Z-1).
 #
-# Przy zmierzonym IC 0,03-0,04 i odchyleniu zwrotu 12 h 3,2% (docs/03)
+# Przy zmierzonym IC 0,03-0,04 i odchyleniu zwrotu 12 h 3,2% (renacode-infra: docs/projekty/trader/03-wynik-walk-forward.md)
 # przewaga brutto to rzad 10-13 pb na runde. Runda drozsza niz 12 pb zjada ja
 # w calosci, wiec zadne strojenie wag, progow ani horyzontu nie da wyniku
 # dodatniego - rozstrzyga koszt, nie statystyka. Dlatego prog stoi PRZED
@@ -746,7 +746,7 @@ def brama_0(maker: float | None, *, stawka_konta_docelowego: bool,
 
 def opis_bramy_0(b: Brama0) -> list[str]:
     """Wiersze do logu. Skladnik bez wartosci slowami, nigdy zerem."""
-    linie = [f"BRAMA 0 (runda <= {PROG_BRAMY_0_PB:g} pb, docs/08): {b.stan}"]
+    linie = [f"BRAMA 0 (runda <= {PROG_BRAMY_0_PB:g} pb, renacode-infra: docs/projekty/trader/08-przed-go-live.md): {b.stan}"]
     for nazwa, v in b.skladniki.items():
         linie.append(f"  {nazwa}: " + ("NIE ZMIERZONO" if v is None else f"{v:.1f} pb"))
     linie.extend(f"  - {p}" for p in b.powody)
@@ -755,7 +755,7 @@ def opis_bramy_0(b: Brama0) -> list[str]:
 
 # ------------------------------------------- kandydatki Bramy 0 (2026-10-11)
 #
-# CENNIKI GIELD DOSTEPNYCH Z UE, zebrane w docs/brama-0-gieldy.md. TO NIE JEST
+# CENNIKI GIELD DOSTEPNYCH Z UE, zebrane w renacode-infra: docs/projekty/trader/brama-0-gieldy.md. TO NIE JEST
 # `CENNIK`: zaden z tych wpisow nie zasila petli, symulacji ani uzgodnienia -
 # silnik demo nadal liczy `spot_eu`, a `koszty(kind)` tych nazw nie zna.
 # Tabela istnieje po to, zeby werdykt Bramy 0 dla kazdej kandydatki byl
@@ -779,7 +779,7 @@ def opis_bramy_0(b: Brama0) -> list[str]:
 #
 # Z tego wynika, ze `brama_0_kandydatki` NIGDY nie oddaje OTWARTA - najlepszy
 # mozliwy stan to NIEROZSTRZYGNIETA z dodatnim zapasem. Otworzyc brame moze
-# tylko komplet pomiarow na koncie docelowym (docs/hipotezy.md, B-0).
+# tylko komplet pomiarow na koncie docelowym (renacode-infra: docs/projekty/trader/hipotezy.md, B-0).
 
 @dataclass(frozen=True)
 class KandydatGieldy:
@@ -907,7 +907,7 @@ KANDYDACI_BRAMY_0: tuple[KandydatGieldy, ...] = (
         "tylko podmioty z USA, 30 tys. USD minimum - JDG handlowalaby jako "
         "osoba fizyczna. SEC Section 31: 20,60 USD/mln od 2026-04-04 = 0,206 pb "
         "na nodze sprzedazy; TAF 0,000195 USD/akcje (max 9,79 USD). Spread "
-        "NIEZMIERZONY (feed IEX, docs/08). Uniwersum: akcje USA, nie krypto"),
+        "NIEZMIERZONY (feed IEX, renacode-infra: docs/projekty/trader/08-przed-go-live.md). Uniwersum: akcje USA, nie krypto"),
 )
 
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Korekta swiec equity o podzialy akcji - procedura operatora, kroki 1-4.
 #
-# PO CO SKRYPT, SKORO KROKI STOJA W docs/08
+# PO CO SKRYPT, SKORO KROKI STOJA W renacode-infra: docs/projekty/trader/08-przed-go-live.md
 #
 # Bo cztery polecenia wpisywane recznie maja jedna kolejnosc, ktorej nie wolno
 # pomylic, i jeden warunek wstepny, ktory latwo przeczytac zbyt pobieznie:
@@ -48,7 +48,7 @@ case "${1:-}" in
   *) echo "uzycie: $0 [--wykonaj]" >&2; exit 2 ;;
 esac
 
-# Instrumenty, ktore MIALY podzial 10:1 w oknie historii (docs/08). Czynnik
+# Instrumenty, ktore MIALY podzial 10:1 w oknie historii (renacode-infra: docs/projekty/trader/08-przed-go-live.md). Czynnik
 # korekty musi u nich wyjsc okolo 0,1 - inny znaczy, ze dostawca skorygowal
 # o cos innego niz podzial, albo ze pomiar porownuje nie te szeregi.
 PODZIELONE="NVDA AVGO NFLX"

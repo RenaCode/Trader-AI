@@ -1,6 +1,6 @@
 """Proces badawczy i promocji (audyt Fable T8: F-3.1, F-3.3, F-3.4, F-2.3).
 
-  * `--sucho` (i `--panel`) wymaga `--hipoteza H-n` z wierszem w docs/hipotezy.md,
+  * `--sucho` (i `--panel`) wymaga `--hipoteza H-n` z wierszem w renacode-infra: docs/projekty/trader/hipotezy.md,
   * `status_walidacji` wymaga przewagi nad B2 w >= 60% okien i mowi, co blokuje,
   * dozor wysyla `learning.zmiana_struktury` raz na wersje-kandydata,
   * trener chodzi raz w tygodniu.
@@ -38,8 +38,14 @@ def test_panel_bez_hipotezy_odmawia(monkeypatch):
     assert "--hipoteza" in _main(monkeypatch, "--panel", "nie-istnieje.json.gz")
 
 
-def test_hipoteza_spoza_rejestru_odmawia(monkeypatch):
-    assert "brak wiersza" in _main(monkeypatch, "--sucho", "--hipoteza", "H-999")
+# Rejestr hipotez zyje w prywatnym repo (renacode-infra:
+# docs/projekty/trader/hipotezy.md), ktorego CI nie widzi - wiec test bramki
+# rejestru dostaje wlasny, tymczasowy rejestr o tym samym ukladzie tabeli.
+def test_hipoteza_spoza_rejestru_odmawia(tmp_path):
+    rejestr = tmp_path / "hipotezy.md"
+    rejestr.write_text("| H-1 | 2026-10-03 | opis |\n", encoding="utf-8")
+    assert "brak wiersza" in tr.sprawdz_hipoteze("H-999", rejestr)
+    assert tr.sprawdz_hipoteze("H-1", rejestr) is None
 
 
 def test_hipoteza_z_rejestru_przechodzi_dalej(monkeypatch):

@@ -958,7 +958,7 @@ def opis_selekcji(z: dict) -> list[str]:
 
 # ------------------------------------- realizacja wobec modelu pesymistycznego
 
-# CO ZAKLADAL MODEL, POD KTORYM LICZONO H-1 I H-3 (docs/hipotezy.md). Przebieg
+# CO ZAKLADAL MODEL, POD KTORYM LICZONO H-1 I H-3 (renacode-infra: docs/projekty/trader/hipotezy.md). Przebieg
 # demo strategii `momentum_filtr_trendu` (E-1) istnieje po to, zeby te liczby
 # zestawic z gielda. IMPORTOWANE tam, gdzie sa stalymi kodu; wypelnialnosc to
 # WYNIK symulacji H-3 (wariant F, 5 przesuniec: 77,0-79,6%), wiec stoi tu jako

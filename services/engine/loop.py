@@ -74,7 +74,7 @@ EXIT_THRESHOLD = PROG_WYJSCIA_POCZATKOWY
 #
 # Do 2026-09-06 stala byla tutaj: FEE_RATE = 0,00055 z komentarzem "prowizja
 # taker Bybit spot". To bylo 0,055%, czyli stawka taker KONTRAKTOW WIECZYSTYCH -
-# dokladnie ten sam blad, ktory docs/03 opisal i naprawil 2026-08-31 w symulacji.
+# dokladnie ten sam blad, ktory renacode-infra: docs/projekty/trader/03-wynik-walk-forward.md opisal i naprawil 2026-08-31 w symulacji.
 # Poprawka poszla wtedy do koszty.py i portfolio.py, a petla decyzyjna - czyli
 # to, co faktycznie prowadzi rachunek papierowy - zostala ze stara stala.
 #
@@ -224,7 +224,7 @@ def ensure_signal_defs(cur, engine: str) -> dict[str, int]:
 # jedyna dopuszczalna na live. `candidate` - decyzja wlasciciela z 2026-10-07:
 # demo przestaje byc pomiarem egzekucji regula R4 (E-1) i staje sie live-OOS
 # kandydata, czyli zbiera dane w przod o modelu, ktorego bramka jeszcze nie
-# przepuscila (docs/hipotezy.md, D-1). Kandydat NIE MA PRAWA dotknac live:
+# przepuscila (renacode-infra: docs/projekty/trader/hipotezy.md, D-1). Kandydat NIE MA PRAWA dotknac live:
 # odmowa startu w `main`, odmowa w `run_once` i odmowa tutaj, w funkcji
 # ladujacej - trzy niezalezne miejsca, bo kazde z nich da sie wywolac osobno.
 STATUSY_MODELU = ("active", "candidate")
@@ -260,7 +260,7 @@ def active_model(cur, engine: str, h: Horizon, status: str = "active",
     wtedy cofnac sie do starszego kandydata. Wersje 'training' (przebieg
     w toku albo suchy) i 'retired' nie wchodza nigdy. Kandydat z wynikiem
     `degraded` wchodzi - po to demo zbiera dane w przod, a bramka live
-    (docs/08-przed-go-live.md) zostaje bez zmian.
+    (renacode-infra: docs/projekty/trader/08-przed-go-live.md) zostaje bez zmian.
 
     `mode` jest wymagany jawnie przy kandydacie: domyslne `None` NIE jest
     demo, wiec wywolanie, ktore zapomnialo trybu, konczy sie odmowa, a nie
@@ -3312,7 +3312,7 @@ async def main() -> int:
     # przelaczenie bylo linia w `values.yaml`, a nie skutkiem wdrozenia obrazu
     # (ta sama zasada co przy `--egzekucja gielda`). `momentum` = decyzja
     # wlasciciela "A" z 2026-10-04: zamrozona regula R4 na demo, pomiar
-    # egzekucji (docs/hipotezy.md, E-1). E-1 zamkniety decyzja D-1
+    # egzekucji (renacode-infra: docs/projekty/trader/hipotezy.md, E-1). E-1 zamkniety decyzja D-1
     # (2026-10-07) - chart przelaczony na `--model-status candidate`; regula
     # zostaje w kodzie, powrot = podmiana flagi.
     ap.add_argument("--strategia", default="model", choices=sorted(STRATEGIE),
@@ -3322,7 +3322,7 @@ async def main() -> int:
     # KTORA WERSJA MODELU STERUJE ENSEMBLE. Domysl `active` - na live jedyny
     # dopuszczalny. `candidate` = decyzja wlasciciela z 2026-10-07: demo gra
     # NAJNOWSZYM kandydatem (albo nowsza aktywna), zeby zbierac dane w przod
-    # o modelu przed bramka live (docs/hipotezy.md, D-1). Wlaczenie to linia
+    # o modelu przed bramka live (renacode-infra: docs/projekty/trader/hipotezy.md, D-1). Wlaczenie to linia
     # w `values.yaml`, tak jak `--strategia` i `--egzekucja gielda`.
     ap.add_argument("--model-status", default="active", choices=STATUSY_MODELU,
                     dest="model_status",
@@ -3383,7 +3383,7 @@ async def main() -> int:
         print("STRATEGIA: ensemble z MODELU-KANDYDATA — najnowsza wersja "
               "'candidate' (albo nowsza 'active'), przeładowywana co cykl. "
               "Tylko demo: live-OOS kandydata przed bramką live "
-              "(docs/hipotezy.md, D-1), nie zatwierdzony model.")
+              "(renacode-infra: docs/projekty/trader/hipotezy.md, D-1), nie zatwierdzony model.")
     else:
         print("STRATEGIA: ensemble z aktywnej wersji modelu.")
     print(f"Rachunek papierowy: {args.kind}, zlecenia "

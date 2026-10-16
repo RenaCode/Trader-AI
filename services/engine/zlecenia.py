@@ -29,7 +29,7 @@ sprzedaży po jednej dziesiątej ceny rynkowej. Cena limitu bierze się u nas
 z `mark_price`, czyli z zamknięcia ostatniej świecy 1m — więc jeden zepsuty tick
 w `market.candle` wystarczy, żeby zlecenie weszło natychmiast po drugiej stronie
 księgi. Księga podmiotu unijnego jest dla naszych par kilkukrotnie płytsza niż
-globalna (docs/03), więc przejechanie przez nią jest realną stratą, a w dzienniku
+globalna (renacode-infra: docs/projekty/trader/03-wynik-walk-forward.md), więc przejechanie przez nią jest realną stratą, a w dzienniku
 wygląda jak zwykła transakcja. Stąd PASMO CENY — patrz `ocena_pasma`.
 
 PASMO NIE JEST JEDNAK ODPOWIEDZIĄ NA PYTANIE WYKONALNOŚCI. Zlecenia idą jako

@@ -1,6 +1,6 @@
 """Strategia "momentum + filtr trendu" na koncie DEMO. POMIAR EGZEKUCJI, NIE PRZEWAGA.
 
-DLACZEGO (decyzja wlasciciela "A", 2026-10-04, docs/hipotezy.md)
+DLACZEGO (decyzja wlasciciela "A", 2026-10-04, renacode-infra: docs/projekty/trader/hipotezy.md)
 
 Poszukiwanie przewagi jest zamkniete wnioskiem "brak przewagi spelniajacej
 kryteria": H-1 (ensemble 4h) STOP przy -11,2 pb na runde pod pesymistycznym
@@ -10,7 +10,7 @@ kosztach, ale zysk z kilku miesiecy hossy altow: okna dodatnie 46% przy progu
 
 ZASTRZEZENIE (przeglad 2026-10-04, T-11): wszechswiat H-3 to dzisiejsze pary
 USDC zastosowane wstecz (survivorship), wiec +155..+188 pb to GORNE
-oszacowanie, nie pomiar - szczegoly w docs/hipotezy.md.
+oszacowanie, nie pomiar - szczegoly w renacode-infra: docs/projekty/trader/hipotezy.md.
 
 Na demo chodzi wiec prosta, jawnie nazwana regula z ZAMROZONYMI parametrami
 R4, po to, zeby zmierzyc EGZEKUCJE: wypelnialnosc wejsc, poslizg, opoznienie
