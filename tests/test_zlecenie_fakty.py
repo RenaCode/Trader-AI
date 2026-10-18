@@ -182,8 +182,8 @@ def test_odmowa_przed_wyslaniem_NIE_PORZUCA_zlecenia_zywego_u_gieldy():
             "quote_ccy": "USDC", "base_ccy": "SOL", "atr_pct": None,
             "trigger": {"rodzaj": "wejscie", "bar": "x"}}
     zyje = StanZlecenia(id_wlasne="tai-p77", id_gieldy="G9", status="new",
-                        ilosc=D("10"), wypelniono=D("0"), srednia_cena=None,
-                        prowizja=D("0"))
+                        ilosc=D("0.001"), wypelniono=D("0"), srednia_cena=None,
+                        prowizja=D("0"), symbol="SOLUSDC", strona="buy")
     cur = Kursor()
     ok, msg = asyncio.run(zloz_plan(cur, Gielda(stan=zyje), plan, SOLUSDC,
                                     engine="crypto", mode="demo",

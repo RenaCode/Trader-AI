@@ -267,7 +267,8 @@ def test_zlecenie_odnalezione_u_gieldy_nie_jest_skladane_drugi_raz():
 def _stan(wypelniono, ilosc=D("10"), status="filled"):
     return StanZlecenia(id_wlasne="tai-p42", id_gieldy="G1", status=status,
                         ilosc=ilosc, wypelniono=wypelniono,
-                        srednia_cena=D("100"), prowizja=D("0.25"))
+                        srednia_cena=D("100"), prowizja=D("0.25"),
+                        symbol="SOLUSDC", strona="buy")
 
 
 SUBMITTED = __import__("datetime").datetime(
@@ -752,6 +753,43 @@ def test_WYJSCIE_poza_pasmem_jest_PRZYCIAGANE_a_nie_odrzucane():
     assert len(gielda.zlozone) == 1
     # Cena zeszla z 200 do gornej krawedzi pasma wokol 100.
     assert gielda.zlozone[0]["cena_limitu"] < D("200")
+
+
+@pytest.mark.parametrize("plan", [PLAN, dict(PLAN, side="sell")],
+                         ids=["wejscie_kupna", "plan_sprzedazy"])
+@pytest.mark.parametrize("zastane", [
+    {"strona": "sell"}, {"symbol": "ETHUSDC"}, {"ilosc": D("25")},
+    {"symbol": None, "strona": None},
+], ids=["inna_strona", "inny_symbol", "wieksza_ilosc", "bez_tozsamosci"])
+def test_ZASTANE_zlecenie_INNE_niz_plan_zatrzymuje_zamiast_uznac_za_zlozone(plan, zastane):
+    """Audyt S-5. `istnieje` z pierwszego odczytu szlo prosto w
+    `juz_istnialo=True` (albo w wiersz "gielda zna to zlecenie") po samym id.
+    Zlecenie o naszym id, ale innej strony, pary albo wiekszej ilosci, nie jest
+    nasze - plan musi stanac z bledem dla czlowieka i nic nie zapisac."""
+    pola = {"symbol": "SOLUSDC", "strona": plan["side"], "ilosc": D("10"), **zastane}
+    if zastane.get("strona") == plan["side"]:
+        pola["strona"] = "buy" if plan["side"] == "sell" else "sell"
+    obce = StanZlecenia(id_wlasne="tai-p42", id_gieldy="OBCE", status="new",
+                        wypelniono=D("0"), srednia_cena=None, prowizja=D("0"),
+                        **pola)
+    g = Gielda(odniesienie=D("100"), stan=obce)
+    cur = Kursor()
+    with pytest.raises(ExchangeError) as e:
+        asyncio.run(zloz_plan(cur, g, plan, F, engine="crypto",
+                              mode="demo", kategoria="spot"))
+    assert e.value.wymaga_czlowieka is True
+    assert g.zlozone == []
+    assert not cur.zapytania("INSERT INTO exec.order")
+
+
+def test_zastane_zlecenie_ZGODNE_z_planem_nadal_jest_uznane_za_zlozone():
+    """Kanarek do poprzedniego: idempotencja dalej dziala dla wlasnego zlecenia."""
+    g = Gielda(odniesienie=D("100"), stan=_stan(D("0"), status="new"))
+    cur = Kursor()
+    ok, msg = asyncio.run(zloz_plan(cur, g, PLAN, F, engine="crypto",
+                                    mode="demo", kategoria="spot"))
+    assert ok is True, msg
+    assert g.zlozone == []
 
 
 def test_PELEN_OBIEG_planu_nie_lamie_unikalnosci_zlecenia():
@@ -1331,7 +1369,8 @@ WYJSCIE = dict(PLAN, id=42, side="sell", qty=D("10"), limit_price=D("100"),
 def _odrzucone(id_wlasne, n):
     return StanZlecenia(id_wlasne=id_wlasne, id_gieldy=f"G{n}", status="cancelled",
                         ilosc=D("10"), wypelniono=D("0"), srednia_cena=None,
-                        prowizja=D("0"), powod_odmowy=POSTONLY)
+                        prowizja=D("0"), powod_odmowy=POSTONLY,
+                        symbol="SOLUSDC", strona="sell")
 
 
 class GieldaPostOnly:
@@ -1507,7 +1546,7 @@ def test_IDEMPOTENCJA_po_restarcie_odnajduje_ZYWE_ogniwo_i_niczego_nie_sklada():
     przed commitem. Następny cykl pyta po ogniwach - i nie składa NICZEGO."""
     zywe = StanZlecenia(id_wlasne="tai-p42-r1", id_gieldy="G2", status="new",
                         ilosc=D("10"), wypelniono=D("0"), srednia_cena=None,
-                        prowizja=D("0"))
+                        prowizja=D("0"), symbol="SOLUSDC", strona="sell")
     g = GieldaPostOnly(znane={"tai-p42": _odrzucone("tai-p42", 1),
                               "tai-p42-r1": zywe})
     cur, ok, msg = _zloz_wyjscie(g)

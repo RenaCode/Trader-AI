@@ -61,7 +61,7 @@ from .base import (
     AuthError, Balance, BladIpKlucza, BookLevel, Candle, ConnectionCheck, ExchangeError,
     KontoZamrozone, OdmowaGieldy, OrderBook, PowodOdmowy, StanZlecenia,
     SymbolNieListowany,
-    Wypelnienie, ZlozoneZlecenie,
+    Wypelnienie, ZlozoneZlecenie, sprawdz_zastane,
 )
 
 # SWIECE I CECHY bierzemy z podmiotu GLOBALNEGO niezaleznie od tego, gdzie stoi
@@ -1144,6 +1144,9 @@ class BybitAdapter:
                     # `StanZlecenia.utworzono_ms`.
                     utworzono_ms=_ms_gieldy(o.get("createdTime")),
                     zaktualizowano_ms=_ms_gieldy(o.get("updatedTime")),
+                    # TOZSAMOSC Z TEJ SAMEJ ODPOWIEDZI - patrz `sprawdz_zastane`.
+                    symbol=o.get("symbol") or None,
+                    strona=(o.get("side") or "").strip().lower() or None,
                 )
         return None
 
@@ -1222,6 +1225,7 @@ class BybitAdapter:
         if not istnienie_sprawdzone:
             istniejace = await self.stan_zlecenia(id_wlasne, kategoria)
             if istniejace is not None:
+                sprawdz_zastane(istniejace, symbol=symbol, strona=strona, ilosc=ilosc)
                 return ZlozoneZlecenie(id_wlasne=id_wlasne, id_gieldy=istniejace.id_gieldy,
                                        status=istniejace.status, juz_istnialo=True)
 

@@ -49,7 +49,7 @@ import httpx
 from services.exchanges.base import (
     AuthError, Balance, BookLevel, Candle, ConnectionCheck, ExchangeError,
     KontoZamrozone, OdmowaGieldy, OrderBook, StanZlecenia, Wypelnienie,
-    ZlozoneZlecenie,
+    ZlozoneZlecenie, sprawdz_zastane,
 )
 
 HOSTS = {
@@ -673,7 +673,9 @@ class AlpacaAdapter:
             status=_status_alpaki(o.get("status", "")), ilosc=_dec(o.get("qty")),
             wypelniono=_dec(o.get("filled_qty")),
             srednia_cena=_dec_albo_nic(o.get("filled_avg_price")),
-            prowizja=Decimal(0), prowizja_w=None)
+            prowizja=Decimal(0), prowizja_w=None,
+            symbol=o.get("symbol") or None,
+            strona=(o.get("side") or "").strip().lower() or None)
 
     async def stan_zlecenia(self, id_wlasne: str, kategoria: str = "spot") -> StanZlecenia | None:
         """Stan po NASZYM identyfikatorze. None, gdy gielda go nie zna."""
@@ -739,6 +741,7 @@ class AlpacaAdapter:
         if not istnienie_sprawdzone:
             istnieje = await self.stan_zlecenia(id_wlasne)
             if istnieje is not None:
+                sprawdz_zastane(istnieje, symbol=symbol, strona=side, ilosc=ilosc)
                 return ZlozoneZlecenie(id_wlasne=id_wlasne, id_gieldy=istnieje.id_gieldy,
                                        status=istnieje.status, juz_istnialo=True)
         body = {"symbol": symbol, "qty": str(ilosc),
@@ -754,6 +757,7 @@ class AlpacaAdapter:
             if e.code == "422" and "client_order_id" in str(e):
                 ponownie = await self.stan_zlecenia(id_wlasne)
                 if ponownie is not None:
+                    sprawdz_zastane(ponownie, symbol=symbol, strona=side, ilosc=ilosc)
                     return ZlozoneZlecenie(id_wlasne=id_wlasne, id_gieldy=ponownie.id_gieldy,
                                            status=ponownie.status, juz_istnialo=True)
             raise
