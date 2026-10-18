@@ -423,7 +423,8 @@ workers:
   # a kazda minuta czekania tutaj to minuta zwloki decyzji po swiecy.
   features:
     enabled: true
-    command: ["python", "services/ingest/features.py", "--bar", "4h,1h", "--interval", "300"]
+    # Tylko 4h od 2026-10-18: tor 1h wylaczony z `trainerCron.horyzonty`.
+    command: ["python", "services/ingest/features.py", "--bar", "4h", "--interval", "300"]
     resources:
       limits:   { cpu: 1000m, memory: 768Mi }
       requests: { cpu: 100m,  memory: 192Mi }
@@ -986,9 +987,16 @@ trainerCron:
   # licznik hipotez i wlasny stan nauki (0025). Okna 1h przesuwaja sie o 14 dni,
   # wiec ten tor zyskuje nowe okno testowe dwa razy czesciej niz 4h.
   #
-  # Silnik handluje wylacznie horyzontem domyslnym; 1h jest torem porownawczym
-  # i nie podnosi alarmu.
-  horyzonty: ["4h", "1h"]
+  # Silnik handluje wylacznie horyzontem domyslnym; 1h byl torem porownawczym
+  # i nie podnosil alarmu.
+  #
+  # TOR 1h WYLACZONY 2026-10-18 (B-0 = STOP, caly tor crypto zamkniety jako
+  # wynik negatywny - `services/engine/tory.py`). Porownawczy 1h nie ma juz
+  # czego porownywac, a trzymal ~970 MiB z limitu 1024 MiB (pomiar nizej przy
+  # `resources`) - najwiekszy proces, ktory OOM zabilby pierwszy. Tor 4h liczy
+  # dalej (seria H-4, dryf). `workers.features` liczy tylko 4h - lista musi
+  # sie zgadzac (`test_petle_w_serwisach`). Powrot 1h = nowa hipoteza.
+  horyzonty: ["4h"]
   # TOR EQUITY - OSOBNY SILNIK, OSOBNY MODEL, OSOBNY CENNIK.
   #
   # Petla decyzyjna equity (`workers.engine-equity`) chodzi z `--wymagaj-modelu`,

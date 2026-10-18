@@ -14,7 +14,7 @@ DLACZEGO `--engine` W CHARTCIE, A NIE PETLA PO SILNIKACH W `dozor.py`
 
 Bo `swiezosc` potrzebuje PARY (silnik, horyzont), a nie samego silnika: prog dla
 `feat.feature_value` liczy sie z `bar_minutes`, a kazdy tor trenuje inne swiece
-(`trainerCron.horyzonty` = 4h+1h dla krypto, `trainerCron.equity.horyzonty` = 1h).
+(`trainerCron.horyzonty` = 4h dla krypto (1h wylaczony 2026-10-18), `trainerCron.equity.horyzonty` = 1h).
 Petla po silnikach wewnatrz `dozor.py` musialaby wiec znac liste horyzontow
 KAZDEGO toru - czyli trzymac DRUGA KOPIE tej listy, obok `workers.features`,
 `workers.features-equity` i `trainerCron`. Rozjazd takiej kopii nie objawia sie

@@ -112,7 +112,8 @@ def test_H5_trainerCron_przekazuje_model_pesymistyczny_crypto_i_equity(monkeypat
     wywolania = _wywolania_trenera()
     silniki = {(a[a.index("--engine") + 1] if "--engine" in a else "crypto",
                 a[a.index("--bar") + 1]) for a in wywolania}
-    assert silniki == {("crypto", "4h"), ("crypto", "1h"), ("equity", "1h")}
+    # Tor crypto 1h wylaczony 2026-10-18 (B-0 = STOP, `trainerCron.horyzonty`).
+    assert silniki == {("crypto", "4h"), ("equity", "1h")}
     for argv in wywolania:
         assert "--egzekucja-pesymistyczna" in argv, argv
         assert argv[argv.index("--opoznienie") + 1] == "20", argv

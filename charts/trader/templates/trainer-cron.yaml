@@ -50,7 +50,8 @@ spec:
       # (services/engine/dozor.py, "Bez zmiany istotnej — cisza").
       #
       # SKAD 10800, a nie 2400 ani 86400:
-      #   * przebieg liczy SEKWENCYJNIE dwa horyzonty (`horyzonty: ["4h","1h"]`),
+      #   * przebieg liczyl SEKWENCYJNIE dwa horyzonty crypto (`horyzonty:
+      #     ["4h","1h"]`; od 2026-10-18 tylko 4h) plus equity,
       #     a pojedynczy trening jest w repo opisany jako "dziesiatki minut"
       #     (values.yaml, workers.trainer) - gorny szacunek legalnego przebiegu
       #     to wiec okolo dwoch godzin, a limit ma zabijac ZAWIESZENIE,
