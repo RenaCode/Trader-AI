@@ -1886,14 +1886,13 @@ def ocen_swiezosc(wiersze: list[dict], swiec_zwloki: int = SWIEC_ZWLOKI
                 f"czym podejmować decyzji."))
             continue
         if w["wiek_min"] > prog_min:
+            skad_prog = ("limit wieku źródła" if prog_jawny is not None else
+                         f"{swiec_zwloki} świece po {w['minut_swiecy']:.0f} min")
             powody.append((
                 w["co"],
                 f"Dane nieświeże: {w['co']}",
                 f"Najnowszy wpis sprzed {w['wiek_min']:.0f} min, próg to "
-                f"{prog_min:.0f} min"
-                + (" (limit wieku źródła)" if prog_jawny is not None else
-                   f" ({swiec_zwloki} świece po {w['minut_swiecy']:.0f} min)")
-                + ".\n\n"
+                f"{prog_min:.0f} min ({skad_prog}).\n\n"
                 f"Pętla decyzyjna NIE ZGŁASZA tego sama: bije dalej i podejmuje "
                 f"decyzje na tym, co ma. Stare cechy nie wyglądają jak awaria — "
                 f"wyglądają jak rynek, który przestał dawać sygnały."))
