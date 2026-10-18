@@ -84,6 +84,7 @@ from services.engine.signals import (
     DEFAULT_WEIGHTS, REGIMES, SIGNALS, classify_regime, combine, evaluate,
     wlaczone_eksperymenty,
 )
+from services.engine.tory import zamkniecie
 from services.engine.wersja import sha_kodu
 from services.engine.dozor import podsumuj_dryf_cech
 
@@ -4826,6 +4827,26 @@ def sprawdz_hipoteze(hipoteza: str, rejestr: Path = REJESTR_HIPOTEZ) -> str | No
     return None
 
 
+def _sprawdz_tor(ap: argparse.ArgumentParser, args) -> None:
+    """Cennik toru i tor zamkniety (services/engine/tory.py).
+
+    Trener na torze zamknietym liczy dalej (H-4, dryf), ale wersji `active` -
+    jedynej, ktora wolno wpuscic na live - nie nadaje. Promocja wpuszcza
+    wersje na live, wiec cennik toru musi byc jawny: domysl `spot` omijalby
+    zamkniecie toru `spot_eu`. Ustawia `args.kind`, gdy nie podano.
+    """
+    if args.kind is None:
+        if args.zgoda_na_promocje:
+            ap.error("--zatwierdz-promocje wymaga jawnego --kind (cennik toru)")
+        args.kind = "spot"
+    tor_zamkniety = zamkniecie(args.engine, args.bar, args.kind)
+    if tor_zamkniety and args.zgoda_na_promocje:
+        ap.error(f"--zatwierdz-promocje odmówione: {tor_zamkniety.opis()}")
+    if tor_zamkniety:
+        print(f"TOR ZAMKNIĘTY: {tor_zamkniety.opis()}. Przebieg liczy się dalej "
+              f"(seria H-4, dryf); żadna wersja nie zostanie promowana.")
+
+
 def _sprawdz_argumenty(ap: argparse.ArgumentParser, args) -> tuple[datetime | None,
                                                                tuple[int, ...]]:
     """Odmowy wariantow bez `--sucho` i rozbior `--od` / `--przesuniecia`."""
@@ -4928,10 +4949,13 @@ def main() -> int:
     # to zero prowizji - patrz `koszty.CENNIK`. Trener MUSI kosztowac tyle, ile
     # kosztuje strategia, ktora kalibruje: tor equity liczony cennikiem Bybita
     # (tak powstaly liczby w renacode-infra: docs/projekty/trader/08-przed-go-live.md) mierzyl oplaty, ktorych to konto nie placi.
-    ap.add_argument("--kind", default="spot",
+    # Domysl `spot` ustawiany po parsowaniu - przy `--zatwierdz-promocje`
+    # `--kind` jest obowiazkowy (patrz tor zamkniety nizej).
+    ap.add_argument("--kind", default=None,
                     choices=("spot", "spot_eu", "perp", "stock"),
                     help="rodzaj instrumentu - wyznacza stawki prowizji; "
-                         "spot_eu to cennik podmiotu unijnego (taker 0,250%%)")
+                         "spot_eu to cennik podmiotu unijnego (taker 0,250%%); "
+                         "domyślnie spot, przy --zatwierdz-promocje obowiązkowy")
     ap.add_argument("--limit", action="store_true",
                     help="zlecenia z limitem zamiast rynkowych")
     ap.add_argument("--sucho", action="store_true",
@@ -5061,6 +5085,7 @@ def main() -> int:
                          "wiersz z kryterium zapisany PRZED przebiegiem")
     args = ap.parse_args()
     od, przesuniecia = _sprawdz_argumenty(ap, args)
+    _sprawdz_tor(ap, args)
 
     plik = panel_plik.wczytaj(args.panel) if args.panel else None
     url = os.environ.get("DATABASE_URL")
