@@ -282,6 +282,17 @@ def test_akcja_wszystkie_galezie():
     assert sb.akcja(GOTOWKA, None, "SPY", True) == ("hold", "filtr_trendu_spy")
 
 
+def test_dziura_w_historii_NIE_likwiduje_pozycji():
+    """Niepelna historia to awaria danych, nie sygnal: SPY zostaje, nic nowego."""
+    brak = sb.Cel(LISTOPAD, False, powod="za mało historii SPY")
+    dlugi = {"side": "long"}
+    assert sb.akcja(brak, dlugi, "SPY", False) == ("hold", "historia_filtra_niepelna")
+    assert sb.akcja(brak, dlugi, "SPY", True) == ("hold", "historia_filtra_niepelna")
+    assert sb.akcja(brak, None, "SPY", True) == ("hold", "historia_filtra_niepelna")
+    assert sb.akcja(brak, {"side": "short"}, "SPY", True) == ("exit", None)
+    assert sb.akcja(brak, dlugi, "AAPL", True) == ("exit", None)
+
+
 def test_snapshot_i_uzasadnienie_niosa_liczby_decyzji():
     s = W_RYNKU.snapshot("SPY")
     assert s["beta_w_rynku"] == 1.0 and s["beta_spy_sma_10m"] == 500.0

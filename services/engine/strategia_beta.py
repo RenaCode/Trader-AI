@@ -248,10 +248,18 @@ def akcja(cel: Cel, pozycja: dict | None, symbol: str,
     Ten sam podpis co `strategia_momentum.akcja` - petla wola jedno albo drugie.
     Pozycja trzymana tylko wtedy, gdy jest dluga, w SPY i cel jest "w rynku";
     kazda inna wychodzi na kazdej swiecy, az wyjdzie.
+
+    WYJATEK: niepelna historia (`sma is None` - dziura w danych, awaria potoku)
+    nie jest sygnalem. Dluga pozycja w SPY zostaje, nowej sie nie otwiera -
+    inaczej awaria `history` likwidowalaby konto, tak jak w momentum filtr
+    z niedomknietej swiecy (`strategia_momentum.cel_z_bazy`).
     """
     if pozycja is not None:
-        if pozycja.get("side") == "long" and symbol == cel.symbol and cel.w_rynku:
-            return "hold", "trzyma_pozycje"
+        if pozycja.get("side") == "long" and symbol == cel.symbol:
+            if cel.w_rynku:
+                return "hold", "trzyma_pozycje"
+            if cel.sma is None:
+                return "hold", POWOD_HISTORIA
         return "exit", None
     if symbol != cel.symbol:
         return "hold", POWOD_POZA
