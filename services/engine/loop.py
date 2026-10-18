@@ -3269,9 +3269,12 @@ async def main() -> int:
     # "stock" dolaczylo 2026-09-24 razem z petla equity. Cennik akcji na Alpace
     # to zero prowizji (koszty.py) - i to jest liczba, nie brak liczby; skladniki,
     # ktorych zero nie obejmuje, wymienia `karta_rundy` z nazwy.
-    ap.add_argument("--kind", default="spot",
+    # Domysl `spot` TYLKO na demo - na live `--kind` jest obowiazkowy (nizej):
+    # cichy domysl omijal zamkniecie toru (tory.py) i liczyl koszt 0,20%.
+    ap.add_argument("--kind", default=None,
                     choices=("spot", "spot_eu", "perp", "stock"),
-                    help="cennik giełdy dla rachunku papierowego")
+                    help="cennik giełdy dla rachunku papierowego; przy "
+                         "--mode live obowiązkowy, na demo domyślnie spot")
     # ZWALIDOWANY MODEL JAKO WARUNEK HANDLU. Patrz "BRAMKA 2" w `run_once`.
     # Domysl `False` zostaje SWIADOMIE: wlaczenie tej reguly dla silnika, ktory
     # chodzi na produkcji od miesiecy, byloby zmiana jego zachowania przy okazji.
@@ -3353,6 +3356,10 @@ async def main() -> int:
     # TOR ZAMKNIETY WYNIKIEM HIPOTEZY (services/engine/tory.py). Na live -
     # odmowa startu, ta sama zasada co wyzej. Na demo silnik gra dalej jako
     # pomiar egzekucji, a log mowi to w pierwszych liniach.
+    if args.kind is None:
+        if args.mode != "demo":
+            ap.error(f"--mode {args.mode} wymaga jawnego --kind (cennik toru)")
+        args.kind = "spot"
     tor_zamkniety = zamkniecie(args.engine, args.bar, args.kind)
     if tor_zamkniety and args.mode != "demo":
         sys.exit(f"{tor_zamkniety.opis()} — --mode {args.mode} odmówiony")

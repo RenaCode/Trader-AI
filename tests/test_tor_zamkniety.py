@@ -71,6 +71,18 @@ def test_silnik_live_na_perp_nie_jest_odmawiany_przez_h9(monkeypatch):
     assert "DATABASE_URL" in kod
 
 
+def test_silnik_live_bez_kind_odmawiany(monkeypatch, capsys):
+    # Cichy domysl `spot` omijal zamkniecie toru `spot_eu` i liczyl 0,20%.
+    kod = _loop_main(monkeypatch, "--bar", "4h", "--mode", "live")
+    assert kod == "2"
+    assert "wymaga jawnego --kind" in capsys.readouterr().err
+
+
+def test_silnik_demo_bez_kind_dalej_spot(monkeypatch):
+    kod = _loop_main(monkeypatch, "--bar", "4h", "--mode", "demo")
+    assert "DATABASE_URL" in kod
+
+
 def test_run_once_odmawia_live_niezaleznie_od_parsera():
     from services.engine.loop import run_once
     with pytest.raises(ValueError, match="H-9"):
@@ -100,6 +112,18 @@ def test_trener_liczy_dalej_bez_promocji(monkeypatch, capsys):
     kod = _train_main(monkeypatch, "--bar", "4h", "--kind", "spot_eu")
     assert "DATABASE_URL" in str(kod)
     assert "TOR ZAMKNIĘTY" in capsys.readouterr().out
+
+
+def test_trener_promocja_bez_kind_odmawiana(monkeypatch, capsys):
+    kod = _train_main(monkeypatch, "--bar", "4h", "--zatwierdz-promocje")
+    assert kod == 2
+    assert "wymaga jawnego --kind" in capsys.readouterr().err
+
+
+def test_trener_bez_kind_i_bez_promocji_dalej_spot(monkeypatch, capsys):
+    kod = _train_main(monkeypatch, "--bar", "4h")
+    assert "DATABASE_URL" in str(kod)
+    assert "TOR ZAMKNIĘTY" not in capsys.readouterr().out
 
 
 def test_trener_promuje_inne_tory(monkeypatch):
@@ -158,5 +182,9 @@ def test_chart_podaje_dozorowi_cennik_toru_crypto():
                          capture_output=True, text=True, check=True).stdout
     assert 'dozor.py --bar "4h" --kind "spot_eu" --kod-trenera $RC_CRYPTO' in out
     assert 'dozor.py --co dryf --bar "4h" --kind "spot_eu"' in out
+    # Trener i dozor ten sam cennik toru - bez rozjazdu domyslow w szablonie.
+    szablon = (KORZEN / "charts/trader/templates/trainer-cron.yaml").read_text(encoding="utf-8")
+    assert 'trainerCron.kind | default "spot" ' not in szablon
+    assert szablon.count('trainerCron.kind | default "spot_eu"') == 4
     # Silnik demo nadal chodzi na `spot_eu` - zamkniecie nie zmienia jego komendy.
     assert "--kind spot_eu --limit --wymagaj-modelu --egzekucja gielda --mode demo" in out
