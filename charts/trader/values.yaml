@@ -355,9 +355,15 @@ workers:
       limits:   { cpu: 200m, memory: 256Mi }
       requests: { cpu: 20m,  memory: 64Mi }
 
+  # --interval 300, NIE 1200 (2026-10-18) - z tego samego powodu co
+  # `features-equity` nizej i `history` krypto (F-4.1): swieca 1h equity bierze
+  # sie WYLACZNIE stad (horyzont 1h, `source_timeframe` 1h), wiec przy 1200 s
+  # potrafila przyjsc 20 min po zamknieciu - dokladnie `MAKS_ZWLOKA_WEJSCIA` -
+  # i wejscie odpadalo, zanim cechy w ogole powstaly. Koszt: ~20 zapytan na
+  # 5 min wobec limitu Alpaki 200 na minute.
   history-equity:
     enabled: true
-    command: ["python", "services/ingest/history_worker.py", "--interval", "1200", "--days", "3", "--timeframe", "1h", "--engine", "equity"]
+    command: ["python", "services/ingest/history_worker.py", "--interval", "300", "--days", "3", "--timeframe", "1h", "--engine", "equity"]
     resources:
       limits:   { cpu: 500m, memory: 384Mi }
       requests: { cpu: 50m,  memory: 96Mi }
@@ -441,10 +447,17 @@ workers:
   # w oknie jednodobowym piatkowa nie dostalaby cech NIGDY - co tydzien, kazdy
   # instrument, bez jednego bledu w logu. Siedem dni przykrywa takze przerwy
   # swiateczne i zamkniecia nadzwyczajne.
+  #
+  # --interval 300, NIE 900 (2026-10-18). Wejscie odpada po 20 min od
+  # zamkniecia swiecy (`loop.MAKS_ZWLOKA_WEJSCIA`). Przy 900 s faza tego
+  # procesu wzgledem pelnej godziny dryfuje (+1,7 s na cykl), wiec co jakis
+  # czas cechy przychodza ~15 min po zamknieciu, a z cyklem silnika (300 s)
+  # przekraczaja 20 min i cala swieca przepada jako `decyzja_przeterminowana`.
+  # 300 s - jak `features` krypto - daje najgorzej ~10 min.
   features-equity:
     enabled: true
     command: ["python", "services/ingest/features.py", "--bar", "1h",
-              "--engine", "equity", "--okno-dni", "7", "--interval", "900"]
+              "--engine", "equity", "--okno-dni", "7", "--interval", "300"]
     resources:
       limits:   { cpu: 1000m, memory: 768Mi }
       requests: { cpu: 100m,  memory: 192Mi }

@@ -451,8 +451,10 @@ def _interwal(nazwa: str) -> int:
     return int(cmd[cmd.index("--interval") + 1])
 
 
-@pytest.mark.parametrize("nazwa", ["history", "features"])
-def test_potok_cech_krypto_nie_doklada_wiecej_niz_piec_minut(nazwa):
+@pytest.mark.parametrize("nazwa", ["history", "features",
+                                   # equity od 2026-10-18 (wejście odpada po 20 min)
+                                   "history-equity", "features-equity"])
+def test_potok_cech_nie_doklada_wiecej_niz_piec_minut(nazwa):
     """Łańcuch market -> history -> features -> engine jest zegarowy: każde
     ogniwo dokłada losowe 0..interwał do zwłoki decyzji po zamknięciu świecy.
 

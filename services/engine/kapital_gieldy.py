@@ -11,7 +11,7 @@ Ten proces przepisuje je do tej samej tabeli, ta sama miara co krypto
 (jednostka uczestnictwa z migracji 0031), wiec obie linie znacza to samo.
 
 CZEGO NIE ROBI: nie decyduje, nie sklada zlecen, nie dotyka pozycji. Odczyt
-i jeden INSERT na cykl, `ON CONFLICT DO NOTHING` na siatce minutowej.
+i jeden INSERT na cykl, `ON CONFLICT DO NOTHING` na siatce sekundowej.
 
 JEDNOSTKI. Bez przeplywow w `exec.cash_flow` przyjmujemy start 100 000 jako
 wplate (tak samo jak `loop.seed_equity` dla demo) - konto paper Alpaki startuje
@@ -100,7 +100,11 @@ def zapisz_punkt(cur, engine: str, mode: str, stan: dict, unrealized: Decimal,
             f"DWIE definicje kapitalu w jednej serii. Silniki z krzywa z ksiag: "
             f"{sorted(stan_kapitalu.KRZYWA_Z_KSIAG_GIELDY)} "
             f"(stan_kapitalu.KRZYWA_Z_KSIAG_GIELDY)")
-    as_of = (as_of or datetime.now(timezone.utc)).replace(second=0, microsecond=0)
+    # BEZ PRZYCINANIA DO MINUTY (2026-10-18). Przyciecie postarzalo punkt
+    # o 0-60 s, a wiek krzywej jest warunkiem handlu (`risk.prog_wieku_pomiaru`):
+    # punkt zapisany 14:30:59 udawal pomiar z 14:30:00. Sekundy zostaja, wiec
+    # `ON CONFLICT` lapie juz tylko powtorke w tej samej sekundzie.
+    as_of = (as_of or datetime.now(timezone.utc)).replace(microsecond=0)
     wplaty, units = przeplywy(cur, engine, mode)
     zgadniete = False
     if wplaty == 0:

@@ -91,8 +91,9 @@ ZRODLA = (ZRODLO_ZASIEW, ZRODLO_PETLA, ZRODLO_KSIEGI_GIELDY)
 #     a `kapital-equity` chodzi co 900 s - dla equity jeden pominiety cykl
 #     wystarczy, zeby pomiar byl "stary". To jest stan JUZ ISTNIEJACY (ksiegi
 #     pisza co 900 s od 2026-09-22), nie skutek tej decyzji, ale ta decyzja
-#     czyni go trwalym i dlatego jest tu nazwany. Osobna decyzja: prog wieku
-#     pomiaru per silnik.
+#     czyni go trwalym i dlatego jest tu nazwany. ROZSTRZYGNIETE 2026-10-18:
+#     prog wieku pomiaru per silnik (`risk.prog_wieku_pomiaru`) - dla krzywej
+#     z ksiag gieldy dwa interwaly zapisu (30 min).
 #
 # DOPISANIE SILNIKA DO TEGO ZBIORU jest zmiana definicji kapitalu i wymaga
 # odpowiedzi na jedno pytanie: kto od tej chwili pisze jego krzywa. Pilnuje

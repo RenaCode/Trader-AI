@@ -37,7 +37,7 @@ robi sie z brakiem wiedzy przy operacji nieodwracalnej: nie handlowac. Domysl
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from services.exchanges.fabryka import OBSLUGIWANE
 
@@ -73,6 +73,53 @@ class StanSesji:
                      if self.nastepne_otwarcie else "")
             return f"POZA SESJĄ ({self.zrodlo}{kiedy})"
         return f"STAN SESJI NIEZNANY ({self.zrodlo}): {self.blad or 'brak zegara giełdy'}"
+
+    def swieca_przed_otwarciem(self, koniec_swiecy: datetime,
+                               teraz: datetime) -> bool:
+        """Czy swieca zamknieta o `koniec_swiecy` skonczyla sie przed otwarciem
+        DZISIEJSZEJ sesji. Prawda wylacznie przy otwartej sesji Alpaki.
+
+        Rynek ciagly, sesja zamknieta i "nie wiem" daja False - przy dwoch
+        ostatnich petla i tak nie decyduje (bramka sesji).
+        """
+        if self.otwarta is not True or self.venue not in OTWARCIE_SESJI:
+            return False
+        return koniec_swiecy <= OTWARCIE_SESJI[self.venue](teraz.date())
+
+
+# GODZINA OTWARCIA SESJI - JEDYNE MIEJSCE, W KTORYM NIE PYTAMY GIELDY.
+#
+# `/v2/clock` Alpaki mowi, czy jest otwarte, i podaje NASTEPNE otwarcie - przy
+# otwartej sesji to jutrzejsze, wiec dzisiejszego z zegara nie odczytamy.
+# Petli potrzebne jest ono do jednego: rozpoznania swiecy zamknietej przed
+# otwarciem (przy swiecy 1h i otwarciu 13:30 UTC swieca 12:00-13:00 jest
+# rozstrzygana najwczesniej 13:30, czyli zawsze po `MAKS_ZWLOKA_WEJSCIA`,
+# i konczyla jako `decyzja_przeterminowana` - licznik, ktory ma mierzyc
+# spoznienie potoku).
+#
+# Regularna sesja NYSE/Nasdaq otwiera sie o 09:30 czasu Nowego Jorku KAZDEGO
+# dnia sesyjnego - dni skrocone koncza sie wczesniej, nie zaczynaja pozniej.
+# Strefe liczymy regula federalna (od 2007: czas letni od drugiej niedzieli
+# marca do pierwszej niedzieli listopada), a nie `zoneinfo`: obraz
+# `python:3.12-slim` nie ma bazy stref ani pakietu `tzdata`, wiec
+# `ZoneInfo("America/New_York")` padloby dopiero na produkcji.
+#
+# Pomylka tej funkcji (zmiana prawa o czasie letnim) zostawia stan sprzed
+# 2026-10-18: swieca przed sesja konczy jako `decyzja_przeterminowana`.
+# Zadne wejscie nie przechodzi przez nia dodatkowo.
+def _niedziela(rok: int, miesiac: int, ktora: int) -> date:
+    pierwszy = date(rok, miesiac, 1)
+    return pierwszy + timedelta(days=(6 - pierwszy.weekday()) % 7 + 7 * (ktora - 1))
+
+
+def otwarcie_sesji_us(dzien: date) -> datetime:
+    """09:30 czasu Nowego Jorku w dniu `dzien`, w UTC."""
+    letni = _niedziela(dzien.year, 3, 2) <= dzien < _niedziela(dzien.year, 11, 1)
+    return datetime(dzien.year, dzien.month, dzien.day, 13 if letni else 14, 30,
+                    tzinfo=timezone.utc)
+
+
+OTWARCIE_SESJI = {"alpaca": otwarcie_sesji_us}
 
 
 def venue_silnika(cur, engine: str) -> dict | None:

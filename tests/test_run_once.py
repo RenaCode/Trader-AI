@@ -18,6 +18,8 @@ które CZYTAJĄ bazę (`active_model`, `latest_features`, `zakres_swiecy`, …)
 i `RiskKernel` — czyli źródła stanu, nie reguły. Wszystko, co rozstrzyga
 o akcji, wykonuje się naprawdę: bramki, `position_budget`, `wielkosc_pozycji`,
 `decyzja_przeterminowana`, `za_szeroki_spread`, `zaplanuj`, `nowe_stats`.
+Z wykluczeń spreadem podmieniony jest wyłącznie POMIAR (`wykluczenia_spreadowe`
+czyta bazę); reguła progu `za_szeroki_spread` wykonuje się naprawdę.
 
 Zegar jest zamrożony (`loop.datetime`), bo `decyzja_przeterminowana` zależy od
 odstępu między zamknięciem świecy a chwilą decyzji — bez tego wynik testu
@@ -36,6 +38,7 @@ from services.engine.horizons import get as get_horizon
 from services.engine.risk_rules import (DEFAULT_LIMITS, RiskVerdict,
                                         position_budget, wielkosc_pozycji)
 from services.engine.sesja import StanSesji
+from services.engine.uniwersum import za_szeroki_spread
 from tests.atrapa_bazy import Kursor
 
 H = get_horizon("4h")
@@ -72,6 +75,8 @@ class Swiat:
         self.wyniki: dict[int, float] = {1: 0.05, 2: 0.05}   # słaby sygnał
         self.pozycje: dict[int, dict] = {}
         self.spready: dict[int, tuple[float, int]] = {}
+        # Powód odrzucenia pomiaru spreadu bramką spójności (None = przyjęty).
+        self.spread_odrzucony: str | None = None
         self.killswitch: dict | None = None
         self.teraz = TERAZ
         self.decyzje: list[dict] = []
@@ -136,7 +141,10 @@ def swiat(monkeypatch):
     m(loop, "ensure_signal_defs", lambda cur, engine: {})
     m(loop, "seed_equity", lambda cur, engine, mode: None)
     m(loop, "pozycje_do_wyceny", lambda cur, engine, mode, as_of: [])
-    m(loop, "srednie_spready", lambda cur, ids, bar, teraz: s.spready)
+    m(loop, "wykluczenia_spreadowe", lambda cur, engine, ids, h, teraz: (
+        ({}, s.spread_odrzucony) if s.spread_odrzucony
+        else (za_szeroki_spread(s.spready), None)))
+    m(loop, "_SPREAD_BEZ_WYKLUCZEN", {})
     m(loop, "active_model", lambda cur, engine, h, status="active", mode=None: {
         "weights": None, "enter": loop.ENTER_THRESHOLD, "exit": loop.EXIT_THRESHOLD,
         "bramki": loop.bramki_z_modelu(None), "min_conf": loop.MIN_CONFIDENCE,
@@ -185,12 +193,13 @@ def swiat(monkeypatch):
     return s
 
 
-def cykl(swiat, **kw):
-    cur = Kursor([dict(i) for i in INSTRUMENTY])
+def cykl(swiat, instrumenty=INSTRUMENTY, engine="crypto", **kw):
+    cur = Kursor([dict(i) for i in instrumenty])
     conn = Polaczenie(cur)
     kw.setdefault("limit", True)
-    stats = asyncio.run(loop.run_once(conn, "crypto", "demo", h=H,
-                                      verbose=False, **kw))
+    kw.setdefault("h", H)
+    kw.setdefault("verbose", False)
+    stats = asyncio.run(loop.run_once(conn, engine, "demo", **kw))
     return stats, cur
 
 
@@ -483,3 +492,138 @@ def test_brak_cech_zostawia_SLAD_pominiecia(swiat, monkeypatch):
 
     assert stats["pominiete_bez_cech"] == 2 and stats["rozwazone"] == 0
     assert sum("journal.pominiecie" in s for s, _ in cur.sql) == 2
+
+
+# ------------------------------------------------------------------ spread: bramka spójności
+
+def test_ODRZUCONY_pomiar_spreadu_nie_wyklucza_i_mowi_o_tym_RAZ(swiat, capsys):
+    """Equity: `book_spread_bps` z feedu IEX średnio 278 pb, ale bramka spójności
+    (`spread.zmierz_spread`) odrzuca ten pomiar - trener go nie używa, więc
+    pętla też nie może nim wykluczać. Powód idzie do logu przy PRZEJŚCIU,
+    nie co cykl (pętla chodzi co 300 s)."""
+    swiat.spready = {1: (278.0, 40), 2: (35.0, 40)}
+    swiat.spread_odrzucony = "wykluczenia spreadem WYŁĄCZONE — pomiar odrzucony"
+    swiat.wyniki = {1: 0.6, 2: 0.05}
+    stats, cur = cykl(swiat)
+
+    assert stats["szeroki_spread"] == 0
+    assert [p[2] for p in plany(cur)] == ["buy"]
+    assert capsys.readouterr().out.count("WYŁĄCZONE") == 1
+
+    cykl(swiat)
+    assert "WYŁĄCZONE" not in capsys.readouterr().out, "powód wypisany co cykl"
+
+
+# ------------------------------------------------------------------ kwota poniżej jednej akcji
+
+AKCJE = [
+    {"id": 1, "symbol": "LLY", "kind": "stock", "quote_ccy": "USD", "lot_size": D("1")},
+    {"id": 2, "symbol": "KO", "kind": "stock", "quote_ccy": "USD", "lot_size": D("1")},
+]
+
+
+def test_kwota_ponizej_JEDNEJ_AKCJI_to_hold_z_powodem_przy_decyzji(swiat, monkeypatch):
+    """Budżet na pozycję niższy niż cena jednej akcji: plan z ilością 0,13 akcji
+    odpadał dopiero przy wysyłce (`zlecenia.sprawdz_zlecenie`), a dziennik
+    decyzji mówił „enter". Teraz `hold` z powodem już przy decyzji, a tańsza
+    spółka (ilość >= 1) wchodzi normalnie."""
+    ceny = {1: D("5000"), 2: D("60")}
+    monkeypatch.setattr(loop, "zakres_swiecy",
+                        lambda cur, iid, h, bar_start: {"close": ceny[iid]})
+    swiat.wyniki = {1: 0.6, 2: 0.6}
+    stats, cur = cykl(swiat, instrumenty=AKCJE)
+
+    decyzje = {d["iid"]: d for d in swiat.decyzje}
+    assert decyzje[1]["action"] == "hold"
+    assert decyzje[1]["powod_holdu"] == "ponizej_jednej_akcji"
+    assert decyzje[2]["action"] == "enter_long"
+    assert stats["ponizej_jednej_akcji"] == 1 and stats["wejscia"] == 1
+    assert [p[1] for p in plany(cur)] == [2]
+
+
+def test_krok_ulamkowy_krypto_NIE_zmienia_wejscia(swiat):
+    """Kanarek: krypto z krokiem 0,1 i ilością ~150 wchodzi jak wcześniej,
+    a instrument bez reguły kroku (`lot_size` NULL) nie dostaje tu odmowy -
+    o nim rozstrzyga wysyłka."""
+    swiat.wyniki = {1: 0.6, 2: 0.6}
+    stats, cur = cykl(swiat, instrumenty=[
+        {**INSTRUMENTY[0], "lot_size": D("0.1")}, {**INSTRUMENTY[1], "lot_size": None}])
+
+    assert stats["ponizej_jednej_akcji"] == 0 and stats["wejscia"] == 2
+
+
+def test_selekcja_uniwersum_POBIERA_krok_ilosci(swiat):
+    """Atrapa oddaje cały wiersz, więc test wyżej przeszedłby także wtedy, gdy
+    zapytanie nie pobiera `lot_size` - a na produkcji reguła by milczała."""
+    _, cur = cykl(swiat)
+    (sql,) = [q for q, _ in cur.sql if "FROM ref.instrument" in q and "tradeable" in q]
+    assert "lot_size" in sql.split("FROM")[0]
+
+
+# ------------------------------------------------------------------ świeca sprzed sesji
+
+H1 = get_horizon("1h")
+SESJA_ALPACA = StanSesji(otwarta=True, zrodlo="zegar giełdy", venue="alpaca")
+
+
+def test_swieca_SPRZED_SESJI_ma_wlasny_powod_a_nie_przeterminowanie(swiat):
+    """Piątek 16.10.2026, czas letni: sesja od 13:30 UTC. O 13:33 zamknięta jest
+    świeca 12:00-13:00 - notowanie sprzed sesji, rozstrzygane 33 min po
+    zamknięciu. Kończyło się jako `decyzja_przeterminowana`, licznik spóźnienia
+    POTOKU. Wyjście z pozycji idzie dalej."""
+    swiat.teraz = datetime(2026, 10, 16, 13, 33, tzinfo=timezone.utc)
+    swiat.wyniki = {1: 0.6, 2: -0.4}
+    swiat.pozycje = {2: POZYCJA}
+    stats, cur = cykl(swiat, engine="equity", h=H1, sesja=SESJA_ALPACA)
+
+    decyzje = {d["iid"]: d for d in swiat.decyzje}
+    assert decyzje[1]["powod_holdu"] == "swieca_przed_sesja"
+    assert decyzje[2]["action"] == "exit"
+    assert stats["swieca_przed_sesja"] == 1
+    assert stats["decyzja_przeterminowana"] == 0
+
+
+def test_pierwsza_swieca_W_SESJI_decyduje_normalnie(swiat):
+    """Kanarek: 14:05 - świeca 13:00-14:00 zawiera otwarcie, wejście przechodzi."""
+    swiat.teraz = datetime(2026, 10, 16, 14, 5, tzinfo=timezone.utc)
+    swiat.wyniki = {1: 0.6, 2: 0.05}
+    stats, cur = cykl(swiat, engine="equity", h=H1, sesja=SESJA_ALPACA)
+
+    assert stats["swieca_przed_sesja"] == 0 and stats["wejscia"] == 1
+
+
+# ------------------------------------------------------------------ log cyklu
+
+def test_verbose_wypisuje_powod_holdu_TAKZE_dla_strategii_model(swiat, capsys):
+    swiat.wyniki = {1: -0.6, 2: 0.05}
+    cykl(swiat, verbose=True)
+
+    out = capsys.readouterr().out
+    assert "(short_niewykonalny)" in out and "(slaby_wynik)" in out
+
+
+def test_podsumowanie_liczy_zatrzymane_wejscia():
+    s = loop.nowe_stats(szeroki_spread=3, short_niewykonalny=1,
+                        decyzja_przeterminowana=2, ponizej_jednej_akcji=4,
+                        swieca_przed_sesja=5)
+    linia = loop.opis_zatrzymanych_wejsc(s)
+    for k, n in (("szeroki_spread", 3), ("short_niewykonalny", 1),
+                 ("decyzja_przeterminowana", 2), ("ponizej_jednej_akcji", 4),
+                 ("swieca_przed_sesja", 5)):
+        assert f"{k} {n}" in linia
+    assert loop.opis_zatrzymanych_wejsc(loop.nowe_stats()) == ""
+
+
+def test_komunikat_spoznionego_potoku_podaje_LIMIT_WEJSC_i_deployment_silnika(
+        swiat, monkeypatch, capsys):
+    """Komunikat mówił „po {długość świecy} min silnik NIE HANDLUJE" i kazał
+    patrzeć w `trader-features` także silnikowi equity - a wejścia odpadają po
+    `MAKS_ZWLOKA_WEJSCIA`, cechy equity liczy `trader-features-equity`."""
+    monkeypatch.setattr(loop, "latest_features", lambda cur, iid, now, h, ids, bar_start: (
+        {}, {"rsi": datetime(2026, 10, 16, 12, 0, tzinfo=timezone.utc)}))
+    swiat.teraz = datetime(2026, 10, 16, 15, 5, tzinfo=timezone.utc)
+    cykl(swiat, engine="equity", h=H1, sesja=SESJA_ALPACA)
+
+    out = capsys.readouterr().out
+    assert "deploy/trader-features-equity" in out
+    assert f"{loop.MAKS_ZWLOKA_WEJSCIA.total_seconds() / 60:.0f} min" in out

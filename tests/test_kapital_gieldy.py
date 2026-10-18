@@ -17,7 +17,9 @@ def test_punkt_z_konta_liczy_nav_i_realized_TA_SAMA_regula_co_krypto():
     assert w["nav"] == D("100250.5") / D(100000)
     assert w["realized"] == D("0"), "equity - wplaty - unrealized = 0 przy samym niezrealizowanym"
     sql, params = next((s, p) for s, p in cur.sql if "INSERT INTO exec.equity_point" in s)
-    assert params[2] == TERAZ.replace(second=0, microsecond=0), "siatka minutowa jak w silniku"
+    # Bez przycinania do minuty: punkt z 14:30:17 przycięty do 14:30:00 był
+    # o 17 s „starszy" przy progu wieku pomiaru (`risk.prog_wieku_pomiaru`).
+    assert params[2] == TERAZ, "event_time przycięty — pomiar wygląda na starszy, niż jest"
     assert params[3] == D("100250.5") and params[7] == D("40250.5")
     assert "ON CONFLICT (engine, mode, event_time) DO NOTHING" in sql
 

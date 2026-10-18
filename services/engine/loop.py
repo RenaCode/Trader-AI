@@ -45,7 +45,7 @@ from services.ingest.features import wklady_newsow
 from services.ingest import puls
 from services.engine.uniwersum import (odcisk, opis_wykluczen,
                                        sql_uniwersum_decyzyjnego,
-                                       srednie_spready, za_szeroki_spread)
+                                       wykluczenia_spreadowe)
 from services.engine.koszty import POSLIZG_MAKER, POSLIZG_TAKER, koszty
 from services.engine.portfolio import _wypelnione
 from services.engine.risk_rules import (
@@ -186,6 +186,13 @@ OPIS_POWODU_HOLDU = {
     "decyzja_przeterminowana": "Nie wchodzimy: od zamknięcia świecy minęło "
                                "ponad 20 minut — sygnał opisuje rynek, którego "
                                "już nie ma (opóźniony potok danych).",
+    # Migracja 0098.
+    "ponizej_jednej_akcji": "Nie wchodzimy: kwota wejścia nie kupi ani jednej "
+                            "jednostki instrumentu (krok ilości giełdy) — "
+                            "zlecenie odpadłoby przy wysyłce.",
+    "swieca_przed_sesja": "Nie wchodzimy: świeca zamknęła się przed otwarciem "
+                          "sesji — cena decyzyjna to notowanie sprzed sesji, "
+                          "a nie potok spóźniony.",
     # Strategia `momentum` (services/engine/strategia_momentum.py, migracja 0091).
     "filtr_trendu": "Nie wchodzimy: BTC pod EMA 50 d — filtr trendu każe "
                     "trzymać gotówkę.",
@@ -413,6 +420,46 @@ def okno_decyzji(bar_start: datetime, h: Horizon) -> datetime:
 # WYJSC TO NIE DOTYCZY. Spozniona decyzja o wyjsciu nadal zdejmuje ryzyko,
 # ktorego decyzja juz nie popiera.
 MAKS_ZWLOKA_WEJSCIA = timedelta(minutes=20)
+
+
+# Deployment potoku cech per silnik - do komunikatu o spoznionym potoku.
+# Nazwy z `charts/trader/values.yaml` (`workers.features`, `workers.features-equity`).
+DEPLOYMENT_CECH = {"crypto": "trader-features", "equity": "trader-features-equity"}
+
+# Liczniki holdow przy zamiarze wejscia wypisywane w linii podsumowania cyklu.
+POWODY_W_PODSUMOWANIU = ("short_niewykonalny", "szeroki_spread",
+                         "decyzja_przeterminowana", "swieca_przed_sesja",
+                         "ponizej_jednej_akcji")
+
+
+def opis_zatrzymanych_wejsc(stats: dict) -> str:
+    """Dopisek do linii podsumowania cyklu: mocne sygnaly zatrzymane przed
+    wejsciem, z rozbiciem na powod. CZYSTA FUNKCJA; pusty napis, gdy zadnego.
+
+    Bez tego linia "wejscia 0" nie mowi, czy sygnalu nie bylo, czy cos go
+    zatrzymalo. Przy `--quiet` linii per instrument (z powodem holdu) w logu
+    nie ma wcale, a ta jest zawsze.
+    """
+    zatrzymane = ", ".join(f"{k} {stats[k]}" for k in POWODY_W_PODSUMOWANIU
+                           if stats.get(k))
+    return f", ZATRZYMANE WEJŚCIA: {zatrzymane}" if zatrzymane else ""
+
+
+def ponizej_kroku_ilosci(qty, krok) -> bool:
+    """Czy ilosc wejscia zaokraglona W DOL do kroku gieldy daje zero. CZYSTA FUNKCJA.
+
+    Brak kroku (`lot_size` NULL) to nie odmowa tutaj: o instrumencie bez
+    reguly rozstrzyga wysylka (`gielda_exec.filtry_z_bazy` - brak reguly
+    blokuje zlecenie z wlasnym powodem). Ta funkcja nie zgaduje reguly.
+    """
+    if qty is None or krok is None:
+        return False
+    k = Decimal(str(krok))
+    if k <= 0:
+        return False
+    # Ta sama funkcja, ktora zaokragla ilosc przy wysylce
+    # (`zlecenia.sprawdz_zlecenie`) - inny przepis rozjechalby sie z odmowa.
+    return do_kroku_w_dol(Decimal(str(qty)), k) <= 0
 
 
 def decyzja_przeterminowana(teraz: datetime, bar_start: datetime,
@@ -2058,6 +2105,25 @@ async def sprawdz(conn, engine: str = "crypto", h: Horizon | None = None,
     return 0
 
 
+# CZY WYKLUCZENIA SPREADEM SA WYLACZONE - stan PROCESU, per silnik.
+#
+# Petla chodzi co 300 s, a odrzucenie pomiaru IEX jest stanem trwalym: ta sama
+# linia co piec minut zatopilaby log i przestalaby byc czytana. Wypisujemy
+# PRZEJSCIE (wylaczone <-> dzialaja), a nie stan. Porownujemy sam fakt
+# odrzucenia, nie tekst powodu - mediana ilorazu w powodzie zmienia sie co
+# swiece i kazda zmiana dawalaby nowa linie. Nowy proces wypisuje stan
+# odrzucenia od razu (pierwszy cykl to tez przejscie: z "nie wiem").
+_SPREAD_BEZ_WYKLUCZEN: dict[str, bool] = {}
+
+
+def zmiana_powodu_bez_wykluczen(engine: str, powod: str | None) -> bool:
+    """Czy wypisac `powod` w tym cyklu. Prawda tylko przy zmianie stanu."""
+    teraz = powod is not None
+    poprzednio = _SPREAD_BEZ_WYKLUCZEN.get(engine, False)
+    _SPREAD_BEZ_WYKLUCZEN[engine] = teraz
+    return teraz != poprzednio
+
+
 def nowe_stats(**flagi) -> dict:
     """Komplet licznikow przebiegu, WSZYSTKIE zalozone zerem. JEDNO ZRODLO.
 
@@ -2101,11 +2167,18 @@ def nowe_stats(**flagi) -> dict:
              # `services/engine/bramki.py`), wiec musi byc widoczne z zewnatrz.
              "rezim_bez_progu": 0,
              # Wejscia zablokowane srednim spreadem z 7 dni (F-1.5,
-             # `uniwersum.za_szeroki_spread`).
+             # `uniwersum.wykluczenia_spreadowe`).
              "szeroki_spread": 0,
              # Wejscia odrzucone, bo od zamkniecia swiecy minelo ponad
              # `MAKS_ZWLOKA_WEJSCIA`. Niezerowe znaczy: potok danych sie spoznia.
              "decyzja_przeterminowana": 0,
+             # Wejscia, ktorych kwota nie kupuje ani jednego kroku ilosci
+             # (akcje: jednej akcji) - bez tego odpadaly po cichu przy wysylce.
+             "ponizej_jednej_akcji": 0,
+             # Wejscia na swiecy zamknietej przed otwarciem sesji. Osobno od
+             # `decyzja_przeterminowana`, bo to nie jest spoznienie potoku,
+             # a tamten licznik ma mierzyc wylacznie spoznienie.
+             "swieca_przed_sesja": 0,
              # POMINIECIA Z ROZBICIEM NA POWOD. Obie te sciezki konczyly sie
              # samym `continue`: instrument wypadal z przebiegu, nie zostawiajac
              # ani wiersza, ani liczby. Tu odpowiadaja na pytanie "ile pominieto
@@ -2393,15 +2466,23 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
     # `odcisk()` — a `horizon_feature_ids` filtruje po odcisku SCISLE. Wlasna
     # kopia warunku tutaj rozjechalaby sie z `features.py` przy pierwszej
     # zmianie definicji uniwersum, a sygnal `rel_strength` zniknalby BEZ SLADU.
-    cur.execute(sql_uniwersum_decyzyjnego("id, symbol, kind, quote_ccy"),
+    # `lot_size` - krok ilosci gieldy, do odmowy wejscia ponizej jednej
+    # jednostki (`ponizej_kroku_ilosci`) jeszcze przy decyzji.
+    cur.execute(sql_uniwersum_decyzyjnego("id, symbol, kind, quote_ccy, lot_size"),
                 (engine,))
     instrumenty = cur.fetchall()
     # WYKLUCZENIE ZE WZGLEDU NA SPREAD (audyt Fable F-1.5) - WYLACZNIE Z WEJSC.
     # Sredni spread arkusza z 7 dni ponad prog: instrument nie dostaje nowej
     # pozycji, ale wychodzi normalnie, a `instrumenty` (odcisk, przekroj,
     # budzet) zostaja na pelnym zbiorze. Uzasadnienie w `uniwersum.py`.
-    szerokie_spready = za_szeroki_spread(srednie_spready(
-        cur, [i["id"] for i in instrumenty], h.bar, datetime.now(timezone.utc)))
+    #
+    # Najpierw bramka spojnosci `spread.zmierz_spread` (ta sama, ktora czyta
+    # trener): pomiar odrzucony = brak wykluczen, powod RAZ do logu.
+    szerokie_spready, bez_wykluczen = wykluczenia_spreadowe(
+        cur, engine, [i["id"] for i in instrumenty], h, datetime.now(timezone.utc))
+    if zmiana_powodu_bez_wykluczen(engine, bez_wykluczen):
+        print(f"  {bez_wykluczen}" if bez_wykluczen else
+              "  wykluczenia spreadem znów działają — pomiar przeszedł bramkę spójności")
     if szerokie_spready and verbose:
         for linia in opis_wykluczen(szerokie_spready,
                                     {i["id"]: i["symbol"] for i in instrumenty}):
@@ -2717,6 +2798,7 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
             stats["rozwazone"] += 1
             oceny.append({"iid": iid, "symbol": symbol, "kind": inst["kind"],
                           "quote_ccy": inst["quote_ccy"],
+                          "lot_size": inst.get("lot_size"),
                           "features": cel.snapshot(symbol), "price": price,
                           "regime": None, "regime_conf": None,
                           "score": cel.sygnaly.get(symbol, 0.0),
@@ -2753,6 +2835,7 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
             stats["niepelne_sygnaly"] += 1
         oceny.append({"iid": iid, "symbol": symbol, "kind": inst["kind"],
                       "quote_ccy": inst["quote_ccy"],
+                      "lot_size": inst.get("lot_size"),
                       "features": features, "price": price,
                       "regime": regime, "regime_conf": regime_conf, "score": score,
                       "confidence": confidence, "contributions": contributions,
@@ -2780,9 +2863,11 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
     if do_oceny > 0 and stats["cechy_z_poprzedniej_swiecy"] == do_oceny:
         print(f"  UWAGA: ŻADEN z {do_oceny} instrumentów nie ma kompletu cech "
               f"świecy {bar_start:%Y-%m-%d %H:%M} — potok cech spóźniony. "
-              f"Decyzje odłożone do następnego cyklu; jeśli opóźnienie "
-              f"przekracza {h.bar_minutes} min, silnik NIE HANDLUJE. "
-              f"Sprawdź: kubectl logs deploy/trader-features --tail=30")
+              f"Decyzje odłożone do następnego cyklu; po "
+              f"{MAKS_ZWLOKA_WEJSCIA.total_seconds() / 60:.0f} min od zamknięcia "
+              f"świecy wejścia odpadają (decyzja_przeterminowana), po "
+              f"{h.bar_minutes} min przepada cała świeca. "
+              f"Sprawdź: kubectl logs deploy/{DEPLOYMENT_CECH.get(engine, 'trader-features')} --tail=30")
 
     # PRZEBIEG DRUGI: najpierw wyjscia (nie konkuruja o kapital i zwalniaja go),
     # potem wejscia w kolejnosci malejacej sily sygnalu.
@@ -2904,6 +2989,17 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
             verdict = werdykt_wstrzymania
             action = "hold"
             powod_holdu = "wstrzymanie_ryzykiem"
+        elif action.startswith("enter") and sesja is not None and \
+                sesja.swieca_przed_otwarciem(okno_decyzji(bar_start, h), now):
+            # SWIECA SPRZED SESJI - przed `decyzja_przeterminowana`, bo taka
+            # swieca jest ZAWSZE przeterminowana (12:00-13:00 UTC decydowana
+            # najwczesniej 13:30), a tamten licznik ma mierzyc spoznienie
+            # potoku, nie godzine otwarcia gieldy. Wyjscia ida dalej.
+            verdict = type("V", (), {"verdict": "allow", "reason": None, "qty": qty,
+                                     "violations": [], "usage": []})()
+            action = "hold"
+            powod_holdu = "swieca_przed_sesja"
+            stats["swieca_przed_sesja"] += 1
         elif action.startswith("enter") and decyzja_przeterminowana(now, bar_start, h):
             # PO WSTRZYMANIU RYZYKIEM, NIE PRZED NIM. Proba pozarowa
             # (`proba_killswitcha`) rozpoznaje dzialajace ogniwo 3 po
@@ -2914,6 +3010,19 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
             action = "hold"
             powod_holdu = "decyzja_przeterminowana"
             stats["decyzja_przeterminowana"] += 1
+        elif action.startswith("enter") and notional > 0 and \
+                ponizej_kroku_ilosci(qty, ocena["lot_size"]):
+            # KWOTA NIE KUPI ANI JEDNEJ JEDNOSTKI. Akcje maja `lot_size` 1,
+            # a budzet na pozycje bywa nizszy niz cena jednej akcji - plan
+            # z iloscia ulamkowa odpadal dopiero przy wysylce
+            # (`zlecenia.sprawdz_zlecenie`), bez powodu w dzienniku decyzji.
+            # `notional > 0`: zerowa kwota to inny stan (reszta do sufitu
+            # strategii momentum ponizej 1% kapitalu) z wlasna odmowa nizej.
+            verdict = type("V", (), {"verdict": "allow", "reason": None, "qty": qty,
+                                     "violations": [], "usage": []})()
+            action = "hold"
+            powod_holdu = "ponizej_jednej_akcji"
+            stats["ponizej_jednej_akcji"] += 1
         elif action.startswith("enter"):
             if momentum and (notional <= 0 or not strategia_momentum.miesci_sie(
                     kapital, ekspozycja_momentum, notional)):
@@ -3027,7 +3136,7 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
             print(f"  {symbol:10s} {regime or '-':11s} wynik={score:+.3f} pewność={confidence:.0%} "
                   f"-> {action:12s} [{verdict.verdict}]"
                   + (f" kwota {notional}" if action.startswith("enter") else "")
-                  + (f" ({powod_holdu})" if momentum and powod_holdu else ""))
+                  + (f" ({powod_holdu})" if powod_holdu else ""))
         conn.commit()
 
     # WYSYLKA NA KONIEC PRZEBIEGU, PO ZATWIERDZENIU WSZYSTKICH DECYZJI.
@@ -3511,6 +3620,7 @@ async def main() -> int:
                 # tamtych nie ma wcale, a ta linia jest zawsze.
                 if s.get("odlozone_momentum"):
                     plany += f", ODŁOŻONE (świeca BTC niedomknięta) {s['odlozone_momentum']}"
+                plany += opis_zatrzymanych_wejsc(s)
                 if s.get("pominiete_bez_cech") or s.get("pominiete_bez_ceny"):
                     plany += (f", POMINIĘTE: bez cech {s['pominiete_bez_cech']}, "
                               f"bez ceny {s['pominiete_bez_ceny']}")

@@ -78,8 +78,7 @@ from services.engine.statystyka import (
     liczba_niezaleznych, rozrzut_sharpeow, sharpe as sharpe_proby, sharpe_dla_dsr,
     spearman, wilson,
 )
-from services.engine.uniwersum import (odcisk, opis_wykluczen, srednie_spready,
-                                       za_szeroki_spread)
+from services.engine.uniwersum import odcisk, opis_wykluczen, wykluczenia_spreadowe
 from services.engine.signals import (
     DEFAULT_WEIGHTS, REGIMES, SIGNALS, classify_regime, combine, evaluate,
     wlaczone_eksperymenty,
@@ -2502,14 +2501,18 @@ def _koszty(cur, plik: dict | None, engine: str, kind: str, h: Horizon,
               f"{'nasza' if spread_nasza_ksiega else 'OBCA'})")
 
     # INSTRUMENTY BEZ WEJSC Z POWODU SPREADU (F-1.5) - ta sama regula, ktora
-    # stosuje petla (`uniwersum.za_szeroki_spread`), na tych samych 7 dniach.
+    # stosuje petla (`uniwersum.wykluczenia_spreadowe`: bramka spojnosci, potem
+    # `za_szeroki_spread`), na tych samych 7 dniach.
     # Tylko do logu: symulacja nadal liczy cale uniwersum, bo regula patrzy na
     # biezacy arkusz, a okna WF siegaja lat wstecz - wykluczenie dzisiejszym
     # spreadem w 2023 roku byloby selekcja z przyszlosci.
     # Z pliku panelu tej liczby nie ma (arkusz z 7 dni przed eksportem) - log
     # i tak niczego w symulacji nie zmienia.
-    wykluczone = (za_szeroki_spread(srednie_spready(
-        cur, [i["id"] for i in instruments], h.bar, now)) if plik is None else {})
+    wykluczone, bez_wykluczen = (
+        wykluczenia_spreadowe(cur, engine, [i["id"] for i in instruments], h, now)
+        if plik is None else ({}, None))
+    if bez_wykluczen:
+        print(f"  {bez_wykluczen} — produkcja też nie wyklucza")
     for linia in opis_wykluczen(wykluczone, {i["id"]: i["symbol"] for i in instruments}):
         print(f"  {linia} — produkcja nie wchodzi, symulacja WF go liczy")
 

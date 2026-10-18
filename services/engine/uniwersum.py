@@ -190,3 +190,47 @@ def opis_wykluczen(wykluczone: dict[int, float],
             f"{sr:.2f} pb z {OKNO_SPREADU_DNI} dni > {PROG_SPREADU_PB:.0f} pb "
             f"(wyjścia bez zmian)" for i, sr in sorted(wykluczone.items(),
                                                      key=lambda t: -t[1])]
+
+
+# BRAMKA SPOJNOSCI PRZED WYKLUCZENIEM (2026-10-18).
+#
+# `za_szeroki_spread` brala surowa srednia `book_spread_bps`, a dla silnika
+# equity ta cecha pochodzi z feedu IEX (`/v2/stocks/quotes/latest`, jedna
+# gielda z kilkunastu). `spread.zmierz_spread` od 2026-09-27 odrzuca taki pomiar
+# bramka spojnosci (kwotowanie porownywalne z calym zakresem high-low swiecy
+# nie jest cena, po ktorej ktos handluje) - trener go wiec NIE uzywal, a petla
+# wykluczala nim 18 z 20 spolek (LLY 278 pb, MSFT 35 pb). Ta sama liczba byla
+# jednoczesnie "niezmierzona" w karcie kosztu i "za duza" w petli.
+#
+# Teraz o tym, czy pomiar w ogole jest pomiarem, rozstrzyga TA SAMA funkcja co
+# w karcie kosztu, na tych samych 7 dniach. Gdy go odrzuci (`bps is None`),
+# wykluczen nie ma: brak pomiaru to nie powod do wykluczenia (patrz
+# MIN_SWIEC_SPREADU). Gdy go przyjmie, regula zostaje DOKLADNIE ta sama co
+# wczesniej (`za_szeroki_spread` na `srednie_spready`, prog swiec 12) - crypto,
+# ktore bramke przechodzi z mediana ilorazu 0,033, nie zmienia zachowania.
+# `per_id` z pomiaru nie wystarcza: liczy tylko instrumenty z co najmniej
+# `spread.MIN_SWIEC_NA_INSTRUMENT` (30) swiecami, wiec swiezy listing z 12-29
+# swiecami po 21 pb przestalby byc wykluczany.
+#
+# Silnik i trener wolaja te funkcje, nie kazdy wlasna kopie - rozjazd
+# "trener odrzuca, petla wyklucza" byl dokladnie ta wada.
+def wykluczenia_spreadowe(cur, engine: str, instrument_ids: list[int], h,
+                          teraz) -> tuple[dict[int, float], str | None]:
+    """(wykluczone id -> sredni spread, powod braku wykluczen albo None).
+
+    Powod jest napisem tylko wtedy, gdy pomiar odrzucono i wykluczen NIE MA
+    z tego powodu - wolajacy ma go wypisac (raz, nie co cykl).
+    """
+    from datetime import timedelta
+
+    from services.engine.spread import zmierz_spread
+
+    if not instrument_ids:
+        return {}, None
+    pomiar = zmierz_spread(cur, engine, h.bar, h.source_timeframe,
+                           h.bar_minutes, list(instrument_ids),
+                           teraz - timedelta(days=OKNO_SPREADU_DNI), teraz)
+    if pomiar.bps is None:
+        return {}, (f"wykluczenia spreadem WYŁĄCZONE — pomiar z "
+                    f"{OKNO_SPREADU_DNI} dni odrzucony: {pomiar.powod}")
+    return za_szeroki_spread(srednie_spready(cur, instrument_ids, h.bar, teraz)), None
