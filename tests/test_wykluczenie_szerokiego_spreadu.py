@@ -115,3 +115,102 @@ def test_srednie_spready_z_bazy():
             c.execute("DELETE FROM feat.feature_value WHERE feature_def_id = %s", (fd,))
             c.execute("DELETE FROM feat.feature_def WHERE id = %s", (fd,))
             c.execute("DELETE FROM ref.instrument WHERE id = ANY(%s)", (ids,))
+
+
+# ------------------------------------------------------- bramka spójności (2026-10-18)
+#
+# Equity: `book_spread_bps` z feedu IEX (LLY 278 pb, MSFT 35 pb) wykluczał 18 z 20
+# spółek, choć `spread.zmierz_spread` - ten sam pomiar w trenerze - odrzuca go
+# bramką spójności. `wykluczenia_spreadowe` pyta tę samą bramkę.
+
+class _Baza:
+    """Atrapa rozstrzygająca po treści zapytania: wiersze bramki
+    (`spread._SQL`) i średnie (`_SQL_SREDNIE_SPREADY`) to dwa różne pytania."""
+
+    def __init__(self, obserwacje, srednie):
+        self.obserwacje, self.srednie, self._w = obserwacje, srednie, []
+
+    def execute(self, sql, params=None):
+        self._w = self.obserwacje if "zakres_bps" in sql else self.srednie
+
+    def fetchall(self):
+        return list(self._w)
+
+
+def _obserwacje(spready_i_zakresy: dict[int, tuple[float, float]], n=40):
+    t0 = datetime(2026, 10, 10, tzinfo=timezone.utc)
+    return [{"instrument_id": i, "event_time": t0 + timedelta(hours=k),
+             "spread_bps": sp, "tradeable": True, "zakres_bps": zakres}
+            for i, (sp, zakres) in spready_i_zakresy.items() for k in range(n)]
+
+
+def _h():
+    from services.engine.horizons import get as get_horizon
+    return get_horizon("1h")
+
+
+TERAZ_T = datetime(2026, 10, 12, tzinfo=timezone.utc)
+
+
+def test_pomiar_ODRZUCONY_bramka_nie_wyklucza_nikogo():
+    """Feed IEX: kwotowany spread większy niż cały zakres świecy (iloraz > 0,5)."""
+    from services.engine.uniwersum import wykluczenia_spreadowe
+
+    baza = _Baza(_obserwacje({1: (278.0, 120.0), 2: (35.0, 40.0), 3: (20.0, 30.0)}),
+                 [{"instrument_id": 1, "srednia": 278.0, "n": 40},
+                  {"instrument_id": 2, "srednia": 35.0, "n": 40},
+                  {"instrument_id": 3, "srednia": 20.0, "n": 40}])
+    wykluczone, powod = wykluczenia_spreadowe(baza, "equity", [1, 2, 3], _h(), TERAZ_T)
+
+    assert wykluczone == {}
+    assert powod and "ODRZUCONY" in powod
+
+
+def test_KANAREK_te_same_dane_bez_bramki_wykluczaly_wszystkie_trzy():
+    """Stara ścieżka (sama średnia) na tych samych danych - dowód, że test
+    wyżej sprawdza bramkę, a nie np. próg świec."""
+    srednie = {1: (278.0, 40), 2: (35.0, 40), 3: (20.0, 40)}
+    assert set(za_szeroki_spread(srednie)) == {1, 2, 3}
+
+
+def test_pomiar_PRZYJETY_wyklucza_DOKLADNIE_jak_wczesniej():
+    """Krypto: iloraz ~0,03, bramka przechodzi - wynik identyczny ze starą
+    regułą, także dla instrumentu z 12-29 świecami (poza `per_id` pomiaru)."""
+    from services.engine.uniwersum import srednie_spready, wykluczenia_spreadowe
+
+    srednie = [{"instrument_id": 1, "srednia": 21.15, "n": 41},
+               {"instrument_id": 2, "srednia": 7.63, "n": 41},
+               {"instrument_id": 3, "srednia": 0.73, "n": 41},
+               {"instrument_id": 4, "srednia": 40.0, "n": 20}]
+    baza = _Baza(_obserwacje({1: (21.15, 700.0), 2: (7.63, 250.0), 3: (0.73, 30.0)})
+                 + _obserwacje({4: (40.0, 1300.0)}, n=20), srednie)
+    wykluczone, powod = wykluczenia_spreadowe(baza, "crypto", [1, 2, 3, 4], _h(), TERAZ_T)
+
+    assert powod is None
+    assert wykluczone == za_szeroki_spread(srednie_spready(baza, [1, 2, 3, 4], "1h", TERAZ_T))
+    assert wykluczone == {1: 21.15, 4: 40.0}
+
+
+def test_petla_i_trener_wolaja_TE_SAMA_funkcje():
+    for plik in ("services/engine/loop.py", "services/engine/train.py"):
+        zrodlo = (KORZEN / plik).read_text(encoding="utf-8")
+        assert "wykluczenia_spreadowe(" in zrodlo, plik
+        assert "za_szeroki_spread(srednie_spready(" not in zrodlo, (
+            f"{plik} liczy wykluczenia z pominięciem bramki spójności")
+
+
+def test_ZA_MALO_SWIEC_na_pomiar_uniwersum_to_STARA_regula_a_nie_brak_wykluczen():
+    """Crypto 4h, dziura w arkuszu ~2 doby: 25 świec na instrument (< 30), więc
+    `zmierz_spread` oddaje `bps=None` z powodu danych, NIE spójności. NEAR
+    (18,65 pb przy 25 >= 12 świecach) ma zostać wykluczony jak przed zmianą."""
+    from services.engine.uniwersum import wykluczenia_spreadowe
+
+    srednie = [{"instrument_id": 1, "srednia": 18.65, "n": 25},
+               {"instrument_id": 2, "srednia": 7.6, "n": 25},
+               {"instrument_id": 3, "srednia": 0.7, "n": 25}]
+    baza = _Baza(_obserwacje({1: (18.65, 600.0), 2: (7.6, 250.0), 3: (0.7, 30.0)},
+                             n=25), srednie)
+    wykluczone, powod = wykluczenia_spreadowe(baza, "crypto", [1, 2, 3], _h(), TERAZ_T)
+
+    assert powod is None
+    assert wykluczone == {1: 18.65}

@@ -105,9 +105,10 @@ class Polaczenie:
         pass
 
 
-def kernel(wiek_min, killswitch=None, equity="100000") -> RiskKernel:
+def kernel(wiek_min, killswitch=None, equity="100000",
+           engine="crypto") -> RiskKernel:
     return RiskKernel(Polaczenie(Kursor(wiek_min, killswitch, equity)),
-                      "crypto", "demo")
+                      engine, "demo")
 
 
 # --------------------------------------------------- stary pomiar to nie pomiar
@@ -277,3 +278,37 @@ def test_dozorca_ODNOTOWUJE_ze_czyta_liczbe_nadzorowanego():
     zrodlo = Path("services/engine/dozorca.py").read_text(encoding="utf-8")
     assert "ZNANE OGRANICZENIE" in zrodlo
     assert "exec.position" in zrodlo and "market.candle" in zrodlo
+
+
+# ------------------------------------------- próg per silnik (2026-10-18)
+
+def test_EQUITY_pomiar_sprzed_16_min_NIE_wstrzymuje_handlu():
+    """Krzywą equity pisze `kapital-equity` co 900 s. Przy progu 15 min każdy
+    jej cykl zostawiał okno „pomiar sprzed 16 min" i blokadę wejść, choć proces
+    pisał na czas. Próg dla krzywej z ksiąg giełdy to dwa interwały zapisu."""
+    assert kernel(wiek_min=16.0, engine="equity").check_account().verdict == "allow"
+
+
+def test_EQUITY_krzywa_stojaca_DWA_cykle_nadal_wstrzymuje():
+    v = kernel(wiek_min=31.0, engine="equity").check_account()
+    assert v.verdict != "allow" and "próg 30 min" in (v.reason or "")
+
+
+def test_KRYPTO_prog_bez_zmian():
+    assert kernel(wiek_min=16.0).check_account().verdict != "allow"
+
+
+def test_prog_equity_to_dwa_interwaly_workera_z_chartu():
+    """Interwał w `risk.py` to kopia `--interval` workera `kapital-equity` -
+    rozjazd przesunąłby próg bez śladu."""
+    import yaml
+
+    from services.engine.risk import (INTERWAL_KSIAG_GIELDY_S,
+                                      POMIAR_STARY_PO_MIN_KSIEGI, prog_wieku_pomiaru)
+    values = yaml.safe_load((Path(__file__).resolve().parents[1]
+                             / "charts/trader/values.yaml").read_text(encoding="utf-8"))
+    cmd = values["workers"]["kapital-equity"]["command"]
+    assert int(cmd[cmd.index("--interval") + 1]) == INTERWAL_KSIAG_GIELDY_S
+    assert POMIAR_STARY_PO_MIN_KSIEGI == 2 * INTERWAL_KSIAG_GIELDY_S / 60
+    assert prog_wieku_pomiaru("equity") == POMIAR_STARY_PO_MIN_KSIEGI
+    assert prog_wieku_pomiaru("crypto") == POMIAR_STARY_PO_MIN

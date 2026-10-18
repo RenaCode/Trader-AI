@@ -42,7 +42,9 @@ POWODY = {"slaby_wynik", "niska_pewnosc", "short_niewykonalny",
           # 0080: wejscie po ponad 20 min od zamkniecia swiecy (audyt F-4.4).
           "decyzja_przeterminowana",
           # 0091: strategia momentum (`strategia_momentum.POWODY_HOLDU`).
-          "filtr_trendu", "poza_skladem", "poza_decyzja_dobowa"}
+          "filtr_trendu", "poza_skladem", "poza_decyzja_dobowa",
+          # 0098: kwota ponizej jednego kroku ilosci; swieca sprzed sesji.
+          "ponizej_jednej_akcji", "swieca_przed_sesja"}
 
 
 def _migracja_definiujaca_check() -> Path:
@@ -105,10 +107,12 @@ def test_kazda_galaz_konczaca_sie_holdem_ustawia_powod():
     # Bez tego licznika test przechodzi także wtedy, gdy CAŁY blok wyboru akcji
     # zniknie z pliku - czyli nie sprawdza niczego.
     # 8 od 2026-10-03: `szeroki_spread` (0075) i `decyzja_przeterminowana` (0080).
-    assert holdy == 8, (
-        f"gałęzi kończących się holdem jest {holdy}, a nie 8 - jeśli to celowa "
+    # 11 od 2026-10-18: `ponizej_jednej_akcji` (przed i po kernelu ryzyka)
+    # i `swieca_przed_sesja` (0098).
+    assert holdy == 11, (
+        f"gałęzi kończących się holdem jest {holdy}, a nie 11 - jeśli to celowa "
         f"zmiana, popraw liczbę i sprawdź, czy CHECK w migracji (0040, ostatnio "
-        f"przepisany w 0080) nadal pokrywa wszystkie powody")
+        f"przepisany w 0098) nadal pokrywa wszystkie powody")
 
 
 def _akcje_momentum(akcja):

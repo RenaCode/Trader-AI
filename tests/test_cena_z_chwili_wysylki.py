@@ -539,15 +539,28 @@ def test_prog_czasowy_wstrzymuje_WEJSCIE_z_wlasnym_powodem_a_po_KILL_SWITCHU():
                 and any(getattr(t, "id", None) == "powod_holdu" for t in a.targets)
                 and isinstance(a.value, ast.Constant)]
 
-    rodzice = [n for n in ast.walk(drzewo) if isinstance(n, ast.If)
-               and len(n.orelse) == 1 and isinstance(n.orelse[0], ast.If)
-               and wola(n.orelse[0].test, "decyzja_przeterminowana")]
-    assert len(rodzice) == 1, "brak gałęzi progu czasowego w łańcuchu wyboru"
-    rodzic = rodzice[0]
-    galaz = rodzic.orelse[0]
-    assert powod(rodzic.body) == ["wstrzymanie_ryzykiem"]
+    # ŁAŃCUCH `if/elif` od gałęzi `wstrzymanie_ryzykiem`. Od 2026-10-18 stoją
+    # w nim także `swieca_przed_sesja` (przed progiem czasowym) i
+    # `ponizej_jednej_akcji` (za nim) - test pilnuje KOLEJNOŚCI, nie sąsiedztwa.
+    def lancuch(n):
+        out = [n]
+        while len(n.orelse) == 1 and isinstance(n.orelse[0], ast.If):
+            n = n.orelse[0]
+            out.append(n)
+        return out
+
+    poczatki = [n for n in ast.walk(drzewo) if isinstance(n, ast.If)
+                and powod(n.body) == ["wstrzymanie_ryzykiem"]
+                and any(wola(g.test, "decyzja_przeterminowana") for g in lancuch(n))]
+    assert len(poczatki) == 1, "brak gałęzi progu czasowego w łańcuchu wyboru"
+    galezie = lancuch(poczatki[0])
+    (i_czas,) = [i for i, g in enumerate(galezie)
+                 if wola(g.test, "decyzja_przeterminowana")]
+    galaz = galezie[i_czas]
+    assert i_czas > 0, "próg czasowy przed `wstrzymanie_ryzykiem`"
     assert powod(galaz.body) == ["decyzja_przeterminowana"]
     assert "startswith" in ast.unparse(galaz.test) and "enter" in ast.unparse(galaz.test)
-    dalej = galaz.orelse[0]
-    assert "risk.check" in ast.unparse(dalej.body[0])
+    (i_risk,) = [i for i, g in enumerate(galezie)
+                 if any("risk.check" in ast.unparse(w) for w in g.body)]
+    assert i_risk > i_czas, "przeterminowane wejście zużywa limity ryzyka"
 

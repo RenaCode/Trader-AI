@@ -457,3 +457,38 @@ def test_run_once_PRZEKAZUJE_obiekt_sesji_do_wysylki(otwarta_przy_wysylce,
         + str(otwarta_przy_wysylce) + ", a do wysyłki doszło "
         + str(doszlo["sesja"].otwarta) + " — czytany jest stan z początku "
         "cyklu, czyli szczelina 15:59 wobec 16:00 jest wciąż otwarta")
+
+
+# ------------------------------------------------------- otwarcie sesji (2026-10-18)
+
+def test_otwarcie_sesji_US_wedlug_czasu_letniego():
+    """09:30 Nowego Jorku: 13:30 UTC w czasie letnim, 14:30 w zimowym.
+    2026: czas letni od 8 marca (druga niedziela) do 1 listopada."""
+    from datetime import date
+
+    from services.engine.sesja import otwarcie_sesji_us
+
+    assert otwarcie_sesji_us(date(2026, 3, 6)).hour == 14
+    assert otwarcie_sesji_us(date(2026, 3, 9)).hour == 13
+    assert otwarcie_sesji_us(date(2026, 10, 16)).hour == 13
+    assert otwarcie_sesji_us(date(2026, 10, 30)).hour == 13
+    assert otwarcie_sesji_us(date(2026, 11, 2)).hour == 14
+    assert otwarcie_sesji_us(date(2027, 3, 15)).hour == 13
+    assert otwarcie_sesji_us(date(2026, 10, 16)).minute == 30
+
+
+def test_swieca_przed_otwarciem_tylko_przy_OTWARTEJ_sesji_Alpaki():
+    from datetime import datetime, timezone
+
+    from services.engine.sesja import StanSesji
+
+    teraz = datetime(2026, 12, 1, 14, 35, tzinfo=timezone.utc)   # zima: otwarcie 14:30
+    koniec_1400 = datetime(2026, 12, 1, 14, 0, tzinfo=timezone.utc)
+    koniec_1500 = datetime(2026, 12, 1, 15, 0, tzinfo=timezone.utc)
+    alpaca = StanSesji(True, "zegar giełdy", venue="alpaca")
+    assert alpaca.swieca_przed_otwarciem(koniec_1400, teraz)
+    assert not alpaca.swieca_przed_otwarciem(koniec_1500, teraz)
+    assert not StanSesji(True, "rynek ciągły (is_24_7)", venue="bybit") \
+        .swieca_przed_otwarciem(koniec_1400, teraz)
+    assert not StanSesji(None, "zegar", venue="alpaca") \
+        .swieca_przed_otwarciem(koniec_1400, teraz)

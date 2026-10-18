@@ -133,6 +133,35 @@ def sprawdz_komplet(limity: dict) -> list[str]:
 # (razem z brakiem dozorcy dla `engine='equity'`), nie poprawka przy okazji.
 POMIAR_STARY_PO_MIN = 15
 
+# PROG DLA KRZYWEJ Z KSIAG GIELDY - DECYZJA Z 2026-10-18.
+#
+# Objawilo sie dokladnie to, co zdanie wyzej zapowiadalo: przy zapisie co
+# 900 s i progu 15 min kazdy cykl `kapital-equity` zostawial okno, w ktorym
+# pomiar byl "sprzed 16 min" - a `kapital_gieldy` przycinal jeszcze
+# `event_time` do pelnej minuty, dokladajac do wieku 0-60 s. Dozorca
+# i `check_account` blokowaly wtedy wejscia, choc proces pisal co do sekundy
+# na czas.
+#
+# Prog = DWA interwaly zapisu: jeden pominiety cykl to wahanie (restart poda,
+# chwilowy blad API Alpaki), dwa to krzywa, ktora stoi. To slabsza ochrona niz
+# "trzy cykle" krypto, ale krypto liczy cykle po 5 min (15 min), a tu jeden
+# cykl to 15 min - trzy dalyby 45 min handlu na liczbie, ktorej nikt nie
+# odswiezyl. Krypto zostaje przy 15 min: pisze petla co 300 s na KONCU cyklu,
+# a wiek mierzy sie na POCZATKU, wiec zdrowy odczyt ma 5-6 min i do progu
+# brakuje 9 - wyscigu, ktory tu zachodzil, tam nie ma.
+#
+# Interwal musi zgadzac sie z `--interval` workera `kapital-equity`
+# w charts/trader/values.yaml - pilnuje tego test (`test_wiek_pomiaru_kapitalu`).
+INTERWAL_KSIAG_GIELDY_S = 900
+POMIAR_STARY_PO_MIN_KSIEGI = 2 * INTERWAL_KSIAG_GIELDY_S / 60
+
+
+def prog_wieku_pomiaru(engine: str) -> float:
+    """Prog wieku krzywej kapitalu w minutach - zalezy od tego, KTO ja pisze."""
+    return (POMIAR_STARY_PO_MIN_KSIEGI
+            if stan_kapitalu.zrodlo_obowiazujace(engine) == stan_kapitalu.ZRODLO_KSIEGI_GIELDY
+            else POMIAR_STARY_PO_MIN)
+
 
 def ocen_wiek_pomiaru(wiek_min: float | None,
                       prog_min: float = POMIAR_STARY_PO_MIN) -> str | None:
@@ -624,7 +653,8 @@ class RiskKernel:
         # bez `trigger_killswitch` wpada tam w gotowa sciezke wstrzymania wejsc,
         # ktora przepuszcza WYJSCIA.
         if verdict.verdict == "allow":
-            stary = ocen_wiek_pomiaru(self.wiek_pomiaru_min())
+            stary = ocen_wiek_pomiaru(self.wiek_pomiaru_min(),
+                                      prog_wieku_pomiaru(self.engine))
             if stary:
                 # `usage` zostaje z oceny limitow: pomiar jest stary, ale to
                 # nadal jedyne wykorzystanie limitow, jakie znamy, a jego
