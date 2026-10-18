@@ -75,3 +75,28 @@ def test_opis_tabeli():
     wiersz = next(w for w in linie if w.strip().startswith("news_shock"))
     assert "—" in wiersz
     assert tr.opis_ic_sygnalow([], H4) == []
+
+
+def test_filtr_swiecy_zaweza_obserwacje():
+    """Recenzja #39, pkt 6: na rynku z sesja IC tylko ze swiec, z ktorych
+    symulacja moze wejsc. Filtr odrzucajacy wszystko nie zostawia IC."""
+    panels, cache = _okno()
+    assert tr.ic_sygnalow(panels, cache, H4.ic_horizon_bars,
+                          filtr_swiecy=lambda r: False) == {}
+    polowa = tr.ic_sygnalow(panels, cache, H4.ic_horizon_bars,
+                            filtr_swiecy=lambda r: r["t"] % 2 == 1)
+    # tylko swiece nieparzyste, czyli wylacznie reżim `trend_up`
+    assert set(polowa) == {tr.RAZEM_IC, "trend_up"}
+
+
+def test_swieca_wejscia_z_kalendarza_sesji():
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+    from services.engine.portfolio import Egzekucja
+    h1 = get_horizon("1h")
+    egz = Egzekucja(limit=True, opoznienie_min=20, pesymistyczna=True)
+    assert tr.swieca_wejscia(SimpleNamespace(kind="spot_eu", h=h1, egzekucja=egz)) is None
+    f = tr.swieca_wejscia(SimpleNamespace(kind="stock", h=h1, egzekucja=egz))
+    dzien = datetime(2026, 7, 15, tzinfo=timezone.utc)
+    godziny = [g for g in range(24) if f({"t": dzien.replace(hour=g)})]
+    assert godziny == [13, 14, 15, 16, 17, 18]

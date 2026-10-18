@@ -190,6 +190,7 @@ async def stan_sesji(cur, engine: str, gielda=None, *,
 # (`is_24_7`), rynek z sesja tylko wtedy, gdy sesja jest otwarta w chwili
 # decyzji i w chwili wysylki (`loop.py`: BRAMKA 1 i `sesja_wysylki`). Godziny
 # to sesja regularna NYSE/Nasdaq, 9:30-16:00 czasu Nowego Jorku, pon.-pt.
+# Jak te chwile przeklada na zlecenia symulacji - `portfolio.okno_wykonania`.
 #
 # CZEGO KALENDARZ NIE ZNA (swiadomie, bez listy swiat w repo):
 #   * swieta - w swieto gieldy nie ma ani jednej swiecy, wiec panel i tak nie
@@ -218,6 +219,28 @@ def sesja_regularna_nyse(t: datetime) -> bool:
     return ny.weekday() < 5 and OTWARCIE_NYSE <= ny.time() < ZAMKNIECIE_NYSE
 
 
-def sesja_historyczna(kind: str) -> Callable[[datetime], bool] | None:
-    """Regula sesji dla symulacji: None = rynek ciagly (decyzja zawsze)."""
-    return sesja_regularna_nyse if kind in RODZAJE_Z_SESJA else None
+def otwarcie_nyse(t: datetime) -> datetime:
+    """Otwarcie sesji regularnej w dniu (czasu Nowego Jorku) chwili `t`, w UTC.
+
+    Bez sprawdzania dnia tygodnia - o tym, czy tego dnia sesja w ogole jest,
+    rozstrzyga `sesja_regularna_nyse` na zwroconej chwili.
+    """
+    dzien = t.astimezone(NYSE).date()
+    return datetime.combine(dzien, OTWARCIE_NYSE, tzinfo=NYSE).astimezone(timezone.utc)
+
+
+@dataclass(frozen=True)
+class KalendarzSesji:
+    """Godziny gieldy dla symulacji: czy otwarta w chwili `t` i kiedy otwiera
+    sie sesja dnia, w ktorym wypada `t` (pierwsza decyzja dnia - patrz
+    `portfolio.okno_wykonania`)."""
+    otwarta: Callable[[datetime], bool]
+    otwarcie: Callable[[datetime], datetime]
+
+
+NYSE_REGULARNA = KalendarzSesji(sesja_regularna_nyse, otwarcie_nyse)
+
+
+def sesja_historyczna(kind: str) -> KalendarzSesji | None:
+    """Kalendarz sesji dla symulacji: None = rynek ciagly (decyzja zawsze)."""
+    return NYSE_REGULARNA if kind in RODZAJE_Z_SESJA else None

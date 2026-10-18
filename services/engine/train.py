@@ -62,10 +62,11 @@ from services.engine.bramki import (
 )
 from services.engine.portfolio import (
     Egzekucja, indeks_swiec, kalibruj_przebicie, kup_i_trzymaj,
-    metrics as portfolio_metrics,
+    metrics as portfolio_metrics, okno_wykonania,
     precompute_panels, simulate_portfolio, udzial_powtornych_wejsc,
     wynik_po_doplacie,
 )
+from services.engine.sesja import sesja_historyczna
 from services.engine.koszty import (
     NIEZMIERZONE, Karta, brama_0, karta_rundy, koszt_niewypelnienia, koszty,
     opis_bramy_0, opis_karty, zwroty_po_doplacie,
@@ -2054,12 +2055,14 @@ def _wagi_z_ic(panels: dict[str, list[dict]], cache: dict[str, list[tuple]],
 
 
 def _pary_ic(panels: dict[str, list[dict]], cache: dict[str, list[tuple]],
-             martwe: set[str], horyzont_swiec: int, filtr=None
+             martwe: set[str], horyzont_swiec: int, filtr=None, filtr_swiecy=None
              ) -> tuple[dict[str, dict[str, tuple[list, list]]],
                         dict[str, tuple[list, list]]]:
     """(wyniki i zwroty per rezim i sygnal, to samo zlaczone po rezimach) -
     jedna definicja obserwacji IC dla wag (`_wagi_z_ic`) i dla diagnostyki
-    (`ic_sygnalow`). Etykieta: zwrot od ceny swiecy i+1 do i+1+H."""
+    (`ic_sygnalow`). Etykieta: zwrot od ceny swiecy i+1 do i+1+H.
+    `filtr_swiecy(wiersz)` - tylko swiece, na ktorych symulacja handluje
+    (diagnostyka na rynku z sesja); wagi go nie podaja."""
     # {rezim: {sygnal: ([wyniki], [zwroty])}}
     zebrane: dict[str, dict[str, tuple[list, list]]] = {}
     for sym, rows in panels.items():
@@ -2069,6 +2072,8 @@ def _pary_ic(panels: dict[str, list[dict]], cache: dict[str, list[tuple]],
             if j >= len(ceny) or ceny[i + 1] == 0:
                 continue
             if filtr is not None and not filtr(regime, sygnaly):
+                continue
+            if filtr_swiecy is not None and not filtr_swiecy(rows[i]):
                 continue
             zwrot = ceny[j] / ceny[i + 1] - 1
             for name, out in sygnaly.items():
@@ -2105,10 +2110,15 @@ RAZEM_IC = "razem"
 
 
 def ic_sygnalow(panels: dict[str, list[dict]], cache: dict[str, list[tuple]],
-                horyzont_swiec: int) -> dict[str, dict[str, float]]:
+                horyzont_swiec: int, filtr_swiecy=None) -> dict[str, dict[str, float]]:
     """{grupa: {sygnal: IC}} jednego okna; grupa to rezim albo `RAZEM_IC`.
-    Sygnal bez IC (za mala proba, stala kolumna) nie ma klucza."""
-    zebrane, ogolne = _pary_ic(panels, cache, set(), horyzont_swiec)
+    Sygnal bez IC (za mala proba, stala kolumna) nie ma klucza.
+
+    `filtr_swiecy` - na rynku z sesja tylko swiece, z ktorych symulacja moze
+    WEJSC (`swieca_wejscia`): IC sygnalu na swiecy posesyjnej opisuje sytuacje,
+    w ktorej nikt nie handluje."""
+    zebrane, ogolne = _pary_ic(panels, cache, set(), horyzont_swiec,
+                               filtr_swiecy=filtr_swiecy)
     out: dict[str, dict[str, float]] = {}
     for grupa, per_sig in [(RAZEM_IC, ogolne), *zebrane.items()]:
         for name, (xs, ys) in per_sig.items():
@@ -2116,6 +2126,16 @@ def ic_sygnalow(panels: dict[str, list[dict]], cache: dict[str, list[tuple]],
             if ic is not None:
                 out.setdefault(grupa, {})[name] = ic
     return out
+
+
+def swieca_wejscia(kt: "Kontekst"):
+    """Filtr swiec dla `ic_sygnalow`: None na rynku ciaglym, inaczej te, na
+    ktorych `portfolio.okno_wykonania` dopuszcza wejscie."""
+    kalendarz = sesja_historyczna(kt.kind)
+    if kalendarz is None:
+        return None
+    return lambda r: okno_wykonania(r["t"], kt.h, kt.egzekucja, kalendarz,
+                                    wejscie=True) is not None
 
 
 def opis_ic_sygnalow(ic_okien: list[dict[str, dict[str, float]]],
@@ -3410,6 +3430,7 @@ class Przebieg:
         # Zlecenia, ktorych symulacja nie zlozyla, bo gielda byla zamknieta
         # (`portfolio.PortfolioResult.poza_sesja`, A-2). Na krypto zawsze 0.
         self.poza_sesja_oos = 0
+        self.poza_sesja_wejsc_oos = 0
         # IC per sygnal, okno po oknie (`ic_sygnalow`) - tylko do wydruku.
         self.ic_okien: list[dict[str, dict[str, float]]] = []
         # SAME WEJSCIA (2026-10-11). Kryterium H-5 porownuje z demo wypelnialnosc
@@ -3486,6 +3507,7 @@ class Przebieg:
         z.utracone_oos.extend(m.oos_brutto.utracone_ruchy)
         z.brak_swiec_oos += m.oos_brutto.brak_swiec_wykonania
         z.poza_sesja_oos += m.oos_brutto.poza_sesja
+        z.poza_sesja_wejsc_oos += m.oos_brutto.poza_sesja_wejscia
         z.wypelnione_wejsc_oos += m.oos_m["wypelnione_wejscia"]
         z.niewypelnione_wejsc_oos += m.oos_m["niewypelnione_wejscia"]
         z.glebokosci_wejsc_oos.extend(m.oos_brutto.glebokosci_wejsc)
@@ -4468,9 +4490,10 @@ def wypisz_podsumowanie(z: Przebieg, w: Status, k: Koszty, *, kind: str, wybor: 
               f"Ich KOSZT nie jest w dopłacie — w karcie stoi jako NIEZMIERZONE.")
     if z.poza_sesja_oos:
         print(f"Zlecenia NIEZŁOŻONE poza sesją giełdy w symulacji OOS: "
-              f"{z.poza_sesja_oos} (decyzja, wysyłka albo okno wypełnienia poza "
-              f"9:30–16:00 Nowego Jorku) — pętla takiej decyzji nie podejmuje; "
-              f"poza wypełnialnością")
+              f"{z.poza_sesja_oos} ({z.poza_sesja_wejsc_oos} wejść, "
+              f"{z.poza_sesja_oos - z.poza_sesja_wejsc_oos} wyjść; jedno na ciąg "
+              f"świec poza sesją 9:30–16:00 Nowego Jorku dla instrumentu albo "
+              f"pozycji) — pętla takiej decyzji nie podejmuje; poza wypełnialnością")
     if egzekucja.limit and kind in ("spot", "spot_eu", "perp"):
         # BRAMA 0 (renacode-infra: docs/projekty/trader/08-przed-go-live.md, 2026-10-11) w kazdym przebiegu crypto z limitem: stawka
         # z cennika (odczyt z konta DEMO), spread z tej samej karty. Koszt
@@ -4674,7 +4697,7 @@ def walk_forward(kt: Kontekst, okna: list[Okno], *, wybor: str, trials_per_windo
         if glowny:
             z.ic_okien.append(ic_sygnalow(
                 {s: v for s, v in dane.test_slices.items() if v}, dane.cache_te,
-                kt.h.ic_horizon_bars))
+                kt.h.ic_horizon_bars, swieca_wejscia(kt)))
         m = ocen_okno(kt, okno, dane, best_w)
         z.dodaj_wypelnienia(m)
         if m.pusty:
