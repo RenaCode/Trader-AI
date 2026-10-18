@@ -39,6 +39,7 @@ from services.engine.risk_rules import (
     DEFAULT_LIMITS, RiskState, evaluate_account, evaluate_limits, position_budget,
 )
 from services.engine.bramki import Bramki, bramki_z_pary
+from services.engine.sesja import sesja_historyczna
 from services.engine.signals import classify_regime, combine, precompute
 
 # Parametry egzekucji. Prowizja i poslizg pochodza z services/engine/koszty.py,
@@ -255,6 +256,12 @@ class PortfolioResult:
     # sprawdzenia wypelnienia. Licza sie jako NIEWYPELNIONE (ostroznie) i sa
     # wypisane osobno, zeby dziura w danych nie udawala rynku.
     brak_swiec_wykonania: int = 0
+    # Zlecenia (wejscia ponad progiem i wyjscia), ktorych symulacja NIE sklada,
+    # bo w chwili decyzji, wysylki albo w oknie wypelnienia gielda jest
+    # zamknieta - petla takiej decyzji nie podejmie (`sesja.sesja_historyczna`).
+    # Na rynku ciaglym zawsze 0. NIE wchodza do wypelnialnosci: zlecenie, ktore
+    # nie powstaje, nie jest ani wypelnione, ani niewypelnione.
+    poza_sesja: int = 0
     pominiete_shorty: int = 0
     # Ile razy sygnal ponad progiem NIE MIAL PROGU - czyli wypadl w rezimie
     # bez kalibracji. Kanarek na ciche zniknięcie rezimu z handlu.
@@ -475,6 +482,11 @@ def _sizing(score: float, price: float, baza: float) -> tuple[float, float]:
     return wielkosc_pozycji(baza, score, price)
 
 
+# Wartosc domyslna `simulate_portfolio(sesja=)`: regula z rodzaju instrumentu.
+# Osobny znacznik, bo None juz cos znaczy (rynek ciagly).
+_Z_RODZAJU = object()
+
+
 def simulate_portfolio(panels: dict[str, list[dict]],
                        weights: dict[str, dict[str, float]],
                        atr_thresholds: dict[str, float | None],
@@ -489,6 +501,7 @@ def simulate_portfolio(panels: dict[str, list[dict]],
                        zakladane_pozycje: int | None = None,
                        poslizg: float | None = None,
                        swiece_wykonania: dict[str, dict[datetime, dict]] | None = None,
+                       sesja=_Z_RODZAJU,
                        ) -> PortfolioResult:
     """Jedno konto, wszystkie instrumenty, wspolne limity.
 
@@ -497,6 +510,9 @@ def simulate_portfolio(panels: dict[str, list[dict]],
 
     `swiece_wykonania` - {symbol: indeks_swiec(swiece 1h)}; wymagane, gdy
     `egzekucja` ma opoznienie albo tryb pesymistyczny (patrz `Egzekucja`).
+
+    `sesja` - regula `chwila -> czy gielda otwarta`; domyslnie z rodzaju
+    instrumentu (`sesja.sesja_historyczna`), None = rynek ciagly.
     """
     limits = limits or DEFAULT_LIMITS
     # PROGI SA PER REZIM. Jeden obiekt `Bramki` na okno albo - dla wolaczy,
@@ -519,6 +535,29 @@ def simulate_portfolio(panels: dict[str, list[dict]],
         raise ValueError("model z opóźnieniem albo pesymistyczny wymaga świec 1h "
                          "(`swiece_wykonania`)")
     spready = egz.spread_per_instrument or {}
+    otwarta = sesja_historyczna(kind) if sesja is _Z_RODZAJU else sesja
+
+    def okno_wykonania_w_sesji(row: dict) -> bool:
+        """Czy produkcja w ogole zlozylaby zlecenie z decyzji na `row`.
+
+        Te same dwie chwile co w petli: decyzja (BRAMKA 1, zamkniecie swiecy
+        decyzyjnej) i wysylka (`sesja_wysylki`, decyzja + opoznienie). W modelu
+        pesymistycznym dochodzi okno wypelnienia - godzina po godzinie wysylki
+        (`wycena_wysylki`): zaczynajaca sie po zamknieciu sesji ocenialaby
+        zlecenie na swiecy posesyjnej albo na brak swiecy, a na gieldzie
+        zlecenie `day` wygasa o zamknieciu. Rynek ciagly - zawsze True, bez
+        jednego obliczenia wiecej.
+        """
+        if otwarta is None:
+            return True
+        t_dec = row["t"] + timedelta(minutes=h.bar_minutes)
+        t_wys = t_dec + timedelta(minutes=egz.opoznienie_min)
+        if not (otwarta(t_dec) and otwarta(t_wys)):
+            return False
+        if z_godzin and egz.pesymistyczna:
+            od = _poczatek_godziny_wysylki(t_wys) + KROK_WYKONANIA
+            return otwarta(od) and otwarta(od + KROK_WYKONANIA - timedelta(minutes=1))
+        return True
 
     def zlecenie_z_limitem(sym: str, row: dict, nxt_row: dict,
                            kupno: bool, wejscie: bool = False) -> float | None:
@@ -748,6 +787,10 @@ def simulate_portfolio(panels: dict[str, list[dict]],
             same = (pos.side > 0 and score > 0) or (pos.side < 0 and score < 0)
             if same and abs(score) >= exit_gate:
                 continue
+            if not okno_wykonania_w_sesji(cur["row"]):
+                # Pozycja zostaje do pierwszej decyzji w sesji - jak w petli.
+                res.poza_sesja += 1
+                continue
             if egz.limit:
                 # Wyjscie po cenie zamkniecia swiecy decyzyjnej. Gdy sie nie
                 # wypelni, POZYCJA ZOSTAJE OTWARTA - nieudane wyjscie
@@ -878,6 +921,9 @@ def simulate_portfolio(panels: dict[str, list[dict]],
                 res.pominiete_bez_progu += 1
                 continue
             if abs(score) < enter_gate or conf < min_conf:
+                continue
+            if not okno_wykonania_w_sesji(cur["row"]):
+                res.poza_sesja += 1
                 continue
             kandydaci.append((abs(score), sym, cur, score, conf))
         kandydaci.sort(key=lambda k: (-k[0], k[1]))

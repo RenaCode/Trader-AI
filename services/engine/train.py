@@ -122,8 +122,10 @@ MIN_CONF = MIN_CONFIDENCE
 #     wchodz".
 # Dla rynku bez shortow obie rzeczy licza sie teraz z obserwacji, na ktorych
 # decyzja long jest mozliwa (`proby_wynikow`, `ic_weights`). Rynek z shortami
-# (perp, stock) - bez zmian, dwustronnie. Klucz `strona` w `params` tylko poza
-# wartoscia domyslna, wiec tor equity (`stock`) zachowuje swoje `params`.
+# (perp) - bez zmian, dwustronnie. Klucz `strona` w `params` tylko poza
+# wartoscia domyslna. Od 2026-10-18 (A-5) `stock` jest rynkiem bez shortow
+# (`koszty.CENNIK`), wiec tor equity dostaje `strona: dluga`, czyli zmiane
+# struktury i nowa wersje `candidate`.
 STRONA_DLUGA = "dluga"
 
 
@@ -2028,6 +2030,36 @@ def _wagi_z_ic(panels: dict[str, list[dict]], cache: dict[str, list[tuple]],
                filtr=None) -> dict[str, dict[str, float]]:
     """Rdzen `ic_weights`: IC per rezim i sygnal na obserwacjach, ktore
     przechodza `filtr(rezim, sygnaly)` (None = wszystkie)."""
+    zebrane, ogolne = _pary_ic(panels, cache, martwe, horyzont_swiec, filtr)
+
+    out: dict[str, dict[str, float]] = {}
+    for regime in REGIMES:
+        surowe = {}
+        for name in SIGNALS:
+            if name in martwe:
+                surowe[name] = 0.0
+                continue
+            xs, ys = zebrane.get(regime, {}).get(name, ([], []))
+            ic = spearman(xs, ys)
+            if ic is None:
+                xs, ys = ogolne.get(name, ([], []))
+                ic = spearman(xs, ys)
+            surowe[name] = ic or 0.0
+        total = sum(abs(v) for v in surowe.values())
+        if total < 1e-9:
+            out[regime] = dict(DEFAULT_WEIGHTS[regime])
+        else:
+            out[regime] = {k: round(v / total, 4) for k, v in surowe.items()}
+    return out
+
+
+def _pary_ic(panels: dict[str, list[dict]], cache: dict[str, list[tuple]],
+             martwe: set[str], horyzont_swiec: int, filtr=None
+             ) -> tuple[dict[str, dict[str, tuple[list, list]]],
+                        dict[str, tuple[list, list]]]:
+    """(wyniki i zwroty per rezim i sygnal, to samo zlaczone po rezimach) -
+    jedna definicja obserwacji IC dla wag (`_wagi_z_ic`) i dla diagnostyki
+    (`ic_sygnalow`). Etykieta: zwrot od ceny swiecy i+1 do i+1+H."""
     # {rezim: {sygnal: ([wyniki], [zwroty])}}
     zebrane: dict[str, dict[str, tuple[list, list]]] = {}
     for sym, rows in panels.items():
@@ -2053,26 +2085,65 @@ def _wagi_z_ic(panels: dict[str, list[dict]], cache: dict[str, list[tuple]],
             w = ogolne.setdefault(name, ([], []))
             w[0].extend(xs)
             w[1].extend(ys)
+    return zebrane, ogolne
 
+
+# IC PER SYGNAL W LOGU (2026-10-18, A-3). Trener liczyl IC sygnalow na kazdym
+# oknie treningowym (`_wagi_z_ic`) i zamienial je od razu w wagi - w logu nie
+# zostawala ani jedna liczba, wiec "ktory sygnal cokolwiek przewiduje" nie
+# mialo odpowiedzi bez osobnego skryptu. Tabela nizej jest CZYSTA
+# DIAGNOSTYKA: liczona z tych samych `cache_te`, ktore ocenia symulacja, po
+# wyborze wag, i nie trafia do zadnej decyzji ani zapisu.
+#
+# NA OKNIE TESTOWYM, OSOBNO W KAZDYM OKNIE. Wynik sygnalu nie zalezy od wag,
+# wiec IC na oknie testowym jest pomiarem poza proba w scislym sensie - nic
+# go nie dopasowywalo. Srednia po oknach i odsetek okien z IC > 0 zamiast
+# jednej korelacji po calym panelu: etykiety sasiednich swiec nachodza na
+# siebie o H-1 swiec, wiec "n obserwacji" zawyzalby istotnosc, a liczba
+# okien jest uczciwym mianownikiem stabilnosci znaku.
+RAZEM_IC = "razem"
+
+
+def ic_sygnalow(panels: dict[str, list[dict]], cache: dict[str, list[tuple]],
+                horyzont_swiec: int) -> dict[str, dict[str, float]]:
+    """{grupa: {sygnal: IC}} jednego okna; grupa to rezim albo `RAZEM_IC`.
+    Sygnal bez IC (za mala proba, stala kolumna) nie ma klucza."""
+    zebrane, ogolne = _pary_ic(panels, cache, set(), horyzont_swiec)
     out: dict[str, dict[str, float]] = {}
-    for regime in REGIMES:
-        surowe = {}
-        for name in SIGNALS:
-            if name in martwe:
-                surowe[name] = 0.0
-                continue
-            xs, ys = zebrane.get(regime, {}).get(name, ([], []))
+    for grupa, per_sig in [(RAZEM_IC, ogolne), *zebrane.items()]:
+        for name, (xs, ys) in per_sig.items():
             ic = spearman(xs, ys)
-            if ic is None:
-                xs, ys = ogolne.get(name, ([], []))
-                ic = spearman(xs, ys)
-            surowe[name] = ic or 0.0
-        total = sum(abs(v) for v in surowe.values())
-        if total < 1e-9:
-            out[regime] = dict(DEFAULT_WEIGHTS[regime])
-        else:
-            out[regime] = {k: round(v / total, 4) for k, v in surowe.items()}
+            if ic is not None:
+                out.setdefault(grupa, {})[name] = ic
     return out
+
+
+def opis_ic_sygnalow(ic_okien: list[dict[str, dict[str, float]]],
+                     h: Horizon) -> list[str]:
+    """Tabela IC per sygnal: kolumna `razem` i kolumna na kazdy rezim."""
+    if not ic_okien:
+        return []
+    grupy = [RAZEM_IC] + [r for r in REGIMES
+                          if any(r in okno for okno in ic_okien)]
+
+    def komorka(wartosci: list[float]) -> str:
+        if not wartosci:
+            return "—"
+        dodatnie = sum(1 for v in wartosci if v > 0)
+        return f"{statistics.fmean(wartosci):+.3f} {dodatnie}/{len(wartosci)}"
+
+    linie = [
+        f"IC SYGNAŁÓW NA OKNACH TESTOWYCH (diagnostyka — nie wpływa na wagi, "
+        f"progi ani wybór modelu): korelacja rangowa wyniku sygnału ze zwrotem "
+        f"{h.ic_horizon_bars} świec ({h.ic_horizon_bars * h.bar_minutes / 60:g} h), "
+        f"osobno w każdym oknie; komórka = średnia IC, okna z IC > 0 / okna z IC",
+        "  " + f"{'sygnał':<20}" + "".join(f"{g:>17}" for g in grupy),
+    ]
+    for name in SIGNALS:
+        kom = [komorka([okno[g][name] for okno in ic_okien
+                        if name in okno.get(g, {})]) for g in grupy]
+        linie.append("  " + f"{name:<20}" + "".join(f"{k:>17}" for k in kom))
+    return linie
 
 
 def random_weights(rng: random.Random) -> dict[str, dict[str, float]]:
@@ -3336,6 +3407,11 @@ class Przebieg:
         self.wypelnione_oos = 0
         self.utracone_oos: list[float] = []
         self.brak_swiec_oos = 0
+        # Zlecenia, ktorych symulacja nie zlozyla, bo gielda byla zamknieta
+        # (`portfolio.PortfolioResult.poza_sesja`, A-2). Na krypto zawsze 0.
+        self.poza_sesja_oos = 0
+        # IC per sygnal, okno po oknie (`ic_sygnalow`) - tylko do wydruku.
+        self.ic_okien: list[dict[str, dict[str, float]]] = []
         # SAME WEJSCIA (2026-10-11). Kryterium H-5 porownuje z demo wypelnialnosc
         # WEJSC; suma wyzej miesza je z wyjsciami. Glebokosci - material na
         # kalibracje przebicia (`kalibracja_wypelnien`).
@@ -3409,6 +3485,7 @@ class Przebieg:
         z.wypelnione_oos += m.oos_m["wypelnione"]
         z.utracone_oos.extend(m.oos_brutto.utracone_ruchy)
         z.brak_swiec_oos += m.oos_brutto.brak_swiec_wykonania
+        z.poza_sesja_oos += m.oos_brutto.poza_sesja
         z.wypelnione_wejsc_oos += m.oos_m["wypelnione_wejscia"]
         z.niewypelnione_wejsc_oos += m.oos_m["niewypelnione_wejscia"]
         z.glebokosci_wejsc_oos.extend(m.oos_brutto.glebokosci_wejsc)
@@ -4389,6 +4466,11 @@ def wypisz_podsumowanie(z: Przebieg, w: Status, k: Koszty, *, kind: str, wybor: 
         print(f"Niewypełnione zlecenia z limitem w symulacji OOS: "
               f"{niewypelnione_oos} (wejścia + wyjścia, wszystkie okna). "
               f"Ich KOSZT nie jest w dopłacie — w karcie stoi jako NIEZMIERZONE.")
+    if z.poza_sesja_oos:
+        print(f"Zlecenia NIEZŁOŻONE poza sesją giełdy w symulacji OOS: "
+              f"{z.poza_sesja_oos} (decyzja, wysyłka albo okno wypełnienia poza "
+              f"9:30–16:00 Nowego Jorku) — pętla takiej decyzji nie podejmuje; "
+              f"poza wypełnialnością")
     if egzekucja.limit and kind in ("spot", "spot_eu", "perp"):
         # BRAMA 0 (renacode-infra: docs/projekty/trader/08-przed-go-live.md, 2026-10-11) w kazdym przebiegu crypto z limitem: stawka
         # z cennika (odczyt z konta DEMO), spread z tej samej karty. Koszt
@@ -4497,6 +4579,7 @@ def podsumowanie_przebiegu(z: Przebieg, w: Status, k: Koszty, *, days: int, now:
         "wypelnialnosc_docelowa": egzekucja.wypelnialnosc_docelowa,
         "niewypelnienie_pb": koszt_niewyp * 1e4 if koszt_niewyp is not None else None,
         "brak_swiec_1h": brak_swiec_oos,
+        "poza_sesja": z.poza_sesja_oos,
         "bije_b1": bije_odn["B1"], "bije_b2": bije_odn["B2"], "bije_b3": bije_odn["B3"],
         "b0_dodatnie": b0_dodatnie, "status": status,
         # H-7: czas trzymania w swiecach (q1, mediana, q3) - patrz
@@ -4588,6 +4671,10 @@ def walk_forward(kt: Kontekst, okna: list[Okno], *, wybor: str, trials_per_windo
             print(f"  progi wejścia ({rodzaj}, percentyl {ENTER_PCTL:.2f}, "
                   f"min. {MIN_PROB_PROGU} próbek): {dane.gates.opis()}")
         z.wybrane_ic += z_ic
+        if glowny:
+            z.ic_okien.append(ic_sygnalow(
+                {s: v for s, v in dane.test_slices.items() if v}, dane.cache_te,
+                kt.h.ic_horizon_bars))
         m = ocen_okno(kt, okno, dane, best_w)
         z.dodaj_wypelnienia(m)
         if m.pusty:
@@ -4743,6 +4830,8 @@ def train(conn, engine: str, days: int, trials_per_window: int, h: Horizon,
                           trials_per_window=trials_per_window,
                           zapisz_hipoteze=_zapis_hipotez(cur, sucho, model_id),
                           glowny=True, zapis_okna=zapis)
+    for linia in opis_ic_sygnalow(z.ic_okien, h):
+        print(linia)
     liczniki = {0: z}
     for p in sorted(set(przesuniecia) - {0}):
         liczniki[p], _ = walk_forward(

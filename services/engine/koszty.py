@@ -139,8 +139,24 @@ CENNIK = {
     # pozycji w karcie wliczal go jako zero. `karta_rundy` dokleja go teraz jako
     # skladnik BEZ WARTOSCI, czyli trafia do `karta.nieznane` i suma podpisuje
     # sie jako DOLNE oszacowanie.
-    "stock": Koszty(maker=0.0, taker=0.0, krotka_pozycja=True),
-    "etf": Koszty(maker=0.0, taker=0.0, krotka_pozycja=True),
+    #
+    # OD 2026-10-18 NOGI KROTKIEJ NA EQUITY NIE MA (A-5, korekta pomiaru).
+    # Skladnik bez wartosci mowil prawde o karcie, ale nie naprawial wyniku:
+    # zwrot shortow w symulacji byl liczony bez kosztu pozyczki, a konto Alpaca
+    # paper tez go nie nalicza - wiec ani trener, ani demo nie mierzyly strony
+    # krotkiej, ktora istnieje na koncie live. Wynik, ktorego czesc jest fikcja,
+    # nie jest dolnym oszacowaniem, tylko innym wynikiem. Flaga False robi to
+    # samo co na spocie: symulacja pomija wejscia ze score < 0
+    # (`pominiete_shorty`), petla daje `hold` z powodem `short_niewykonalny`,
+    # trener uczy sie strony dlugiej (H-6, `train.strona_uczenia`), a skladnik
+    # "koszt pozyczki papieru" znika z karty razem z noga, ktorej dotyczyl.
+    # `etf` RAZEM ZE `stock`: trener liczy SPY w torze `--kind stock`, a petla
+    # czyta rodzaj z `ref.instrument` (SPY = 'etf') - rozne flagi dawaly by
+    # shorty na produkcji, ktorych symulacja nie zna.
+    # Powrot do True wymaga zmierzonej stawki pozyczki (pozycje `FEE` rejestru
+    # Alpaki albo stawka brokera live) naliczanej w `simulate_portfolio`.
+    "stock": Koszty(maker=0.0, taker=0.0, krotka_pozycja=False),
+    "etf": Koszty(maker=0.0, taker=0.0, krotka_pozycja=False),
 }
 
 # Chwile wyplaty finansowania na Bybicie: co osiem godzin, o pelnych 00:00,
@@ -585,6 +601,9 @@ def karta_rundy(kind: str, maker: bool = False, *,
     # ani jako liczby, ani jako braku. Czyli dokladnie stan, przed ktorym ten
     # plik ostrzega w naglowku sekcji: skladnik nieobecny w karcie jest w sumie
     # zerem, a "im wiecej rzeczy nie policzylismy, tym tanszy koszt wyglada".
+    # (Od 2026-10-18 `stock` i `etf` maja flage False - patrz `CENNIK` - wiec
+    # dzis skladnik nie dotyczy zadnego rodzaju; zostaje dla przyszlego
+    # instrumentu z noga krotka bez finansowania.)
     #
     # WARUNEK CZYTA FLAGE, A NIE LISTE NAZW. `k.krotka_pozycja` to ta sama
     # flaga, ktora DECYDUJE o otwarciu nogi krotkiej, wiec skladnik pojawia sie

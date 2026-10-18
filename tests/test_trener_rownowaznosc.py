@@ -55,6 +55,19 @@ a poza tymi liniami wydruk jest identyczny - zadne okno, transakcja ani miara
 sie nie zmienia, bo przebicie domyslne to 0. Doszedl wariant `ic_kalibracja`
 (przebieg kalibracyjny + przebicie > 0) - ten zmienia wynik z definicji.
 
+PRZEGENEROWANY SZOSTY RAZ, 2026-10-18 (A-2, A-3, A-5): w siedmiu wariantach
+crypto `PODSUMOWANIE_JSON` dostaje klucz `poza_sesja` (zawsze 0 - rynek
+ciagly), a wydruk tabele IC per sygnal po walk-forwardzie. Sprawdzone przed
+zapisem: JSON bez `poza_sesja` (takze w `przesuniecia`) przechodzi `_bliskie`
+ze zrzutem z 11.10, a wydruk bez tabeli IC i bez `"poza_sesja": 0` w linii
+JSON jest identyczny linia po linii - zadne okno, transakcja ani miara krypto
+sie nie zmienia. Wariant `ic_stock` USUNIETY: od A-5 `stock` jest rynkiem bez
+shortow, a od A-2 panel syntetyczny (swieca 4h przez cala dobe) daje na nim
+jedna decyzje w sesji dziennie, czyli 0 okien powyzej progu transakcji.
+Galaz "rynek z shortami, uczenie dwustronne" pilnuje teraz `ic_perp`
+(panel ma `funding_rate`). Equity pokrywaja testy jednostkowe
+(`tests/test_sesja_w_symulacji.py`, `tests/test_runda_w_zwrocie.py`).
+
 Zmiana wyniku zamierzona (nowa miara, poprawka) oznacza swiadome
 przegenerowanie zrzutu:
 
@@ -104,7 +117,8 @@ WARIANTY = {
                                               pesymistyczna=True,
                                               wypelnialnosc_docelowa=0.656), wybor="ic"),
     # Rynek Z SHORTAMI (H-6): uczenie dwustronne jak przed 2026-10-07.
-    "ic_stock": dict(egzekucja=Egzekucja(limit=True), wybor="ic", kind="stock"),
+    # Do 2026-10-18 `ic_stock` - od A-5 akcje sa rynkiem bez shortow.
+    "ic_perp": dict(egzekucja=Egzekucja(limit=True), wybor="ic", kind="perp"),
     # Siatka produkcji (T4): kotwica w kalendarzu i piec przesuniec. `days`
     # o 2 krotsze niz plik - zapas na przesuniecie -2.
     "ic_siatka": dict(egzekucja=Egzekucja(limit=True), wybor="ic", days=DNI - 2,
