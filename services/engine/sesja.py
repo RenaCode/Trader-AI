@@ -37,7 +37,8 @@ robi sie z brakiem wiedzy przy operacji nieodwracalnej: nie handlowac. Domysl
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timezone
+from zoneinfo import ZoneInfo
 
 from services.exchanges.fabryka import OBSLUGIWANE
 
@@ -99,24 +100,19 @@ class StanSesji:
 #
 # Regularna sesja NYSE/Nasdaq otwiera sie o 09:30 czasu Nowego Jorku KAZDEGO
 # dnia sesyjnego - dni skrocone koncza sie wczesniej, nie zaczynaja pozniej.
-# Strefe liczymy regula federalna (od 2007: czas letni od drugiej niedzieli
-# marca do pierwszej niedzieli listopada), a nie `zoneinfo`: obraz
-# `python:3.12-slim` nie ma bazy stref ani pakietu `tzdata`, wiec
-# `ZoneInfo("America/New_York")` padloby dopiero na produkcji.
+# Strefa z `zoneinfo` (baza stref jest w obrazie silnika, /usr/share/zoneinfo
+# - sprawdzone w trader-engine-equity), wiec czas letni rozstrzyga baza IANA,
+# nie wlasna kopia reguly.
 #
-# Pomylka tej funkcji (zmiana prawa o czasie letnim) zostawia stan sprzed
-# 2026-10-18: swieca przed sesja konczy jako `decyzja_przeterminowana`.
-# Zadne wejscie nie przechodzi przez nia dodatkowo.
-def _niedziela(rok: int, miesiac: int, ktora: int) -> date:
-    pierwszy = date(rok, miesiac, 1)
-    return pierwszy + timedelta(days=(6 - pierwszy.weekday()) % 7 + 7 * (ktora - 1))
+# Pomylka tej funkcji zostawia stan sprzed 2026-10-18: swieca przed sesja
+# konczy jako `decyzja_przeterminowana`. Zadne wejscie nie przechodzi przez nia
+# dodatkowo.
+STREFA_US = ZoneInfo("America/New_York")
 
 
 def otwarcie_sesji_us(dzien: date) -> datetime:
     """09:30 czasu Nowego Jorku w dniu `dzien`, w UTC."""
-    letni = _niedziela(dzien.year, 3, 2) <= dzien < _niedziela(dzien.year, 11, 1)
-    return datetime(dzien.year, dzien.month, dzien.day, 13 if letni else 14, 30,
-                    tzinfo=timezone.utc)
+    return datetime.combine(dzien, time(9, 30), tzinfo=STREFA_US).astimezone(timezone.utc)
 
 
 OTWARCIE_SESJI = {"alpaca": otwarcie_sesji_us}
