@@ -39,6 +39,7 @@ from services.engine.risk_rules import (
     DEFAULT_LIMITS, RiskState, evaluate_account, evaluate_limits, position_budget,
 )
 from services.engine.bramki import Bramki, bramki_z_pary
+from services.engine.sesja import KalendarzSesji, sesja_historyczna
 from services.engine.signals import classify_regime, combine, precompute
 
 # Parametry egzekucji. Prowizja i poslizg pochodza z services/engine/koszty.py,
@@ -79,6 +80,9 @@ class Position:
     # akcji noc i weekend to kilkanascie godzin bez swiec, a etykieta IC
     # (`train.ic_weights`) liczy horyzont w swiecach panelu.
     idx_wejscia: int = -1
+    # Czy biezacy ciag decyzji o wyjsciu poza sesja juz policzono w
+    # `PortfolioResult.poza_sesja_wyjscia` - jedno zlecenie na noc, nie na swiece.
+    poza_sesja: bool = False
 
     @property
     def finansowanie_w_zwrocie(self) -> float:
@@ -255,10 +259,22 @@ class PortfolioResult:
     # sprawdzenia wypelnienia. Licza sie jako NIEWYPELNIONE (ostroznie) i sa
     # wypisane osobno, zeby dziura w danych nie udawala rynku.
     brak_swiec_wykonania: int = 0
+    # Zlecenia, ktorych symulacja NIE sklada, bo petla nie podjelaby decyzji
+    # (`okno_wykonania`). LICZONE RAZ NA CIAG SWIEC POZA SESJA dla pozycji
+    # (wyjscie) albo instrumentu (wejscie): sygnal wyjscia trzymajacy sie przez
+    # noc to jedno zlecenie, ktore stary model by wyslal, a nie kilkanascie
+    # swiec. Na rynku ciaglym zawsze 0. NIE wchodza do wypelnialnosci: zlecenie,
+    # ktore nie powstaje, nie jest ani wypelnione, ani niewypelnione.
+    poza_sesja_wejscia: int = 0
+    poza_sesja_wyjscia: int = 0
     pominiete_shorty: int = 0
     # Ile razy sygnal ponad progiem NIE MIAL PROGU - czyli wypadl w rezimie
     # bez kalibracji. Kanarek na ciche zniknięcie rezimu z handlu.
     pominiete_bez_progu: int = 0
+
+    @property
+    def poza_sesja(self) -> int:
+        return self.poza_sesja_wejscia + self.poza_sesja_wyjscia
     # Stawki faktycznie zastosowane - do sprawdzenia z zewnatrz, ze symulacja
     # policzyla te koszty, ktore deklaruje.
     prowizja: float = 0.0
@@ -428,7 +444,8 @@ def _poczatek_godziny_wysylki(t_wys: datetime) -> datetime:
 
 
 def wycena_wysylki(row: dict, bar_minutes: int, opoznienie_min: int,
-                   swiece: dict[datetime, dict] | None
+                   swiece: dict[datetime, dict] | None, *,
+                   t_wys: datetime | None = None, do_zamkniecia: bool = False,
                    ) -> tuple[float, dict] | None:
     """(cena w chwili wysylki, godzina PO wysylce) - bez spreadu.
 
@@ -439,16 +456,21 @@ def wycena_wysylki(row: dict, bar_minutes: int, opoznienie_min: int,
 
     None, gdy brakuje swiecy potrzebnej do ktoregokolwiek kroku - wolajacy
     liczy to jako niewypelnienie i osobno jako dziure w danych.
+
+    `t_wys` i `do_zamkniecia` - z `okno_wykonania` na rynku z sesja: wysylka
+    po otwarciu (wyjscie z decyzji przedsesyjnej) i okno wypelnienia skrocone
+    do reszty godziny wysylki, gdy nastepna godzina jest juz po zamknieciu.
     """
     if swiece is None:
         return None
-    t_wys = row["t"] + timedelta(minutes=bar_minutes + opoznienie_min)
+    t_dec = row["t"] + timedelta(minutes=bar_minutes)
+    t_wys = t_wys or t_dec + timedelta(minutes=opoznienie_min)
     start = _poczatek_godziny_wysylki(t_wys)
     biezaca = swiece.get(start)
-    nastepna = swiece.get(start + KROK_WYKONANIA)
+    nastepna = biezaca if do_zamkniecia else swiece.get(start + KROK_WYKONANIA)
     if biezaca is None or nastepna is None:
         return None
-    if opoznienie_min == 0:
+    if t_wys == t_dec:
         return row["price"], nastepna
     poprzednia = swiece.get(start - KROK_WYKONANIA)
     otwarcie = (poprzednia["close"] if poprzednia is not None
@@ -475,6 +497,63 @@ def _sizing(score: float, price: float, baza: float) -> tuple[float, float]:
     return wielkosc_pozycji(baza, score, price)
 
 
+@dataclass(frozen=True)
+class Wykonanie:
+    """Kiedy wychodzi zlecenie z decyzji na swiecy i jakie ma okno wypelnienia."""
+    t_wys: datetime
+    # Okno wypelnienia modelu pesymistycznego = RESZTA godziny wysylki do
+    # zamkniecia sesji, a nie godzina po niej (ta jest juz po zamknieciu).
+    do_zamkniecia: bool = False
+
+
+def okno_wykonania(t_swiecy: datetime, h: Horizon, egz: "Egzekucja",
+                   sesja: KalendarzSesji | None, *, wejscie: bool) -> Wykonanie | None:
+    """Czy i kiedy petla zlozylaby zlecenie z decyzji na swiecy `t_swiecy`.
+
+    CZYSTA FUNKCJA. None = petla tego zlecenia nie zlozy. Te same reguly co
+    w `loop.py`:
+      * decyzja dla swiecy zapada w oknie [koniec swiecy, koniec + swieca)
+        (`okno_decyzji`) i tylko przy otwartej sesji (BRAMKA 1);
+      * swieca, ktorej koniec wypada PRZED otwarciem, a nastepna jeszcze sie
+        nie zamknela (przedsesyjna 12:00Z latem), dostaje decyzje w pierwszym
+        cyklu po otwarciu - wtedy wejscie odpada jako `swieca_przed_sesja`
+        (`StanSesji.swieca_przed_otwarciem`, ta sama `otwarcie_sesji_us`),
+        a WYJSCIE idzie: wysylka = otwarcie + opoznienie;
+      * wysylka musi wypasc w sesji (`sesja_wysylki`);
+      * model pesymistyczny: gdy godzina po godzinie wysylki jest juz po
+        zamknieciu (decyzja 15:00 NY, wysylka 15:20), zlecenie `day` zyje do
+        16:00 - okno to reszta godziny wysylki, a nie odrzucenie. Swieca 1h
+        tej godziny obejmuje tez ~20 min PRZED wysylka, wiec to okno jest
+        lekko laskawsze niz rzeczywistosc; swiec 1m z historii nie ma.
+    Rynek ciagly (`sesja=None`): wysylka = koniec swiecy + opoznienie, zawsze.
+    """
+    t_dec = t_swiecy + timedelta(minutes=h.bar_minutes)
+    opoznienie = timedelta(minutes=egz.opoznienie_min)
+    if sesja is None:
+        return Wykonanie(t_dec + opoznienie)
+    if sesja.otwarta(t_dec):
+        t_wys = t_dec + opoznienie
+    elif not wejscie:
+        otwarcie = sesja.otwarcie(t_dec.astimezone(sesja.strefa).date())
+        if not (t_dec < otwarcie < t_dec + timedelta(minutes=h.bar_minutes)
+                and sesja.otwarta(otwarcie)):
+            return None
+        t_wys = otwarcie + opoznienie
+    else:
+        return None
+    if not sesja.otwarta(t_wys):
+        return None
+    if egz.pesymistyczna:
+        nastepna = _poczatek_godziny_wysylki(t_wys) + KROK_WYKONANIA
+        return Wykonanie(t_wys, do_zamkniecia=not sesja.otwarta(nastepna))
+    return Wykonanie(t_wys)
+
+
+# Wartosc domyslna `simulate_portfolio(sesja=)`: regula z rodzaju instrumentu.
+# Osobny znacznik, bo None juz cos znaczy (rynek ciagly).
+_Z_RODZAJU = object()
+
+
 def simulate_portfolio(panels: dict[str, list[dict]],
                        weights: dict[str, dict[str, float]],
                        atr_thresholds: dict[str, float | None],
@@ -489,6 +568,7 @@ def simulate_portfolio(panels: dict[str, list[dict]],
                        zakladane_pozycje: int | None = None,
                        poslizg: float | None = None,
                        swiece_wykonania: dict[str, dict[datetime, dict]] | None = None,
+                       sesja=_Z_RODZAJU,
                        ) -> PortfolioResult:
     """Jedno konto, wszystkie instrumenty, wspolne limity.
 
@@ -497,6 +577,9 @@ def simulate_portfolio(panels: dict[str, list[dict]],
 
     `swiece_wykonania` - {symbol: indeks_swiec(swiece 1h)}; wymagane, gdy
     `egzekucja` ma opoznienie albo tryb pesymistyczny (patrz `Egzekucja`).
+
+    `sesja` - `sesja.KalendarzSesji`; domyslnie z rodzaju instrumentu
+    (`sesja.sesja_historyczna`), None = rynek ciagly.
     """
     limits = limits or DEFAULT_LIMITS
     # PROGI SA PER REZIM. Jeden obiekt `Bramki` na okno albo - dla wolaczy,
@@ -519,9 +602,18 @@ def simulate_portfolio(panels: dict[str, list[dict]],
         raise ValueError("model z opóźnieniem albo pesymistyczny wymaga świec 1h "
                          "(`swiece_wykonania`)")
     spready = egz.spread_per_instrument or {}
+    kalendarz = sesja_historyczna(kind) if sesja is _Z_RODZAJU else sesja
+    # Instrumenty, ktorych biezacy ciag wejsc poza sesja jest juz policzony.
+    poza_sesja_policzone: set[str] = set()
 
-    def zlecenie_z_limitem(sym: str, row: dict, nxt_row: dict,
-                           kupno: bool, wejscie: bool = False) -> float | None:
+    def wykonanie_wejscia(row: dict) -> Wykonanie | None:
+        return okno_wykonania(row["t"], h, egz, kalendarz, wejscie=True)
+
+    def wykonanie_wyjscia(row: dict) -> Wykonanie | None:
+        return okno_wykonania(row["t"], h, egz, kalendarz, wejscie=False)
+
+    def zlecenie_z_limitem(sym: str, row: dict, nxt_row: dict, kupno: bool,
+                           wyk: Wykonanie, wejscie: bool = False) -> float | None:
         """Cena limitu, jesli zlecenie WESZLO; None, jesli nie.
 
         Przy wartosciach domyslnych `Egzekucja` to jest dokladnie model sprzed
@@ -534,7 +626,8 @@ def simulate_portfolio(panels: dict[str, list[dict]],
             return limit_px if _wypelnione(limit_px, nxt_row, kupno) else None
         if z_godzin:
             w = wycena_wysylki(row, h.bar_minutes, egz.opoznienie_min,
-                               swiece_wykonania.get(sym))
+                               swiece_wykonania.get(sym), t_wys=wyk.t_wys,
+                               do_zamkniecia=wyk.do_zamkniecia)
             if w is None:
                 res.brak_swiec_wykonania += 1
                 return None
@@ -741,6 +834,11 @@ def simulate_portfolio(panels: dict[str, list[dict]],
             regime, sygnaly = cache[sym][cur["idx"]]
             score, _conf, _ = combine(sygnaly, regime, weights.get(regime), with_contributions=False)
             pos = positions[sym]
+            # Na rynku z sesja liczone na KAZDEJ swiecy: decyzja w sesji konczy
+            # ciag poza sesja, takze gdy sygnal kaze trzymac.
+            wyk = wykonanie_wyjscia(cur["row"]) if kalendarz else None
+            if wyk is not None:
+                pos.poza_sesja = False
             # PROG WYJSCIA Z REZIMU, W KTORYM POZYCJA JEST TERAZ, nie z tego,
             # w ktorym powstala - i ZAWSZE liczba: rezim bez kalibracji progu
             # wejscia nie moze uniemozliwiac zamkniecia pozycji.
@@ -748,12 +846,20 @@ def simulate_portfolio(panels: dict[str, list[dict]],
             same = (pos.side > 0 and score > 0) or (pos.side < 0 and score < 0)
             if same and abs(score) >= exit_gate:
                 continue
+            if kalendarz is None:
+                wyk = wykonanie_wyjscia(cur["row"])
+            elif wyk is None:
+                # Pozycja zostaje do pierwszej decyzji w sesji - jak w petli.
+                if not pos.poza_sesja:
+                    res.poza_sesja_wyjscia += 1
+                    pos.poza_sesja = True
+                continue
             if egz.limit:
                 # Wyjscie po cenie zamkniecia swiecy decyzyjnej. Gdy sie nie
                 # wypelni, POZYCJA ZOSTAJE OTWARTA - nieudane wyjscie
                 # w spadajacym rynku kosztuje najwiecej i musi byc w modelu.
                 limit_px = zlecenie_z_limitem(sym, cur["row"], rows[nxt_idx],
-                                              kupno=pos.side < 0)
+                                              kupno=pos.side < 0, wyk=wyk)
                 if limit_px is None:
                     res.niewypelnione_wyjscia += 1
                     continue
@@ -868,6 +974,9 @@ def simulate_portfolio(panels: dict[str, list[dict]],
             rows = panels[sym]
             if cur["idx"] + 1 >= len(rows):
                 continue
+            wyk = wykonanie_wejscia(cur["row"]) if kalendarz else None
+            if wyk is not None:
+                poza_sesja_policzone.discard(sym)
             regime, sygnaly = cache[sym][cur["idx"]]
             score, conf, _ = combine(sygnaly, regime, weights.get(regime), with_contributions=False)
             enter_gate = bram[sym].wejscie(regime)
@@ -879,10 +988,17 @@ def simulate_portfolio(panels: dict[str, list[dict]],
                 continue
             if abs(score) < enter_gate or conf < min_conf:
                 continue
-            kandydaci.append((abs(score), sym, cur, score, conf))
+            if kalendarz is None:
+                wyk = wykonanie_wejscia(cur["row"])
+            elif wyk is None:
+                if sym not in poza_sesja_policzone:
+                    res.poza_sesja_wejscia += 1
+                    poza_sesja_policzone.add(sym)
+                continue
+            kandydaci.append((abs(score), sym, cur, score, conf, wyk))
         kandydaci.sort(key=lambda k: (-k[0], k[1]))
 
-        for _sila, sym, cur, score, conf in kandydaci:
+        for _sila, sym, cur, score, conf, wyk in kandydaci:
             if score < 0 and not wolno_short:
                 res.pominiete_shorty += 1
                 continue
@@ -938,7 +1054,7 @@ def simulate_portfolio(panels: dict[str, list[dict]],
             side = 1 if score > 0 else -1
             if egz.limit:
                 limit_px = zlecenie_z_limitem(sym, cur["row"], rows[nxt_idx],
-                                              kupno=side > 0, wejscie=True)
+                                              kupno=side > 0, wyk=wyk, wejscie=True)
                 if limit_px is None:
                     res.niewypelnione_wejscia += 1
                     # Ruch, ktory przepadl: od ceny, po ktorej chcielismy wejsc,

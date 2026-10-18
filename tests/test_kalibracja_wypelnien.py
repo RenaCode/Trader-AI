@@ -177,7 +177,9 @@ def test_przebicie_nie_dotyczy_wyjsc():
     `zlecenie_z_limitem` bez tej flagi."""
     zrodlo = inspect.getsource(simulate_portfolio)
     assert zrodlo.count("przebicie_bps") == 1
-    assert zrodlo.count("wejscie=True") == 1
+    # Flaga przy `zlecenie_z_limitem`, nie w ogole: `okno_wykonania` ma wlasne
+    # `wejscie=` (sesja gieldy, 2026-10-18) i nie dotyka przebicia.
+    assert len(re.findall(r"zlecenie_z_limitem\([^)]*wejscie=True", zrodlo)) == 1
     assert zrodlo.count("zlecenie_z_limitem(") == 3     # definicja, wyjście, wejście
 
 

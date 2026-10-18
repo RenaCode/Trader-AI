@@ -38,6 +38,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime, time, timezone
+from typing import Callable
 from zoneinfo import ZoneInfo
 
 from services.exchanges.fabryka import OBSLUGIWANE
@@ -168,3 +169,72 @@ async def stan_sesji(cur, engine: str, gielda=None, *,
     return StanSesji(bool(z.otwarta), "zegar giełdy", venue=kod,
                      nastepne_otwarcie=z.nastepne_otwarcie,
                      nastepne_zamkniecie=z.nastepne_zamkniecie)
+
+
+# ------------------------------------------------------- SESJA W SYMULACJI
+#
+# SYMULACJA NIE MA ZEGARA GIELDY. `stan_sesji` pyta `/v2/clock` o chwile
+# biezaca; trener odtwarza decyzje sprzed lat, a `ref.session_calendar` jest
+# pusta (naglowek modulu). Do 2026-10-18 symulacja nie pytala wiec o sesje
+# wcale i decydowala na KAZDEJ swiecy panelu equity - takze na swiecach
+# przed- i posesyjnych (Alpaca oddaje je w `/v2/stocks/bars`, np. NVDA
+# 2024-06-10 12:00Z w `exchanges/alpaca.py`, czyli 8:00 czasu
+# Nowego Jorku) i na ostatniej swiecy sesji, ktorej
+# decyzja zapada o 16:00 czasu Nowego Jorku, gdy zegar mowi juz "zamknieta".
+# Petla takiej decyzji nie podejmie (BRAMKA 1 w `loop.py`), a jej zlecenie
+# w symulacji szlo jako niewypelnione z braku swiecy 1h (`brak_swiec_1h: 890`
+# z 4061 zlecen w przebiegu 18.10) - wyjscie "nie weszlo" i pozycja niosla
+# luke otwarcia, ktorej produkcja nie niesie.
+#
+# TA SAMA REGULA CO W PETLI, INNE ZRODLO GODZIN: rynek ciagly decyduje zawsze
+# (`is_24_7`), rynek z sesja tylko wtedy, gdy sesja jest otwarta w chwili
+# decyzji i w chwili wysylki (`loop.py`: BRAMKA 1 i `sesja_wysylki`). Godziny
+# to sesja regularna NYSE/Nasdaq, 9:30-16:00 czasu Nowego Jorku, pon.-pt.
+# Jak te chwile przeklada na zlecenia symulacji - `portfolio.okno_wykonania`.
+#
+# CZEGO KALENDARZ NIE ZNA (swiadomie, bez listy swiat w repo):
+#   * swieta - w swieto gieldy nie ma ani jednej swiecy, wiec panel i tak nie
+#     ma wiersza, na ktorym mozna by decydowac;
+#   * sesje skrocone (13:00, ok. trzech dni w roku) - po 13:00 symulacja moze
+#     tam jeszcze decydowac na swiecach posesyjnych. Gorne oszacowanie rzedu
+#     3 dni x 3 h na rok; zegar gieldy w petli zna te godziny, kalendarz nie.
+# Strefa i godzina otwarcia - JEDNA definicja dla petli i symulacji:
+# `STREFA_US` i `otwarcie_sesji_us` wyzej (petla: `StanSesji.swieca_przed_otwarciem`).
+ZAMKNIECIE_SESJI_US = time(16, 0)
+
+# Rodzaje instrumentu notowane z sesja. Klucze jak w `koszty.CENNIK`, bo
+# symulacja zna rodzaj instrumentu (`kind`), a nie gielde (`ref.venue`).
+RODZAJE_Z_SESJA = ("stock", "etf")
+
+
+def sesja_regularna_nyse(t: datetime) -> bool:
+    """Czy w chwili `t` (strefa dowolna, byle jawna) trwa sesja regularna.
+
+    Przedzial polotwarty [9:30, 16:00): o 16:00:00 zegar Alpaki mowi juz
+    `is_open: false`, wiec decyzja z zamkniecia ostatniej swiecy nie zapada.
+    """
+    if t.tzinfo is None:
+        raise ValueError("czas bez strefy - sesji nie da sie rozstrzygnac")
+    ny = t.astimezone(STREFA_US)
+    if ny.weekday() >= 5:
+        return False
+    zamkniecie = datetime.combine(ny.date(), ZAMKNIECIE_SESJI_US, tzinfo=STREFA_US)
+    return otwarcie_sesji_us(ny.date()) <= t < zamkniecie
+
+
+@dataclass(frozen=True)
+class KalendarzSesji:
+    """Godziny gieldy dla symulacji: czy otwarta w chwili `t` i kiedy otwiera
+    sie sesja danego dnia gieldy (pierwsza decyzja dnia - patrz
+    `portfolio.okno_wykonania`). `strefa` wyznacza, ktory to dzien."""
+    otwarta: Callable[[datetime], bool]
+    otwarcie: Callable[[date], datetime]
+    strefa: ZoneInfo
+
+
+NYSE_REGULARNA = KalendarzSesji(sesja_regularna_nyse, otwarcie_sesji_us, STREFA_US)
+
+
+def sesja_historyczna(kind: str) -> KalendarzSesji | None:
+    """Kalendarz sesji dla symulacji: None = rynek ciagly (decyzja zawsze)."""
+    return NYSE_REGULARNA if kind in RODZAJE_Z_SESJA else None

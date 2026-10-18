@@ -112,13 +112,13 @@ def _karta_stock_wymienia_braki(kind: str, limit: bool) -> None:
     NICZEGO — i dla takiej, która naliczyłaby nie to, co trzeba.
 
     Karta kosztu jest tu jedynym miejscem, w którym widać różnicę między
-    „policzone i wyszło zero" a „nie policzone". Trzy składniki MUSZĄ być w niej
+    „policzone i wyszło zero" a „nie policzone". Dwa składniki MUSZĄ być w niej
     bez wartości:
       * opłaty regulacyjne (SEC Section 31, FINRA TAF) — obciążają wyłącznie
         nogę sprzedaży, a TAF liczy się od LICZBY AKCJI,
-      * spread — na equity nikt go nie zmierzył,
-      * koszt pożyczki papieru — `koszty("stock").krotka_pozycja` jest True,
-        więc symulacja nogę krótką OTWIERA, a tego kosztu nie nalicza.
+      * spread — na equity nikt go nie zmierzył.
+    Kosztu pożyczki papieru od 2026-10-18 w karcie NIE MA, bo nie ma nogi
+    krótkiej (A-5) — patrz `test_krotka_pozycja_na_equity_WYLACZONA...`.
     """
     karta = karta_rundy(kind, limit)
     assert not karta.pelna, (
@@ -126,7 +126,7 @@ def _karta_stock_wymienia_braki(kind: str, limit: bool) -> None:
         f"wynosi {runda(kind, limit)} — zero z pełnej karty czyta się jako "
         f"„koszt zmierzony i wynosi zero”, co dla equity jest nieprawdą")
     braki = set(karta.nieznane)
-    for oczekiwany in ("oplaty regulacyjne", "spread", "koszt pozyczki papieru"):
+    for oczekiwany in ("oplaty regulacyjne", "spread"):
         assert oczekiwany in braki, (
             f"karta {kind} nie wymienia braku „{oczekiwany}”; nieznane: "
             f"{sorted(braki)}. Składnik nieobecny w karcie wchodzi do sumy jako "
@@ -143,10 +143,12 @@ def test_transakcja_bez_ruchu_ceny_kosztuje_dokladnie_runde(kind, limit):
     fee = k.maker if limit else k.taker
     slip = POSLIZG_MAKER if limit else POSLIZG_TAKER
 
+    # `sesja=None`: test mierzy RUNDĘ, nie kalendarz — panel co 4 h przez
+    # całą dobę dałby na equity jedną decyzję dziennie (A-2, `sesja.py`).
     res = simulate_portfolio(
         {"AAA": panel_plaski()}, DEFAULT_WEIGHTS, {"AAA": 2.0},
         {"AAA": (0.05, 0.0225)}, H, 0.05, LIMITY_LUZNE,
-        kind=kind, egzekucja=Egzekucja(limit=limit))
+        kind=kind, egzekucja=Egzekucja(limit=limit), sesja=None)
 
     assert res.trades, (
         "płaska cena nie dała ani jednej transakcji — kanarek przestał mierzyć "
@@ -185,40 +187,53 @@ def test_zwrot_zgadza_sie_z_deklarowana_runda(kind, limit):
 
 
 @pytest.mark.parametrize("kind", ["stock", "etf"])
-def test_krotka_pozycja_na_equity_JEST_WLACZONA_i_ma_swoj_koszt_w_karcie(kind):
-    """ZMIERZONE MUTACYJNIE 2026-09-25: wyłączenie `koszty("stock").krotka_pozycja`
-    nie wywracało ANI JEDNEGO testu w całym zestawie.
+def test_krotka_pozycja_na_equity_WYLACZONA_i_bez_kosztu_pozyczki(kind):
+    """OD 2026-10-18 (A-5) NOGI KRÓTKIEJ NA EQUITY NIE MA — korekta pomiaru.
 
-    Flaga nie jest ozdobą — decyduje o DWÓCH rzeczach naraz:
-
-      1. czy symulacja i pętla decyzyjna otwierają nogę krótką na akcjach;
-      2. czy `evaluate_limits` wymaga limitu dźwigni (od 2026-09-24 odmawia
-         handlu instrumentem z pozycją krótką bez `max_leverage` — strata
-         na shorcie nie ma górnego końca).
-
-    Zmiana jej po cichu na `False` odjęłaby połowę sygnału na całym torze equity
-    i NIE objawiłaby się niczym poza mniejszą liczbą transakcji; zmiana na `True`
-    tam, gdzie broker nie pożyczy papieru, otwierałaby pozycje niewykonalne —
-    ten drugi błąd zdarzył się już na spocie (8 z 12 pozycji w dzienniku
-    produkcyjnym to były krótkie sprzedaże na instrumentach spotowych).
-
-    Test pilnuje obu stron naraz: flagi ORAZ tego, że jej koszt jest w karcie
-    wymieniony. Sama flaga bez składnika w karcie znaczyłaby, że symulacja
-    otwiera nogę, której kosztu rachunek nie zna i o tym nie mówi.
+    Do tej daty test pilnował odwrotnej decyzji: flaga True i koszt pożyczki
+    papieru w karcie jako składnik BEZ WARTOŚCI. Karta mówiła prawdę, ale
+    wynik nie: zwrot shortów liczono bez kosztu pożyczki, a konto Alpaca paper
+    też go nie nalicza — strona krótka nie była zmierzona ani w trenerze, ani
+    na demo. Flaga decyduje o trzech rzeczach naraz i wszystkie czytają TO
+    SAMO pole:
+      1. symulacja pomija wejścia ze score < 0 (`pominiete_shorty`),
+      2. pętla daje `hold` z powodem `short_niewykonalny` (`loop.py`),
+      3. trener uczy się strony długiej (`train.strona_uczenia`, H-6).
+    `etf` razem ze `stock`: trener liczy SPY w torze `--kind stock`, a pętla
+    czyta rodzaj z `ref.instrument` (SPY = 'etf').
     """
     k = koszty(kind)
-    assert k.krotka_pozycja is True, (
-        f"`koszty({kind!r}).krotka_pozycja` jest False — tor equity handlowałby "
-        f"wyłącznie długą stroną sygnału, cicho i bez śladu w żadnej metryce")
+    assert k.krotka_pozycja is False, (
+        f"`koszty({kind!r}).krotka_pozycja` jest True — symulacja otwiera "
+        f"shorty bez kosztu pożyczki papieru, którego nikt nie zmierzył")
     assert k.finansowanie is False, (
         "akcje nie płacą finansowania perpetuala; podpięcie jednej wielkości pod "
         "drugą byłoby nazwaniem dwóch różnych rzeczy jedną nazwą")
     for limit in (False, True):
         nieznane = karta_rundy(kind, limit).nieznane
-        assert "koszt pozyczki papieru" in nieznane, (
-            f"noga krótka jest otwierana, a karta ({kind}, "
-            f"{'limit' if limit else 'rynek'}) nie wymienia kosztu pożyczki "
-            f"papieru — wchodzi więc do sumy jako zero")
+        assert "koszt pozyczki papieru" not in nieznane, (
+            "karta wymienia koszt nogi, której symulacja nie otwiera")
+
+
+def test_symulacja_stock_nie_otwiera_shortow():
+    """Sygnał krótki na `stock` → zero transakcji krótkich, licznik pominięć."""
+    def cechy_spadku():
+        return _cechy(False) | {"ema_ratio": 0.99, "ret_short": -20.0,
+                                "ret_mid": -40.0, "ret_long": -80.0}
+    panel = [{"t": T0 + timedelta(hours=4 * i), "f": cechy_spadku(),
+              "price": CENA, "high": CENA, "low": CENA} for i in range(30)]
+    wyniki = {}
+    for kind in ("perp", "stock"):
+        res = simulate_portfolio(
+            {"AAA": panel}, DEFAULT_WEIGHTS, {"AAA": 2.0},
+            {"AAA": (0.05, 0.0225)}, H, 0.05, LIMITY_LUZNE,
+            kind=kind, egzekucja=Egzekucja(limit=True), sesja=None)
+        wyniki[kind] = res
+    # Kanarek: na rynku z shortami ten sam panel daje noge krotka - inaczej
+    # test nizej przechodzilby takze bez flagi.
+    assert any(t["side"] < 0 for t in wyniki["perp"].trades)
+    assert not any(t["side"] < 0 for t in wyniki["stock"].trades)
+    assert wyniki["stock"].pominiete_shorty > 0
 
 
 def test_perpetual_NIE_dostaje_kosztu_pozyczki_papieru():

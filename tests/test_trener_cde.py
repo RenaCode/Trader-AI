@@ -125,19 +125,23 @@ def test_H5_trainerCron_przekazuje_model_pesymistyczny_crypto_i_equity(monkeypat
 # ================================================================== H-6
 
 @pytest.mark.parametrize("kind,strona", [("spot", "dluga"), ("spot_eu", "dluga"),
-                                         ("stock", None), ("perp", None)])
+                                         ("stock", "dluga"), ("perp", None)])
 def test_H6_strona_uczenia_z_tej_samej_flagi_co_symulacja(kind, strona):
     assert tr.strona_uczenia(kind) == strona
     p = _params(kind)
     assert p.get("strona") == strona
 
 
-def test_H6_klucz_strona_zglasza_zmiane_struktury_tylko_na_spocie():
-    """Tor equity (`stock`, shorty dozwolone) zachowuje swoje `params` - jego
-    aktywna wersja nie dostaje falszywej zmiany struktury."""
+def test_H6_klucz_strona_zglasza_zmiane_struktury_tylko_tam_gdzie_shortow_nie_ma():
+    """Rynek z shortami (`perp`) zachowuje swoje `params`. Tor equity od
+    2026-10-18 (A-5) dostaje `strona: dluga` - aktywna wersja sprzed zmiany
+    (bez klucza) widzi zmiane struktury, wiec nowa wersja idzie jako
+    `candidate`, a nie cicho na miejsce aktywnej."""
     przed = {k: v for k, v in _params("spot_eu").items() if k != "strona"}
     assert "+strona" in tr.zmiana_struktury(przed, _params("spot_eu"))
-    assert tr.zmiana_struktury(_params("stock"), _params("stock")) is None
+    przed_stock = {k: v for k, v in _params("stock").items() if k != "strona"}
+    assert "+strona" in tr.zmiana_struktury(przed_stock, _params("stock"))
+    assert tr.zmiana_struktury(_params("perp"), _params("perp")) is None
 
 
 def _panel(n):
