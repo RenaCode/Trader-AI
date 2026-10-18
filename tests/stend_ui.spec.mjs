@@ -458,7 +458,10 @@ TRASY = { ...BRZEGI,
   '/api/engines/crypto/planned': [{ id: 1, symbol: 'DOGEUSDC', side: 'buy',
     order_type: 'limit', qty: '1000', limit_price: '0.012345' }],
   '/api/engines/crypto/positions': [{ id: 2, symbol: 'ADAUSDC', side: 'long',
-    qty: '500', avg_price: '0.4567', opened_at: TERAZ() }],
+    qty: '500', avg_price: '0.4567', opened_at: TERAZ() },
+  // Odwrotny przypadek: drogi instrument, mala ILOSC. `fmtNum(qty, 4)` dawalo „0.0001".
+  { id: 3, symbol: 'BTCUSDC', side: 'long', qty: '0.000123', avg_price: '64000.5',
+    opened_at: TERAZ() }],
 };
 await page.reload({ waitUntil: 'networkidle' });
 await page.waitForSelector('.nav-tab', { timeout: 20000 });
@@ -467,6 +470,10 @@ jest(t, '@ 0,012345', 'Ceny: limit 0.012345 bez uciecia do 2 miejsc');
 niema(t, '@ 0,01\n', 'Ceny: limit nie jest „0,01"');
 jest(t, '@ 0,4567', 'Ceny: srednia cena 0.4567 w calosci');
 niema(t, '@ 0,46', 'Ceny: srednia cena nie jest zaokraglona do „0,46"');
+// Separator tysiecy w pl-PL to twarda spacja - stad \s, a nie zwykla spacja.
+ok(/0,000123 @ 64\s000,50/.test(t), 'Ilosci: 0.000123 BTC bez uciecia do 4 miejsc',
+   (t.match(/[^\n]*@ 64[^\n]*/) || ['brak wiersza BTC'])[0]);
+niema(t, '0.0001 @', 'Ilosci: mala ilosc nie jest „0.0001"');
 
 // =========== 8: „Usun" wymaga potwierdzenia w oknie aplikacji (audyt 2026-10-16)
 console.log('\n--- SCENARIUSZ 8: usuwanie z potwierdzeniem ---');

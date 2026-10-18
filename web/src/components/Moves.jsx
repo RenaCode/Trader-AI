@@ -3,7 +3,7 @@ import React, { useState } from 'react';
 import { useApi, get } from '../utils/api';
 import { ContributionBars } from '../charts';
 import {
-  fmtMoney, fmtPrice, fmtNum, fmtTime, ACTION_PL, REGIME_PL, VERDICT_PL, DIRECTION_PL,
+  fmtMoney, fmtPrice, fmtQty, fmtNum, fmtTime, ACTION_PL, REGIME_PL, VERDICT_PL, DIRECTION_PL,
 } from '../utils/format';
 
 /* Brak pomiaru to nie jest pomiar rowny zeru: `null * 100` dawalo "0%"
@@ -128,7 +128,7 @@ export default function Moves({ engine }) {
               <div key={p.id} className="row-item clickable" onClick={() => setSelected(p.decision_id)}>
                 <div className="row-head">
                   <span className="row-title">
-                    {p.symbol} · {p.side === 'buy' ? 'kupno' : 'sprzedaż'} {fmtNum(p.qty, 4)}
+                    {p.symbol} · {p.side === 'buy' ? 'kupno' : 'sprzedaż'} {fmtQty(p.qty)}
                   </span>
                   <span className="badge warn">oczekuje</span>
                 </div>
@@ -206,7 +206,7 @@ export default function Moves({ engine }) {
                       style={{ cursor: t.decision_id ? 'pointer' : 'default' }}>
                     <td style={{ fontWeight: 600 }}>{t.symbol}</td>
                     <td><span className={`badge ${t.side === 'long' ? 'ok' : 'bad'}`}>{t.side}</span></td>
-                    <td className="mono">{fmtNum(t.qty, 4)}</td>
+                    <td className="mono">{fmtQty(t.qty)}</td>
                     <td className="mono">{fmtPrice(t.avg_price)}</td>
                     <td className="dim">{fmtTime(t.opened_at)}</td>
                     <td className="dim">{fmtTime(t.closed_at)}</td>
