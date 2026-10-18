@@ -38,7 +38,9 @@ from services.engine.loop import (
     trwale_niesprzedawalna, zapisz_pominiecie, zapisz_wejscie, zapisz_wyjscie)
 from services.engine.zlecenia import (
     Filtry, Oferty, ocena_zwloki, sprawdz_zlecenie)
-from services.exchanges.base import ExchangeError, OdmowaGieldy, ZlozoneZlecenie
+from services.exchanges.base import (
+    ExchangeError, OdmowaGieldy, ZlozoneZlecenie, sprawdz_zastane,
+)
 # `recv_window` to jedyna liczba, ktora opisuje dopuszczalny rozjazd naszego
 # zegara z zegarem gieldy — ta sama, ktorej pilnuje `BybitAdapter.dryf_zegara`.
 from services.exchanges.bybit import RECV_WINDOW
@@ -696,6 +698,14 @@ async def zloz_plan(cur, adapter, plan: dict, f: Filtry, *, engine: str,
         if e.wymaga_czlowieka:
             raise
         blad_odczytu = e
+    # ZASTANE ZLECENIE MUSI BYC TYM Z PLANU (audyt S-5). Obie galezie nizej -
+    # `juz_istnialo=True` i wiersz "gielda zna to zlecenie mimo odmowy" - biora
+    # `istnieje` za nasze. Sprawdzamy tu, raz, zanim ktorakolwiek to zrobi.
+    # Ilosc z planu, nie po `sprawdz_zlecenie`: ta zaokragla w dol, wiec
+    # zlecenie z poprzedniego cyklu nie moze jej przekroczyc.
+    if istnieje is not None:
+        sprawdz_zastane(istnieje, symbol=plan["symbol"], strona=plan["side"],
+                        ilosc=Decimal(plan["qty"]))
     # Odczyt przerwany w srodku lancucha zostawia `proba` nieustalone. Zero jest
     # wtedy bezpieczne: bez odpowiedzi nic nie wysylamy (`BladPrzedWyslaniem`),
     # a wiersz odmowy pod `tai-p{id}` nie zderzy sie z wycofanym ogniwem, bo to

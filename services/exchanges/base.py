@@ -296,10 +296,57 @@ class StanZlecenia:
     # tego nie podaje (Alpaca) albo pole nie przyszlo; NIE zero.
     utworzono_ms: int | None = None
     zaktualizowano_ms: int | None = None
+    # CO TO ZA ZLECENIE, wedlug gieldy: symbol i strona ('buy'/'sell', male
+    # litery). Na nich stoi `sprawdz_zastane` - samo `orderLinkId` mowi tylko,
+    # ze gielda zna JAKIES zlecenie o tym id. None = adapter tego nie podal,
+    # i to NIE przechodzi sprawdzenia (patrz `sprawdz_zastane`).
+    symbol: str | None = None
+    strona: str | None = None
 
     @property
     def czesciowe(self) -> bool:
         return Decimal(0) < self.wypelniono < self.ilosc
+
+
+def sprawdz_zastane(stan: StanZlecenia, *, symbol: str, strona: str,
+                    ilosc: Decimal) -> None:
+    """Zlecenie zastane u gieldy pod NASZYM id - czy to naprawde nasze. Rzuca, gdy nie.
+
+    IDEMPOTENCJA PO SAMYM ID PRZYJMUJE CUDZE ZLECENIE JAKO SWOJE (audyt S-5).
+    Gielda zna zlecenie o tym `orderLinkId` -> `juz_istnialo=True` i plan uchodzi
+    za zlozony. Id moze sie jednak powtorzyc: druga instancja na tym samym
+    koncie, reczne zlecenie z tym samym id, przenumerowanie planow po
+    odtworzeniu bazy. Wtedy plan kupna uznaje za swoje zlecenie SPRZEDAZY innego
+    instrumentu, a pozycja, o ktorej decydowalismy, nigdy nie powstaje - bez
+    zadnego bledu.
+
+    ROZJAZD WYMAGA CZLOWIEKA, nie ponowienia. Zlozenie drugiego zlecenia pod tym
+    samym id i tak odrzuci gielda, a ponowienie odczytu da ten sam wynik.
+
+    ILOSC: NIE WIECEJ NIZ W PLANIE, a nie "rowno". Pod tym samym id moze lezec
+    zlecenie zastepcze na MNIEJSZA ilosc - `odmowa_gieldy` sklada je, gdy
+    rachunek potwierdza mniej, niz wyjscie chcialo sprzedac. Wieksza ilosc
+    naszym zleceniem byc nie moze: ilosc idzie przez `do_kroku_w_dol`.
+
+    BRAK SYMBOLU ALBO STRONY TO ROZJAZD. Adapter, ktory ich nie podaje, nie daje
+    podstaw do uznania zlecenia za nasze - domysl "pewnie sie zgadza" jest
+    dokladnie ta wada, ktora to sprawdzenie zamyka.
+    """
+    roznice = []
+    if stan.symbol is None or stan.symbol != symbol:
+        roznice.append(f"symbol {stan.symbol!r} zamiast {symbol!r}")
+    if stan.strona is None or stan.strona != strona.strip().lower():
+        roznice.append(f"strona {stan.strona!r} zamiast {strona!r}")
+    if not (Decimal(0) < stan.ilosc <= Decimal(ilosc)):
+        roznice.append(f"ilosc {stan.ilosc} przy planie {ilosc}")
+    if roznice:
+        raise ExchangeError(
+            f"gielda zna zlecenie {stan.id_wlasne!r} (id gieldy "
+            f"{stan.id_gieldy}, status {stan.status}), ale to NIE jest zlecenie "
+            f"z planu: {'; '.join(roznice)}. Uznanie go za zlozone zostawiloby "
+            f"plan bez zlecenia, a cudze zlecenie bez wlasciciela. SPRAWDZ "
+            f"KONTO GIELDY - ponowienie da ten sam wynik.",
+            code="tozsamosc-zlecenia", wymaga_czlowieka=True)
 
 @dataclass(frozen=True)
 class Wypelnienie:

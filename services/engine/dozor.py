@@ -1881,25 +1881,37 @@ def ocen_swiezosc(wiersze: list[dict], swiec_zwloki: int = SWIEC_ZWLOKI
     """
     powody = []
     for w in wiersze:
-        prog_min = w["minut_swiecy"] * swiec_zwloki
+        # `prog_min` W WIERSZU wygrywa: zrodlo bez siatki swiec (funding) ma
+        # wlasny limit wieku, ten sam, ktorym potok cech odcina stara stawke.
+        prog_jawny = w.get("prog_min")
+        prog_min = (float(prog_jawny) if prog_jawny is not None
+                    else w["minut_swiecy"] * swiec_zwloki)
         if w["wiek_min"] is None:
             powody.append((
                 w["co"],
                 f"Brak danych: {w['co']}",
-                f"Tabela {w['co']} nie ma ANI JEDNEGO wiersza. Silnik nie ma na "
-                f"czym podejmować decyzji."))
+                (f"Co najmniej jeden instrument nie ma w {w['co']} ANI JEDNEGO "
+                 f"wiersza.{_nieswieze(w)}") if w.get("szczegol") else
+                (f"Tabela {w['co']} nie ma ANI JEDNEGO wiersza. Silnik nie ma na "
+                 f"czym podejmować decyzji.")))
             continue
         if w["wiek_min"] > prog_min:
+            skad_prog = ("limit wieku źródła" if prog_jawny is not None else
+                         f"{swiec_zwloki} świece po {w['minut_swiecy']:.0f} min")
             powody.append((
                 w["co"],
                 f"Dane nieświeże: {w['co']}",
                 f"Najnowszy wpis sprzed {w['wiek_min']:.0f} min, próg to "
-                f"{prog_min:.0f} min ({swiec_zwloki} świece po "
-                f"{w['minut_swiecy']:.0f} min).\n\n"
+                f"{prog_min:.0f} min ({skad_prog}).\n\n"
                 f"Pętla decyzyjna NIE ZGŁASZA tego sama: bije dalej i podejmuje "
                 f"decyzje na tym, co ma. Stare cechy nie wyglądają jak awaria — "
-                f"wyglądają jak rynek, który przestał dawać sygnały."))
+                f"wyglądają jak rynek, który przestał dawać sygnały.{_nieswieze(w)}"))
     return powody
+
+
+def _nieswieze(w: dict) -> str:
+    """Lista instrumentow ponad progiem, gdy zrodlo liczy wiek per instrument."""
+    return f"\n\nNieświeże instrumenty: {w['szczegol']}." if w.get("szczegol") else ""
 
 
 async def rynek_z_sesjami(fetch_all, engine: str) -> bool:
@@ -1989,6 +2001,7 @@ async def sprawdz_swiezosc(fetch_all, notify, sucho: bool = False,
     pod, zawieszony harmonogram, blad polaczenia z gielda, skasowany Deployment.
     """
     from services.engine.horizons import get as get_horizon
+    from services.ingest.features import FUNDING_WIEK_MAX
 
     h = get_horizon(bar)
     minut_zrodla = MINUT_TIMEFRAME.get(h.source_timeframe)
@@ -2026,17 +2039,48 @@ async def sprawdz_swiezosc(fetch_all, notify, sucho: bool = False,
         # ZNACZNIK STANU dla tlumienia nizej - ta sama chwila, z ktorej liczy
         # sie wiek, tyle ze surowa. Liczona w bazie, bo drugi zegar w Pythonie
         # rozjechalby sie z `created_at` powiadomien, ktore zapisuje baza.
-        "       max(c.event_time) AS ostatni"
+        "       max(c.event_time) AS ostatni,"
+        "       NULL::numeric AS prog_min, NULL::text AS szczegol"
         "  FROM market.candle c JOIN ref.instrument i ON i.id = c.instrument_id"
         " WHERE c.timeframe::text = %(tf)s AND i.engine::text = %(engine)s"
         " UNION ALL"
         " SELECT %(engine)s || ': feat.feature_value', %(min_bar)s::numeric,"
         "        round(extract(epoch from (now() - max(f.event_time)))/60),"
-        "        max(f.event_time)"
+        "        max(f.event_time), NULL::numeric, NULL::text"
         "   FROM feat.feature_value f JOIN ref.instrument i ON i.id = f.instrument_id"
-        "  WHERE i.engine::text = %(engine)s",
+        "  WHERE i.engine::text = %(engine)s"
+        # FUNDING (audyt S-8) - TYLKO dla silnika, ktory go czyta
+        # (`meta->>'funding_from'`); bez takich instrumentow `HAVING` nie oddaje
+        # wiersza, wiec equity nie dostaje "brak danych". Prog to ten sam limit,
+        # ktorym `features.compute_funding` odcina stara stawke: po nim cecha
+        # znika, a ta czujka mowi dlaczego.
+        #
+        # WIEK PER INSTRUMENT, alarm z NAJSTARSZEGO. `max(event_time)` po
+        # wszystkich perpach milczal, gdy stal jeden: swiezy BTC przykrywal
+        # trzydniowa dziure w SOL (recenzja PR #37, sprawdzone na PG). Jeden
+        # wiersz, a nie wiersz na instrument: padniety zbieracz to JEDNA
+        # awaria, a wiersz na instrument dawalby tyle alarmow, ile perpow.
+        # Instrument bez zadnej stawki liczy sie jak nieswiezy (`brak`).
+        " UNION ALL"
+        " SELECT %(engine)s || ': market.funding_rate', 480::numeric,"
+        "        CASE WHEN bool_or(p.ostatni IS NULL) THEN NULL"
+        "             ELSE round(extract(epoch from (now() - min(p.ostatni)))/60) END,"
+        "        min(p.ostatni), %(prog_funding)s::numeric,"
+        "        string_agg(p.symbol || ' (' || coalesce(round(extract(epoch from"
+        "                   (now() - p.ostatni))/3600)::text || ' h', 'brak') || ')',"
+        "                   ', ' ORDER BY p.symbol)"
+        "          FILTER (WHERE p.ostatni IS NULL OR now() - p.ostatni"
+        "                  > make_interval(mins => %(prog_funding)s::int))"
+        "   FROM (SELECT i.symbol, max(fr.event_time) AS ostatni"
+        "           FROM ref.instrument i LEFT JOIN market.funding_rate fr"
+        "             ON fr.instrument_id = (i.meta->>'funding_from')::int"
+        "          WHERE i.engine::text = %(engine)s AND i.active"
+        "            AND i.meta->>'funding_from' IS NOT NULL"
+        "          GROUP BY i.id, i.symbol) p"
+        " HAVING count(*) > 0",
         {"tf": h.source_timeframe, "bar": bar, "min": minut_zrodla,
-         "min_bar": h.bar_minutes, "engine": engine})
+         "min_bar": h.bar_minutes, "engine": engine,
+         "prog_funding": FUNDING_WIEK_MAX.total_seconds() / 60})
 
     for w in wiersze:
         wiek = "brak danych" if w["wiek_min"] is None else f"{w['wiek_min']:.0f} min temu"

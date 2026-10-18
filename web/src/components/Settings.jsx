@@ -3,6 +3,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { get, post, put, del, ApiError } from '../utils/api';
 import { fmtTime, fmtAgo } from '../utils/format';
+import Potwierdzenie from './Potwierdzenie';
 
 function TestResult({ result }) {
   if (!result) return null;
@@ -99,6 +100,8 @@ export default function Settings({ user, onUserChanged }) {
   const [venues, setVenues] = useState(null);
   const [tests, setTests] = useState({});
   const [busyId, setBusyId] = useState(null);
+  // Klucz czekajacy na potwierdzenie usuniecia - patrz `Potwierdzenie.jsx`.
+  const [doUsuniecia, setDoUsuniecia] = useState(null);
   const [loadErr, setLoadErr] = useState('');
 
   const load = useCallback(async () => {
@@ -238,7 +241,7 @@ export default function Settings({ user, onUserChanged }) {
                     {busyId === c.id ? 'Sprawdzam…' : 'Sprawdź połączenie'}
                   </button>
                   <button className="btn-ghost" disabled={busyId === c.id}
-                          onClick={() => remove(c.id)}
+                          onClick={() => setDoUsuniecia(c)}
                           style={{ borderColor: 'rgba(239,68,68,0.3)', color: 'var(--danger-light)' }}>
                     Usuń
                   </button>
@@ -254,6 +257,20 @@ export default function Settings({ user, onUserChanged }) {
           </div>
         )}
       </div>
+
+      {doUsuniecia && (
+        <Potwierdzenie
+          tytul="Usunąć klucz giełdy?"
+          etykieta="Usuń klucz"
+          zajete={busyId === doUsuniecia.id}
+          onAnuluj={() => setDoUsuniecia(null)}
+          onPotwierdz={async () => { await remove(doUsuniecia.id); setDoUsuniecia(null); }}>
+          <strong>{doUsuniecia.venue_name} · {doUsuniecia.label}</strong>{' '}
+          (<span className="mono">{doUsuniecia.key_hint}</span>, {doUsuniecia.mode}).
+          Silnik straci dostęp do tego konta: nie złoży ani nie zamknie zlecenia,
+          dopóki nie dodasz nowego klucza. Tego nie da się cofnąć.
+        </Potwierdzenie>
+      )}
 
       <SecretsPanel />
 
@@ -388,6 +405,7 @@ function SecretsPanel() {
   const [saved, setSaved] = useState({});
   const [tested, setTested] = useState({});
   const [tryb, setTryb] = useState(null);
+  const [doUsuniecia, setDoUsuniecia] = useState(null);
   const [loadErr, setLoadErr] = useState('');
 
   const load = useCallback(async () => {
@@ -536,7 +554,7 @@ function SecretsPanel() {
               </button>
             )}
             {s.is_set && (
-              <button className="btn-ghost" disabled={busy === s.name} onClick={() => clear(s.name)}
+              <button className="btn-ghost" disabled={busy === s.name} onClick={() => setDoUsuniecia(s)}
                       style={{ borderColor: 'rgba(239,68,68,0.3)', color: 'var(--danger-light)' }}>
                 Usuń
               </button>
@@ -557,6 +575,20 @@ function SecretsPanel() {
           )}
         </div>
       ))}
+
+      {doUsuniecia && (
+        <Potwierdzenie
+          tytul="Usunąć klucz usługi?"
+          etykieta="Usuń klucz"
+          zajete={busy === doUsuniecia.name}
+          onAnuluj={() => setDoUsuniecia(null)}
+          onPotwierdz={async () => { await clear(doUsuniecia.name); setDoUsuniecia(null); }}>
+          <strong>{doUsuniecia.label}</strong>
+          {doUsuniecia.hint && <> (<span className="mono">{doUsuniecia.hint}</span>)</>}.
+          Usługa przestanie działać od następnego wywołania. Tego nie da się cofnąć —
+          klucz trzeba będzie wkleić od nowa.
+        </Potwierdzenie>
+      )}
     </div>
   );
 }
@@ -570,6 +602,7 @@ function WalletsPanel() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [loadErr, setLoadErr] = useState('');
+  const [doUsuniecia, setDoUsuniecia] = useState(null);
 
   const load = useCallback(async () => {
     // Pusta lista portfeli i NIEODCZYTANA lista portfeli wygladaly identycznie,
@@ -666,7 +699,7 @@ function WalletsPanel() {
                 <span>dodany {fmtTime(w.created_at)}</span>
               </div>
               <div style={{ marginTop: 10 }}>
-                <button className="btn-ghost" disabled={busy} onClick={() => remove(w.id)}
+                <button className="btn-ghost" disabled={busy} onClick={() => setDoUsuniecia(w)}
                         style={{ borderColor: 'rgba(239,68,68,0.3)', color: 'var(--danger-light)' }}>
                   Usuń
                 </button>
@@ -674,6 +707,19 @@ function WalletsPanel() {
             </div>
           ))}
         </div>
+      )}
+
+      {doUsuniecia && (
+        <Potwierdzenie
+          tytul="Usunąć portfel?"
+          etykieta="Usuń portfel"
+          zajete={busy}
+          onAnuluj={() => setDoUsuniecia(null)}
+          onPotwierdz={async () => { await remove(doUsuniecia.id); setDoUsuniecia(null); }}>
+          <strong>{doUsuniecia.label}</strong> ({doUsuniecia.chain},{' '}
+          <span className="mono">{doUsuniecia.identifier}</span>).
+          Adres przestanie być obserwowany, a jego saldo zniknie z panelu.
+        </Potwierdzenie>
       )}
     </div>
   );

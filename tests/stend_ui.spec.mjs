@@ -56,6 +56,10 @@
  * Do tego zero wyjatkow JavaScript: nieobslugiwany `await` w komponencie konczy
  * sie nieobsluzonym odrzuceniem promisy i to tu wychodzi.
  *
+ * Scenariusze 7-8 (audyt 2026-10-16): cena instrumentu ponizej 1 USDC nie
+ * moze byc ucieta do 2 miejsc, a „Usun" nie moze wysylac DELETE bez
+ * potwierdzenia w oknie aplikacji.
+ *
  * Scenariusze 2-4 pilnuja wad szczegolowych z tego samego audytu: limitu bez
  * pomiaru rysowanego na zielono, jednostki zgadywanej we froncie, pulsu dozorcy
  * branego z pierwszego wiersza zamiast z najstarszego, godzin ciszy zapisywanych
@@ -445,10 +449,107 @@ for (const szer of [375, 360]) {
 }
 await page.setViewportSize({ width: 1440, height: 1200 });
 
+// ================== 7: cena instrumentu ponizej 1 USDC (audyt 2026-10-16)
+console.log('\n--- SCENARIUSZ 7: ceny tanich instrumentow ---');
+// `fmtMoney` (2 miejsca) robil z 0.012345 „0,01", a z 0.4567 „0,46" - limit
+// i srednia cena traci wiekszosc cyfr znaczacych. Liczby jako napisy, tak jak
+// Decimal przychodzi z API.
+TRASY = { ...BRZEGI,
+  '/api/engines/crypto/planned': [{ id: 1, symbol: 'DOGEUSDC', side: 'buy',
+    order_type: 'limit', qty: '1000', limit_price: '0.012345' }],
+  '/api/engines/crypto/positions': [{ id: 2, symbol: 'ADAUSDC', side: 'long',
+    qty: '500', avg_price: '0.4567', opened_at: TERAZ() },
+  // Odwrotny przypadek: drogi instrument, mala ILOSC. `fmtNum(qty, 4)` dawalo „0.0001".
+  { id: 3, symbol: 'BTCUSDC', side: 'long', qty: '0.000123', avg_price: '64000.5',
+    opened_at: TERAZ() },
+  // Ilosc tuz pod jednostka: zaokraglenie pokazaloby „1", ktorego nie mamy.
+  { id: 4, symbol: 'ETHUSDC', side: 'long', qty: '0.9999996', avg_price: '2500',
+    opened_at: TERAZ() }],
+};
+await page.reload({ waitUntil: 'networkidle' });
+await page.waitForSelector('.nav-tab', { timeout: 20000 });
+t = await zakladka('Stan');
+jest(t, '@ 0,012345', 'Ceny: limit 0.012345 bez uciecia do 2 miejsc');
+niema(t, '@ 0,01\n', 'Ceny: limit nie jest „0,01"');
+jest(t, '@ 0,4567', 'Ceny: srednia cena 0.4567 w calosci');
+niema(t, '@ 0,46', 'Ceny: srednia cena nie jest zaokraglona do „0,46"');
+// Separator tysiecy w pl-PL to twarda spacja - stad \s, a nie zwykla spacja.
+ok(/0,000123 @ 64\s000,50/.test(t), 'Ilosci: 0.000123 BTC bez uciecia do 4 miejsc',
+   (t.match(/[^\n]*@ 64[^\n]*/) || ['brak wiersza BTC'])[0]);
+niema(t, '0.0001 @', 'Ilosci: mala ilosc nie jest „0.0001"');
+jest(t, '0,999999 @', 'Ilosci: 0.9999996 ucinane, nie zaokraglane do „1"');
+
+// =========== 8: „Usun" wymaga potwierdzenia w oknie aplikacji (audyt 2026-10-16)
+console.log('\n--- SCENARIUSZ 8: usuwanie z potwierdzeniem ---');
+TRASY = { ...BRZEGI,
+  '/api/credentials': [{ id: 7, venue_name: 'Bybit EU', label: 'klucz-demo-a',
+    mode: 'demo', can_withdraw: false, active: true, key_hint: 'ab…yz',
+    created_at: TERAZ(), last_used_at: null, days_left: null, last_error: null }],
+  '/api/credentials/venues': [{ code: 'bybit_eu', name: 'Bybit EU', engine: 'crypto' }],
+  '/api/settings/secrets': [{ name: 'anthropic_api_key', label: 'Klucz Anthropic',
+    is_set: true, hint: 'sk-…q9', description: 'Analiza wiadomosci.', updated_at: TERAZ() }],
+  '/api/settings/wallets': [{ id: 11, label: 'portfel-obserwowany', chain: 'bitcoin',
+    kind: 'address', identifier: 'bc1qstendtestowy', balance: null, created_at: TERAZ() }],
+};
+const usuniecia = [];
+await page.route('**/api/**', (route) => {
+  if (route.request().method() !== 'DELETE') return route.fallback();
+  usuniecia.push(new URL(route.request().url()).pathname);
+  return route.fulfill({ status: 200, contentType: 'application/json', body: '{"ok":true}' });
+});
+await page.reload({ waitUntil: 'networkidle' });
+await page.waitForSelector('.nav-tab', { timeout: 20000 });
+await zakladka('Ustawienia');
+// Natywne okno przegladarki nie jest potwierdzeniem w aplikacji - kazde
+// pojawienie sie `confirm()` to blad, a nie sciezka do klikniecia.
+const natywne = [];
+page.on('dialog', (d) => { natywne.push(d.message()); d.dismiss(); });
+const okno = page.getByRole('alertdialog');
+
+for (const [nazwa, wiersz, przycisk, sciezka] of [
+  ['klucz gieldy', page.locator('.row-item', { hasText: 'klucz-demo-a' }), 'Usuń klucz', '/api/credentials/7'],
+  ['klucz uslugi', page.locator('.row-head', { hasText: 'Klucz Anthropic' }).locator('xpath=..'),
+   'Usuń klucz', '/api/settings/secrets/anthropic_api_key'],
+  ['portfel', page.locator('.row-item', { hasText: 'portfel-obserwowany' }), 'Usuń portfel', '/api/settings/wallets/11'],
+]) {
+  usuniecia.length = 0;
+  const usun = wiersz.getByRole('button', { name: 'Usuń', exact: true });
+  await usun.click();
+  await page.waitForTimeout(300);
+  ok(usuniecia.length === 0, `Usun ${nazwa}: pierwsze klikniecie NIE wysyla DELETE`, usuniecia.join(','));
+  ok(await okno.isVisible(), `Usun ${nazwa}: otwiera okno potwierdzenia`);
+  const tresc = (await okno.isVisible()) ? await okno.innerText() : '';
+  const nazwaObiektu = { 'klucz gieldy': 'klucz-demo-a', 'klucz uslugi': 'Klucz Anthropic',
+                         portfel: 'portfel-obserwowany' }[nazwa];
+  jest(tresc, nazwaObiektu, `Usun ${nazwa}: okno nazywa usuwany obiekt`);
+  ok(await page.evaluate(() => document.activeElement?.textContent?.trim()) === 'Anuluj',
+     `Usun ${nazwa}: fokus startuje na „Anuluj"`);
+
+  await page.keyboard.press('Escape');
+  await page.waitForTimeout(200);
+  ok(!(await okno.isVisible()) && usuniecia.length === 0,
+     `Usun ${nazwa}: Escape zamyka bez DELETE`, usuniecia.join(','));
+
+  await usun.click();
+  await okno.getByRole('button', { name: 'Anuluj' }).click();
+  await page.waitForTimeout(200);
+  ok(!(await okno.isVisible()) && usuniecia.length === 0,
+     `Usun ${nazwa}: „Anuluj" zamyka bez DELETE`, usuniecia.join(','));
+
+  await usun.click();
+  await okno.getByRole('button', { name: przycisk }).click();
+  await page.waitForTimeout(500);
+  ok(usuniecia.length === 1 && usuniecia[0] === sciezka,
+     `Usun ${nazwa}: potwierdzenie wysyla JEDNO DELETE na ${sciezka}`, usuniecia.join(','));
+  ok(!(await okno.isVisible()), `Usun ${nazwa}: okno znika po usunieciu`);
+}
+ok(natywne.length === 0, 'Usun: zadnego natywnego confirm()', natywne.join(' | '));
+await page.unroute('**/api/**');
+
 /* ------------------------------------------------------------------------
  * MIEJSCE NA KOLEJNE SCENARIUSZE
  *
- * 7: /learning/walk-forward - okna posortowane po `test_from` i pochodzace
+ * 9: /learning/walk-forward - okna posortowane po `test_from` i pochodzace
  *    z JEDNEGO przebiegu treningowego (czeka na poprawke po stronie API).
  *    Podstawic odpowiedz w `stend_ui_dane.mjs`, wejsc na "Stopień nauki".
  * ------------------------------------------------------------------------ */

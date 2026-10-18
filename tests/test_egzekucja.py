@@ -31,11 +31,12 @@ def pusto():
     return {"retCode": 0, "result": {"list": []}}
 
 
-def zlecenie(status="New", qty="1", wypelniono="0", link="dec-42"):
+def zlecenie(status="New", qty="1", wypelniono="0", link="dec-42",
+             symbol="BTCUSDC", side="Buy"):
     return {"retCode": 0, "result": {"list": [{
         "orderId": "gielda-1", "orderLinkId": link, "orderStatus": status,
         "qty": qty, "cumExecQty": wypelniono, "avgPrice": "64000",
-        "cumExecFee": "0.5",
+        "cumExecFee": "0.5", "symbol": symbol, "side": side,
     }]}}
 
 
@@ -60,6 +61,50 @@ def test_zlecenie_o_znanym_id_NIE_JEST_skladane_drugi_raz():
     assert wynik.id_gieldy == "gielda-1"
     assert not any(m == "POST" for m, _ in zapytania), (
         f"złożono zlecenie mimo że już istniało: {zapytania}")
+
+
+@pytest.mark.parametrize("zastane", [
+    {"side": "Sell"},                       # ta sama para, PRZECIWNA strona
+    {"symbol": "ETHUSDC"},                  # ta sama strona, INNA para
+    {"qty": "5"},                           # wiecej niz w planie
+    {"symbol": None, "side": None},         # gielda nie podala, kim jest
+])
+def test_ZASTANE_zlecenie_o_naszym_id_ale_INNE_konczy_sie_bledem_dla_czlowieka(zastane):
+    """Audyt S-5. Samo `orderLinkId` mowi tylko, ze gielda zna JAKIES zlecenie
+    o tym id. Uznanie zlecenia sprzedazy ETH za nasze kupno BTC zostawia plan
+    bez zlecenia - `juz_istnialo=True` i zadnego bledu. Rozjazd ma zatrzymac,
+    a nie przejsc i nie zlozyc drugiego."""
+    zapytania = []
+
+    def handler(req):
+        zapytania.append(req.method)
+        if "/order/realtime" in str(req.url):
+            return httpx.Response(200, json=zlecenie(**zastane))
+        return httpx.Response(200, json=pusto())
+
+    k = gielda(handler)
+    with pytest.raises(ExchangeError) as e:
+        asyncio.run(k.zloz_zlecenie(symbol="BTCUSDC", strona="buy",
+                                    ilosc=Decimal("1"), cena_limitu=Decimal("64000"),
+                                    id_wlasne="dec-42"))
+    assert e.value.wymaga_czlowieka is True
+    assert e.value.code == "tozsamosc-zlecenia"
+    assert "POST" not in zapytania
+
+
+def test_zastane_zlecenie_zastepcze_na_MNIEJSZA_ilosc_jest_nasze():
+    """Kanarek do poprzedniego. `odmowa_gieldy` sklada pod tym samym id
+    zlecenie na ilosc potwierdzona przez rachunek - mniejsza niz w planie.
+    Tego nie wolno brac za cudze."""
+    def handler(req):
+        if "/order/realtime" in str(req.url):
+            return httpx.Response(200, json=zlecenie(qty="0.4", side="Buy"))
+        return httpx.Response(200, json=pusto())
+
+    wynik = asyncio.run(gielda(handler).zloz_zlecenie(
+        symbol="BTCUSDC", strona="buy", ilosc=Decimal("1"),
+        cena_limitu=Decimal("64000"), id_wlasne="dec-42"))
+    assert wynik.juz_istnialo is True
 
 
 def test_zlecenie_nieznane_gieldzie_JEST_skladane():
