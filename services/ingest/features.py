@@ -129,6 +129,15 @@ MIN_SNAPSHOTS = 20
 # okno, a nie szereg - ten sam prog co w `zscore()` dla cech cenowych.
 MIN_PROBEK_Z = 20
 
+# NAJSTARSZA STAWKA FINANSOWANIA, JAKA WOLNO PRZENIESC NA SWIECE (audyt S-8).
+# Bybit oglasza funding co 8 h, wiec dwa interwaly to zapas na jedno spoznione
+# ogloszenie i odstep pobierania (20 min). Starsza stawka nie opisuje rynku,
+# tylko chwile, w ktorej zbieranie stanelo - a przeniesiona dalej wyglada na
+# swieza: `funding_rate`, `funding_z` i `funding_carry` graja wtedy na stawce
+# sprzed dni. Swieca dostaje BRAK wartosci, a brak widac (pokrycie wag w
+# `loop.MIN_POKRYCIE`, czujka `dozor.py --co swiezosc`).
+FUNDING_WIEK_MAX = timedelta(hours=16)
+
 # rola -> (code_ref, szablon opisu). {okno} podstawia sie z etykiet horyzontu.
 ROLES = {
     "rsi":         ("features.momentum:rsi",
@@ -847,12 +856,22 @@ def compute_funding(cur, instrument_id: int, h: Horizon, feat_ids: dict[str, int
     hist: deque[float] = deque(maxlen=win)
     j = 0
     last: float | None = None
+    last_t: datetime | None = None
+    # Swiece z zapisywanego zakresu, ktore dostaly brak zamiast przeterminowanej
+    # stawki - do jednej linii w logu, nie po linii na swiece.
+    przeterminowane = 0
+    wiek_max = timedelta(0)
     t = od - rozgrzewka                      # od tad tylko LICZYMY
     while t <= until:
         while j < len(rates) and rates[j][0] <= t:
-            last = rates[j][1]
+            last_t, last = rates[j]
             j += 1
-        if last is not None:
+        if last is not None and t - last_t > FUNDING_WIEK_MAX:
+            # NIE DO OKNA Z-SCORE i NIE DO CECHY - patrz `FUNDING_WIEK_MAX`.
+            if t >= od:
+                przeterminowane += 1
+                wiek_max = max(wiek_max, t - last_t)
+        elif last is not None:
             hist.append(last)
             if t >= od:
                 ingested = znane_od(t, h)
@@ -867,6 +886,16 @@ def compute_funding(cur, instrument_id: int, h: Horizon, feat_ids: dict[str, int
                             rows.append((feat_ids["funding_z"], instrument_id, t, z,
                                          ingested))
         t += step
+
+    if przeterminowane:
+        # NIE CICHE ZERO - to samo, co przy za krotkiej historii w
+        # `compute_prices`: bez tej linii brak cechy wyglada jak spokojny cykl.
+        print(f"    UWAGA instrument {instrument_id}: funding z perpetuala {src} "
+              f"PRZETERMINOWANY na {przeterminowane} świecach (najstarsza "
+              f"stawka {wiek_max.total_seconds() / 3600:.0f} h, limit "
+              f"{FUNDING_WIEK_MAX.total_seconds() / 3600:.0f} h) — te świece "
+              f"NIE dostają funding_rate ani funding_z. Sprawdź pobieranie "
+              f"fundingu (history worker).")
 
     return insert_values(cur, rows)
 

@@ -1873,7 +1873,11 @@ def ocen_swiezosc(wiersze: list[dict], swiec_zwloki: int = SWIEC_ZWLOKI
     """
     powody = []
     for w in wiersze:
-        prog_min = w["minut_swiecy"] * swiec_zwloki
+        # `prog_min` W WIERSZU wygrywa: zrodlo bez siatki swiec (funding) ma
+        # wlasny limit wieku, ten sam, ktorym potok cech odcina stara stawke.
+        prog_jawny = w.get("prog_min")
+        prog_min = (float(prog_jawny) if prog_jawny is not None
+                    else w["minut_swiecy"] * swiec_zwloki)
         if w["wiek_min"] is None:
             powody.append((
                 w["co"],
@@ -1886,8 +1890,10 @@ def ocen_swiezosc(wiersze: list[dict], swiec_zwloki: int = SWIEC_ZWLOKI
                 w["co"],
                 f"Dane nieświeże: {w['co']}",
                 f"Najnowszy wpis sprzed {w['wiek_min']:.0f} min, próg to "
-                f"{prog_min:.0f} min ({swiec_zwloki} świece po "
-                f"{w['minut_swiecy']:.0f} min).\n\n"
+                f"{prog_min:.0f} min"
+                + (" (limit wieku źródła)" if prog_jawny is not None else
+                   f" ({swiec_zwloki} świece po {w['minut_swiecy']:.0f} min)")
+                + ".\n\n"
                 f"Pętla decyzyjna NIE ZGŁASZA tego sama: bije dalej i podejmuje "
                 f"decyzje na tym, co ma. Stare cechy nie wyglądają jak awaria — "
                 f"wyglądają jak rynek, który przestał dawać sygnały."))
@@ -1981,6 +1987,7 @@ async def sprawdz_swiezosc(fetch_all, notify, sucho: bool = False,
     pod, zawieszony harmonogram, blad polaczenia z gielda, skasowany Deployment.
     """
     from services.engine.horizons import get as get_horizon
+    from services.ingest.features import FUNDING_WIEK_MAX
 
     h = get_horizon(bar)
     minut_zrodla = MINUT_TIMEFRAME.get(h.source_timeframe)
@@ -2018,17 +2025,32 @@ async def sprawdz_swiezosc(fetch_all, notify, sucho: bool = False,
         # ZNACZNIK STANU dla tlumienia nizej - ta sama chwila, z ktorej liczy
         # sie wiek, tyle ze surowa. Liczona w bazie, bo drugi zegar w Pythonie
         # rozjechalby sie z `created_at` powiadomien, ktore zapisuje baza.
-        "       max(c.event_time) AS ostatni"
+        "       max(c.event_time) AS ostatni,"
+        "       NULL::numeric AS prog_min"
         "  FROM market.candle c JOIN ref.instrument i ON i.id = c.instrument_id"
         " WHERE c.timeframe::text = %(tf)s AND i.engine::text = %(engine)s"
         " UNION ALL"
         " SELECT %(engine)s || ': feat.feature_value', %(min_bar)s::numeric,"
         "        round(extract(epoch from (now() - max(f.event_time)))/60),"
-        "        max(f.event_time)"
+        "        max(f.event_time), NULL::numeric"
         "   FROM feat.feature_value f JOIN ref.instrument i ON i.id = f.instrument_id"
-        "  WHERE i.engine::text = %(engine)s",
+        "  WHERE i.engine::text = %(engine)s"
+        # FUNDING (audyt S-8) - TYLKO dla silnika, ktory go czyta
+        # (`meta->>'funding_from'`); bez takich instrumentow `HAVING` nie oddaje
+        # wiersza, wiec equity nie dostaje "brak danych". Prog to ten sam limit,
+        # ktorym `features.compute_funding` odcina stara stawke: po nim cecha
+        # znika, a ta czujka mowi dlaczego.
+        " UNION ALL"
+        " SELECT %(engine)s || ': market.funding_rate', 480::numeric,"
+        "        round(extract(epoch from (now() - max(fr.event_time)))/60),"
+        "        max(fr.event_time), %(prog_funding)s::numeric"
+        "   FROM ref.instrument i LEFT JOIN market.funding_rate fr"
+        "     ON fr.instrument_id = (i.meta->>'funding_from')::int"
+        "  WHERE i.engine::text = %(engine)s AND i.meta->>'funding_from' IS NOT NULL"
+        " HAVING count(i.id) > 0",
         {"tf": h.source_timeframe, "bar": bar, "min": minut_zrodla,
-         "min_bar": h.bar_minutes, "engine": engine})
+         "min_bar": h.bar_minutes, "engine": engine,
+         "prog_funding": FUNDING_WIEK_MAX.total_seconds() / 60})
 
     for w in wiersze:
         wiek = "brak danych" if w["wiek_min"] is None else f"{w['wiek_min']:.0f} min temu"
