@@ -20,8 +20,11 @@ export default function Potwierdzenie({
 }) {
   const anuluj = useRef(null);
 
+  // Fokus TYLKO przy otwarciu. W jednym efekcie z Escape wracal na „Anuluj"
+  // przy kazdym renderze rodzica, bo `onAnuluj` jest tworzone na nowo.
+  useEffect(() => { anuluj.current?.focus(); }, []);
+
   useEffect(() => {
-    anuluj.current?.focus();
     const klawisz = (e) => { if (e.key === 'Escape' && !zajete) onAnuluj(); };
     document.addEventListener('keydown', klawisz);
     return () => document.removeEventListener('keydown', klawisz);

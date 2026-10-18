@@ -10,24 +10,28 @@ export const fmtMoney = (v) => (v == null ? '—' : money.format(v));
    po przecinku. */
 const CYFRY_CENY = 6;
 const formaty = new Map();
-const cyfryZnaczace = (v, minMiejsc) => {
+const cyfryZnaczace = (v, minMiejsc, zaokraglenie = 'halfExpand') => {
   if (v == null) return '—';
   const n = Number(v);
   if (!Number.isFinite(n)) return '—';
   const rzad = n === 0 ? 0 : Math.floor(Math.log10(Math.abs(n)));
   const miejsc = Math.min(12, Math.max(minMiejsc, CYFRY_CENY - 1 - rzad));
-  const klucz = `${minMiejsc}:${miejsc}`;
+  const klucz = `${minMiejsc}:${miejsc}:${zaokraglenie}`;
   if (!formaty.has(klucz)) {
-    formaty.set(klucz, new Intl.NumberFormat('pl-PL',
-      { minimumFractionDigits: minMiejsc, maximumFractionDigits: miejsc }));
+    formaty.set(klucz, new Intl.NumberFormat('pl-PL', {
+      minimumFractionDigits: minMiejsc, maximumFractionDigits: miejsc,
+      roundingMode: zaokraglenie,
+    }));
   }
   return formaty.get(klucz).format(n);
 };
 export const fmtPrice = (v) => cyfryZnaczace(v, 2);
 
 /* ILOSC: ta sama zasada co cena, bez minimum miejsc. `fmtNum(qty, 4)` ucinalo
-   male ilosci drogich instrumentow - 0.000123 BTC pokazywalo sie jako „0.0001". */
-export const fmtQty = (v) => cyfryZnaczace(v, 0);
+   male ilosci drogich instrumentow - 0.000123 BTC pokazywalo sie jako „0.0001".
+   UCINANIE, NIE ZAOKRAGLANIE: 0.9999996 nie moze pokazac „1" - ekran
+   twierdzilby, ze trzymamy cala jednostke, ktorej nie da sie sprzedac. */
+export const fmtQty = (v) => cyfryZnaczace(v, 0, 'trunc');
 export const fmtCompact = (v) => (v == null ? '—' : compact.format(v));
 export const fmtPct = (v, d = 2) => (v == null ? '—' : `${v >= 0 ? '+' : ''}${v.toFixed(d)}%`);
 export const fmtNum = (v, d = 3) => (v == null ? '—' : Number(v).toFixed(d));

@@ -461,6 +461,9 @@ TRASY = { ...BRZEGI,
     qty: '500', avg_price: '0.4567', opened_at: TERAZ() },
   // Odwrotny przypadek: drogi instrument, mala ILOSC. `fmtNum(qty, 4)` dawalo „0.0001".
   { id: 3, symbol: 'BTCUSDC', side: 'long', qty: '0.000123', avg_price: '64000.5',
+    opened_at: TERAZ() },
+  // Ilosc tuz pod jednostka: zaokraglenie pokazaloby „1", ktorego nie mamy.
+  { id: 4, symbol: 'ETHUSDC', side: 'long', qty: '0.9999996', avg_price: '2500',
     opened_at: TERAZ() }],
 };
 await page.reload({ waitUntil: 'networkidle' });
@@ -474,6 +477,7 @@ niema(t, '@ 0,46', 'Ceny: srednia cena nie jest zaokraglona do „0,46"');
 ok(/0,000123 @ 64\s000,50/.test(t), 'Ilosci: 0.000123 BTC bez uciecia do 4 miejsc',
    (t.match(/[^\n]*@ 64[^\n]*/) || ['brak wiersza BTC'])[0]);
 niema(t, '0.0001 @', 'Ilosci: mala ilosc nie jest „0.0001"');
+jest(t, '0,999999 @', 'Ilosci: 0.9999996 ucinane, nie zaokraglane do „1"');
 
 // =========== 8: „Usun" wymaga potwierdzenia w oknie aplikacji (audyt 2026-10-16)
 console.log('\n--- SCENARIUSZ 8: usuwanie z potwierdzeniem ---');

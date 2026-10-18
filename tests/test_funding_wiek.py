@@ -6,7 +6,10 @@ i `funding_z` dalej wygladaja na swieze, a `funding_carry` gra na stawce sprzed
 dni. Brak wartosci jest tu poprawnym wynikiem: brak widac (pokrycie wag
 w petli, czujka swiezosci), stara liczby udajacej swieza - nie.
 """
+import os
 from datetime import datetime, timedelta, timezone
+
+import pytest
 
 from services.engine.horizons import get as get_horizon
 from services.ingest import features
@@ -125,3 +128,60 @@ def test_czujka_swiezosci_PYTA_o_funding_z_limitem_cechy():
     sql, params = zapytania[0]
     assert "market.funding_rate" in sql and "funding_from" in sql
     assert params["prog_funding"] == 16 * 60
+
+
+TEST_DB_URL = os.environ.get("TEST_DB_URL")
+
+
+@pytest.mark.skipif(not TEST_DB_URL,
+                    reason="ustaw TEST_DB_URL na jednorazową bazę z zastosowanymi migracjami")
+def test_czujka_fundingu_liczy_wiek_PER_INSTRUMENT_na_prawdziwej_bazie():
+    """Recenzja PR #37. `max(event_time)` po wszystkich perpach milczal, gdy stal
+    jeden: BTC sprzed 2 h przykrywal SOL sprzed 3 dni („bez zastrzezen").
+    Alarm ma isc z najstarszego i nazwac instrument, ktory stoi - i tylko jego."""
+    import asyncio
+
+    import psycopg
+    from psycopg.rows import dict_row
+
+    from services.engine import dozor
+
+    with psycopg.connect(TEST_DB_URL, row_factory=dict_row) as conn:
+        try:
+            conn.execute("UPDATE ref.instrument SET meta = meta - 'funding_from'")
+            venue = conn.execute("SELECT id FROM ref.venue WHERE engine::text = 'crypto'"
+                                 " ORDER BY id LIMIT 1").fetchone()["id"]
+            for sym, wiek_h in (("TSTBTC", 2), ("TSTSOL", 72)):
+                perp = conn.execute(
+                    "INSERT INTO ref.instrument (venue_id, symbol, engine, quote_ccy, kind)"
+                    " VALUES (%s, %s, 'crypto', 'USDT', 'perp') RETURNING id",
+                    (venue, sym + "PERP")).fetchone()["id"]
+                conn.execute(
+                    "INSERT INTO ref.instrument (venue_id, symbol, engine, quote_ccy, kind, meta)"
+                    " VALUES (%s, %s, 'crypto', 'USDC', 'spot', jsonb_build_object('funding_from', %s))",
+                    (venue, sym, perp))
+                conn.execute(
+                    "INSERT INTO market.funding_rate (instrument_id, event_time, rate)"
+                    " VALUES (%s, now() - make_interval(hours => %s), 0.0001)", (perp, wiek_h))
+
+            wiersze_fundingu = []
+
+            async def fetch_all(sql, params=None):
+                wiersze = conn.execute(sql, params).fetchall()
+                if "market.funding_rate" in sql:
+                    wiersze_fundingu.extend(w for w in wiersze
+                                            if w["co"].endswith("market.funding_rate"))
+                return wiersze
+
+            async def notify(*a, **k):
+                pass
+
+            asyncio.run(dozor.sprawdz_swiezosc(fetch_all, notify, sucho=True,
+                                               bar="4h", engine="crypto"))
+            (w,), = [wiersze_fundingu]
+            assert 71 * 60 <= w["wiek_min"] <= 73 * 60, (
+                f"wiek {w['wiek_min']} min - liczony z najswiezszego, nie z najstarszego")
+            (_zrodlo, _tytul, tresc), = dozor.ocen_swiezosc([w])
+            assert "TSTSOL" in tresc and "TSTBTC" not in tresc, tresc
+        finally:
+            conn.rollback()
