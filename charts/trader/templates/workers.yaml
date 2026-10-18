@@ -133,9 +133,18 @@ spec:
           `torCrypto.enabled` (`trader.silnikiZTorow`). Lista w komendzie
           w values.yaml bylaby druga kopia przelacznika toru - wylaczenie toru
           zostawiloby wtedy skaner placacy za kanaly krypto.
+
+          PUSTA LISTA PO FILTRZE TO BLAD RENDERU, nie `--silniki ""`:
+          `news_worker.py` czyta pusty napis jako "bez ograniczenia", czyli
+          WSZYSTKIE kanaly - wylaczenie toru zamieniloby sie w poszerzenie
+          skanera. Worker bez silnika ma dostac `enabled: false`.
           */}}
           {{- if $w.silnikiZTorow }}
-          command: {{ toJson (concat $w.command (list "--silniki" (include "trader.silnikiZTorow" (dict "lista" $w.silnikiZTorow "ctx" $)))) }}
+          {{- $silniki := include "trader.silnikiZTorow" (dict "lista" $w.silnikiZTorow "ctx" $) }}
+          {{- if not $silniki }}
+          {{- fail (printf "workers.%s: po odfiltrowaniu toru crypto `silnikiZTorow` jest puste, a `--silniki \"\"` znaczy WSZYSTKIE kanaly - ustaw workers.%s.enabled: false" $name $name) }}
+          {{- end }}
+          command: {{ toJson (concat $w.command (list "--silniki" $silniki)) }}
           {{- else }}
           command: {{ toJson $w.command }}
           {{- end }}

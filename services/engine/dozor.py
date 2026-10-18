@@ -852,6 +852,69 @@ def wylaczony_w_chartcie(proces: str | None,
     return workery is not None and proces is not None and proces not in workery
 
 
+# PULS SPOZA LISTY, KTORY JEST SWIEZY, TO ZEPSUTE MAPOWANIE, NIE WYLACZENIE.
+#
+# Filtr wyzej jest fail-open na rozjazd nazw: gdyby proces bil pod nazwa, ktorej
+# nie ma w `--workery-z-chartu` (literowka w kluczu `workers`, nowa konwencja
+# nazwy pulsu), czujka pominelaby go jako "wylaczony" - takze wtedy, gdy potem
+# umrze. Proces wylaczony w chartcie przestaje bic, wiec puls MLODSZY NIZ JEDEN
+# CYKL oznacza, ze proces zyje, a chart twierdzi, ze go nie uruchamia - czyli
+# lista i nazwy sie rozjechaly. To jest zglaszane (ostrzezenie, raz na dobe).
+#
+# CENA: w ciagu jednego cyklu procesu po przelaczeniu flagi jego ostatni puls
+# bywa jeszcze mlodszy niz cykl - jedno ostrzezenie o procesie, ktory wlasnie
+# wylaczono, jest mozliwe i tresc mowi o tym wprost. Przy cyklu silnika 300 s
+# i dozorcy 60 s prog silnikow i dozorcow to 5 min.
+SWIEZY_SPOZA_CHARTU_MIN = 5
+
+
+def swiezy_spoza_chartu(wiek_s: float, interwal_s: float) -> bool:
+    """Czy puls procesu spoza listy z chartu jest mlodszy niz jeden jego cykl."""
+    return wiek_s <= interwal_s
+
+
+async def zglos_spoza_chartu(fetch_all, notify, nazwy: list[str],
+                             sucho: bool = False) -> tuple[int, int]:
+    """Ostrzezenie o zywym procesie, ktorego chart "nie uruchamia". Zwraca
+    (zgloszone, trwale) do `kod_wyjscia`; tlumienie dobowe po nazwie procesu."""
+    zgloszone = trwale = 0
+    odbiorcy = None
+    for nazwa in nazwy:
+        print(f"  SPOZA CHARTU {nazwa}: puls świeży, a `--workery-z-chartu` go "
+              f"nie wymienia — nazwa pulsu i klucz `workers` się rozjechały")
+        juz = await fetch_all(
+            "SELECT 1 FROM notify.notification WHERE event_code = 'engine.down'"
+            " AND data->>'spoza_chartu' = %s"
+            " AND created_at > now() - make_interval(hours => 24) LIMIT 1",
+            (nazwa,))
+        if juz:
+            trwale += 1
+            print(f"  (puls spoza chartu {nazwa} zgłoszony w ciągu doby — cisza)")
+            continue
+        zgloszone += 1
+        if sucho:
+            continue
+        if odbiorcy is None:
+            odbiorcy = await fetch_all(
+                "SELECT id FROM app.\"user\" WHERE is_active AND role = 'owner'")
+        for u in odbiorcy:
+            await notify(
+                u["id"], "engine.down",
+                f"Proces {nazwa} żyje, choć chart go nie uruchamia",
+                f"Puls `{nazwa}` jest młodszy niż jeden cykl procesu, a lista "
+                f"procesów z chartu (`dozor.py --workery-z-chartu`, "
+                f"`trader.workerWlaczony`) go nie wymienia. Czujki pulsu "
+                f"POMIJAJĄ procesy spoza tej listy, więc gdyby ten proces "
+                f"umarł, nikt by o tym nie powiedział.\n\n"
+                f"Jeżeli w ostatnich minutach wyłączono go w chartcie, to "
+                f"jednorazowe — kolejny przebieg czujki go nie zgłosi. Inaczej: "
+                f"nazwa pulsu w kodzie i klucz w `workers` (values.yaml) się "
+                f"rozjechały.",
+                engine=None, severity="warning",
+                data={"spoza_chartu": nazwa})
+    return zgloszone, trwale
+
+
 def brakujacy_dozorcy(pary: list[dict], pulsy: list[dict],
                       workery: set[str] | None = None) -> list[str]:
     """Dozorcy, ktorych puls NIE POWSTAL ANI RAZU. CZYSTA FUNKCJA.
@@ -981,6 +1044,7 @@ async def sprawdz_zywotnosc(fetch_all, notify, sucho: bool = False,
               f"zwolnić (wznow() woła tylko services/engine/dozorca.py)")
 
     martwe = []
+    spoza: list[str] = []
     for s in silniki:
         opis = f"{s['etykieta']}/{s['mode']}: {s['status']}, ostatnie uderzenie {s['wiek_min']:.0f} min temu"
         if s["status"] != "running":
@@ -990,6 +1054,8 @@ async def sprawdz_zywotnosc(fetch_all, notify, sucho: bool = False,
                   else proces_dozorcy(s["etykieta"]))
         if wylaczony_w_chartcie(proces, workery):
             print(f"  pomijam  {opis} — `{proces}` wyłączony w chartcie")
+            if s["wiek_min"] <= SWIEZY_SPOZA_CHARTU_MIN:
+                spoza.append(proces)
             continue
         if s["wiek_min"] > prog:
             martwe.append(s)
@@ -997,15 +1063,16 @@ async def sprawdz_zywotnosc(fetch_all, notify, sucho: bool = False,
         else:
             print(f"  żyje     {opis}")
 
+    zgloszone, trwale = await zglos_spoza_chartu(fetch_all, notify, spoza, sucho)
+
     if not martwe and not brakujacy:
-        return 0
+        return kod_wyjscia(zgloszone, trwale, "silnik bez pulsu")
 
     if sucho:
         print("Tryb suchy — powiadomienie nie wysyłane.")
         return 1
 
     odbiorcy = await fetch_all("SELECT id FROM app.\"user\" WHERE is_active AND role = 'owner'")
-    zgloszone = trwale = 0
     for s in martwe:
         # TLUMIENIE PYTA O ETYKIETE, NIE O KOLUMNE. Dla silnika etykieta siedzi
         # w `engine`, dla procesu nadzoru w `data->>'proces'` - `coalesce` bierze
@@ -3251,12 +3318,16 @@ async def sprawdz_puls_workerow(fetch_all, notify, sucho: bool = False,
         print("brak wpisow o pulsie workerow — żaden nie domknął jeszcze cyklu")
         return 0
 
+    spoza = []
     for w in wiersze:
         if wylaczony_w_chartcie(w["worker"], workery):
             print(f"  pomijam   {w['worker']}: wyłączony w chartcie, ostatni "
                   f"udany cykl {w['wiek_s'] / 60:.0f} min temu")
+            if swiezy_spoza_chartu(float(w["wiek_s"]), float(w["interwal_s"])):
+                spoza.append(w["worker"])
     wiersze = [w for w in wiersze
                if not wylaczony_w_chartcie(w["worker"], workery)]
+    z_spoza, t_spoza = await zglos_spoza_chartu(fetch_all, notify, spoza, sucho)
     po_workerze = {w["worker"]: w for w in wiersze}
     powody = ocen_puls_workerow(wiersze, prog_s=prog_s)
     ciche = {p[0] for p in powody}
@@ -3267,15 +3338,16 @@ async def sprawdz_puls_workerow(fetch_all, notify, sucho: bool = False,
               f"awarii pod rząd {w['awarii_pod_rzad']}")
 
     if not powody:
-        print("  bez zastrzeżeń")
-        return 0
+        if not spoza:
+            print("  bez zastrzeżeń")
+        return kod_wyjscia(z_spoza, t_spoza, "worker bez pulsu")
 
     if sucho:
         print("Tryb suchy — powiadomienie nie wysyłane.")
-        return len(powody)
+        return len(powody) + z_spoza
 
     odbiorcy = await fetch_all("SELECT id FROM app.\"user\" WHERE is_active AND role = 'owner'")
-    zgloszone = trwale = 0
+    zgloszone, trwale = z_spoza, t_spoza
     for worker, tytul, tresc in powody:
         # TLUMIENIE BEZ DODATKOWEJ KOLUMNY, tak samo jak przy zywotnosci
         # silnikow: jesli powiadomienie o TYM workerze poszlo juz PO jego

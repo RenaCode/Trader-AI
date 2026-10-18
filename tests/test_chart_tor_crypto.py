@@ -359,3 +359,119 @@ def test_stan_domykania_liczy_z_prawdziwej_bazy():
     assert po["pozycje"] == przed["pozycje"] + 1
     assert inny == inny_przed, "pozycja crypto policzona na rachunku equity"
     assert set(po) == {"pozycje", "plany", "zlecenia"}
+
+
+# ------------------------------------- recenzja #41: fail-open na rozjazd nazw
+
+# Moduly piszace `risk.worker_heartbeat` i regula nazwy pulsu w kazdym z nich -
+# przepisana z kodu i POTWIERDZANA w zrodle nizej, wiec zmiana konwencji
+# w module zapala ten test zamiast cicho rozjechac filtr czujki.
+REGULY_PULSU = {
+    "services/ingest/market_worker.py":
+        ('puls_nazwa = PULS if args.engine == "crypto" else f"{PULS}-{args.engine}"',
+         lambda p, e: p if e == "crypto" else f"{p}-{e}"),
+    "services/ingest/history_worker.py":
+        ('return PULS if engine == "crypto" else f"{PULS}-{engine}"',
+         lambda p, e: p if e == "crypto" else f"{p}-{e}"),
+    "services/ingest/features.py":
+        ('return PULS if engine == "crypto" else f"{PULS}-{engine}"',
+         lambda p, e: p if e == "crypto" else f"{p}-{e}"),
+    "services/ingest/news_worker.py":
+        ('puls.bij(conn, PULS, args.interval', lambda p, e: p),
+    "services/engine/kapital_gieldy.py":
+        ('nazwa = f"{PULS}-{args.engine}"', lambda p, e: f"{p}-{e}"),
+}
+
+
+def test_nazwa_pulsu_KAZDEGO_workera_danych_to_jego_klucz_workers():
+    """`--workery-z-chartu` niesie klucze `workers`, a czujka porownuje je
+    z nazwa z `risk.worker_heartbeat`. Gdyby sie rozjechaly, czujka uznalaby
+    zywy worker za "wylaczony w chartcie" i pominela go takze po smierci."""
+    import re
+    sprawdzone = set()
+    for nazwa, w in VALUES["workers"].items():
+        cmd = " ".join(w["command"])
+        modul = next((m for m in REGULY_PULSU if m in cmd), None)
+        if modul is None:
+            continue
+        regula_w_zrodle, regula = REGULY_PULSU[modul]
+        zrodlo = (KORZEN / modul).read_text(encoding="utf-8")
+        assert regula_w_zrodle in zrodlo, (modul, "regula nazwy pulsu sie zmienila")
+        stala = re.search(r'^\s*PULS = "([\w-]+)"', zrodlo, re.M).group(1)
+        m = re.search(r"--engine[\s\",]+(\w+)", cmd)
+        engine = m.group(1) if m else "crypto"
+        assert regula(stala, engine) == nazwa, (nazwa, modul, engine)
+        sprawdzone.add(nazwa)
+    assert sprawdzone == {"market", "market-equity", "history", "history-equity",
+                          "features", "features-equity", "news",
+                          "kapital-equity"}, sprawdzone
+
+
+def test_KANAREK_swiezy_puls_spoza_chartu_ALARMUJE():
+    """Zywy proces, ktorego chart "nie uruchamia" = zepsute mapowanie nazw.
+    Bez tego filtr bylby fail-open: proces pominiety teraz, pominiety po smierci."""
+    from services.engine.dozor import sprawdz_puls_workerow, sprawdz_zywotnosc
+    fa, nt, poszly = _stend([("crypto", 2), ("equity", 2)], DOZORCY,
+                            WORKERY + [("rynek-literowka", 30)])
+    assert asyncio.run(sprawdz_zywotnosc(fa, nt, workery=Z_CHARTU)) != 0
+    assert [t for _, t in poszly] == ["Proces engine żyje, choć chart go nie uruchamia"]
+    fa, nt, poszly = _stend(SILNIKI, DOZORCY, WORKERY + [("rynek-literowka", 30)])
+    assert asyncio.run(sprawdz_puls_workerow(fa, nt, workery=Z_CHARTU)) != 0
+    assert [t for _, t in poszly] == [
+        "Proces rynek-literowka żyje, choć chart go nie uruchamia"], poszly
+
+
+def test_swiezosc_spoza_chartu_to_jeden_cykl():
+    from services.engine.dozor import swiezy_spoza_chartu
+    assert swiezy_spoza_chartu(299, 300) and not swiezy_spoza_chartu(301, 300)
+
+
+class _ZlyKursor:
+    class connection:
+        @staticmethod
+        def transaction():
+            import contextlib
+            return contextlib.nullcontext()
+
+    def execute(self, *a, **kw):
+        raise RuntimeError("relacja nie istnieje")
+
+
+def test_blad_odczytu_domykania_to_NIE_WIEM_a_nie_awaria_cyklu():
+    from services.engine.loop import opis_domykania, stan_domykania
+    stan = stan_domykania(_ZlyKursor(), "crypto", "demo")
+    assert "relacja nie istnieje" in stan["blad"]
+    opis = opis_domykania(stan)
+    assert "nie wiem" in opis and "NIE wyłączać" in opis and "DOMKNIĘTY" not in opis
+
+
+@pytest.mark.skipif(not DB, reason="ustaw TEST_DB_URL na jednorazowa baze")
+def test_blad_odczytu_domykania_nie_psuje_transakcji_cyklu(monkeypatch):
+    """Savepoint: zapis cyklu sprzed blednego odczytu przezywa i transakcja
+    dalej przyjmuje zapytania (bez niego: InFailedSqlTransaction)."""
+    import psycopg
+    from psycopg.rows import dict_row
+    from services.engine import loop
+    monkeypatch.setattr(loop, "SQL_DOMYKANIE", "SELECT * FROM nie_ma_takiej_tabeli")
+    with psycopg.connect(DB, row_factory=dict_row) as c:
+        cur = c.cursor()
+        try:
+            cur.execute("CREATE TEMP TABLE zapis_cyklu (x int)")
+            cur.execute("INSERT INTO zapis_cyklu VALUES (1)")
+            stan = loop.stan_domykania(cur, "crypto", "demo")
+            cur.execute("SELECT count(*) AS n FROM zapis_cyklu")
+            n = cur.fetchone()["n"]
+        finally:
+            c.rollback()
+    assert "blad" in stan and n == 1
+
+
+@helm
+def test_RENDER_pusta_lista_silnikow_skanera_to_BLAD_a_nie_wszystkie_kanaly():
+    """`--silniki ""` news_worker czyta jako WSZYSTKIE kanaly."""
+    w = subprocess.run(["helm", "template", "trader", str(CHART),
+                        "--set", "torCrypto.enabled=false",
+                        "--set", "workers.news.silnikiZTorow={crypto}"],
+                       capture_output=True, text=True)
+    assert w.returncode != 0 and "silnikiZTorow" in w.stderr, w.stdout[-300:]
+    assert '"--silniki",""' not in w.stdout

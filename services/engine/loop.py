@@ -481,9 +481,24 @@ SQL_DOMYKANIE = """
 
 
 def stan_domykania(cur, engine: str, mode: str) -> dict:
-    """Ile zostalo do domkniecia na rachunku silnika. Patrz `SQL_DOMYKANIE`."""
-    cur.execute(SQL_DOMYKANIE, {"e": engine, "m": mode})
-    return dict(cur.fetchone())
+    """Ile zostalo do domkniecia na rachunku silnika. Patrz `SQL_DOMYKANIE`.
+
+    BLAD TEGO ODCZYTU NIE JEST AWARIA CYKLU. To jest dopisek do logu, a nie
+    czesc handlu: wyjatek stad liczylby sie do `POD_RZAD_MAX` i piec zlych
+    odczytow ubiloby silnik, ktory wlasnie domyka pozycje - czyli zrobiloby
+    dokladnie to, przed czym ten odczyt ma chronic. Zamiast liczb wraca
+    `{"blad": ...}`, a `opis_domykania` mowi "nie wiem" - nigdy "DOMKNIĘTY".
+    """
+    # SAVEPOINT (`transaction()` wewnatrz otwartej transakcji): bledne
+    # zapytanie psuje inaczej cala transakcje cyklu, a jej zatwierdzenie przy
+    # wyjsciu z `with psycopg.connect` zamieniloby sie w cichy ROLLBACK zapisow
+    # `run_once`.
+    try:
+        with cur.connection.transaction():
+            cur.execute(SQL_DOMYKANIE, {"e": engine, "m": mode})
+            return dict(cur.fetchone())
+    except Exception as e:                                    # noqa: BLE001
+        return {"blad": f"{type(e).__name__}: {e}"}
 
 
 def opis_domykania(stan: dict | None) -> str:
@@ -495,6 +510,9 @@ def opis_domykania(stan: dict | None) -> str:
     """
     if stan is None:
         return ""
+    if "blad" in stan:
+        return (f", DOMYKANIE: nie wiem (błąd: {stan['blad']}) — silnika "
+                f"NIE wyłączać, dopóki odczyt nie wróci")
     if not (stan["pozycje"] or stan["plany"] or stan["zlecenia"]):
         return (", TOR DOMKNIĘTY: 0 otwartych pozycji, 0 planów, 0 zleceń "
                 "w locie — silnik można wyłączyć (`torCrypto.enabled: false`)")
