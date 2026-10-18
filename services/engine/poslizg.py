@@ -1295,8 +1295,9 @@ async def main() -> int:
                     help="okno w godzinach; domyslnie od poczatku")
     # Filtr po `journal.decision.strategia` (0091). Z nim raport dostaje sekcje
     # "wobec modelu pesymistycznego" - po to chodzi strategia momentum na demo.
+    # `beta_filtr_trendu` (0100): regula D-3 na demo equity.
     ap.add_argument("--strategia", default=None,
-                    choices=("ensemble", "momentum_filtr_trendu"),
+                    choices=("ensemble", "momentum_filtr_trendu", "beta_filtr_trendu"),
                     help="tylko zlecenia decyzji tej strategii (domyślnie wszystkie)")
     args = ap.parse_args()
 

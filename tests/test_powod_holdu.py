@@ -46,7 +46,10 @@ POWODY = {"slaby_wynik", "niska_pewnosc", "short_niewykonalny",
           # 0098: kwota ponizej jednego kroku ilosci; swieca sprzed sesji.
           "ponizej_jednej_akcji", "swieca_przed_sesja",
           # 0099: wejscie na torze zamknietym wynikiem hipotezy (B-0 = STOP).
-          "tor_zamkniety"}
+          "tor_zamkniety",
+          # 0100: regula beta (`strategia_beta.POWODY_HOLDU`, D-3).
+          "filtr_trendu_spy", "historia_filtra_niepelna", "czeka_na_sesje",
+          "poza_instrumentem_reguly"}
 
 
 def _migracja_definiujaca_check() -> Path:
@@ -136,15 +139,38 @@ def _akcje_momentum(akcja):
     return wyniki
 
 
+def _akcje_beta():
+    """Wszystkie galezie `strategia_beta.akcja` - kazda para (akcja, powod)."""
+    from datetime import date
+
+    from services.engine.strategia_beta import Cel, akcja
+    cele = [Cel(date(2026, 11, 1), True, sma=1.0, zamkniecie=2.0),
+            Cel(date(2026, 11, 1), False, sma=2.0, zamkniecie=1.0),
+            Cel(date(2026, 11, 1), False, powod="za mało historii")]
+    wyniki = [akcja(cel, poz, sym, decyzyjna)
+              for cel in cele
+              for poz in (None, {"side": "long"}, {"side": "short"})
+              for sym in ("SPY", "AAPL")
+              for decyzyjna in (True, False)]
+    for a, p in wyniki:
+        assert (a == "hold") == (p is not None), (a, p)
+    return wyniki
+
+
 def test_powody_w_kodzie_migracji_i_opisach_to_ten_sam_zbior():
     """Trzy miejsca, jedna lista. Rozjazd kończy się odrzuceniem INSERT-a przez bazę."""
+    from services.engine import strategia_beta
     from services.engine.loop import OPIS_POWODU_HOLDU
     from services.engine.strategia_momentum import POWODY_HOLDU, akcja
 
-    # Powody strategii momentum ustawia czysta funkcja `akcja` w jej module,
-    # nie przypisanie w loop.py - zbior bierzemy stamtad.
+    # Powody regul (momentum, beta) ustawia czysta funkcja `akcja` w module
+    # reguly, nie przypisanie w loop.py - zbior bierzemy stamtad.
     w_kodzie = set(POWODY_HOLDU) | {"trzyma_pozycje"}
     assert {p for _, p in _akcje_momentum(akcja) if p} <= w_kodzie
+    w_kodzie |= set(strategia_beta.POWODY_HOLDU)
+    z_beta = {p for _, p in _akcje_beta() if p}
+    assert z_beta <= w_kodzie
+    assert z_beta >= set(strategia_beta.POWODY_HOLDU), "gałąź reguły beta bez testu"
     for blok in _bloki(_drzewo_petli()):
         for p in _przypisania(blok, "powod_holdu"):
             if isinstance(p.value, ast.Constant) and isinstance(p.value.value, str):

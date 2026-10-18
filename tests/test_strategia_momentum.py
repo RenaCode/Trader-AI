@@ -53,7 +53,9 @@ def test_nazwa_strategii_to_wartosc_z_CHECK_migracji():
     from tests.atrapa_bazy import MIGRACJE
     tresc = "\n".join(p.read_text(encoding="utf-8") for p in MIGRACJE)
     assert f"'{sm.NAZWA}'" in tresc
-    assert loop.STRATEGIE == {"model": "ensemble", "momentum": sm.NAZWA}
+    # `beta` od 2026-10-18 (D-3, `strategia_beta`, tests/test_strategia_beta.py).
+    assert loop.STRATEGIE == {"model": "ensemble", "momentum": sm.NAZWA,
+                              "beta": "beta_filtr_trendu"}
 
 
 def test_migracja_0091_ma_lock_timeout_i_transakcje():
