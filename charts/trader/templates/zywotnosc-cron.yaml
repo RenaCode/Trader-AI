@@ -33,7 +33,12 @@ o rynek, nie o konfiguracje wdrozenia, i odpowiada na nie `dozor.py` z kolumny
 nie jest miara awarii potoku, bo po otwarciu sesji najnowsza swieca pochodzi
 z poprzedniego zamkniecia (zmierzone: 1050 min przy progu 180).
 */}}
-{{- $tory := list (dict "engine" "crypto" "horyzonty" (.Values.trainerCron.horyzonty | default (list .Values.trainerCron.bar))) }}
+{{- $tory := list }}
+{{/* Crypto tylko przy wlaczonym torze (`torCrypto` w values.yaml): czujki danych
+toru, ktorego potok jest wylaczony, mierzylyby wylacznie to, ze go wylaczono. */}}
+{{- if .Values.torCrypto.enabled }}
+{{- $tory = append $tory (dict "engine" "crypto" "horyzonty" (.Values.trainerCron.horyzonty | default (list .Values.trainerCron.bar))) }}
+{{- end }}
 {{- /* Equity pilnowane, gdy chodzi potok cech, nie trening (trening bywa wstrzymany, 2026-10-03). */}}
 {{- if (index .Values.workers "features-equity").enabled }}
 {{- $tory = append $tory (dict "engine" "equity" "horyzonty" .Values.trainerCron.equity.horyzonty) }}
@@ -49,11 +54,21 @@ dawaly falszywe "trainer: cisza". */}}
 {{- $zadania := list }}
 {{- $harmonogramy := list }}
 {{- if .Values.trainerCron.enabled }}{{ $zadania = append $zadania "trainer" }}{{ $harmonogramy = append $harmonogramy (printf "trainer=%s" .Values.trainerCron.schedule) }}{{ end }}
-{{- if .Values.probaCron.enabled }}{{ $zadania = append $zadania "proba-killswitcha" }}{{ $harmonogramy = append $harmonogramy (printf "proba-killswitcha=%s" .Values.probaCron.schedule) }}{{ end }}
+{{- if and .Values.probaCron.enabled .Values.torCrypto.enabled }}{{ $zadania = append $zadania "proba-killswitcha" }}{{ $harmonogramy = append $harmonogramy (printf "proba-killswitcha=%s" .Values.probaCron.schedule) }}{{ end }}
 {{- if .Values.postmortemCron.enabled }}{{ $zadania = append $zadania "postmortem" }}{{ $harmonogramy = append $harmonogramy (printf "postmortem=%s" .Values.postmortemCron.schedule) }}{{ end }}
 {{- if .Values.instrumentyCron.enabled }}{{ $zadania = append $zadania "instrumenty" }}{{ $harmonogramy = append $harmonogramy (printf "instrumenty=%s" .Values.instrumentyCron.schedule) }}{{ end }}
 {{- if .Values.kursCron.enabled }}{{ $zadania = append $zadania "kurs" }}{{ $harmonogramy = append $harmonogramy (printf "kurs=%s" .Values.kursCron.schedule) }}{{ end }}
 {{- if .Values.backup.enabled }}{{ $zadania = append $zadania "backup" }}{{ $harmonogramy = append $harmonogramy (printf "backup=%s" .Values.backup.schedule) }}{{ end }}
+{{/* PROCESY, KTORE CHART URUCHAMIA (2026-10-18) - do `--workery-z-chartu`.
+Ta sama odpowiedz co Deployment (`trader.workerWlaczony`), wiec proces
+wylaczony w chartcie - flaga `enabled` albo caly tor (`torCrypto`) - nie jest
+dla czujek pulsu martwy, choc jego ostatni wiersz w `risk.*_heartbeat` zostal
+w bazie ze statusem `running`. Nazwy = klucze `workers`; dozor mapuje na nie
+wiersze pulsu silnika i dozorcy (`dozor.proces_pulsu`). */}}
+{{- $workery := list }}
+{{- range $nazwa, $w := .Values.workers }}
+{{- if include "trader.workerWlaczony" (dict "w" $w "ctx" $) }}{{ $workery = append $workery $nazwa }}{{ end }}
+{{- end }}
 # Czujka zywotnosci silnikow.
 #
 # MUSI byc osobnym procesem: martwy proces nie zglosi wlasnej smierci. Petla
@@ -170,7 +185,8 @@ spec:
                 - -c
                 - |
                   RC=0
-                  python services/engine/dozor.py --co zywotnosc || RC=$?
+                  # `--workery-z-chartu`: patrz `$workery` na gorze pliku.
+                  python services/engine/dozor.py --co zywotnosc --workery-z-chartu {{ join "," $workery | quote }} || RC=$?
                   python services/engine/dozor.py --co ryzyko    || RC=$?
                   python services/engine/dozor.py --co kopie     || RC=$?
                   # SWIEZOSC DANYCH. Puls silnika mowi, ze silnik zyje - nie mowi,
@@ -221,7 +237,7 @@ spec:
                   # cykl. Prog liczy z INTERWALU danego workera zapisanego przez
                   # niego samego (market 60 s, history 1200 s), wiec nie ma tu
                   # drugiej kopii tej liczby do rozjechania.
-                  python services/engine/dozor.py --co workery   || RC=$?
+                  python services/engine/dozor.py --co workery --workery-z-chartu {{ join "," $workery | quote }} || RC=$?
                   # SWIECA ODLOZONA I NIEROZSTRZYGNIETA - dziura, ktora otworzyla
                   # poprawka z 2026-09-22.
                   #
@@ -263,7 +279,9 @@ spec:
                   # chodzi z `--wymagaj-modelu` i bez aktywnego modelu konczy
                   # cykl na bramce (wstrzymany trening, values.yaml) - czujka
                   # krzyczalaby o stanie zamierzonym przy kazdej sesji.
+                  {{- if .Values.torCrypto.enabled }}
                   python services/engine/dozor.py --co decyzje --engine crypto --bar 4h || RC=$?
+                  {{- end }}
                   # ZADANIA CYKLICZNE (F-8.4). Kazdy CronJob dopisuje wynik do
                   # `risk.job_run` (przebieg_zadania.py, backup - trap). Ostatni
                   # przebieg z kodem niezerowym albo cisza > 2 typowe odstepy ->
@@ -332,6 +350,9 @@ spec:
                   # taker podmiotu unijnego to 0,250%, czyli 2,5x wiecej niz
                   # dawna stala 0,001. Prog policzony z cudzego wiersza cennika
                   # alarmowalby przy kazdym kupnie zleceniem rynkowym.
+                  # UZGODNIENIE I CENNIK NIZEJ SA TORU CRYPTO (Bybit, `spot_eu`) - po
+                  # `torCrypto.enabled: false` nie ma czego uzgadniac.
+                  {{- if .Values.torCrypto.enabled }}
                   python services/engine/uzgodnienie.py --kind spot_eu || RC=$?
                   # CENNIK GIELDY KONTRA CENNIK W KODZIE. Sprawdzenie istnialo
                   # od poczatku jako narzedzie CLI i nikt go nigdy nie uruchomil.
@@ -356,6 +377,7 @@ spec:
                   # workers.crypto: `--kind spot_eu`). Inny rodzaj instrumentu
                   # znaczy porownanie z wierszem CENNIKA, ktorego nikt nie uzywa.
                   python services/exchanges/mozliwosci.py --stawki --kind spot_eu || RC=$?
+                  {{- end }}
                   # POSLIZG I ULAMEK WYPELNIENIA. To jedyna linia tego zadania,
                   # ktora nie jest czujka, tylko POMIAREM - i dlatego nie dopisuje
                   # sie do RC. POSLIZG_TAKER = 0,0004 i POSLIZG_MAKER = 0 sa

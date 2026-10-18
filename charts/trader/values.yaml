@@ -322,12 +322,47 @@ llm:
   # deduplikacji (4404, 09.09). Lapie ucieczke, nie dotyka pracy.
   dailyCalls: "1500"
 
+# TOR CRYPTO - JEDEN PRZELACZNIK CALEGO POTOKU (2026-10-18, sprzatanie po B-0 = STOP).
+#
+# Tor zamkniety wynikiem hipotezy (`services/engine/tory.py`, renacode-infra:
+# docs/projekty/trader/hipotezy.md). Silnik demo nie otwiera juz nowych pozycji
+# (hold `tor_zamkniety`), ale potok nadal kosztuje: piec Deploymentow, trening
+# tygodniowy, zapytania do Bybita. `false` zdejmuje naraz:
+#   * Deploymenty z `torCrypto: true` nizej: `market`, `history`, `features`,
+#     `engine`, `dozorca` (`trader.workerWlaczony`, _helpers.tpl),
+#   * kanaly krypto skanera wiadomosci (`workers.news.silnikiZTorow`),
+#   * tor crypto w trenerze, w post-mortem i w odswiezaniu statusu instrumentow,
+#   * probe pozarowa kill-switcha (cwiczy wylacznie silnik crypto),
+#   * czujki toru crypto w `trader-zywotnosc` - a dla procesow, ktore zostawily
+#     w bazie puls (`risk.engine_heartbeat`, `risk.dozorca_heartbeat`,
+#     `risk.worker_heartbeat`), czujka dostaje liste wlaczonych procesow
+#     (`dozor.py --workery-z-chartu`) i ich NIE uznaje za martwe.
+#
+# DLACZEGO PRZELACZNIK W CHARTCIE, A NIE STATUS `halted` W BAZIE. Status musialby
+# ustawic ktos w chwili wylaczenia. Silnik ustawiajacy go sam przy SIGTERM-ie
+# robilby to takze przy kazdym rolloucie i ewikcji - a pod, ktory potem nie
+# wstanie, zostalby z napisem "zatrzymany swiadomie", czyli awaria glosna
+# zamieniona na cicha. Zamiar wylaczenia jest konfiguracja wdrozenia i ma lezec
+# tam, gdzie lezy wdrozenie; czujka bierze go z tego samego miejsca co Deployment.
+#
+# WARUNEK PRZELACZENIA NA `false` - BEZPIECZENSTWO POZYCJI. Wylaczenie `engine`
+# zostawia otwarte pozycje i niewypelnione zlecenia na Bybit demo BEZ WYJSCIA.
+# Przelaczac dopiero, gdy linia podsumowania cyklu silnika crypto
+# (`kubectl logs deploy/trader-engine`) mowi "TOR DOMKNIĘTY" - zero otwartych
+# pozycji, zero planow oczekujacych i zero zlecen w locie (`loop.stan_domykania`).
+# Do tego czasu linia ma dopisek "DOMYKANIE: ..." z liczbami.
+torCrypto:
+  enabled: true
+
 # Procesy tla. Kazdy dziala niezaleznie - patrz templates/workers.yaml.
+# `torCrypto: true` przy wpisie = Deployment istnieje tylko przy wlaczonym torze
+# crypto (patrz `torCrypto` wyzej); `enabled` dziala jak dotad.
 workers:
   # Dociaga swiece 1m i snapshoty orderbooka z gieldy. Nie wymaga zadnych kluczy,
   # bo dane rynkowe sa publiczne.
   market:
     enabled: true
+    torCrypto: true
     command: ["python", "services/ingest/market_worker.py", "--interval", "60"]
     resources:
       limits:   { cpu: 500m, memory: 384Mi }
@@ -394,6 +429,7 @@ workers:
   # pomijalne wobec limitu Bybita.
   history:
     enabled: true
+    torCrypto: true
     command: ["python", "services/ingest/history_worker.py", "--interval", "300", "--days", "3", "--timeframe", "1h"]
     resources:
       limits:   { cpu: 500m, memory: 384Mi }
@@ -423,6 +459,7 @@ workers:
   # a kazda minuta czekania tutaj to minuta zwloki decyzji po swiecy.
   features:
     enabled: true
+    torCrypto: true
     # Tylko 4h od 2026-10-18: tor 1h wylaczony z `trainerCron.horyzonty`.
     command: ["python", "services/ingest/features.py", "--bar", "4h", "--interval", "300"]
     resources:
@@ -466,6 +503,7 @@ workers:
   # Petla decyzyjna. Odpala sie po cechach, wiec ma wlasny, przesuniety cykl.
   engine:
     enabled: true
+    torCrypto: true
     # P-T4: cykl w toku musi sie domknac przed SIGKILL-em.
     terminationGracePeriodSeconds: 150
     priorityClass: true
@@ -673,6 +711,7 @@ workers:
   # ten sam stan i moglyby zwolnic to samo zdarzenie dwukrotnie.
   dozorca:
     enabled: true
+    torCrypto: true
     # P-T4: cykl w toku musi sie domknac przed SIGKILL-em.
     terminationGracePeriodSeconds: 90
     priorityClass: true
@@ -775,7 +814,21 @@ workers:
     # czym byly. Teraz opisy bledow ida ZAWSZE, poza tym przelacznikiem, a
     # `--quiet` wycisza wylacznie rutynowy postep - w tym uzasadnienie odsiania
     # kazdego pojedynczego artykulu, ktorego bywa kilkadziesiat na cykl.
-    command: ["sh", "-c", "exec python services/ingest/news_worker.py --auto --quiet --silniki crypto,equity --interval 300"]
+    #
+    # `--silniki` DOKLEJA SZABLON (2026-10-18) z `silnikiZTorow` nizej, po
+    # odfiltrowaniu `crypto` przy `torCrypto.enabled: false`. Komenda bez
+    # `sh -c`, bo doklejenie argumentu do napisu powloki byloby edycja tekstu.
+    #
+    # SKANER ZOSTAJE WLACZONY PO ZAMKNIECIU TORU CRYPTO - i to nie przeoczenie.
+    # Tor equity bierze z niego ceche `news_sent` (`features-equity` liczy ja
+    # z `news.article_analysis`; sygnal `news_shock` i rezim `news_shock`
+    # w `signals.py` sa wspolne dla obu silnikow), a trener equity uczy sie na
+    # jej historii. Wylaczenie skanera zostawiloby silnik equity z luka w cesze,
+    # ktorej model nie widzial w treningu. Po wylaczeniu toru crypto odpadaja
+    # kanaly krypto (ok. 80 z ~190 artykulow na dobe); kanaly equity i makro
+    # (Fed, EBC - bez silnika) zostaja.
+    command: ["python", "services/ingest/news_worker.py", "--auto", "--quiet", "--interval", "300"]
+    silnikiZTorow: ["crypto", "equity"]
     resources:
       limits:   { cpu: 1000m, memory: 512Mi }
       requests: { cpu: 50m,   memory: 128Mi }
@@ -869,6 +922,8 @@ instrumentyCron:
   # Wpis tam mowi czujce "pusta data sprawdzenia to awaria"; silnik, ktory tam
   # jest, a nie ma go tutaj, zapalalby alarm "nie sprawdzano" po 26 h przy
   # kazdym przebiegu. Zgodnosc obu list pilnuje test.
+  # `crypto` odpada w szablonie przy `torCrypto.enabled: false` - razem z czujka
+  # `--co instrumenty` dla tego toru, wiec alarm "nie sprawdzano" nie powstaje.
   silniki: [crypto, equity]
 
 # Proba pozarowa kill-switcha. Doprowadza do PRAWDZIWEGO zadzialania i sprawdza
@@ -880,6 +935,10 @@ instrumentyCron:
 # sie nastepnego dnia, a nie po tygodniu.
 #
 # Godzina dobrana tak, zeby nie kolidowac z trenerem (04:40) ani z kopia (03:17).
+# `probaCron.enabled` dziala tylko przy `torCrypto.enabled: true`: proba cwiczy
+# lancuch silnika crypto (`proba_killswitcha.py`, domyslny `--engine crypto`),
+# a bez jego petli ogniwo 3 (wstrzymanie wejsc) nie ma kto potwierdzic - proba
+# padalaby co dobe jako `job.nieudany`. Wariant dla equity to osobna decyzja.
 probaCron:
   enabled: true
   schedule: "20 5 * * *"        # codziennie 05:20 czasu lokalnego, po treningu i kopii
@@ -1104,10 +1163,17 @@ postmortemCron:
   # o godzine blizej trenera. Teraz zapas 3 h 10 min po starcie trenera (04:40)
   # jest staly przez caly rok.
   schedule: "50 7 * * *"
-  # OBA SILNIKI. Silnik equity dopisze sie tu sam z chwila, gdy zacznie zamykac
-  # pozycje; do tego czasu jego przebieg konczy sie linia "0 zamknietych
-  # pozycji, prog to 5" i kodem zero - czyli cisza, ktora widac.
-  silniki: ["crypto", "equity"]
+  # Silnik equity dopisze sie tu sam z chwila, gdy zacznie zamykac pozycje; do
+  # tego czasu jego przebieg konczy sie linia "0 zamknietych pozycji, prog to 5"
+  # i kodem zero - czyli cisza, ktora widac.
+  #
+  # BEZ `crypto` OD 2026-10-18 - wczesniej niz reszta toru. Tor zamkniety
+  # wynikiem hipotezy (B-0 = STOP), wiec wnioski z jego transakcji nie maja juz
+  # dokad trafic, a kazdy przebieg to wywolanie LLM za realne dolary. Pozycji
+  # nie dotyka: post-mortem tylko CZYTA zamkniete transakcje, wiec silnik crypto
+  # domyka je dalej bez niego. Szablon i tak odfiltrowuje `crypto` przy
+  # `torCrypto.enabled: false` (`trader.silnikiZTorow`); powrot = dopisanie tutaj.
+  silniki: ["equity"]
   mode: "demo"
   dni: 7
 

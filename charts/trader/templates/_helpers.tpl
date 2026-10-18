@@ -313,3 +313,35 @@ z zadnym API zewnetrznym (`networkPolicy.egress.bezInternetu`).
         cidr: 0.0.0.0/0
         except: {{- toYaml .Values.networkPolicy.egress.siecDomowa | nindent 10 }}
 {{- end -}}
+
+{{/*
+CZY WORKER MA SWOJ DEPLOYMENT - JEDNA ODPOWIEDZ DLA WSZYSTKICH SZABLONOW
+(2026-10-18, sprzatanie zamknietego toru crypto).
+
+Worker istnieje, gdy ma `enabled: true` ORAZ - jesli nalezy do toru crypto
+(`torCrypto: true` przy wpisie w `workers`) - gdy wlaczony jest caly tor
+(`torCrypto.enabled`). Te sama odpowiedz biora `workers.yaml` (Deployment),
+`networkpolicy.yaml` (dostep do bazy) i `zywotnosc-cron.yaml` (lista procesow,
+ktorych puls czujki maja pilnowac). Trzy osobne warunki rozjechalyby sie przy
+pierwszej zmianie: wylaczony tor zostawilby czujke krzyczaca o procesie, ktorego
+nikt nie uruchamia - dokladnie ten alarm, przed ktorym ten helper broni.
+
+Zwraca "tak" albo pusty napis (falsz w `if`).
+*/}}
+{{- define "trader.workerWlaczony" -}}
+{{- if and .w.enabled (or (not .w.torCrypto) .ctx.Values.torCrypto.enabled) -}}tak{{- end -}}
+{{- end -}}
+
+{{/*
+SILNIKI Z WLACZONYM TOREM, po przecinku - dla procesow, ktore obsluguja oba
+tory naraz i filtruja po silniku (`news_worker.py --silniki`,
+`postmortemCron.silniki`, `instrumentyCron.silniki`). `crypto` wypada, gdy
+`torCrypto.enabled: false`; reszta listy zostaje bez zmian.
+*/}}
+{{- define "trader.silnikiZTorow" -}}
+{{- $wynik := list -}}
+{{- range .lista -}}
+{{- if or (ne . "crypto") $.ctx.Values.torCrypto.enabled -}}{{- $wynik = append $wynik . -}}{{- end -}}
+{{- end -}}
+{{- join "," $wynik -}}
+{{- end -}}

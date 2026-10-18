@@ -48,7 +48,8 @@ karmia, pisza plik juz NA STARCIE, wiec zawieszenie w pierwszym cyklu tez
 jest lapane. Pilnuje tego tests/test_sonda_zywotnosci.py.
 */}}
 {{- range $name, $w := .Values.workers }}
-{{- if $w.enabled }}
+{{- /* `enabled` i tor crypto - patrz `trader.workerWlaczony` w _helpers.tpl. */}}
+{{- if include "trader.workerWlaczony" (dict "w" $w "ctx" $) }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -126,7 +127,18 @@ spec:
           image: "{{ $.Values.api.image.repository }}:{{ $.Values.api.image.tag }}"
           imagePullPolicy: {{ $.Values.api.image.pullPolicy }}
           {{- include "trader.kontenerTylkoOdczyt" $ | nindent 10 }}
+          {{/*
+          `silnikiZTorow` (2026-10-18): worker obslugujacy oba tory dostaje
+          `--silniki` doklejone tutaj, z listy przefiltrowanej przez
+          `torCrypto.enabled` (`trader.silnikiZTorow`). Lista w komendzie
+          w values.yaml bylaby druga kopia przelacznika toru - wylaczenie toru
+          zostawiloby wtedy skaner placacy za kanaly krypto.
+          */}}
+          {{- if $w.silnikiZTorow }}
+          command: {{ toJson (concat $w.command (list "--silniki" (include "trader.silnikiZTorow" (dict "lista" $w.silnikiZTorow "ctx" $)))) }}
+          {{- else }}
           command: {{ toJson $w.command }}
+          {{- end }}
           {{/* Patrz naglowek: termin jest w pliku, sonda tylko porownuje go z zegarem. */}}
           livenessProbe:
             exec:

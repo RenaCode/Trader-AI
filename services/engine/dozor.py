@@ -805,7 +805,55 @@ MARTWY_PO_MIN = 15
 from services.engine.dozorca import NAZWA as DOZORCA_PULS  # noqa: E402
 
 
-def brakujacy_dozorcy(pary: list[dict], pulsy: list[dict]) -> list[str]:
+# ------------------------------------------- procesy wylaczone w chartcie
+#
+# WIERSZ PULSU ZOSTAJE, GDY DEPLOYMENT ZNIKA (2026-10-18, sprzatanie toru crypto).
+#
+# Kazda z trzech tabel pulsu (`risk.engine_heartbeat`, `risk.dozorca_heartbeat`,
+# `risk.worker_heartbeat`) dostaje wiersz od procesu i nikt go nie kasuje.
+# Wylaczenie Deploymentu w chartcie zostawia wiec `running` z coraz starszym
+# `last_beat_at` - dla czujek nie do odroznienia od procesu, ktory umarl.
+# Status `halted` nie pomaga: musialby go ustawic ktos w chwili wylaczenia,
+# a sam proces robilby to takze przy rolloucie i ewikcji (szczegoly przy
+# `torCrypto` w values.yaml).
+#
+# ZAMIAR JEST W CHARTCIE, wiec chart go podaje: `--workery-z-chartu` to klucze
+# `workers`, dla ktorych istnieje Deployment (`trader.workerWlaczony`). Brak
+# argumentu = brak filtra, czyli dokladnie dotychczasowe zachowanie - reczne
+# wywolanie czujki nie moze niczego cicho pomijac.
+
+
+def proces_pulsu(rola: str, engine: str) -> str:
+    """Nazwa wpisu w `workers` (values.yaml) dla procesu toru. CZYSTA FUNKCJA.
+
+    Ta sama konwencja, ktora sklada nazwy pulsu workerow danych
+    (`features.py`: `PULS if engine == "crypto" else f"{PULS}-{engine}"`):
+    tor crypto ma nazwe goła, kazdy inny - z przyrostkiem silnika.
+    """
+    return rola if engine == "crypto" else f"{rola}-{engine}"
+
+
+def proces_dozorcy(nazwa: str) -> str | None:
+    """`dozorca-ryzyka:equity:demo` -> `dozorca-equity`. None dla obcej nazwy."""
+    czesci = nazwa.split(":")
+    if len(czesci) != 3 or czesci[0] != DOZORCA_PULS:
+        return None
+    return proces_pulsu("dozorca", czesci[1])
+
+
+def wylaczony_w_chartcie(proces: str | None,
+                         workery: set[str] | None) -> bool:
+    """Czy chart swiadomie NIE uruchamia tego procesu. CZYSTA FUNKCJA.
+
+    `workery=None` (wywolanie bez listy) nie wylacza niczego. Proces, ktorego
+    nazwy nie umiemy ustalic, tez nie jest wylaczony: nie wiedziec nie znaczy
+    "zatrzymany swiadomie".
+    """
+    return workery is not None and proces is not None and proces not in workery
+
+
+def brakujacy_dozorcy(pary: list[dict], pulsy: list[dict],
+                      workery: set[str] | None = None) -> list[str]:
     """Dozorcy, ktorych puls NIE POWSTAL ANI RAZU. CZYSTA FUNKCJA.
 
     DLACZEGO BRAK WIERSZA MUSI BYC OSOBNYM PYTANIEM
@@ -827,15 +875,20 @@ def brakujacy_dozorcy(pary: list[dict], pulsy: list[dict]) -> list[str]:
     oceniac niezaleznie od silnika - i odwrotnie: para bez limitow nie ma czego
     nadzorowac. Lista nazw procesow wpisana tutaj byla by druga kopia zawartosci
     `values.yaml` i rozjechala by sie przy pierwszym nowym silniku.
+
+    PARA TORU WYLACZONEGO W CHARTCIE (`workery`) nie ma kogo oczekiwac: limity
+    zostaja w `risk.limit_def`, ale dozorcy tego toru chart nie uruchamia.
     """
     maja = {p["nazwa"] for p in pulsy}
     return [n for n in
             (f"{DOZORCA_PULS}:{p['engine']}:{p['mode']}" for p in pary)
-            if n not in maja]
+            if n not in maja
+            and not wylaczony_w_chartcie(proces_dozorcy(n), workery)]
 
 
 async def sprawdz_zywotnosc(fetch_all, notify, sucho: bool = False,
-                            prog_min: int | None = None) -> int:
+                            prog_min: int | None = None,
+                            workery: set[str] | None = None) -> int:
     """Czy silniki, ktore MAJA dzialac, faktycznie bija.
 
     DLACZEGO TO JEST OSOBNY PROCES
@@ -851,6 +904,9 @@ async def sprawdz_zywotnosc(fetch_all, notify, sucho: bool = False,
     Silnik `equity` ma status `halted` i uderzenie sprzed dziesieciu dni, bo nie
     zostal jeszcze zbudowany. To nie jest awaria i nie ma o czym powiadamiac.
     Sprawdzamy wylacznie te, ktore twierdza, ze dzialaja.
+
+    PROCES WYLACZONY W CHARTCIE TEZ NIE JEST AWARIA (`workery`, 2026-10-18).
+    Jego wiersz zostaje w tabeli z `running` - patrz `proces_pulsu`.
 
     TLUMIENIE BEZ DODATKOWEJ KOLUMNY
 
@@ -917,7 +973,8 @@ async def sprawdz_zywotnosc(fetch_all, notify, sucho: bool = False,
         "SELECT DISTINCT engine::text AS engine, mode::text AS mode"
         "  FROM risk.limit_def WHERE enabled ORDER BY 1, 2")
     brakujacy = brakujacy_dozorcy(
-        pary, await fetch_all("SELECT nazwa FROM risk.dozorca_heartbeat"))
+        pary, await fetch_all("SELECT nazwa FROM risk.dozorca_heartbeat"),
+        workery)
     for nazwa in brakujacy:
         print(f"  BRAK      {nazwa}: ani jednego uderzenia — limity tej pary "
               f"nie mają niezależnego oceniającego, a kill-switcha nie ma kto "
@@ -928,6 +985,11 @@ async def sprawdz_zywotnosc(fetch_all, notify, sucho: bool = False,
         opis = f"{s['etykieta']}/{s['mode']}: {s['status']}, ostatnie uderzenie {s['wiek_min']:.0f} min temu"
         if s["status"] != "running":
             print(f"  pomijam  {opis} — zatrzymany świadomie")
+            continue
+        proces = (proces_pulsu("engine", s["engine"]) if s["engine"]
+                  else proces_dozorcy(s["etykieta"]))
+        if wylaczony_w_chartcie(proces, workery):
+            print(f"  pomijam  {opis} — `{proces}` wyłączony w chartcie")
             continue
         if s["wiek_min"] > prog:
             martwe.append(s)
@@ -3131,7 +3193,8 @@ def ocen_puls_workerow(wiersze: list[dict], cykli_zwloki: int = CYKLI_ZWLOKI,
 
 
 async def sprawdz_puls_workerow(fetch_all, notify, sucho: bool = False,
-                                prog_min: int | None = None) -> int:
+                                prog_min: int | None = None,
+                                workery: set[str] | None = None) -> int:
     """Czy cztery procesy wejscia danych domykaja cykle.
 
     DLACZEGO TO NIE JEST `--co swiezosc` JESZCZE RAZ
@@ -3168,6 +3231,9 @@ async def sprawdz_puls_workerow(fetch_all, notify, sucho: bool = False,
     lapie go licznik pieciu awarii (CrashLoopBackOff widac w `kubectl get pods`)
     oraz `--co swiezosc`. Zgadywanie, ktore workery „powinny" istniec, byloby
     czwarta kopia listy z values.yaml.
+
+    WORKER WYLACZONY W CHARTCIE (`workery`, 2026-10-18) jest wypisywany i NIE
+    oceniany: jego wiersz zostal, a procesu swiadomie nie ma.
     """
     # Prog jako parametr - zeby dalo sie wywolac SCIEZKE ALARMOWA na zadanie.
     # Bez tego jedynym sposobem sprawdzenia, czy alarm dziala, byloby zabicie
@@ -3185,6 +3251,12 @@ async def sprawdz_puls_workerow(fetch_all, notify, sucho: bool = False,
         print("brak wpisow o pulsie workerow — żaden nie domknął jeszcze cyklu")
         return 0
 
+    for w in wiersze:
+        if wylaczony_w_chartcie(w["worker"], workery):
+            print(f"  pomijam   {w['worker']}: wyłączony w chartcie, ostatni "
+                  f"udany cykl {w['wiek_s'] / 60:.0f} min temu")
+    wiersze = [w for w in wiersze
+               if not wylaczony_w_chartcie(w["worker"], workery)]
     po_workerze = {w["worker"]: w for w in wiersze}
     powody = ocen_puls_workerow(wiersze, prog_s=prog_s)
     ciche = {p[0] for p in powody}
@@ -4257,6 +4329,11 @@ async def main() -> int:
                          "instrumentu uniwersum, gdy cechy przyszly; "
                          "zadania: czy wlaczone CronJoby koncza sie "
                          "powodzeniem i chodza w swoim rytmie (risk.job_run)")
+    ap.add_argument("--workery-z-chartu", default=None, dest="workery_z_chartu",
+                    help="dla --co zywotnosc i --co workery: klucze `workers` "
+                         "z wlaczonym Deploymentem, po przecinku (podaje chart). "
+                         "Puls procesu spoza listy nie jest oceniany - proces "
+                         "wylaczono w chartcie. Bez flagi: bez filtra")
     ap.add_argument("--zadania", default="",
                     help="lista nazw zadan dla --co zadania, po przecinku; "
                          "podaje ja chart z flag `enabled`")
@@ -4302,14 +4379,21 @@ async def main() -> int:
     from services.api.db import close_pool, fetch_all, open_pool
     from services.api.notifications import notify
 
+    # Pusty napis to PUSTA lista (chart bez ani jednego workera), a nie brak
+    # flagi - tylko None znaczy "bez filtra".
+    workery = (None if args.workery_z_chartu is None
+               else {w for w in args.workery_z_chartu.split(",") if w})
+
     await open_pool()
     try:
         if args.co == "zywotnosc":
             return await sprawdz_zywotnosc(fetch_all, notify, sucho=args.sucho,
-                                           prog_min=args.prog_min)
+                                           prog_min=args.prog_min,
+                                           workery=workery)
         if args.co == "workery":
             return await sprawdz_puls_workerow(fetch_all, notify, sucho=args.sucho,
-                                               prog_min=args.prog_min)
+                                               prog_min=args.prog_min,
+                                               workery=workery)
         if args.co == "ryzyko":
             return await sprawdz_ryzyko(fetch_all, notify, sucho=args.sucho)
         if args.co == "kopie":

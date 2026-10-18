@@ -450,6 +450,59 @@ def opis_zatrzymanych_wejsc(stats: dict) -> str:
     return f", ZATRZYMANE WEJŚCIA: {zatrzymane}" if zatrzymane else ""
 
 
+# ------------------------------------------- domykanie toru zamknietego
+#
+# WARUNEK WYLACZENIA SILNIKA ZAMKNIETEGO TORU, WYPISANY W JEGO LOGU (2026-10-18).
+#
+# Tor zamkniety (`tory.ZAMKNIETE`) nie otwiera pozycji, a otwarte domyka na
+# sygnale wyjscia. Silnik wolno wylaczyc (`torCrypto.enabled: false`) dopiero
+# wtedy, gdy nie zostawi niczego bez wyjscia: zadnej otwartej pozycji, zadnego
+# planu czekajacego na swiece i zadnego zlecenia, o ktorym gielda jeszcze nie
+# rozstrzygnela. Do tej pory odpowiedz byla wylacznie w bazie (panel albo SQL na
+# produkcji), a linia podsumowania cyklu - jedyne, co widac przy `--quiet` -
+# mowila "wyjscia 0" tak samo przy pustym rachunku, jak przy pozycji czekajacej
+# na sygnal.
+#
+# Trzy liczby, nie jedna: pozycja bez planu (czeka na sygnal), plan bez zlecenia
+# (czeka na swiece T+1) i zlecenie bez rozstrzygniecia (czeka na gielde) to trzy
+# rozne powody, dla ktorych wylaczenie dzis zostawiloby cos na rachunku.
+SQL_DOMYKANIE = """
+    SELECT
+      (SELECT count(*) FROM exec.position
+        WHERE engine = %(e)s AND mode = %(m)s AND closed_at IS NULL) AS pozycje,
+      (SELECT count(*) FROM journal.planned_order p
+         JOIN journal.decision d ON d.id = p.decision_id
+        WHERE d.engine = %(e)s AND d.mode = %(m)s
+          AND p.status = 'pending') AS plany,
+      (SELECT count(*) FROM exec.order
+        WHERE engine = %(e)s AND mode = %(m)s
+          AND status IN ('new', 'partial', 'unknown')) AS zlecenia
+"""
+
+
+def stan_domykania(cur, engine: str, mode: str) -> dict:
+    """Ile zostalo do domkniecia na rachunku silnika. Patrz `SQL_DOMYKANIE`."""
+    cur.execute(SQL_DOMYKANIE, {"e": engine, "m": mode})
+    return dict(cur.fetchone())
+
+
+def opis_domykania(stan: dict | None) -> str:
+    """Dopisek do linii podsumowania cyklu na torze zamknietym. CZYSTA FUNKCJA.
+
+    Pusty napis, gdy tor nie jest zamkniety (`stan` None). "TOR DOMKNIĘTY"
+    wylacznie przy trzech zerach - kazda inna liczba znaczy, ze wylaczenie
+    silnika zostawiloby cos bez wyjscia.
+    """
+    if stan is None:
+        return ""
+    if not (stan["pozycje"] or stan["plany"] or stan["zlecenia"]):
+        return (", TOR DOMKNIĘTY: 0 otwartych pozycji, 0 planów, 0 zleceń "
+                "w locie — silnik można wyłączyć (`torCrypto.enabled: false`)")
+    return (f", DOMYKANIE: otwarte pozycje {stan['pozycje']}, plany oczekujące "
+            f"{stan['plany']}, zlecenia w locie {stan['zlecenia']} — "
+            f"silnika NIE wyłączać")
+
+
 def ponizej_kroku_ilosci(qty, krok) -> bool:
     """Czy ilosc wejscia zaokraglona W DOL do kroku gieldy daje zero. CZYSTA FUNKCJA.
 
@@ -3642,6 +3695,10 @@ async def main() -> int:
                                    sesja=sesja, likwiduj=args.likwiduj,
                                    strategia=args.strategia,
                                    model_status=args.model_status)
+                # Ten sam cykl i to samo polaczenie - liczby opisuja stan PO
+                # rozstrzygnieciu planow w tym przebiegu.
+                domykanie = (stan_domykania(conn.cursor(), args.engine, args.mode)
+                             if tor_zamkniety else None)
             poprzedni_model, zmiana = zmiana_modelu(poprzedni_model, s)
             if zmiana:
                 print(f"[{t0:%H:%M:%S}] {zmiana}")
@@ -3657,7 +3714,7 @@ async def main() -> int:
                 print(f"[{t0:%H:%M:%S}] BEZ "
                       f"{'MODELU-KANDYDATA' if args.model_status != 'active' else 'ZWALIDOWANEGO MODELU'} "
                       f"({s['model_nazwa']}, status {OPIS_STATUSU[args.model_status]}) "
-                      f"— bez decyzji")
+                      f"— bez decyzji{opis_domykania(domykanie)}")
             else:
                 plany = (f", plany: wypełnione {s['wypelnione']}, "
                          f"niewypełnione {s['niewypelnione']}, czekają {s['czekaja']}"
@@ -3676,7 +3733,8 @@ async def main() -> int:
                 print(f"[{t0:%H:%M:%S}] rozważone {s['rozwazone']}, wejścia {s['wejscia']}, "
                       f"wyjścia {s['wyjscia']}, wstrzymane {s['wstrzymane']}, "
                       f"zablokowane {s['zablokowane']}, "
-                      f"już rozstrzygnięte w tej świecy {s['poza_swieca']}{plany}")
+                      f"już rozstrzygnięte w tej świecy {s['poza_swieca']}{plany}"
+                      f"{opis_domykania(domykanie)}")
             pod_rzad = 0
         except Exception as e:                                # noqa: BLE001
             pod_rzad += 1

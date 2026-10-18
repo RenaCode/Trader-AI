@@ -1,4 +1,5 @@
-{{- if .Values.probaCron.enabled }}
+{{- /* Tylko przy wlaczonym torze crypto - powod przy `probaCron` w values.yaml. */}}
+{{- if and .Values.probaCron.enabled .Values.torCrypto.enabled }}
 # PROBA POZAROWA KILL-SWITCHA.
 #
 # Kill-switch jest jedynym mechanizmem w tym systemie, ktorego awaria nie

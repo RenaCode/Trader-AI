@@ -94,11 +94,14 @@ spec:
                   # zamrazac statusu krypto. Wynik zadania to PIERWSZY niezerowy
                   # kod, wiec czerwien jednego toru nie ginie za zielenia drugiego.
                   KOD=0
-                  {{- range .Values.instrumentyCron.silniki }}
+                  {{- /* `crypto` odpada przy wylaczonym torze - `trader.silnikiZTorow`. */}}
+                  {{- range splitList "," (include "trader.silnikiZTorow" (dict "lista" .Values.instrumentyCron.silniki "ctx" $)) }}
+                  {{- if . }}
                   python services/ingest/instrumenty.py --engine {{ . | quote }} --mode {{ $.Values.instrumentyCron.mode }}
                   RC=$?
                   [ "$RC" = 3 ] && RC=0
                   [ "$KOD" = 0 ] && KOD=$RC
+                  {{- end }}
                   {{- end }}
                   exit $KOD
               env:

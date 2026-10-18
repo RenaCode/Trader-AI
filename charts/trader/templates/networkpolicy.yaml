@@ -17,7 +17,7 @@ wiec wlaczony worker dostaje dostep do bazy razem z wlasnym Deploymentem.
 {{- $pelna := include "trader.fullname" . }}
 {{- $workery := list }}
 {{- range $nazwa, $w := .Values.workers }}
-{{- if $w.enabled }}
+{{- if include "trader.workerWlaczony" (dict "w" $w "ctx" $) }}
 {{- $workery = append $workery (printf "%s-%s" $pelna $nazwa) }}
 {{- end }}
 {{- end }}
