@@ -120,6 +120,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 # bo ten plik bywa uruchamiany jako skrypt.
 from services.engine.risk import LIMITY_KONIECZNE, POMIAR_CO_S  # noqa: E402
 from services.engine.wznowienie import HISTEREZA, KARENCJA_MIN  # noqa: E402
+from services.engine.tory import zamkniecie  # noqa: E402
 
 
 # ------------------------------------------------------------- kod wyjscia
@@ -650,7 +651,8 @@ def ocen_zmiane_struktury(wiersz: dict | None) -> str | None:
 
 
 async def sprawdz_zmiane_struktury(fetch_all, notify, sucho: bool = False, *,
-                                   engine: str, bar: str) -> int:
+                                   engine: str, bar: str,
+                                   kind: str | None = None) -> int:
     """`learning.zmiana_struktury` po treningu - wolane z galezi stanu nauki."""
     wiersze = await fetch_all(SQL_ZMIANA_STRUKTURY,
                               (f"{engine}_signal_weighting_{bar}",))
@@ -660,6 +662,12 @@ async def sprawdz_zmiane_struktury(fetch_all, notify, sucho: bool = False, *,
         print("Struktura modelu: bez nowej zmiany do zgłoszenia.")
         return 0
     print(f"Struktura modelu: {powod}")
+    # TOR ZAMKNIETY: `--zatwierdz-promocje` jest na nim odmawiane (train.py),
+    # wiec "czeka na zatwierdzenie" byloby co tydzien prosba o niemozliwe.
+    tor_zamkniety = zamkniecie(engine, bar, kind)
+    if tor_zamkniety:
+        print(f"  {tor_zamkniety.opis()} — powiadomienie nie wysyłane")
+        return 0
     if sucho:
         print("Tryb suchy — powiadomienie nie wysyłane.")
         return 1
@@ -4032,6 +4040,7 @@ async def sprawdz_zadania(fetch_all, notify, sucho: bool = False, *,
 
 async def sprawdz_dryf(fetch_all, notify, sucho: bool = False, *,
                        engine: str = "crypto", bar: str = "4h",
+                       kind: str | None = None,
                        teraz: datetime | None = None) -> int:
     """Czy rozklad cech odjechal od treningowego I TAK ZOSTAL.
 
@@ -4125,6 +4134,13 @@ async def sprawdz_dryf(fetch_all, notify, sucho: bool = False, *,
     rozpiska = podsumuj_dryf_cech(cechy)
     for c in rozpiska:
         print(f"      {c}")
+
+    # TOR ZAMKNIETY (services/engine/tory.py): dryf modelu, ktory nie pojdzie
+    # na live, nie wymaga reakcji - werdykt zostaje w logu, powiadomienia nie ma.
+    tor_zamkniety = zamkniecie(engine, bar, kind)
+    if tor_zamkniety:
+        print(f"  {tor_zamkniety.opis()} — powiadomienie nie wysyłane")
+        return 0
 
     if sucho:
         print("Tryb suchy — powiadomienie nie wysyłane.")
@@ -4222,6 +4238,11 @@ async def main() -> int:
     # wlasny stan, ale NIE podnosza alarmu - inaczej powiadomienie mowiloby
     # o modelu, ktorym nikt nie handluje.
     ap.add_argument("--bar", default="4h")
+    # Cennik toru - tylko po to, zeby rozpoznac tor zamkniety (tory.py) przy
+    # `stan-nauki` i `dryf`. Bez flagi zaden tor nie jest uznany za zamkniety.
+    ap.add_argument("--kind", default=None,
+                    help="cennik toru (spot_eu, perp, stock); przy torze "
+                         "zamknietym dryf i zmiana struktury nie powiadamiaja")
     ap.add_argument("--sucho", action="store_true",
                     help="wypisz werdykt, nie wysylaj powiadomienia")
     ap.add_argument("--kod-trenera", type=int, default=0, dest="kod_trenera",
@@ -4266,7 +4287,8 @@ async def main() -> int:
                                              prog_h=args.prog_statusu_h)
         if args.co == "dryf":
             return await sprawdz_dryf(fetch_all, notify, sucho=args.sucho,
-                                      engine=args.engine, bar=args.bar)
+                                      engine=args.engine, bar=args.bar,
+                                      kind=args.kind)
         if args.co == "zadania":
             return await sprawdz_zadania(
                 fetch_all, notify, sucho=args.sucho,
@@ -4299,7 +4321,8 @@ async def main() -> int:
         # sie zmienil: nowa struktura moze przyjsc przy tym samym statusie.
         if not args.kod_trenera:
             await sprawdz_zmiane_struktury(fetch_all, notify, sucho=args.sucho,
-                                           engine=args.engine, bar=args.bar)
+                                           engine=args.engine, bar=args.bar,
+                                           kind=args.kind)
         wiersze = await fetch_all(SQL_STAN_NAUKI,
                                   (args.engine, args.bar, STAN_NAUKI_WSTECZ))
         if not wiersze:

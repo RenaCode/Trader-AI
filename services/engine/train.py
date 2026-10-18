@@ -84,6 +84,7 @@ from services.engine.signals import (
     DEFAULT_WEIGHTS, REGIMES, SIGNALS, classify_regime, combine, evaluate,
     wlaczone_eksperymenty,
 )
+from services.engine.tory import zamkniecie
 from services.engine.wersja import sha_kodu
 from services.engine.dozor import podsumuj_dryf_cech
 
@@ -5061,6 +5062,14 @@ def main() -> int:
                          "wiersz z kryterium zapisany PRZED przebiegiem")
     args = ap.parse_args()
     od, przesuniecia = _sprawdz_argumenty(ap, args)
+    # TOR ZAMKNIETY (services/engine/tory.py): trener liczy dalej (H-4, dryf),
+    # ale wersji `active` - jedynej, ktora wolno wpuscic na live - nie nadaje.
+    tor_zamkniety = zamkniecie(args.engine, args.bar, args.kind)
+    if tor_zamkniety and args.zgoda_na_promocje:
+        ap.error(f"--zatwierdz-promocje odmówione: {tor_zamkniety.opis()}")
+    if tor_zamkniety:
+        print(f"TOR ZAMKNIĘTY: {tor_zamkniety.opis()}. Przebieg liczy się dalej "
+              f"(seria H-4, dryf); żadna wersja nie zostanie promowana.")
 
     plik = panel_plik.wczytaj(args.panel) if args.panel else None
     url = os.environ.get("DATABASE_URL")

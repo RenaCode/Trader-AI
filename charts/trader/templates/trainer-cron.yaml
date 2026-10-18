@@ -213,6 +213,11 @@ spec:
                   E=$?
                   [ "$E" = 0 ] || RC=$E
                   {{- end }}
+                  # `--kind` rozpoznaje tor zamkniety wynikiem hipotezy
+                  # (services/engine/tory.py, crypto 4h spot_eu po H-9): wtedy
+                  # dryf i zmiana struktury zostaja w logu bez powiadomienia,
+                  # a awaria trenera i zmiana stanu nauki alarmuja jak dotad.
+                  #
                   # Dozor WYLACZNIE dla horyzontu produkcyjnego: tory porownawcze
                   # maja wlasny stan, ale alarm o modelu, ktorym nikt nie handluje,
                   # bylby halasem.
@@ -226,7 +231,7 @@ spec:
                   # zielone, ArgoCD zdrowe, powiadomienie nigdy nie wyszlo.
                   # `--co stan-nauki` i `--co dryf` nie sa wolane nigdzie
                   # indziej, wiec byl to CALY nadzor nad jakoscia modelu.
-                  python services/engine/dozor.py --bar {{ .Values.trainerCron.bar | quote }} --kod-trenera $RC_CRYPTO
+                  python services/engine/dozor.py --bar {{ .Values.trainerCron.bar | quote }} --kind {{ .Values.trainerCron.kind | default "spot_eu" | quote }} --kod-trenera $RC_CRYPTO
                   D=$?
                   [ "$D" = 0 ] || RC=$D
                   # Czujka stanu TRWALEGO, osobno od czujki zmiany powyzej.
@@ -254,7 +259,7 @@ spec:
                   # tamta i zapali zadanie na czerwono. Rozroznienie stanu od
                   # awarii wlasnym kodem wyjscia nalezy do dozor.py, nie do
                   # tego szablonu.
-                  python services/engine/dozor.py --co dryf --bar {{ .Values.trainerCron.bar | quote }} || true
+                  python services/engine/dozor.py --co dryf --bar {{ .Values.trainerCron.bar | quote }} --kind {{ .Values.trainerCron.kind | default "spot_eu" | quote }} || true
                   # TEST W PRZOD H-4 - PO TRENERZE I PO DOZORZE, nigdy przed nimi.
                   #
                   # Liczy WYLACZNIE okna juz zamkniete (tydzien pon-pon UTC) dla

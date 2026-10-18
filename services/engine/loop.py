@@ -40,6 +40,7 @@ from services.engine.horizons import DEFAULT_BAR, HORIZONS, Horizon, get as get_
 from services.engine import stan_kapitalu, strategia_momentum
 from services.engine.risk import RiskKernel
 from services.engine.sesja import StanSesji, stan_sesji
+from services.engine.tory import zamkniecie
 from services.engine.zatrzymanie import Zatrzymanie
 from services.ingest.features import wklady_newsow
 from services.ingest import puls
@@ -2262,6 +2263,10 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
         # Parametry H-3 sa zmierzone na swiecach 4h i decyzji na ich zamknieciu
         # o polnocy UTC; inny horyzont bylby inna regula.
         raise ValueError(f"strategia momentum wymaga świecy 4h (dostała {h.bar})")
+    # Druga odmowa toru zamknietego, niezalezna od parsera - jak przy kandydacie.
+    tor_zamkniety = zamkniecie(engine, h.bar, kind_kosztow)
+    if tor_zamkniety and mode != "demo":
+        raise ValueError(f"{tor_zamkniety.opis()} — tryb {mode!r} odmówiony")
     # `None`, a nie pusty slownik: "likwidacja nie ruszyla w tym cyklu" to inny
     # stan niz "ruszyla i nie miala o czym mowic". Patrz `nowe_stats`.
     likwidacja_stat: dict | None = None
@@ -3345,6 +3350,12 @@ async def main() -> int:
     if args.model_status != "active" and args.strategia == "momentum":
         sys.exit("--model-status candidate i --strategia momentum wykluczają się: "
                  "reguła momentum nie czyta modelu")
+    # TOR ZAMKNIETY WYNIKIEM HIPOTEZY (services/engine/tory.py). Na live -
+    # odmowa startu, ta sama zasada co wyzej. Na demo silnik gra dalej jako
+    # pomiar egzekucji, a log mowi to w pierwszych liniach.
+    tor_zamkniety = zamkniecie(args.engine, args.bar, args.kind)
+    if tor_zamkniety and args.mode != "demo":
+        sys.exit(f"{tor_zamkniety.opis()} — --mode {args.mode} odmówiony")
 
     url = os.environ.get("DATABASE_URL")
     if not url:
@@ -3386,6 +3397,9 @@ async def main() -> int:
               "(renacode-infra: docs/projekty/trader/hipotezy.md, D-1), nie zatwierdzony model.")
     else:
         print("STRATEGIA: ensemble z aktywnej wersji modelu.")
+    if tor_zamkniety:
+        print(f"TOR ZAMKNIĘTY: {tor_zamkniety.opis()}. Wejścia i wyjścia działają "
+              f"(pomiar egzekucji: H-10, B-0); wynik finansowy NIE jest wynikiem.")
     print(f"Rachunek papierowy: {args.kind}, zlecenia "
           f"{'z limitem' if args.limit else 'rynkowe'}, "
           f"koszt rundy {runda(args.kind, args.limit) * 100:.3f}%")
