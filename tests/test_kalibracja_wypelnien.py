@@ -252,7 +252,8 @@ def test_chart_kalibruje_tylko_tory_crypto():
                  if linia.strip().startswith("python services/engine/train.py")]
     crypto = [x for x in wywolania if "--engine equity" not in x]
     equity = [x for x in wywolania if "--engine equity" in x]
-    assert len(crypto) == 2 and equity
+    # Jeden tor crypto (4h) od 2026-10-18 - 1h wylaczony (B-0 = STOP).
+    assert len(crypto) == 1 and equity
     assert all('--wypelnialnosc-docelowa "0.656"' in x for x in crypto)
     assert not any("--wypelnialnosc-docelowa" in x for x in equity)
 

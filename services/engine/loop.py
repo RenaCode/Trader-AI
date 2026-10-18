@@ -194,6 +194,10 @@ OPIS_POWODU_HOLDU = {
     "swieca_przed_sesja": "Nie wchodzimy: świeca zamknęła się przed otwarciem "
                           "sesji — cena decyzyjna to notowanie sprzed sesji, "
                           "a nie potok spóźniony.",
+    # Migracja 0099 (`services/engine/tory.py`, B-0 = STOP 2026-10-18).
+    "tor_zamkniety": "Nie wchodzimy: tor zamknięty wynikiem hipotezy — "
+                     "nowe pozycje wyłączone, otwarte domykają się na "
+                     "sygnale wyjścia.",
     # Strategia `momentum` (services/engine/strategia_momentum.py, migracja 0091).
     "filtr_trendu": "Nie wchodzimy: BTC pod EMA 50 d — filtr trendu każe "
                     "trzymać gotówkę.",
@@ -430,7 +434,7 @@ DEPLOYMENT_CECH = {"crypto": "trader-features", "equity": "trader-features-equit
 # Liczniki holdow przy zamiarze wejscia wypisywane w linii podsumowania cyklu.
 POWODY_W_PODSUMOWANIU = ("short_niewykonalny", "szeroki_spread",
                          "decyzja_przeterminowana", "swieca_przed_sesja",
-                         "ponizej_jednej_akcji")
+                         "ponizej_jednej_akcji", "tor_zamkniety")
 
 
 def opis_zatrzymanych_wejsc(stats: dict) -> str:
@@ -2180,6 +2184,10 @@ def nowe_stats(**flagi) -> dict:
              # `decyzja_przeterminowana`, bo to nie jest spoznienie potoku,
              # a tamten licznik ma mierzyc wylacznie spoznienie.
              "swieca_przed_sesja": 0,
+             # Wejscia zatrzymane, bo tor jest zamkniety wynikiem hipotezy
+             # (`tory.ZAMKNIETE`, demo). Niezerowy na torze zamknietym jest
+             # stanem normalnym - mowi, ile wejsc model by zrobil.
+             "tor_zamkniety": 0,
              # POMINIECIA Z ROZBICIEM NA POWOD. Obie te sciezki konczyly sie
              # samym `continue`: instrument wypadal z przebiegu, nie zostawiajac
              # ani wiersza, ani liczby. Tu odpowiadaja na pytanie "ile pominieto
@@ -2994,6 +3002,17 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
             verdict = werdykt_wstrzymania
             action = "hold"
             powod_holdu = "wstrzymanie_ryzykiem"
+        elif action.startswith("enter") and tor_zamkniety is not None:
+            # TOR ZAMKNIETY (`tory.ZAMKNIETE`; na live silnik w ogole nie
+            # wystartuje). PO wstrzymaniu ryzykiem - proba pozarowa rozpoznaje
+            # ogniwo 3 po `wstrzymanie_ryzykiem` - a PRZED `risk.check`, zeby
+            # wejscie, ktorego i tak nie bedzie, nie zuzywalo limitow. Wyjscia
+            # ida dalej: otwarte pozycje domykaja sie na sygnale wyjscia.
+            verdict = type("V", (), {"verdict": "allow", "reason": None, "qty": qty,
+                                     "violations": [], "usage": []})()
+            action = "hold"
+            powod_holdu = "tor_zamkniety"
+            stats["tor_zamkniety"] += 1
         elif action.startswith("enter") and sesja is not None and \
                 sesja.swieca_przed_otwarciem(okno_decyzji(bar_start, h), now):
             # SWIECA SPRZED SESJI - przed `decyzja_przeterminowana`, bo taka
@@ -3522,8 +3541,9 @@ async def main() -> int:
     else:
         print("STRATEGIA: ensemble z aktywnej wersji modelu.")
     if tor_zamkniety:
-        print(f"TOR ZAMKNIĘTY: {tor_zamkniety.opis()}. Wejścia i wyjścia działają "
-              f"(pomiar egzekucji: H-10, B-0); wynik finansowy NIE jest wynikiem.")
+        print(f"TOR ZAMKNIĘTY: {tor_zamkniety.opis()}. NOWE WEJŚCIA WYŁĄCZONE "
+              f"(hold `tor_zamkniety`); wyjścia działają, otwarte pozycje "
+              f"domykają się same.")
     print(f"Rachunek papierowy: {args.kind}, zlecenia "
           f"{'z limitem' if args.limit else 'rynkowe'}, "
           f"koszt rundy {runda(args.kind, args.limit) * 100:.3f}%")
