@@ -3,7 +3,7 @@ import React, { useState } from 'react';
 import { useApi, get } from '../utils/api';
 import { ContributionBars } from '../charts';
 import {
-  fmtMoney, fmtNum, fmtTime, ACTION_PL, REGIME_PL, VERDICT_PL, DIRECTION_PL,
+  fmtMoney, fmtPrice, fmtNum, fmtTime, ACTION_PL, REGIME_PL, VERDICT_PL, DIRECTION_PL,
 } from '../utils/format';
 
 /* Brak pomiaru to nie jest pomiar rowny zeru: `null * 100` dawalo "0%"
@@ -134,7 +134,7 @@ export default function Moves({ engine }) {
                 </div>
                 <div className="row-meta">
                   <span>typ: {p.order_type}</span>
-                  {p.limit_price != null && <span>limit: {fmtMoney(p.limit_price)}</span>}
+                  {p.limit_price != null && <span>limit: {fmtPrice(p.limit_price)}</span>}
                   <span>ważne do: {fmtTime(p.valid_until)}</span>
                 </div>
                 {p.trigger && (
@@ -175,7 +175,7 @@ export default function Moves({ engine }) {
                 <div className="row-meta">
                   <span>{fmtTime(d.at)}</span>
                   <span>{REGIME_PL[d.regime] || d.regime}</span>
-                  {d.target_price != null && <span className="mono">{fmtMoney(d.target_price)}</span>}
+                  {d.target_price != null && <span className="mono">{fmtPrice(d.target_price)}</span>}
                 </div>
               </div>
             ))}
@@ -207,7 +207,7 @@ export default function Moves({ engine }) {
                     <td style={{ fontWeight: 600 }}>{t.symbol}</td>
                     <td><span className={`badge ${t.side === 'long' ? 'ok' : 'bad'}`}>{t.side}</span></td>
                     <td className="mono">{fmtNum(t.qty, 4)}</td>
-                    <td className="mono">{fmtMoney(t.avg_price)}</td>
+                    <td className="mono">{fmtPrice(t.avg_price)}</td>
                     <td className="dim">{fmtTime(t.opened_at)}</td>
                     <td className="dim">{fmtTime(t.closed_at)}</td>
                     {/* `null >= 0` jest prawda w JS, wiec brak rozliczenia

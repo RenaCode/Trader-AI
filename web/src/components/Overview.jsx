@@ -9,7 +9,7 @@ import { useApi } from '../utils/api';
 import { AreaChart } from '../charts';
 import KapitalLaczny from './KapitalLaczny';
 import {
-  fmtMoney, fmtPct, fmtTime, fmtAgo, fmtNum,
+  fmtMoney, fmtPrice, fmtPct, fmtTime, fmtAgo, fmtNum,
   STATE_PL, STATE_TONE, ACTION_PL,
 } from '../utils/format';
 
@@ -260,7 +260,7 @@ export default function Overview({ engine }) {
                       {p.side === 'buy' ? 'kupno' : 'sprzedaż'} {p.order_type}
                     </span>
                     <span className="line-sub mono">
-                      {fmtNum(p.qty, 4)}{p.limit_price != null && ` @ ${fmtMoney(p.limit_price)}`}
+                      {fmtNum(p.qty, 4)}{p.limit_price != null && ` @ ${fmtPrice(p.limit_price)}`}
                     </span>
                   </span>
                   <span className="pill">oczekuje</span>
@@ -287,7 +287,7 @@ export default function Overview({ engine }) {
                   <span className="line-main">
                     <strong>{p.symbol}</strong>
                     <span className="line-sub mono">
-                      {fmtNum(p.qty, 4)} @ {fmtMoney(p.avg_price)}
+                      {fmtNum(p.qty, 4)} @ {fmtPrice(p.avg_price)}
                     </span>
                     <span className="line-sub">otwarta {fmtAgo(p.opened_at)}</span>
                   </span>
