@@ -107,9 +107,10 @@ def test_kazda_galaz_konczaca_sie_holdem_ustawia_powod():
     # Bez tego licznika test przechodzi także wtedy, gdy CAŁY blok wyboru akcji
     # zniknie z pliku - czyli nie sprawdza niczego.
     # 8 od 2026-10-03: `szeroki_spread` (0075) i `decyzja_przeterminowana` (0080).
-    # 10 od 2026-10-18: `ponizej_jednej_akcji` i `swieca_przed_sesja` (0098).
-    assert holdy == 10, (
-        f"gałęzi kończących się holdem jest {holdy}, a nie 10 - jeśli to celowa "
+    # 11 od 2026-10-18: `ponizej_jednej_akcji` (przed i po kernelu ryzyka)
+    # i `swieca_przed_sesja` (0098).
+    assert holdy == 11, (
+        f"gałęzi kończących się holdem jest {holdy}, a nie 11 - jeśli to celowa "
         f"zmiana, popraw liczbę i sprawdź, czy CHECK w migracji (0040, ostatnio "
         f"przepisany w 0098) nadal pokrywa wszystkie powody")
 

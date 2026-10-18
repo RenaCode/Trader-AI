@@ -3043,6 +3043,14 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
                            f"{max(reszta, Decimal(0)):.2f}, mniej niż 1% kapitału")
             else:
                 verdict = risk.check(iid, notional, qty)
+                if (verdict.verdict != "block" and verdict.qty is not None
+                        and ponizej_kroku_ilosci(verdict.qty, ocena["lot_size"])):
+                    # TEN SAM WARUNEK PO KERNELU: `downsize` (limit wielkosci
+                    # pozycji, `risk_rules` p. 7) potrafi obciac ilosc ponizej
+                    # jednego kroku - plan odpadlby przy wysylce jak wyzej.
+                    action = "hold"
+                    powod_holdu = "ponizej_jednej_akcji"
+                    stats["ponizej_jednej_akcji"] += 1
         else:
             verdict = type("V", (), {"verdict": "allow", "reason": None, "qty": qty,
                                      "violations": [], "usage": []})()

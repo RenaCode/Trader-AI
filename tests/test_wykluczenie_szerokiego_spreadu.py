@@ -197,3 +197,20 @@ def test_petla_i_trener_wolaja_TE_SAMA_funkcje():
         assert "wykluczenia_spreadowe(" in zrodlo, plik
         assert "za_szeroki_spread(srednie_spready(" not in zrodlo, (
             f"{plik} liczy wykluczenia z pominięciem bramki spójności")
+
+
+def test_ZA_MALO_SWIEC_na_pomiar_uniwersum_to_STARA_regula_a_nie_brak_wykluczen():
+    """Crypto 4h, dziura w arkuszu ~2 doby: 25 świec na instrument (< 30), więc
+    `zmierz_spread` oddaje `bps=None` z powodu danych, NIE spójności. NEAR
+    (18,65 pb przy 25 >= 12 świecach) ma zostać wykluczony jak przed zmianą."""
+    from services.engine.uniwersum import wykluczenia_spreadowe
+
+    srednie = [{"instrument_id": 1, "srednia": 18.65, "n": 25},
+               {"instrument_id": 2, "srednia": 7.6, "n": 25},
+               {"instrument_id": 3, "srednia": 0.7, "n": 25}]
+    baza = _Baza(_obserwacje({1: (18.65, 600.0), 2: (7.6, 250.0), 3: (0.7, 30.0)},
+                             n=25), srednie)
+    wykluczone, powod = wykluczenia_spreadowe(baza, "crypto", [1, 2, 3], _h(), TERAZ_T)
+
+    assert powod is None
+    assert wykluczone == {1: 18.65}

@@ -77,6 +77,8 @@ class Swiat:
         self.spready: dict[int, tuple[float, int]] = {}
         # Powód odrzucenia pomiaru spreadu bramką spójności (None = przyjęty).
         self.spread_odrzucony: str | None = None
+        # Mnożnik ilości z gałęzi `downsize` kernela (None = `allow`).
+        self.przyciecie: D | None = None
         self.killswitch: dict | None = None
         self.teraz = TERAZ
         self.decyzje: list[dict] = []
@@ -115,6 +117,9 @@ def swiat(monkeypatch):
             return s.killswitch
 
         def check(self, iid, notional, qty):
+            if s.przyciecie is not None:
+                return RiskVerdict(verdict="downsize", reason="limit pozycji",
+                                   qty=(qty * s.przyciecie).quantize(D("0.000001")))
             return RiskVerdict(verdict="allow", qty=qty)
 
         def record_usage(self, usage):
@@ -627,3 +632,29 @@ def test_komunikat_spoznionego_potoku_podaje_LIMIT_WEJSC_i_deployment_silnika(
     out = capsys.readouterr().out
     assert "deploy/trader-features-equity" in out
     assert f"{loop.MAKS_ZWLOKA_WEJSCIA.total_seconds() / 60:.0f} min" in out
+
+
+def test_DOWNSIZE_kernela_ponizej_jednej_akcji_to_ten_sam_hold(swiat, monkeypatch):
+    """Przed kernelem ilość >= 1 akcji, ale `downsize` (limit wielkości pozycji)
+    obcina ją poniżej kroku - plan odpadłby przy wysyłce bez powodu."""
+    monkeypatch.setattr(loop, "zakres_swiecy",
+                        lambda cur, iid, h, bar_start: {"close": D("60")})
+    swiat.wyniki = {1: 0.6, 2: 0.05}
+    swiat.przyciecie = D("0.01")
+    stats, cur = cykl(swiat, instrumenty=AKCJE)
+
+    decyzje = {d["iid"]: d for d in swiat.decyzje}
+    assert decyzje[1]["action"] == "hold"
+    assert decyzje[1]["powod_holdu"] == "ponizej_jednej_akcji"
+    assert stats["ponizej_jednej_akcji"] == 1 and plany(cur) == []
+
+
+def test_DOWNSIZE_powyzej_kroku_nadal_wchodzi(swiat, monkeypatch):
+    """Kanarek: obcięcie, po którym zostaje >= 1 akcja, wchodzi obciętą ilością."""
+    monkeypatch.setattr(loop, "zakres_swiecy",
+                        lambda cur, iid, h, bar_start: {"close": D("60")})
+    swiat.wyniki = {1: 0.6, 2: 0.05}
+    swiat.przyciecie = D("0.5")
+    stats, cur = cykl(swiat, instrumenty=AKCJE)
+
+    assert stats["ponizej_jednej_akcji"] == 0 and stats["wejscia"] == 1

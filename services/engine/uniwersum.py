@@ -202,12 +202,16 @@ def opis_wykluczen(wykluczone: dict[int, float],
 # wykluczala nim 18 z 20 spolek (LLY 278 pb, MSFT 35 pb). Ta sama liczba byla
 # jednoczesnie "niezmierzona" w karcie kosztu i "za duza" w petli.
 #
-# Teraz o tym, czy pomiar w ogole jest pomiarem, rozstrzyga TA SAMA funkcja co
-# w karcie kosztu, na tych samych 7 dniach. Gdy go odrzuci (`bps is None`),
-# wykluczen nie ma: brak pomiaru to nie powod do wykluczenia (patrz
-# MIN_SWIEC_SPREADU). Gdy go przyjmie, regula zostaje DOKLADNIE ta sama co
-# wczesniej (`za_szeroki_spread` na `srednie_spready`, prog swiec 12) - crypto,
-# ktore bramke przechodzi z mediana ilorazu 0,033, nie zmienia zachowania.
+# Teraz o tym, czy pomiar w ogole jest pomiarem, rozstrzyga TA SAMA bramka co
+# w karcie kosztu, na tych samych 7 dniach. Wykluczenia wylacza WYLACZNIE jawne
+# odrzucenie spojnoscia (`spojnosc > PROG_SPOJNOSCI`) - to jest twierdzenie
+# "ten arkusz nie jest cena, po ktorej ktos handluje". Kazdy inny `bps is None`
+# z `zmierz_spread` (mniej niz 3 instrumenty z 30 swiecami, za male pokrycie
+# swiec) to "za malo danych na agregat uniwersum", a nie dowod falszu arkusza:
+# dla crypto 4h wystarczy dziura ~2 dob w `book_snapshot` (29 swiec), a NEAR
+# (18-21 pb) wracalby wtedy do wejsc. W tych przypadkach i przy pomiarze
+# przyjetym regula zostaje DOKLADNIE ta sama co wczesniej (`za_szeroki_spread`
+# na `srednie_spready`, prog swiec 12).
 # `per_id` z pomiaru nie wystarcza: liczy tylko instrumenty z co najmniej
 # `spread.MIN_SWIEC_NA_INSTRUMENT` (30) swiecami, wiec swiezy listing z 12-29
 # swiecami po 21 pb przestalby byc wykluczany.
@@ -223,14 +227,14 @@ def wykluczenia_spreadowe(cur, engine: str, instrument_ids: list[int], h,
     """
     from datetime import timedelta
 
-    from services.engine.spread import zmierz_spread
+    from services.engine.spread import PROG_SPOJNOSCI, zmierz_spread
 
     if not instrument_ids:
         return {}, None
     pomiar = zmierz_spread(cur, engine, h.bar, h.source_timeframe,
                            h.bar_minutes, list(instrument_ids),
                            teraz - timedelta(days=OKNO_SPREADU_DNI), teraz)
-    if pomiar.bps is None:
+    if pomiar.spojnosc is not None and pomiar.spojnosc > PROG_SPOJNOSCI:
         return {}, (f"wykluczenia spreadem WYŁĄCZONE — pomiar z "
                     f"{OKNO_SPREADU_DNI} dni odrzucony: {pomiar.powod}")
     return za_szeroki_spread(srednie_spready(cur, instrument_ids, h.bar, teraz)), None
