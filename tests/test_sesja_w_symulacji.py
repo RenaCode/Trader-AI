@@ -8,13 +8,13 @@ niewypelniona i trzymala pozycje przez luke otwarcia. Do tego swiece przed-
 i posesyjne Alpaki trafiaja do panelu, a symulacja decydowala takze na nich.
 
 CO PILNUJE TEN PLIK:
-  * kalendarz `sesja.sesja_regularna_nyse` / `otwarcie_nyse` - granice sesji
+  * kalendarz `sesja.sesja_regularna_nyse` / `otwarcie_sesji_us` - granice sesji
     w czasie letnim i zimowym, weekend, czas bez strefy;
   * `portfolio.okno_wykonania` - te same reguly co petla: decyzja w sesji,
     wysylka w sesji; swieca z decyzja 15:00 NY (wysylka 15:20) ma okno
     wypelnienia do 16:00 zamiast odrzucenia; swieca przedsesyjna (decyzja
     w pierwszym cyklu po otwarciu) - wyjscie tak, wejscie nie
-    (`decyzja_przeterminowana`);
+    (`swieca_przed_sesja` w petli);
   * symulacja na `stock`: decyzje tylko z tych swiec, przy danych bez swiec
     posesyjnych zadne zlecenie nie wypada "bez swiecy 1h", a `poza_sesja`
     liczy ZLECENIA (raz na noc), nie swiece;
@@ -31,7 +31,8 @@ from services.engine.portfolio import (
     Egzekucja, Wykonanie, indeks_swiec, okno_wykonania, simulate_portfolio,
 )
 from services.engine.sesja import (
-    NYSE_REGULARNA, otwarcie_nyse, sesja_historyczna, sesja_regularna_nyse,
+    NYSE_REGULARNA, STREFA_US, otwarcie_sesji_us, sesja_historyczna,
+    sesja_regularna_nyse,
 )
 from services.engine.signals import DEFAULT_WEIGHTS
 
@@ -75,13 +76,19 @@ def test_czas_bez_strefy_nie_jest_zgadywany():
         sesja_regularna_nyse(datetime(2026, 7, 15, 15, 0))
 
 
+def _otwarcie(t: datetime) -> datetime:
+    """Otwarcie sesji dnia gieldy, w ktorym wypada `t` - tak jak liczy je
+    `portfolio.okno_wykonania` (jedna funkcja z petla: `otwarcie_sesji_us`)."""
+    return otwarcie_sesji_us(t.astimezone(STREFA_US).date())
+
+
 def test_otwarcie_dnia_w_utc():
-    assert otwarcie_nyse(datetime(2026, 7, 15, 15, 0, tzinfo=UTC)) == \
+    assert _otwarcie(datetime(2026, 7, 15, 15, 0, tzinfo=UTC)) == \
         datetime(2026, 7, 15, 13, 30, tzinfo=UTC)
     # 03:00Z to jeszcze poprzedni dzien w Nowym Jorku
-    assert otwarcie_nyse(datetime(2026, 7, 15, 3, 0, tzinfo=UTC)) == \
+    assert _otwarcie(datetime(2026, 7, 15, 3, 0, tzinfo=UTC)) == \
         datetime(2026, 7, 14, 13, 30, tzinfo=UTC)
-    assert otwarcie_nyse(datetime(2026, 1, 14, 23, 0, tzinfo=UTC)) == \
+    assert _otwarcie(datetime(2026, 1, 14, 23, 0, tzinfo=UTC)) == \
         datetime(2026, 1, 14, 14, 30, tzinfo=UTC)
 
 
@@ -127,9 +134,9 @@ def test_ostatnia_swieca_sesji_bez_decyzji(dzien, godzina, wejscie):
 @pytest.mark.parametrize("dzien,godzina", [(LATO, 12), (ZIMA, 13)])
 def test_swieca_przedsesyjna_wyjscie_tak_wejscie_nie(dzien, godzina):
     """Petla decyduje o niej w pierwszym cyklu po otwarciu: wejscie odpada
-    (`decyzja_przeterminowana`), wyjscie idzie - wysylka otwarcie + 20 min."""
+    (`swieca_przed_sesja`), wyjscie idzie - wysylka otwarcie + 20 min."""
     assert _okno(dzien, godzina, wejscie=True) is None
-    otwarcie = otwarcie_nyse(dzien + timedelta(hours=godzina))
+    otwarcie = _otwarcie(dzien + timedelta(hours=godzina))
     assert _okno(dzien, godzina, wejscie=False) == Wykonanie(
         otwarcie + timedelta(minutes=20))
 

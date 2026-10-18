@@ -198,9 +198,9 @@ async def stan_sesji(cur, engine: str, gielda=None, *,
 #   * sesje skrocone (13:00, ok. trzech dni w roku) - po 13:00 symulacja moze
 #     tam jeszcze decydowac na swiecach posesyjnych. Gorne oszacowanie rzedu
 #     3 dni x 3 h na rok; zegar gieldy w petli zna te godziny, kalendarz nie.
-NYSE = ZoneInfo("America/New_York")
-OTWARCIE_NYSE = time(9, 30)
-ZAMKNIECIE_NYSE = time(16, 0)
+# Strefa i godzina otwarcia - JEDNA definicja dla petli i symulacji:
+# `STREFA_US` i `otwarcie_sesji_us` wyzej (petla: `StanSesji.swieca_przed_otwarciem`).
+ZAMKNIECIE_SESJI_US = time(16, 0)
 
 # Rodzaje instrumentu notowane z sesja. Klucze jak w `koszty.CENNIK`, bo
 # symulacja zna rodzaj instrumentu (`kind`), a nie gielde (`ref.venue`).
@@ -215,30 +215,24 @@ def sesja_regularna_nyse(t: datetime) -> bool:
     """
     if t.tzinfo is None:
         raise ValueError("czas bez strefy - sesji nie da sie rozstrzygnac")
-    ny = t.astimezone(NYSE)
-    return ny.weekday() < 5 and OTWARCIE_NYSE <= ny.time() < ZAMKNIECIE_NYSE
-
-
-def otwarcie_nyse(t: datetime) -> datetime:
-    """Otwarcie sesji regularnej w dniu (czasu Nowego Jorku) chwili `t`, w UTC.
-
-    Bez sprawdzania dnia tygodnia - o tym, czy tego dnia sesja w ogole jest,
-    rozstrzyga `sesja_regularna_nyse` na zwroconej chwili.
-    """
-    dzien = t.astimezone(NYSE).date()
-    return datetime.combine(dzien, OTWARCIE_NYSE, tzinfo=NYSE).astimezone(timezone.utc)
+    ny = t.astimezone(STREFA_US)
+    if ny.weekday() >= 5:
+        return False
+    zamkniecie = datetime.combine(ny.date(), ZAMKNIECIE_SESJI_US, tzinfo=STREFA_US)
+    return otwarcie_sesji_us(ny.date()) <= t < zamkniecie
 
 
 @dataclass(frozen=True)
 class KalendarzSesji:
     """Godziny gieldy dla symulacji: czy otwarta w chwili `t` i kiedy otwiera
-    sie sesja dnia, w ktorym wypada `t` (pierwsza decyzja dnia - patrz
-    `portfolio.okno_wykonania`)."""
+    sie sesja danego dnia gieldy (pierwsza decyzja dnia - patrz
+    `portfolio.okno_wykonania`). `strefa` wyznacza, ktory to dzien."""
     otwarta: Callable[[datetime], bool]
-    otwarcie: Callable[[datetime], datetime]
+    otwarcie: Callable[[date], datetime]
+    strefa: ZoneInfo
 
 
-NYSE_REGULARNA = KalendarzSesji(sesja_regularna_nyse, otwarcie_nyse)
+NYSE_REGULARNA = KalendarzSesji(sesja_regularna_nyse, otwarcie_sesji_us, STREFA_US)
 
 
 def sesja_historyczna(kind: str) -> KalendarzSesji | None:

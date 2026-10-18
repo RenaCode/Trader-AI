@@ -516,9 +516,9 @@ def okno_wykonania(t_swiecy: datetime, h: Horizon, egz: "Egzekucja",
         (`okno_decyzji`) i tylko przy otwartej sesji (BRAMKA 1);
       * swieca, ktorej koniec wypada PRZED otwarciem, a nastepna jeszcze sie
         nie zamknela (przedsesyjna 12:00Z latem), dostaje decyzje w pierwszym
-        cyklu po otwarciu - wtedy wejscie odpada jako
-        `decyzja_przeterminowana` (> 20 min po zamknieciu swiecy), a WYJSCIE
-        idzie (wyjsc ten prog nie dotyczy): wysylka = otwarcie + opoznienie;
+        cyklu po otwarciu - wtedy wejscie odpada jako `swieca_przed_sesja`
+        (`StanSesji.swieca_przed_otwarciem`, ta sama `otwarcie_sesji_us`),
+        a WYJSCIE idzie: wysylka = otwarcie + opoznienie;
       * wysylka musi wypasc w sesji (`sesja_wysylki`);
       * model pesymistyczny: gdy godzina po godzinie wysylki jest juz po
         zamknieciu (decyzja 15:00 NY, wysylka 15:20), zlecenie `day` zyje do
@@ -534,7 +534,7 @@ def okno_wykonania(t_swiecy: datetime, h: Horizon, egz: "Egzekucja",
     if sesja.otwarta(t_dec):
         t_wys = t_dec + opoznienie
     elif not wejscie:
-        otwarcie = sesja.otwarcie(t_dec)
+        otwarcie = sesja.otwarcie(t_dec.astimezone(sesja.strefa).date())
         if not (t_dec < otwarcie < t_dec + timedelta(minutes=h.bar_minutes)
                 and sesja.otwarta(otwarcie)):
             return None
