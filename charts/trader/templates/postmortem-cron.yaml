@@ -95,7 +95,9 @@ spec:
                 - -c
                 - |
                   RC=0
-                  {{- range $e := .Values.postmortemCron.silniki }}
+                  {{- /* `crypto` odpada przy wylaczonym torze - `trader.silnikiZTorow`. */}}
+                  {{- range $e := splitList "," (include "trader.silnikiZTorow" (dict "lista" .Values.postmortemCron.silniki "ctx" $)) }}
+                  {{- if $e }}
                   echo "===== silnik {{ $e }} ====="
                   python services/engine/postmortem.py \
                     --engine {{ $e | quote }} \
@@ -103,6 +105,7 @@ spec:
                     --dni {{ $.Values.postmortemCron.dni | quote }}
                   K=$?
                   [ "$K" = 0 ] || RC=$K
+                  {{- end }}
                   {{- end }}
                   exit $RC
               env:

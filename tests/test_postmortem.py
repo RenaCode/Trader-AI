@@ -241,7 +241,7 @@ def test_rola_nie_dostaje_kluczy_gieldy():
             f"migracja nie nadaje prawa do {wymagane} — proces nie zbuduje dziennika")
 
 
-def test_oba_silniki_maja_dziennik():
+def test_kazdy_otwarty_tor_ma_dziennik():
     """`enabled` NIE jest tu sprawdzane, i to jest celowe.
 
     To przelacznik WDROZENIA, nie wlasnosc konfiguracji: zadanie startuje
@@ -251,9 +251,18 @@ def test_oba_silniki_maja_dziennik():
 
     Lista silnikow to co innego - opisuje, CO ma byc oceniane, i rozjazd tutaj
     znaczylby silnik bez dziennika, o ktorym nikt sie nie dowie.
+
+    OD 2026-10-18 BEZ `crypto`: tor zamkniety wynikiem hipotezy (B-0 = STOP,
+    `services/engine/tory.py`) - wnioski z jego transakcji nie maja dokad
+    trafic, a kazdy przebieg kosztuje wywolanie LLM. Wymagany jest wiec kazdy
+    silnik, ktorego zaden tor NIE jest zamkniety (dzis: equity), a crypto nie
+    moze wrocic na liste bez wpisu o ponownym otwarciu toru.
     """
+    from services.engine.tory import ZAMKNIETE
+    zamkniete = {e for e, _bar, _kind in ZAMKNIETE}
     v = yaml.safe_load(CHART.read_text())["postmortemCron"]
-    assert v["silniki"] == ["crypto", "equity"]
+    assert v["silniki"] == ["equity"]
+    assert not (set(v["silniki"]) & zamkniete), v["silniki"]
 
 
 def test_cron_ma_strefe_jawnie():

@@ -163,6 +163,14 @@ spec:
                   # `candidate` - flaga nie promuje niczego sama.
                   # `--wypelnialnosc-docelowa` (H-10) tylko w torach crypto: to
                   # pomiar wejsc demo crypto, equity go nie ma.
+                  {{/*
+                  TOR CRYPTO TYLKO PRZY `torCrypto.enabled` (2026-10-18). Po
+                  wylaczeniu toru `history`/`features` crypto nie chodza, wiec
+                  trening liczylby sie na danych, ktore przestaly przybywac,
+                  a seria H-4 i dryf mierzylyby zamrozony panel. Dotyczy tez
+                  dozoru stanu nauki, dryfu i testu w przod toru crypto nizej.
+                  */}}
+                  {{- if .Values.torCrypto.enabled }}
                   {{- range $h := .Values.trainerCron.horyzonty | default (list .Values.trainerCron.bar) }}
                   echo "===== horyzont {{ $h }} ====="
                   python services/engine/train.py                     --bar {{ $h | quote }}                     --days {{ $.Values.trainerCron.days | quote }}                     --od {{ $.Values.trainerCron.od | quote }}                     --trials {{ $.Values.trainerCron.trials | quote }}                     --kind {{ $.Values.trainerCron.kind | default "spot_eu" | quote }}                     {{- if $.Values.trainerCron.limit }} --limit{{ end }}                     {{- if $.Values.trainerCron.pesymistyczna }} --egzekucja-pesymistyczna --opoznienie {{ required "trainerCron.opoznienie musi byc ustawione przy pesymistyczna" $.Values.trainerCron.opoznienie | quote }}{{ end }}                     {{- if $.Values.trainerCron.wypelnialnoscDocelowa }} --wypelnialnosc-docelowa {{ $.Values.trainerCron.wypelnialnoscDocelowa | quote }}{{ end }}                     {{- if $.Values.trainerCron.spreadBps }} --spread-bps {{ $.Values.trainerCron.spreadBps }}{{- if $.Values.trainerCron.spreadObcaKsiega }} --spread-obca-ksiega{{ end }}{{ end }}
@@ -178,6 +186,7 @@ spec:
                     {{- end }}
                   elif [ "$K" != 0 ]; then RC=$K; RC_CRYPTO=$K
                   fi
+                  {{- end }}
                   {{- end }}
                   {{- if .Values.trainerCron.equity.enabled }}
                   # ---------------------------------------------- TOR EQUITY
@@ -232,6 +241,7 @@ spec:
                   # zielone, ArgoCD zdrowe, powiadomienie nigdy nie wyszlo.
                   # `--co stan-nauki` i `--co dryf` nie sa wolane nigdzie
                   # indziej, wiec byl to CALY nadzor nad jakoscia modelu.
+                  {{- if .Values.torCrypto.enabled }}
                   python services/engine/dozor.py --bar {{ .Values.trainerCron.bar | quote }} --kind {{ .Values.trainerCron.kind | default "spot_eu" | quote }} --kod-trenera $RC_CRYPTO
                   D=$?
                   [ "$D" = 0 ] || RC=$D
@@ -261,6 +271,7 @@ spec:
                   # awarii wlasnym kodem wyjscia nalezy do dozor.py, nie do
                   # tego szablonu.
                   python services/engine/dozor.py --co dryf --bar {{ .Values.trainerCron.bar | quote }} --kind {{ .Values.trainerCron.kind | default "spot_eu" | quote }} || true
+                  {{- end }}
                   # TEST W PRZOD H-4 - PO TRENERZE I PO DOZORZE, nigdy przed nimi.
                   #
                   # Liczy WYLACZNIE okna juz zamkniete (tydzien pon-pon UTC) dla
@@ -278,11 +289,13 @@ spec:
                   # kodu miary i zapala Joba: `|| true` polknalby traceback,
                   # a seria, ktora po cichu przestaje przybywac, jest gorsza od
                   # czerwonego Joba - werdykt H-4 stoi na liczbie okien.
+                  {{- if .Values.torCrypto.enabled }}
                   python services/engine/w_przod.py --engine crypto --bar {{ .Values.trainerCron.bar | quote }} --kind {{ .Values.trainerCron.kind | default "spot_eu" | quote }}
                   W=$?
                   if [ "$W" = 3 ]; then NIEGOTOWE="${NIEGOTOWE}w_przod/crypto/{{ .Values.trainerCron.bar }} "
                   elif [ "$W" != 0 ]; then RC=$W
                   fi
+                  {{- end }}
                   {{- if .Values.trainerCron.equity.enabled }}
                   # Equity: seria pomocnicza, poza kryterium H-4 (zapisanym dla
                   # crypto 4h) - ta sama miara, osobny model, osobny wynik.
