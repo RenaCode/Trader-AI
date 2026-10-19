@@ -20,6 +20,9 @@ cztery skutki w kodzie i zaden wiecej:
    "ZATRZYMANE WEJŚCIA" podsumowania cyklu. Blokada stoi PO wstrzymaniu
    ryzykiem - proba pozarowa kill-switcha (`proba_killswitcha`) rozpoznaje
    ogniwo 3 po `wstrzymanie_ryzykiem` i nie moze go stracic na tym torze.
+   REGULA BETA (`--strategia beta`, alokacja D-3) jest z tej blokady
+   ZWOLNIONA: zamkniecie toru to wynik hipotezy przewagi modelu, a beta
+   przewagi nie twierdzi (recenzja PR #42, P3).
 
    Wczesniej demo wchodzilo dalej jako pomiar egzekucji dla H-10 i B-0
    krok 1 (adapter Krakena na sygnalach demo). Decyzja wlasciciela

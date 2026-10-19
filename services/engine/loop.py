@@ -233,6 +233,43 @@ STRATEGIE = {"model": "ensemble", "momentum": strategia_momentum.NAZWA,
 # galeziami - wspolny ksztalt dla dwoch roznych budzetow bylby udawany.
 REGULY = {"momentum": strategia_momentum, "beta": strategia_beta}
 
+# LIMITY KONTA POD REGULE BETA NIE MOGA ZOSTAC POD ENSEMBLE (recenzja PR #42, B2).
+#
+# Migracja 0100 podnosi `max_total_exposure` i `max_position_notional` konta
+# equity/demo do 97% kapitalu. Te liczby maja sens WYLACZNIE przy regule beta,
+# ktora sama trzyma sufit 95% w jednym instrumencie. Gdy ktokolwiek przywroci
+# ensemble (revert chartu, H-13 GO, stary obraz) bez odwrocenia limitow,
+# `risk_rules.position_budget` liczy budzet z limitu lacznego: 97% / 10
+# instrumentow = 9,7% na pozycje zamiast 1,5%, i do 97% kapitalu w rynku -
+# bez zadnego bledu, z zielonym pulsem. Dlatego przy strategii innej niz beta
+# na equity/demo limit laczny ponad dotychczasowe 15% WSTRZYMUJE WEJSCIA
+# (hold `wstrzymanie_ryzykiem` z powodem w werdykcie, zlecenia wejscia zdjete
+# z gieldy - ta sama sciezka co kill-switch i niepelny pomiar). Wyjscia ida.
+MAKS_EKSPOZYCJA_POZA_BETA_PCT = Decimal("15")
+
+
+def limity_beta_poza_beta(strategia: str, engine: str, mode: str,
+                          limits: dict) -> str | None:
+    """Powod wstrzymania wejsc albo None. CZYSTA FUNKCJA.
+
+    Ocenia wylacznie limit zapisany w `pct_equity` - tak zapisuje go 0028
+    i 0100; inna jednostka to inny zapis limitu, ktorego ta bramka nie
+    rozstrzyga (kwota bez kapitalu nie mowi, jaki to procent).
+    """
+    if strategia == "beta" or engine != "equity" or mode != "demo":
+        return None
+    lim = limits.get("max_total_exposure")
+    if not lim or lim.get("unit") != "pct_equity":
+        return None
+    wartosc = Decimal(str(lim["value"]))
+    if wartosc <= MAKS_EKSPOZYCJA_POZA_BETA_PCT:
+        return None
+    return (f"limit max_total_exposure {wartosc:g}% kapitału (equity/demo) to limit "
+            f"reguły beta (migracja 0100), a gra strategia {strategia!r} — przy "
+            f"ensemble dopuszczalne najwyżej {MAKS_EKSPOZYCJA_POZA_BETA_PCT}%. "
+            f"Odwróć limity z 0100 (pct_equity 5/15, pct 2/10, quote_ccy 95 000) "
+            f"albo wróć do --strategia beta")
+
 # Opis statusu do logu: czego silnik szukal, gdy modelu nie znalazl.
 OPIS_STATUSU = {"active": "'active'",
                 "candidate": "'candidate' albo nowsza 'active'"}
@@ -2677,6 +2714,14 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
         # wstrzymanych wejsciach ta liczba i tak nigdzie nie idzie. Zero sprawia,
         # ze gdyby kiedys poszla, bylaby zleceniem pustym, a nie zgadnietym.
         baza = Decimal(0)
+    # LIMITY REGULY BETA POD INNA STRATEGIA (B2, `limity_beta_poza_beta`).
+    # Wstrzymanie, a nie odmowa startu: limity czyta sie co cykl z bazy, wiec
+    # odwrocenie ich w `risk.limit_def` odblokowuje wejscia bez restartu poda,
+    # a puls i wyjscia ida dalej.
+    limity_beta = limity_beta_poza_beta(strategia, engine, mode, risk.limits)
+    if limity_beta:
+        print(f"  UWAGA: {limity_beta}")
+        powody_wstrzymania.append(limity_beta)
 
     # Budzet wejscia strategii momentum: 15% / 3 kapitalu (wariant P z H-3).
     # Z TEGO SAMEGO `kapital` co `baza`; przy braku pomiaru zero, a wejscia
@@ -3154,7 +3199,11 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
             verdict = werdykt_wstrzymania
             action = "hold"
             powod_holdu = "wstrzymanie_ryzykiem"
-        elif action.startswith("enter") and tor_zamkniety is not None:
+        elif action.startswith("enter") and tor_zamkniety is not None and not beta:
+            # REGULA BETA ZWOLNIONA (recenzja PR #42, P3): zamkniecie toru to
+            # wynik hipotezy PRZEWAGI modelu (ensemble/kandydat), a beta jest
+            # alokacja D-3, nie hipoteza przewagi - zamkniecie toru equity po
+            # H-13 nie moze po cichu zamienic alokacji w gotowke.
             # TOR ZAMKNIETY (`tory.ZAMKNIETE`; na live silnik w ogole nie
             # wystartuje). PO wstrzymaniu ryzykiem - proba pozarowa rozpoznaje
             # ogniwo 3 po `wstrzymanie_ryzykiem` - a PRZED `risk.check`, zeby
@@ -3731,7 +3780,10 @@ async def main() -> int:
               "(renacode-infra: docs/projekty/trader/hipotezy.md, D-1), nie zatwierdzony model.")
     else:
         print("STRATEGIA: ensemble z aktywnej wersji modelu.")
-    if tor_zamkniety:
+    if tor_zamkniety and args.strategia == "beta":
+        print(f"TOR ZAMKNIĘTY: {tor_zamkniety.opis()}. Reguła beta (alokacja D-3, "
+              f"nie hipoteza przewagi) jest z blokady wejść ZWOLNIONA.")
+    elif tor_zamkniety:
         print(f"TOR ZAMKNIĘTY: {tor_zamkniety.opis()}. NOWE WEJŚCIA WYŁĄCZONE "
               f"(hold `tor_zamkniety`); wyjścia działają, otwarte pozycje "
               f"domykają się same.")

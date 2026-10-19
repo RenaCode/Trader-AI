@@ -272,6 +272,15 @@ spec:
                   {{- range $tor := $tory }}
                   python services/engine/dozor.py --co odlozone --engine {{ $tor.engine | quote }} || RC=$?
                   {{- end }}
+                  # REGULA BETA BEZ HISTORII SPY (recenzja PR #42, P1). Hold
+                  # `historia_filtra_niepelna` = gotowka z braku danych, ktora
+                  # wyglada jak filtr poza rynkiem. Alarm po wiecej niz jednej
+                  # sesji takiej serii. Tylko gdy silnik equity gra regula beta
+                  # (ta sama flaga co w jego komendzie).
+                  {{- $silnikEquity := index .Values.workers "engine-equity" }}
+                  {{- if and $silnikEquity.enabled (contains "--strategia beta" (join " " $silnikEquity.command)) }}
+                  python services/engine/dozor.py --co beta --engine equity --mode demo || RC=$?
+                  {{- end }}
                   # DECYZJA NA KAZDA SWIECE DLA KAZDEGO INSTRUMENTU (F-8.3).
                   # Puls silnika bije, gdy cykl sie udal - takze bez ani jednej
                   # decyzji. Dwie domkniete swiece z rzedu bez kompletu przy

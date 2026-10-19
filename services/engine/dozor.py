@@ -3762,6 +3762,113 @@ async def sprawdz_odlozone_decyzje(fetch_all, notify, sucho: bool = False, *,
     return kod_wyjscia(len(braki), 0, "swieca odlozona bez decyzji")
 
 
+# ------------------------------------------------- regula beta bez historii SPY
+#
+# BRAK HISTORII SPY TO CICHA GOTOWKA (recenzja PR #42, P1). Regula beta
+# (`strategia_beta`, D-3) bez kompletu 10 zamkniec miesiecznych SPY zapisuje
+# hold `historia_filtra_niepelna` i trzyma gotowke. Silnik bez wejsc wyglada
+# wtedy dokladnie jak regula, ktorej filtr kazal wyjsc z rynku: puls bije,
+# decyzje sa, zadania zielone. Jedna sesja z tym powodem to jeszcze moze byc
+# chwilowa luka potoku; DRUGA sesja z rzedu to stan.
+#
+# SESJA = dzien NY decyzji. Seria liczy sie od ostatniej decyzji reguly na SPY
+# z innym powodem (albo akcja) - po naprawie danych czujka sama milknie.
+BETA_STRATEGIA = "beta_filtr_trendu"      # strategia_beta.NAZWA (CHECK 0100)
+BETA_POWOD_HISTORIA = "historia_filtra_niepelna"
+BETA_SYMBOL = "SPY"
+BETA_SESJI_TOLERANCJI = 1
+BETA_OKNO_DNI = 14
+# Powtorka ROSNIE z dlugoscia serii: doba, dopoki seria jest swieza, potem co
+# trzy doby - stan znany i czekajacy na naprawe danych nie moze dzwonic
+# codziennie przez tydzien, ale tez nie moze zamilknac.
+BETA_PRZYPOMNIENIE_H = 24
+BETA_PRZYPOMNIENIE_DLUGIE_H = 72
+BETA_SERIA_DLUGA_SESJI = 4
+
+SQL_BETA_BEZ_HISTORII = """
+SELECT (d.decided_at AT TIME ZONE 'America/New_York')::date AS dzien,
+       count(*) AS ile, max(d.decided_at) AS ostatnia
+  FROM journal.decision d
+  JOIN ref.instrument i ON i.id = d.instrument_id
+ WHERE d.engine::text = %(engine)s AND d.mode::text = %(mode)s
+   AND d.strategia = %(strategia)s AND i.symbol = %(symbol)s
+   AND d.powod_holdu = %(powod)s
+   AND d.decided_at >= now() - make_interval(days => %(okno)s)
+   AND d.decided_at > COALESCE((
+         SELECT max(d2.decided_at)
+           FROM journal.decision d2
+           JOIN ref.instrument i2 ON i2.id = d2.instrument_id
+          WHERE d2.engine = d.engine AND d2.mode = d.mode
+            AND d2.strategia = %(strategia)s AND i2.symbol = %(symbol)s
+            AND d2.powod_holdu IS DISTINCT FROM %(powod)s), '-infinity')
+ GROUP BY 1
+ ORDER BY 1
+"""
+
+
+def ocen_beta_bez_historii(dni: list) -> bool:
+    """Czy seria holdow `historia_filtra_niepelna` przekroczyla jedna sesje. CZYSTA."""
+    return len(set(dni)) > BETA_SESJI_TOLERANCJI
+
+
+def odstep_przypomnienia_beta(sesji: int) -> int:
+    """Godziny miedzy powiadomieniami - rosna z dlugoscia serii. CZYSTA."""
+    return (BETA_PRZYPOMNIENIE_DLUGIE_H if sesji >= BETA_SERIA_DLUGA_SESJI
+            else BETA_PRZYPOMNIENIE_H)
+
+
+async def sprawdz_beta_bez_historii(fetch_all, notify, sucho: bool = False, *,
+                                    engine: str = "equity",
+                                    mode: str = "demo") -> int:
+    """Czy regula beta trzyma gotowke z BRAKU DANYCH dluzej niz jedna sesje."""
+    wiersze = await fetch_all(SQL_BETA_BEZ_HISTORII, {
+        "engine": engine, "mode": mode, "strategia": BETA_STRATEGIA,
+        "symbol": BETA_SYMBOL, "powod": BETA_POWOD_HISTORIA, "okno": BETA_OKNO_DNI})
+    dni = [w["dzien"] for w in wiersze]
+    if not ocen_beta_bez_historii(dni):
+        print(f"beta ({engine}/{mode}): seria holdów `{BETA_POWOD_HISTORIA}` na "
+              f"{BETA_SYMBOL} — {len(dni)} sesji (tolerancja "
+              f"{BETA_SESJI_TOLERANCJI}); historia filtra kompletna albo luka "
+              f"krótsza niż sesja")
+        return 0
+
+    sesji = len(dni)
+    tytul = (f"Reguła beta bez historii {BETA_SYMBOL}: {sesji} sesji gotówki "
+             f"z braku danych ({engine}/{mode})")
+    tresc = (
+        f"Silnik {engine}/{mode} z regułą beta (D-3) zapisuje hold "
+        f"`{BETA_POWOD_HISTORIA}` na {BETA_SYMBOL} w {sesji} kolejnych sesjach "
+        f"({dni[0]:%Y-%m-%d} … {dni[-1]:%Y-%m-%d}, łącznie "
+        f"{sum(int(w['ile']) for w in wiersze)} decyzji). Brakuje zamknięć "
+        f"miesięcznych {BETA_SYMBOL} z ostatnich 10 miesięcy, więc filtr trendu "
+        f"jest nieznany i reguła trzyma gotówkę — z powodu danych, nie rynku. "
+        f"Sprawdź `market.candle` {BETA_SYMBOL} (timeframe 1h) i backfill "
+        f"historii; powód brakującego miesiąca stoi w `journal.decision.rationale`.")
+    print(f"\n  {tytul}")
+    if sucho:
+        print("  Tryb suchy — powiadomienie nie wysylane.")
+        return 1
+
+    # TLUMIENIE TYM SAMYM WARUNKIEM, KTOREGO UZYWA `notify()` (jak `odlozone`):
+    # wiersz `notify.notification` tego kodu w oknie powtorki.
+    odstep_h = odstep_przypomnienia_beta(sesji)
+    juz = await fetch_all(
+        "SELECT 1 FROM notify.notification"
+        " WHERE event_code = 'engine.beta_bez_historii'"
+        "   AND created_at > now() - make_interval(hours => %s) LIMIT 1",
+        (odstep_h,))
+    if juz:
+        return kod_wyjscia(0, 1, f"reguła beta bez historii {BETA_SYMBOL} "
+                                 f"(powtórka co {odstep_h} h)")
+    odbiorcy = await fetch_all("SELECT id FROM app.\"user\" WHERE is_active AND role = 'owner'")
+    for u in odbiorcy:
+        await notify(u["id"], "engine.beta_bez_historii", tytul, tresc,
+                     engine=engine, severity="critical",
+                     data={"sesji": sesji, "od": dni[0].isoformat(),
+                           "do": dni[-1].isoformat()})
+    return kod_wyjscia(1, 0, "reguła beta bez historii")
+
+
 # ------------------------------------------------- decyzje na kazda swiece
 #
 # CZUJKI WYKRYWALY BRAK PULSU, NIE BRAK SENSU (audyt Fable F-8.3, 2026-10-03).
@@ -4377,7 +4484,7 @@ async def main() -> int:
                     choices=("stan-nauki", "zywotnosc", "ryzyko", "kopie",
                              "swiezosc", "egzekucja", "poslizg", "instrumenty",
                              "workery", "dryf", "kanaly", "odlozone",
-                             "decyzje", "zadania"),
+                             "decyzje", "zadania", "beta"),
                     help="stan-nauki: czy wynik treningu sie zmienil; "
                          "dryf: czy rozklad cech odjechal od treningowego I TAK "
                          "ZOSTAL - stan trwaly, ktorego 'stan-nauki' z definicji "
@@ -4400,7 +4507,9 @@ async def main() -> int:
                          "decyzje: czy kazda swieca ma decyzje dla kazdego "
                          "instrumentu uniwersum, gdy cechy przyszly; "
                          "zadania: czy wlaczone CronJoby koncza sie "
-                         "powodzeniem i chodza w swoim rytmie (risk.job_run)")
+                         "powodzeniem i chodza w swoim rytmie (risk.job_run); "
+                         "beta: czy regula beta trzyma gotowke z braku historii "
+                         "SPY dluzej niz jedna sesje")
     ap.add_argument("--workery-z-chartu", default=None, dest="workery_z_chartu",
                     help="dla --co zywotnosc i --co workery: klucze `workers` "
                          "z wlaczonym Deploymentem, po przecinku (podaje chart). "
@@ -4499,6 +4608,10 @@ async def main() -> int:
             return await sprawdz_decyzje(fetch_all, notify, sucho=args.sucho,
                                          engine=args.engine, mode=args.mode,
                                          bar=args.bar)
+        if args.co == "beta":
+            return await sprawdz_beta_bez_historii(
+                fetch_all, notify, sucho=args.sucho, engine=args.engine,
+                mode=args.mode)
         if args.co == "odlozone":
             # `--okno-h` ma domyslnie None (dla `--co poslizg` znaczy to "od
             # poczatku"), a tutaj None wywrocilo by zapytanie. Domyslne 48 h to
