@@ -247,7 +247,9 @@ def _komendy():
 def test_chart_kandydat_TYLKO_w_silnikach_demo():
     komendy = _komendy()
     z_kandydatem = {n for n, k in komendy.items() if "--model-status candidate" in k}
-    assert z_kandydatem == {"engine", "engine-equity"}
+    # `engine-equity` od 2026-10-18 gra regula beta (D-3), nie kandydatem -
+    # tests/test_strategia_beta.py pilnuje jego komendy.
+    assert z_kandydatem == {"engine"}
     for n in z_kandydatem:
         k = komendy[n]
         assert "--mode demo" in k and "--mode live" not in k, n

@@ -251,7 +251,8 @@ def test_KANAREK_werdykt_REAGUJE_na_silnik():
                 wynik[engine] = (v.verdict, v.reason)
     assert wynik["crypto"][0] == "allow", wynik["crypto"]
     assert wynik["equity"][0] == "block", wynik["equity"]
-    assert "min_equity" in (wynik["equity"][1] or "") or "95000" in (
+    # Podloga equity/demo od 0100 (regula beta, D-3): 60 000, nie 95 000.
+    assert "min_equity" in (wynik["equity"][1] or "") or "60000" in (
         wynik["equity"][1] or ""), wynik["equity"]
     assert wynik["crypto"] != wynik["equity"], (
         "werdykt nie drgnął przy dwóch różnych stanach kont — `engine` nie "

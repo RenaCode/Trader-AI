@@ -149,12 +149,18 @@ def test_petla_equity_i_krypto_wymagaja_modelu():
     podjętą wprost: bez kandydata cykl ma kończyć się bez decyzji, a nie
     handlem na założeniach początkowych podpisanym jako wynik kandydata.
     Oba silniki mają teraz tę samą parę flag (tests/test_model_kandydat.py).
+
+    Od 2026-10-18 (decyzja D-3) equity gra regułą beta, która modelu nie
+    czyta: bramka modelu jej nie dotyczy, a parser odmawia tej pary flag.
+    Para zostaje wyłącznie w silniku crypto.
     """
     workers = yaml.safe_load(CHART.read_text())["workers"]
-    for nazwa in ("engine-equity", "engine"):
-        komenda = " ".join(workers[nazwa]["command"])
-        assert "--wymagaj-modelu" in komenda, nazwa
-        assert "--model-status candidate" in komenda, nazwa
+    komenda = " ".join(workers["engine"]["command"])
+    assert "--wymagaj-modelu" in komenda
+    assert "--model-status candidate" in komenda
+    equity = " ".join(workers["engine-equity"]["command"])
+    assert "--strategia beta" in equity
+    assert "--wymagaj-modelu" not in equity and "--model-status" not in equity
 
 
 def test_run_once_oddaje_powod_blokady_a_nie_same_zera():

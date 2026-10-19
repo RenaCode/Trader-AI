@@ -582,14 +582,30 @@ workers:
   # a nie `spot_eu` Bybita. Rachunek papierowy i trener musza kosztowac tyle,
   # ile kosztuje strategia, ktora kalibrujemy.
   #
-  # --wymagaj-modelu: BEZ AKTYWNEJ WERSJI MODELU TEN SILNIK NIE HANDLUJE.
+  # --strategia beta (decyzja wlasciciela D-3, 2026-10-18; uzasadnienie:
+  # renacode-infra docs/projekty/trader/hipotezy.md, D-3 i H-16): demo equity
+  # gra regule "beta z filtrem trendu" - SPY, gdy zamkniecie miesieczne jest
+  # nad SMA 10 mies., inaczej gotowka (`services/engine/strategia_beta.py`).
+  # ALOKACJA, nie hipoteza przewagi. Zastepuje dwie flagi, ktore staly tu do
+  # 18.10 (`--model-status candidate` i `--wymagaj-modelu`, opis nizej zostaje
+  # jako historia): regula modelu nie czyta, a parser odmawia obu par
+  # (`--strategia beta` z kandydatem albo z `--wymagaj-modelu`), bo flaga,
+  # ktora niczego nie robi, wygladalaby tu na zabezpieczenie. Limity ryzyka
+  # konta equity/demo podniesione pod 95% w jednym instrumencie migracja 0100.
+  # Kontrola `--sprawdz` dostaje te sama flage - czyta to, czym petla gra.
+  # TRENER EQUITY BEZ ZMIAN (`trainerCron.equity`): H-13 liczy sie z trenera,
+  # nie z demo. Powrot do ensemble = przywrocenie dwoch flag zamiast tej
+  # i odwrocenie limitow z 0100.
+  #
+  # --wymagaj-modelu (do 2026-10-18): BEZ AKTYWNEJ WERSJI MODELU TEN SILNIK NIE
+  # HANDLOWAL.
   # `active_model` przy braku modelu cofa sie do zalozen poczatkowych i handluje
   # dalej - dla silnika, ktory dopiero rusza, znaczyloby to krzywa kapitalu
   # mierzaca heurystyke i wygladajaca jak wynik modelu. Model powstaje pierwszy
   # (`trainerCron.equity`), handel drugi. Od 2026-10-07 crypto tez ja ma
   # (razem z `--model-status candidate`, patrz `workers.engine`).
   #
-  # --model-status candidate (decyzja wlasciciela 2026-10-07, jak crypto):
+  # --model-status candidate (decyzja wlasciciela 2026-10-07 do 2026-10-18):
   # handluje najnowszy kandydat toru `equity_signal_weighting_1h` albo nowsza
   # aktywna wersja. Do tej pory ta petla czekala na wersje `active`, ktorej
   # bramka promocji bez zgody czlowieka nie nadaje (`status_nowej_wersji`) -
@@ -644,6 +660,8 @@ workers:
   # ktory dla equity zapisuje slad pomiaru limitow - a to NIE jest zamiana
   # ryzyka na brak ryzyka, tylko na brak widoku.
   #
+  # (Akapit nizej opisuje stan z 2026-09-26. Od 2026-10-18 petla gra regula
+  # beta - `--strategia beta` wyzej - wiec decyduje i sklada zlecenia na SPY.)
   # CO TA PETLA ROBI DZIS, dokladnie: bije puls, mierzy limity konta na serii
   # `equity/demo` (juz jednorodnej) i konczy cykl na bramce modelu. Nie decyduje,
   # nie sklada zlecen, nie dotyka pozycji - uniwersum decyzyjne jest puste
@@ -661,7 +679,7 @@ workers:
     # P-T4: cykl w toku musi sie domknac przed SIGKILL-em.
     terminationGracePeriodSeconds: 150
     priorityClass: true
-    command: ["sh", "-c", "sleep 90; python services/engine/loop.py --engine equity --bar 1h --sprawdz --model-status candidate && exec python services/engine/loop.py --engine equity --bar 1h --interval 300 --kind stock --limit --wymagaj-modelu --egzekucja gielda --mode demo --model-status candidate"]
+    command: ["sh", "-c", "sleep 90; python services/engine/loop.py --engine equity --bar 1h --sprawdz --strategia beta && exec python services/engine/loop.py --engine equity --bar 1h --interval 300 --kind stock --limit --egzekucja gielda --mode demo --strategia beta"]
     resources:
       limits:   { cpu: 1000m, memory: 512Mi }
       requests: { cpu: 100m,  memory: 128Mi }

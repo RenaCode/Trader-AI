@@ -37,7 +37,7 @@ import psycopg
 from psycopg.rows import dict_row
 
 from services.engine.horizons import DEFAULT_BAR, HORIZONS, Horizon, get as get_horizon
-from services.engine import stan_kapitalu, strategia_momentum
+from services.engine import stan_kapitalu, strategia_beta, strategia_momentum
 from services.engine.risk import RiskKernel
 from services.engine.sesja import StanSesji, stan_sesji
 from services.engine.tory import zamkniecie
@@ -205,12 +205,70 @@ OPIS_POWODU_HOLDU = {
                     "po momentum 30 d.",
     "poza_decyzja_dobowa": "Nie wchodzimy: instrument jest w składzie, ale "
                            "wejście zapada tylko na zamknięciu doby UTC.",
+    # Regula `beta` (services/engine/strategia_beta.py, migracja 0100).
+    "filtr_trendu_spy": "Nie wchodzimy: zamknięcie miesięczne SPY nie jest "
+                        "powyżej SMA 10 miesięcy — reguła trzyma gotówkę.",
+    "historia_filtra_niepelna": "Nie wchodzimy: brak kompletu 10 zamknięć "
+                                "miesięcznych SPY — filtr nieznany, cel = gotówka.",
+    "czeka_na_sesje": "Nie wchodzimy teraz: cel to SPY, ale wejście zapada "
+                      "tylko na pierwszej świecy sesji dnia.",
+    "poza_instrumentem_reguly": "Nie wchodzimy: instrument spoza reguły beta "
+                                "(gra wyłącznie SPY).",
 }
 
-# STRATEGIA -> wartosc `journal.decision.strategia` (CHECK w migracji 0091).
-# `model` to ensemble z aktywnej wersji modelu (albo zalozenia poczatkowe),
-# `momentum` - zamrozona regula R4 na demo (`strategia_momentum`).
-STRATEGIE = {"model": "ensemble", "momentum": strategia_momentum.NAZWA}
+# STRATEGIA -> wartosc `journal.decision.strategia` (CHECK w migracji 0091,
+# rozszerzony w 0100). `model` to ensemble z aktywnej wersji modelu (albo
+# zalozenia poczatkowe), `momentum` - zamrozona regula R4 na demo
+# (`strategia_momentum`), `beta` - SPY z filtrem trendu na demo equity
+# (`strategia_beta`, decyzja D-3).
+STRATEGIE = {"model": "ensemble", "momentum": strategia_momentum.NAZWA,
+             "beta": strategia_beta.NAZWA}
+
+# REGULY BEZ MODELU - modul z jednym interfejsem, ktory czyta `run_once`:
+# `OPIS`, `cel_z_bazy(cur, instrumenty, bar_start, h, czekaj)` -> cel
+# z `kompletny`, `powod`, `sygnaly`, `snapshot(symbol)`;
+# `swieca_decyzyjna(bar_start, h)`; `akcja(cel, pozycja, symbol, decyzyjna)`;
+# `uzasadnienie(cel, symbol)`. Wielkosc wejscia i wlasny sufit sa wlasnoscia
+# reguly (15%/5% momentum, 95% w calych akcjach beta) i zostaja jawnymi
+# galeziami - wspolny ksztalt dla dwoch roznych budzetow bylby udawany.
+REGULY = {"momentum": strategia_momentum, "beta": strategia_beta}
+
+# LIMITY KONTA POD REGULE BETA NIE MOGA ZOSTAC POD ENSEMBLE (recenzja PR #42, B2).
+#
+# Migracja 0100 podnosi `max_total_exposure` i `max_position_notional` konta
+# equity/demo do 97% kapitalu. Te liczby maja sens WYLACZNIE przy regule beta,
+# ktora sama trzyma sufit 95% w jednym instrumencie. Gdy ktokolwiek przywroci
+# ensemble (revert chartu, H-13 GO, stary obraz) bez odwrocenia limitow,
+# `risk_rules.position_budget` liczy budzet z limitu lacznego: 97% / 10
+# instrumentow = 9,7% na pozycje zamiast 1,5%, i do 97% kapitalu w rynku -
+# bez zadnego bledu, z zielonym pulsem. Dlatego przy strategii innej niz beta
+# na equity/demo limit laczny ponad dotychczasowe 15% WSTRZYMUJE WEJSCIA
+# (hold `wstrzymanie_ryzykiem` z powodem w werdykcie, zlecenia wejscia zdjete
+# z gieldy - ta sama sciezka co kill-switch i niepelny pomiar). Wyjscia ida.
+MAKS_EKSPOZYCJA_POZA_BETA_PCT = Decimal("15")
+
+
+def limity_beta_poza_beta(strategia: str, engine: str, mode: str,
+                          limits: dict) -> str | None:
+    """Powod wstrzymania wejsc albo None. CZYSTA FUNKCJA.
+
+    Ocenia wylacznie limit zapisany w `pct_equity` - tak zapisuje go 0028
+    i 0100; inna jednostka to inny zapis limitu, ktorego ta bramka nie
+    rozstrzyga (kwota bez kapitalu nie mowi, jaki to procent).
+    """
+    if strategia == "beta" or engine != "equity" or mode != "demo":
+        return None
+    lim = limits.get("max_total_exposure")
+    if not lim or lim.get("unit") != "pct_equity":
+        return None
+    wartosc = Decimal(str(lim["value"]))
+    if wartosc <= MAKS_EKSPOZYCJA_POZA_BETA_PCT:
+        return None
+    return (f"limit max_total_exposure {wartosc:g}% kapitału (equity/demo) to limit "
+            f"reguły beta (migracja 0100), a gra strategia {strategia!r} — przy "
+            f"ensemble dopuszczalne najwyżej {MAKS_EKSPOZYCJA_POZA_BETA_PCT}%. "
+            f"Odwróć limity z 0100 (pct_equity 5/15, pct 2/10, quote_ccy 95 000) "
+            f"albo wróć do --strategia beta")
 
 # Opis statusu do logu: czego silnik szukal, gdy modelu nie znalazl.
 OPIS_STATUSU = {"active": "'active'",
@@ -1963,7 +2021,7 @@ def rozstrzygnij_plany(cur, engine: str, mode: str, h: Horizon, now: datetime,
 
 
 async def sprawdz(conn, engine: str = "crypto", h: Horizon | None = None,
-                  model_status: str = "active") -> int:
+                  model_status: str = "active", strategia: str = "model") -> int:
     """Przebieg KONTROLNY: wykonuje wszystkie odczyty, nie zapisuje niczego.
 
     DLACZEGO ISTNIEJE
@@ -2074,6 +2132,24 @@ async def sprawdz(conn, engine: str = "crypto", h: Horizon | None = None,
                      f"filtr BTC {'TAK' if cel.filtr else 'NIE'}, skład: "
                      f"{', '.join(cel.sklad) or 'gotówka'}"
                      + (f" ({cel.powod})" if cel.powod else "")))
+
+    # REGULA BETA: ten sam odczyt co `run_once --strategia beta` (SPY po
+    # symbolu, zamkniecia miesieczne z `market.candle`). Dla silnika equity
+    # zawsze - z tego samego powodu co momentum wyzej. Brak SPY albo niepelna
+    # historia NIE sa bledem kontroli (cel = gotowka z powodem w logu);
+    # bledem jest wywrocone zapytanie.
+    if engine == "equity" or strategia == "beta":
+        inst_beta = probuj(f"strategia {strategia_beta.OPIS}: instrumenty reguły",
+                           lambda: strategia_beta.instrumenty_reguly(cur, engine, "demo"))
+        cel_b = probuj(f"strategia {strategia_beta.OPIS}: cel miesięczny",
+                       lambda: strategia_beta.cel_z_bazy(cur, inst_beta or [],
+                                                         bar_start, h))
+        if cel_b is not None:
+            print(f"         {cel_b.miesiac:%Y-%m}: "
+                  + (f"{cel_b.symbol} {cel_b.zamkniecie:.2f} "
+                     f"{'>' if cel_b.w_rynku else '≤'} SMA {cel_b.sma:.2f} — "
+                     f"{'w rynku' if cel_b.w_rynku else 'gotówka'}"
+                     if cel_b.sma is not None else cel_b.powod))
 
     # KONTROLA STRUKTURALNA: czy wszystkie cechy horyzontu siedza na siatce swiec.
     # Cechy liczone na wlasnej siatce (funding, news) potrafily wyladowac na
@@ -2393,7 +2469,9 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
 
     `strategia` PRZELACZA WYLACZNIE WYBOR AKCJI I WIELKOSC WEJSCIA: `model`
     to ensemble z aktywnej wersji modelu, `momentum` to zamrozona regula R4
-    (`strategia_momentum`). Bramki, kill-switch, risk kernel, egzekucja i puls
+    (`strategia_momentum`), `beta` - SPY z filtrem trendu (`strategia_beta`,
+    tylko demo; rozpatruje SPY i instrumenty z otwarta pozycja zamiast
+    uniwersum decyzyjnego). Bramki, kill-switch, risk kernel, egzekucja i puls
     sa wspolne - pomiar egzekucji ma dotyczyc tej samej sciezki, ktora handluje.
 
     `model_status` mowi, KTORA WERSJA modelu steruje strategia `model`:
@@ -2404,17 +2482,28 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
     if strategia not in STRATEGIE:
         raise ValueError(f"nieznana strategia {strategia!r} (znane: {sorted(STRATEGIE)})")
     kandydat_tylko_na_demo(model_status, mode)
+    # `regula` None = ensemble; inaczej modul reguly bez modelu (`REGULY`).
+    regula = REGULY.get(strategia)
     momentum = strategia == "momentum"
-    if momentum and model_status != "active":
-        # Regula momentum modelu nie czyta - kandydat przy niej bylby flaga,
+    beta = strategia == "beta"
+    if regula is not None and model_status != "active":
+        # Regula modelu nie czyta - kandydat przy niej bylby flaga,
         # ktora niczego nie zmienia, a w dzienniku wygladalaby, jakby zmieniala.
-        raise ValueError("strategia momentum nie czyta modelu — --model-status "
+        raise ValueError(f"strategia {strategia} nie czyta modelu — --model-status "
                          "candidate jej nie dotyczy")
+    if beta and mode != "demo":
+        # Druga odmowa obok parsera (`main`), bo `run_once` bywa wolane wprost.
+        # Alokacja na demo, nie strategia z przewaga - patrz `strategia_beta`.
+        raise ValueError(f"strategia beta tylko na demo (dostała {mode!r})")
     h = h or get_horizon(DEFAULT_BAR)
     if momentum and h.bar_minutes != 240:
         # Parametry H-3 sa zmierzone na swiecach 4h i decyzji na ich zamknieciu
         # o polnocy UTC; inny horyzont bylby inna regula.
         raise ValueError(f"strategia momentum wymaga świecy 4h (dostała {h.bar})")
+    if beta and h.bar_minutes != 60:
+        # Wejscie na pierwszej swiecy sesji: przy 1h to swieca z otwarciem
+        # 9:30 NY, rozstrzygana ok. 10:00. Inny horyzont przesuwa wejscie.
+        raise ValueError(f"strategia beta wymaga świecy 1h (dostała {h.bar})")
     # Druga odmowa toru zamknietego, niezalezna od parsera - jak przy kandydacie.
     tor_zamkniety = zamkniecie(engine, h.bar, kind_kosztow)
     if tor_zamkniety and mode != "demo":
@@ -2500,7 +2589,10 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
     # (Od 2026-10-07 chart wlacza ja obu silnikom demo, razem z
     # `--model-status candidate`: bez kandydata cykl bez decyzji, a nie handel
     # na zalozeniach podpisany jako wynik kandydata.)
-    if wymagaj_modelu:
+    #
+    # REGULA BETA JEJ NIE PODLEGA: modelu nie czyta, wiec brak kandydata nie
+    # moze zatrzymac alokacji (decyzja D-3). `main` odmawia tej pary flag.
+    if wymagaj_modelu and not beta:
         m = active_model(cur, engine, h, status=model_status, mode=mode)
         if not m.get("version"):
             stats = nowe_stats(
@@ -2552,9 +2644,19 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
     # zmianie definicji uniwersum, a sygnal `rel_strength` zniknalby BEZ SLADU.
     # `lot_size` - krok ilosci gieldy, do odmowy wejscia ponizej jednej
     # jednostki (`ponizej_kroku_ilosci`) jeszcze przy decyzji.
-    cur.execute(sql_uniwersum_decyzyjnego("id, symbol, kind, quote_ccy, lot_size"),
-                (engine,))
-    instrumenty = cur.fetchall()
+    #
+    # REGULA BETA: SPY po symbolu (poza uniwersum - `tradeable = false` zostaje,
+    # zeby nie ruszac odcisku ensemble) i kazdy instrument z otwarta pozycja.
+    if beta:
+        instrumenty = strategia_beta.instrumenty_reguly(cur, engine, mode)
+        if not any(i["symbol"] == strategia_beta.SYMBOL for i in instrumenty):
+            print(f"  UWAGA strategia {strategia_beta.OPIS}: brak "
+                  f"{strategia_beta.SYMBOL} w ref.instrument (aktywny, giełda "
+                  f"z adapterem) — wejść nie będzie")
+    else:
+        cur.execute(sql_uniwersum_decyzyjnego("id, symbol, kind, quote_ccy, lot_size"),
+                    (engine,))
+        instrumenty = cur.fetchall()
     # WYKLUCZENIE ZE WZGLEDU NA SPREAD (audyt Fable F-1.5) - WYLACZNIE Z WEJSC.
     # Sredni spread arkusza z 7 dni ponad prog: instrument nie dostaje nowej
     # pozycji, ale wychodzi normalnie, a `instrumenty` (odcisk, przekroj,
@@ -2612,6 +2714,14 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
         # wstrzymanych wejsciach ta liczba i tak nigdzie nie idzie. Zero sprawia,
         # ze gdyby kiedys poszla, bylaby zleceniem pustym, a nie zgadnietym.
         baza = Decimal(0)
+    # LIMITY REGULY BETA POD INNA STRATEGIA (B2, `limity_beta_poza_beta`).
+    # Wstrzymanie, a nie odmowa startu: limity czyta sie co cykl z bazy, wiec
+    # odwrocenie ich w `risk.limit_def` odblokowuje wejscia bez restartu poda,
+    # a puls i wyjscia ida dalej.
+    limity_beta = limity_beta_poza_beta(strategia, engine, mode, risk.limits)
+    if limity_beta:
+        print(f"  UWAGA: {limity_beta}")
+        powody_wstrzymania.append(limity_beta)
 
     # Budzet wejscia strategii momentum: 15% / 3 kapitalu (wariant P z H-3).
     # Z TEGO SAMEGO `kapital` co `baza`; przy braku pomiaru zero, a wejscia
@@ -2619,6 +2729,10 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
     baza_momentum = (strategia_momentum.budzet_pozycji(kapital)
                      if momentum and kapital is not None and kapital > 0
                      and baza > 0 else Decimal(0))
+    # Budzet reguly beta: 95% kapitalu, ta sama zasada zera przy braku pomiaru.
+    baza_beta = (strategia_beta.budzet(kapital)
+                 if beta and kapital is not None and kapital > 0
+                 and baza > 0 else Decimal(0))
 
     wejscia_wstrzymane = bool(powody_wstrzymania)
     powod_wstrzymania = " | ".join(powody_wstrzymania)
@@ -2685,7 +2799,7 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
     # ensemble przypadkiem: kazde takie siegniecie wywroci cykl, a nie po cichu
     # domiesza wagi modelu do reguly.
     model = (active_model(cur, engine, h, status=model_status, mode=mode)
-             if not momentum else
+             if regula is None else
              {"version": None, "model_version_id": None, "bramki": None,
               "weights": None, "min_conf": None, "status": None})
     if momentum and verbose:
@@ -2694,6 +2808,10 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
               f"{strategia_momentum.UDZIAL_LACZNY:.0%} kapitału, "
               f"{strategia_momentum.UDZIAL_POZYCJI:.0%} na pozycję = "
               f"{baza_momentum} przy kapitale {kapital}; model nieużywany)")
+    elif beta and verbose:
+        print(f"  strategia: {strategia_beta.OPIS} (zamrożone parametry D-3: "
+              f"{dict(strategia_beta.PARAMETRY)}, budżet {baza_beta} przy "
+              f"kapitale {kapital}; model nieużywany)")
     elif verbose:
         print(f"  wagi: {'wersja modelu ' + str(model['version']) + ' (' + str(model['status']) + ', id ' + str(model['model_version_id']) + ')' if model['version'] else 'założenia początkowe (brak modelu o statusie ' + OPIS_STATUSU[model_status] + ')'}")
         print(f"  progi wejścia: {model['bramki'].opis()}")
@@ -2704,7 +2822,7 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
     # prog przepuszcza 7,0% sygnalow w `range` i 34,0% w `high_vol` przy
     # zamiarze 12%, wiec silnik handluje wtedy inna czestotliwoscia niz
     # zaprojektowana - i musi to powiedziec, a nie zrobic po cichu.
-    if not momentum and model["bramki"].powod == "wersja_modelu_bez_progow_per_rezim":
+    if regula is None and model["bramki"].powod == "wersja_modelu_bez_progow_per_rezim":
         print(f"  UWAGA: wersja modelu {model['version']} NIE MA progów per reżim "
               f"(wytrenowana przed 2026-09-27). Obowiązuje jeden próg "
               f"{model['enter']:.4f} dla wszystkich reżimów — zamierzone 12% "
@@ -2747,18 +2865,18 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
     # IDENTYFIKATORY CECH DOPIERO TERAJ, bo cechy przekrojowe sa filtrowane
     # odciskiem uniwersum - a uniwersum znamy dopiero po tym zapytaniu.
     feature_ids = (horizon_feature_ids(cur, h, [i["symbol"] for i in instrumenty])
-                   if not momentum else [])
+                   if regula is None else [])
     stats["strategia"] = strategia
     # KTORA WERSJA MODELU DECYDOWALA W TYM CYKLU - do pulsu, a `main` porownuje
     # ja z poprzednim cyklem i ZAPISUJE w logu zmiane (nowy trening kandydata).
-    stats["model_status"] = None if momentum else model_status
+    stats["model_status"] = None if regula is not None else model_status
     stats["model_version_id"] = model.get("model_version_id")
     stats["model_wersja"] = model.get("version")
-    # CEL STRATEGII MOMENTUM - liczony RAZ na cykl i tylko wtedy, gdy jest
+    # CEL REGULY (momentum, beta) - liczony RAZ na cykl i tylko wtedy, gdy jest
     # co decydowac (pierwszy instrument bez decyzji w tej swiecy). Patrz
-    # `strategia_momentum.cel_z_bazy`.
-    cel: strategia_momentum.Cel | None = None
-    decyzyjna = momentum and strategia_momentum.swieca_decyzyjna(bar_start, h)
+    # `strategia_momentum.cel_z_bazy` i `strategia_beta.cel_z_bazy`.
+    cel = None
+    decyzyjna = regula is not None and regula.swieca_decyzyjna(bar_start, h)
 
     # PRZEBIEG PIERWSZY: ocena wszystkich instrumentow, bez podejmowania akcji.
     #
@@ -2773,27 +2891,28 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
         if decided_for_bar(cur, engine, mode, iid, bar_start, h):
             stats["poza_swieca"] += 1
             continue
-        if momentum:
-            # REGULA ZAMIAST CECH: momentum nie czyta `feat.*` ani reżimu.
-            # Niedomknieta swieca BTC = decyzja ODLOZONA do nastepnego cyklu
-            # w oknie swiecy (jak `MIN_POKRYCIE`), bez wiersza w dzienniku.
+        if regula is not None:
+            # REGULA ZAMIAST CECH: regula nie czyta `feat.*` ani reżimu.
+            # Niedomknieta swieca BTC (momentum) = decyzja ODLOZONA do
+            # nastepnego cyklu w oknie swiecy (jak `MIN_POKRYCIE`), bez wiersza
+            # w dzienniku. Cel reguly beta jest zawsze kompletny.
             if cel is None:
                 # Na domkniecie swiecy BTC czekamy tylko w oknie wejscia
                 # swiecy decyzyjnej - potem czekanie wiezi wyjscia.
-                cel = strategia_momentum.cel_z_bazy(
+                cel = regula.cel_z_bazy(
                     cur, instrumenty, bar_start, h,
                     czekaj=decyzyjna and not decyzja_przeterminowana(now, bar_start, h))
                 if not cel.kompletny:
-                    print(f"  strategia {strategia_momentum.OPIS}: decyzja "
+                    print(f"  strategia {regula.OPIS}: decyzja "
                           f"odłożona — {cel.powod}")
                 elif cel.powod:
-                    print(f"  UWAGA strategia {strategia_momentum.OPIS}: {cel.powod}")
+                    print(f"  UWAGA strategia {regula.OPIS}: {cel.powod}")
             if not cel.kompletny:
                 stats["odlozone_momentum"] += 1
                 continue
         features, obce = (latest_features(cur, iid, now, h, feature_ids, bar_start)
-                          if not momentum else ({}, {}))
-        if not momentum and len(features) < MIN_CECH:
+                          if regula is None else ({}, {}))
+        if regula is None and len(features) < MIN_CECH:
             # SLAD ZANIM `continue`. Bez tego wiersza instrument znikal
             # z przebiegu bezglosnie i z bazy nie dalo sie odroznic "pominiety
             # z braku cech" od "silnik w ogole nie chodzil".
@@ -2876,9 +2995,9 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
                 print(f"  {symbol:10s} pominięty — BRAK CENY "
                       f"(świeca {h.bar} {bar_start:%m-%d %H:%M} i minutówka)")
             continue
-        if momentum:
+        if regula is not None:
             # Cena ta sama co dla ensemble (zamkniecie swiecy decyzyjnej), cechy
-            # zastepuje sklad celu - to on trafia do `feature_snapshot`.
+            # zastepuje cel reguly - to on trafia do `feature_snapshot`.
             stats["rozwazone"] += 1
             oceny.append({"iid": iid, "symbol": symbol, "kind": inst["kind"],
                           "quote_ccy": inst["quote_ccy"],
@@ -2983,17 +3102,16 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
         # PROGI TEGO REZIMU. `None` przy wejsciu znaczy "reżim bez skalibrowanego
         # progu" i jest odpowiedzia inna niz jakakolwiek liczba - patrz
         # `services/engine/bramki.py`. Prog WYJSCIA jest zawsze liczba.
-        if momentum:
+        if regula is not None:
             # Regula bez progow: NULL w dzienniku, bo progu nie bylo.
             prog_wejscia_rezimu = prog_wyjscia_rezimu = None
         else:
             prog_wejscia_rezimu = model["bramki"].wejscie(regime)
             prog_wyjscia_rezimu = model["bramki"].wyjscie(regime)
-        if momentum:
-            # Cala regula w `strategia_momentum.akcja` (czysta funkcja, tam
-            # testy galezi). Powody holdu z jej zbioru stoja w CHECK 0091.
-            action, powod_holdu = strategia_momentum.akcja(cel, position, symbol,
-                                                           decyzyjna)
+        if regula is not None:
+            # Cala regula w `<modul reguly>.akcja` (czysta funkcja, tam
+            # testy galezi). Powody holdu z jej zbioru stoja w CHECK 0091/0100.
+            action, powod_holdu = regula.akcja(cel, position, symbol, decyzyjna)
         elif position:
             same_way = (position["side"] == "long" and score > 0) or \
                        (position["side"] == "short" and score < 0)
@@ -3047,9 +3165,17 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
         # `risk_rules.wielkosc_pozycji` - tej samej funkcji liczy symulacja (U-3).
         qty = Decimal(0)
         notional = Decimal(0)
-        kwota_momentum = ekspozycja_momentum = None
+        kwota_momentum = ekspozycja_momentum = ekspozycja_beta = None
         if action in ("enter_long", "enter_short"):
-            if momentum:
+            if beta:
+                # 95% KAPITALU W CALYCH AKCJACH, W DOL (`strategia_beta`).
+                # Reszta do sufitu liczona po wartosci rynkowej, jak w kernelu.
+                # Bez kapitalu `baza_beta` jest zerem, a wejscia wstrzymane.
+                if baza_beta > 0:
+                    ekspozycja_beta = risk.ekspozycja()
+                    notional, qty = strategia_beta.wielkosc_wejscia(
+                        kapital, ekspozycja_beta, price)
+            elif momentum:
                 # ROWNE WAGI PRZY WEJSCIU (H-3): 5% kapitalu niezaleznie od
                 # sily sygnalu - stad udzial 1,0 zamiast `score`. Bez kapitalu
                 # `baza` jest juz zerem, a wejscia wstrzymane (wyzej).
@@ -3073,7 +3199,11 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
             verdict = werdykt_wstrzymania
             action = "hold"
             powod_holdu = "wstrzymanie_ryzykiem"
-        elif action.startswith("enter") and tor_zamkniety is not None:
+        elif action.startswith("enter") and tor_zamkniety is not None and not beta:
+            # REGULA BETA ZWOLNIONA (recenzja PR #42, P3): zamkniecie toru to
+            # wynik hipotezy PRZEWAGI modelu (ensemble/kandydat), a beta jest
+            # alokacja D-3, nie hipoteza przewagi - zamkniecie toru equity po
+            # H-13 nie moze po cichu zamienic alokacji w gotowke.
             # TOR ZAMKNIETY (`tory.ZAMKNIETE`; na live silnik w ogole nie
             # wystartuje). PO wstrzymaniu ryzykiem - proba pozarowa rozpoznaje
             # ogniwo 3 po `wstrzymanie_ryzykiem` - a PRZED `risk.check`, zeby
@@ -3119,7 +3249,16 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
             powod_holdu = "ponizej_jednej_akcji"
             stats["ponizej_jednej_akcji"] += 1
         elif action.startswith("enter"):
-            if momentum and (notional <= 0 or not strategia_momentum.miesci_sie(
+            if beta and (notional <= 0 or ekspozycja_beta is None
+                         or not strategia_beta.miesci_sie(kapital, ekspozycja_beta,
+                                                          notional)):
+                # WLASNY SUFIT REGULY BETA (95%), jak przy momentum nizej:
+                # `notional <= 0` = reszta do sufitu nie kupi jednej akcji.
+                verdict = RiskVerdict(
+                    verdict="block",
+                    reason=strategia_beta.odmowa_budzetu(kapital, ekspozycja_beta,
+                                                         price))
+            elif momentum and (notional <= 0 or not strategia_momentum.miesci_sie(
                     kapital, ekspozycja_momentum, notional)):
                 # WLASNY SUFIT STRATEGII (15%), na tej samej ekspozycji co
                 # `max_total_exposure` (pozycje po cenie rynkowej + zlecenia
@@ -3161,6 +3300,13 @@ async def run_once(conn, engine: str = "crypto", mode: str = "demo",
             + (f" Ryzyko: {verdict.reason}." if verdict.reason else "")
             + (f" {OPIS_POWODU_HOLDU[powod_holdu]}" if powod_holdu else "")
         ) if momentum else (
+            strategia_beta.uzasadnienie(cel, symbol)
+            + (f" Zamiar wejścia: {qty} akcji po {price} = {notional} (budżet {baza_beta}, "
+               f"ekspozycja przed wejściem {ekspozycja_beta:.2f})."
+               if ekspozycja_beta is not None and notional > 0 else "")
+            + (f" Ryzyko: {verdict.reason}." if verdict.reason else "")
+            + (f" {OPIS_POWODU_HOLDU[powod_holdu]}" if powod_holdu else "")
+        ) if beta else (
             f"Reżim: {regime}. Wynik złożony {score:+.3f} przy pewności {confidence:.0%}. "
             f"Największy wkład: {top_txt}."
             # Niepelny komplet mowimy WPROST w uzasadnieniu, bo wynik go juz nie
@@ -3530,10 +3676,13 @@ async def main() -> int:
     # egzekucji (renacode-infra: docs/projekty/trader/hipotezy.md, E-1). E-1 zamkniety decyzja D-1
     # (2026-10-07) - chart przelaczony na `--model-status candidate`; regula
     # zostaje w kodzie, powrot = podmiana flagi.
+    # `beta` = decyzja D-3 (2026-10-18): demo equity gra SPY z filtrem trendu
+    # (SMA 10 mies.) jako ALOKACJA, nie przewaga - `strategia_beta`.
     ap.add_argument("--strategia", default="model", choices=sorted(STRATEGIE),
                     help="model: ensemble z aktywnej wersji modelu; momentum: "
                          "momentum + filtr trendu (zamrożone parametry H-3, "
-                         "15%% kapitału)")
+                         "15%% kapitału); beta: SPY z filtrem trendu SMA 10 "
+                         "mies. (D-3, alokacja, 95%% kapitału, tylko demo)")
     # KTORA WERSJA MODELU STERUJE ENSEMBLE. Domysl `active` - na live jedyny
     # dopuszczalny. `candidate` = decyzja wlasciciela z 2026-10-07: demo gra
     # NAJNOWSZYM kandydatem (albo nowsza aktywna), zeby zbierac dane w przod
@@ -3557,9 +3706,20 @@ async def main() -> int:
         sys.exit(f"--model-status {args.model_status} tylko z --mode demo "
                  f"(kandydat nie przeszedł bramki promocji; na live handluje "
                  f"wyłącznie wersja 'active')")
-    if args.model_status != "active" and args.strategia == "momentum":
-        sys.exit("--model-status candidate i --strategia momentum wykluczają się: "
-                 "reguła momentum nie czyta modelu")
+    if args.strategia == "beta" and args.mode != "demo":
+        # Alokacja w bete rynku na koncie demo (D-3), nie strategia z przewaga.
+        # Na live - odmowa startu, ta sama zasada co przy momentum.
+        sys.exit("--strategia beta tylko z --mode demo (alokacja D-3, "
+                 "nie strategia z przewagą)")
+    if args.model_status != "active" and args.strategia in REGULY:
+        sys.exit(f"--model-status candidate i --strategia {args.strategia} "
+                 f"wykluczają się: reguła {args.strategia} nie czyta modelu")
+    if args.wymagaj_modelu and args.strategia == "beta":
+        # Bramka modelu nie moze blokowac reguly, ktora modelu nie czyta
+        # (`run_once` i tak ja pomija) - flaga, ktora niczego nie robi, nie
+        # ma prawa stac w charcie i wygladac na zabezpieczenie.
+        sys.exit("--wymagaj-modelu i --strategia beta wykluczają się: "
+                 "reguła beta nie czyta modelu")
     # TOR ZAMKNIETY WYNIKIEM HIPOTEZY (services/engine/tory.py). Na live -
     # odmowa startu, ta sama zasada co wyzej. Na demo silnik gra dalej jako
     # pomiar egzekucji, a log mowi to w pierwszych liniach.
@@ -3579,7 +3739,8 @@ async def main() -> int:
 
     if args.sprawdz:
         with psycopg.connect(url, row_factory=dict_row) as conn:
-            return await sprawdz(conn, args.engine, h, args.model_status)
+            return await sprawdz(conn, args.engine, h, args.model_status,
+                                 strategia=args.strategia)
 
     gielda = None
     klucz_gieldy: int | None = None
@@ -3604,6 +3765,14 @@ async def main() -> int:
               f"({strategia_momentum.UDZIAL_POZYCJI:.0%} na pozycję), wejścia tylko "
               f"na zamknięciu doby UTC. Model NIEUŻYWANY. Pomiar egzekucji, "
               f"nie strategia z przewagą (H-1, H-3: STOP).")
+    elif args.strategia == "beta":
+        print(f"STRATEGIA: {strategia_beta.OPIS} ({strategia_beta.NAZWA}) — "
+              f"parametry zamrożone (D-3) {dict(strategia_beta.PARAMETRY)}: "
+              f"{strategia_beta.UDZIAL:.0%} kapitału w {strategia_beta.SYMBOL} "
+              f"w całych akcjach, gdy zamknięcie miesięczne > SMA "
+              f"{strategia_beta.OKNO_SMA} mies., inaczej gotówka; wejście na "
+              f"pierwszej świecy sesji. Model NIEUŻYWANY. Alokacja (beta rynku "
+              f"z kontrolą obsunięcia), nie hipoteza przewagi.")
     elif args.model_status == "candidate":
         print("STRATEGIA: ensemble z MODELU-KANDYDATA — najnowsza wersja "
               "'candidate' (albo nowsza 'active'), przeładowywana co cykl. "
@@ -3611,7 +3780,10 @@ async def main() -> int:
               "(renacode-infra: docs/projekty/trader/hipotezy.md, D-1), nie zatwierdzony model.")
     else:
         print("STRATEGIA: ensemble z aktywnej wersji modelu.")
-    if tor_zamkniety:
+    if tor_zamkniety and args.strategia == "beta":
+        print(f"TOR ZAMKNIĘTY: {tor_zamkniety.opis()}. Reguła beta (alokacja D-3, "
+              f"nie hipoteza przewagi) jest z blokady wejść ZWOLNIONA.")
+    elif tor_zamkniety:
         print(f"TOR ZAMKNIĘTY: {tor_zamkniety.opis()}. NOWE WEJŚCIA WYŁĄCZONE "
               f"(hold `tor_zamkniety`); wyjścia działają, otwarte pozycje "
               f"domykają się same.")
